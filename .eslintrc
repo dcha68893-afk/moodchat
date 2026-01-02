@@ -1,0 +1,69 @@
+{
+  "env": {
+    "node": true,
+    "es2021": true
+  },
+  "extends": [
+    "eslint:recommended",
+    "plugin:node/recommended",
+    "plugin:security/recommended",
+    "plugin:prettier/recommended"
+  ],
+  "plugins": ["node", "security", "prettier"],
+  "parserOptions": {
+    "ecmaVersion": 2021,
+    "sourceType": "module"
+  },
+  "rules": {
+    "no-console": "off",
+    "no-unused-vars": ["warn", { "argsIgnorePattern": "^_", "varsIgnorePattern": "^_" }],
+    "no-process-exit": "warn",
+    "node/no-unsupported-features/es-syntax": [
+      "error",
+      {
+        "ignores": ["modules"]
+      }
+    ],
+    "node/no-unpublished-require": [
+      "error",
+      {
+        "allowModules": ["dotenv", "supertest", "jest", "mocha", "chai"]
+      }
+    ],
+    "node/no-missing-require": [
+      "error",
+      {
+        "allowModules": [],
+        "resolvePaths": ["./src", "./node_modules"]
+      }
+    ],
+    "node/no-deprecated-api": "error",
+    "prettier/prettier": [
+      "error",
+      {
+        "semi": true,
+        "singleQuote": true,
+        "trailingComma": "es5",
+        "printWidth": 100,
+        "tabWidth": 2,
+        "arrowParens": "avoid",
+        "endOfLine": "lf"
+      }
+    ]
+  },
+  "settings": {
+    "node": {
+      "tryExtensions": [".js", ".json", ".node"],
+      "version": ">=18.0.0"
+    }
+  },
+  "overrides": [
+    {
+      "files": ["**/*.test.js", "**/*.spec.js"],
+      "env": {
+        "jest": true,
+        "mocha": true
+      }
+    }
+  ]
+}

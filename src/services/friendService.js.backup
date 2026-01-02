@@ -1,0 +1,398 @@
+const { User, Friend, Notification } = require('../models');
+const redisClient = require('../utils/redisClient');
+const logger = require('../utils/logger');
+
+class FriendService {
+  async sendFriendRequest(requesterId, receiverId, notes = null) {
+    try {
+      // Check if users exist
+      const [requester, receiver] = await Promise.all([
+        User.findByPk(requesterId),
+        User.findByPk(receiverId),
+      ]);
+
+      if (!requester || !receiver) {
+        throw new Error('User not found');
+      }
+
+      // Check if receiver allows friend requests
+      if (receiver.settings?.privacy?.allowFriendRequests === false) {
+        throw new Error('User does not accept friend requests');
+      }
+
+      // Check if friendship already exists
+      const existingFriendship = await Friend.findFriendship(requesterId, receiverId);
+      if (existingFriendship) {
+        switch (existingFriendship.status) {
+          case 'pending':
+            throw new Error('Friend request already sent');
+          case 'accepted':
+            throw new Error('Already friends');
+          case 'rejected':
+            // Allow sending new request after rejection
+            await existingFriendship.destroy();
+            break;}
+          case 'blocked':
+            throw new Error('Cannot send friend request to blocked user');
+        }
+      }
+
+      // Create friend request
+      const friendRequest = await Friend.create({
+        requesterId: Math.min(requesterId, receiverId),
+        receiverId: Math.max(requesterId, receiverId),
+        status: 'pending',
+        notes,
+        requestedAt: new Date(),
+      });
+
+      // Create notification for receiver
+      const notificationService = require('./notificationService');
+      await notificationService.createFromTemplate(receiverId, 'friend_request', {
+        requesterId,
+        requesterName: requester.username,
+        requesterAvatar: requester.avatar,
+      });
+
+      // Send real-time notification via WebSocket
+      const webSocketService = require('./webSocketService');
+      webSocketService.notifyFriendRequest(receiverId, {
+        id: friendRequest.id,
+        requester: {
+          id: requester.id,
+          username: requester.username,
+          avatar: requester.avatar,
+        },
+        notes,
+        requestedAt: friendRequest.requestedAt,
+      });
+
+      return friendRequest;
+    } catch (error) {
+      logger.error('Send friend request error:', error);
+      throw error;
+    }
+  }
+
+  async respondToFriendRequest(requestId, userId, action) {
+    try {
+      const friendRequest = await Friend.findByPk(requestId, {
+        include: [
+          {
+            model: User,
+            as: 'requester',
+            attributes: ['id', 'username', 'avatar'],
+          },
+          {
+            model: User,
+            as: 'receiver',
+            attributes: ['id', 'username', 'avatar'],
+          },
+        ],
+      });
+
+      if (!friendRequest) {
+        throw new Error('Friend request not found');
+      }
+
+      // Check if user is the receiver
+      if (friendRequest.receiverId !== userId && friendRequest.requesterId !== userId) {
+        throw new Error('Not authorized to respond to this request');
+      }
+
+      // Handle different actions
+      switch (action) {
+        case 'accept':
+          if (friendRequest.status !== 'pending') {
+            throw new Error('Friend request is not pending');
+          }
+          await friendRequest.accept();
+
+          // Create notification for requester
+          const notificationService = require('./notificationService');
+          await notificationService.createFromTemplate(
+            friendRequest.requesterId,
+            'friend_request_accepted',
+            {
+              acceptorId: userId,
+              acceptorName: friendRequest.receiver.username,
+              acceptorAvatar: friendRequest.receiver.avatar,
+            }
+          );
+
+          // Send real-time notification
+          const webSocketService = require('./webSocketService');
+          webSocketService.notifyFriendRequestAccepted(friendRequest.requesterId, {
+            friendId: userId,
+            friendName: friendRequest.receiver.username,
+            friendAvatar: friendRequest.receiver.avatar,
+          });
+          break;
+
+        case 'reject':
+          if (friendRequest.status !== 'pending') {
+            throw new Error('Friend request is not pending');
+          }
+          await friendRequest.reject();
+          break;
+
+        case 'block':
+          await friendRequest.block();
+          break;
+
+        default:
+          throw new Error('Invalid action');
+      }
+
+      // Clear friend list cache for both users
+      await Promise.all([
+        redisClient.del(`user:${friendRequest.requesterId}:friends`),
+        redisClient.del(`user:${friendRequest.receiverId}:friends`),
+      ]);
+
+      return friendRequest;
+    } catch (error) {
+      logger.error('Respond to friend request error:', error);
+      throw error;
+    }
+  }
+
+  async getFriends(userId, status = 'accepted') {
+    try {
+      // Try to get from cache first
+      const cacheKey = `user:${userId}:friends:${status}`;
+      const cached = await redisClient.get(cacheKey);
+
+      if (cached) {
+        return JSON.parse(cached);
+      }
+
+      const friendships = await Friend.getFriends(userId, status);
+
+      // Format response
+      const friends = friendships.map(friendship => {
+        const friend =
+          friendship.requesterId === userId ? friendship.receiver : friendship.requester;
+
+        return {
+          id: friend.id,
+          username: friend.username,
+          firstName: friend.firstName,
+          lastName: friend.lastName,
+          avatar: friend.avatar,
+          bio: friend.bio,
+          status: friend.status,
+          lastSeen: friend.lastSeen,
+          friendshipId: friendship.id,
+          requestedAt: friendship.requestedAt,
+          respondedAt: friendship.respondedAt,
+        };
+      });
+
+      // Cache for 5 minutes
+      await redisClient.setex(cacheKey, 300, JSON.stringify(friends));
+
+      return friends;
+    } catch (error) {
+      logger.error('Get friends error:', error);
+      throw error;
+    }
+  }
+
+  async getPendingRequests(userId) {
+    try {
+      const requests = await Friend.getPendingRequests(userId);
+
+      return requests.map(request => ({
+        id: request.id,
+        requester: {
+          id: request.requester.id,
+          username: request.requester.username,
+          firstName: request.requester.firstName,
+          lastName: request.requester.lastName,
+          avatar: request.requester.avatar,
+          bio: request.requester.bio,
+        },
+        notes: request.notes,
+        requestedAt: request.requestedAt,
+      }));
+    } catch (error) {
+      logger.error('Get pending requests error:', error);
+      throw error;
+    }
+  }
+
+  async getSentRequests(userId) {
+    try {
+      const requests = await Friend.getSentRequests(userId);
+
+      return requests.map(request => ({
+        id: request.id,
+        receiver: {
+          id: request.receiver.id,
+          username: request.receiver.username,
+          firstName: request.receiver.firstName,
+          lastName: request.receiver.lastName,
+          avatar: request.receiver.avatar,
+          bio: request.receiver.bio,
+        },
+        notes: request.notes,
+        requestedAt: request.requestedAt,
+      }));
+    } catch (error) {
+      logger.error('Get sent requests error:', error);
+      throw error;
+    }
+  }
+
+  async getBlockedUsers(userId) {
+    try {
+      const blocked = await Friend.getBlockedUsers(userId);
+
+      return blocked.map(block => {
+        const blockedUser = block.requesterId === userId ? block.receiver : block.requester;
+
+        return {
+          id: blockedUser.id,
+          username: blockedUser.username,
+          firstName: blockedUser.firstName,
+          lastName: blockedUser.lastName,
+          avatar: blockedUser.avatar,
+          blockedAt: block.respondedAt,
+        };
+      });
+    } catch (error) {
+      logger.error('Get blocked users error:', error);
+      throw error;
+    }
+  }
+
+  async unfriend(userId, friendId) {
+    try {
+      const friendship = await Friend.findFriendship(userId, friendId);
+
+      if (!friendship) {
+        throw new Error('Friendship not found');
+      }
+
+      if (friendship.status !== 'accepted') {
+        throw new Error('Users are not friends');
+      }
+
+      await friendship.destroy();
+
+      // Clear cache
+      await Promise.all([
+        redisClient.del(`user:${userId}:friends:accepted`),
+        redisClient.del(`user:${friendId}:friends:accepted`),
+      ]);
+
+      // Notify other user
+      const webSocketService = require('./webSocketService');
+      webSocketService.notifyUnfriend(friendId, userId);
+
+      return true;
+    } catch (error) {
+      logger.error('Unfriend error:', error);
+      throw error;
+    }
+  }
+
+  async blockUser(userId, targetId) {
+    try {
+      const friendship = await Friend.findFriendship(userId, targetId);
+
+      if (friendship) {
+        if (friendship.status === 'blocked') {
+          throw new Error('User already blocked');
+        }
+        await friendship.block();
+      } else {
+        // Create new blocked relationship
+        await Friend.create({
+          requesterId: Math.min(userId, targetId),
+          receiverId: Math.max(userId, targetId),
+          status: 'blocked',
+          respondedAt: new Date(),
+        });
+      }
+
+      // Clear cache
+      await redisClient.del(`user:${userId}:friends`);
+      await redisClient.del(`user:${targetId}:friends`);
+
+      return true;
+    } catch (error) {
+      logger.error('Block user error:', error);
+      throw error;
+    }
+  }
+
+  async unblockUser(userId, targetId) {
+    try {
+      const friendship = await Friend.findFriendship(userId, targetId);
+
+      if (!friendship || friendship.status !== 'blocked') {
+        throw new Error('User is not blocked');
+      }
+
+      await friendship.destroy();
+
+      // Clear cache
+      await redisClient.del(`user:${userId}:friends`);
+      await redisClient.del(`user:${targetId}:friends`);
+
+      return true;
+    } catch (error) {
+      logger.error('Unblock user error:', error);
+      throw error;
+    }
+  }
+
+  async areFriends(userId1, userId2) {
+    try {
+      return await Friend.areFriends(userId1, userId2);
+    } catch (error) {
+      logger.error('Check friendship error:', error);
+      throw error;
+    }
+  }
+
+  async isBlocked(userId1, userId2) {
+    try {
+      return await Friend.isBlocked(userId1, userId2);
+    } catch (error) {
+      logger.error('Check blocked status error:', error);
+      throw error;
+    }
+  }
+
+  async getFriendsCount(userId) {
+    try {
+      const friends = await this.getFriends(userId);
+      return friends.length;
+    } catch (error) {
+      logger.error('Get friends count error:', error);
+      throw error;
+    }
+  }
+
+  async getMutualFriends(userId1, userId2) {
+    try {
+      const [friends1, friends2] = await Promise.all([
+        this.getFriends(userId1),
+        this.getFriends(userId2),
+      ]);
+
+      const friendIds1 = new Set(friends1.map(f => f.id));
+      const mutualFriends = friends2.filter(f => friendIds1.has(f.id));
+
+      return mutualFriends;
+    } catch (error) {
+      logger.error('Get mutual friends error:', error);
+      throw error;
+    }
+  }
+}
+
+module.exports = new FriendService();
