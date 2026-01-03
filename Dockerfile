@@ -7,8 +7,13 @@ WORKDIR /usr/src/app
 # Install dependencies first (better layer caching)
 COPY package*.json ./
 
-# Install production dependencies only (no dev dependencies)
-RUN npm ci --only=production
+# Install production dependencies only
+# Check if package-lock.json exists, use ci if it does, install if it doesn't
+RUN if [ -f package-lock.json ]; then \
+      npm ci --only=production; \
+    else \
+      npm install --only=production; \
+    fi
 
 # Copy source code
 COPY src ./src
