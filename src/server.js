@@ -6,19 +6,28 @@ const socketIo = require('socket.io');
 const cors = require('cors');
 
 const app = express();
+
+// Configure CORS for local and deployed environments
 app.use(
   cors({
-    origin: process.env.CLIENT_URL || 'http://localhost:3000',
+    origin: process.env.CLIENT_URL || 'http://localhost:3000', // Default for client
     credentials: true,
   })
 );
+
+// Middleware for parsing JSON and URL-encoded data
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// ========== ADDED: Import and mount auth routes ==========
+const authRoutes = require('./routes/auth');
+app.use('/api/auth', authRoutes);
+// ========== END ADDED ==========
 
 const server = http.createServer(app);
 const io = socketIo(server, {
   cors: {
-    origin: process.env.CLIENT_URL || 'http://localhost:3000',
+    origin: process.env.CLIENT_URL || 'http://localhost:3000', // Default for client
     credentials: true,
   },
   transports: ['websocket', 'polling'],
@@ -41,6 +50,10 @@ app.get('/', (req, res) => {
       { path: '/api/status', method: 'GET', description: 'Server status' },
       { path: '/api/users', method: 'GET', description: 'Get online users' },
       { path: '/socket.io/', method: 'WS', description: 'WebSocket endpoint' },
+      // ========== CHANGED: Added auth endpoints to documentation ==========
+      { path: '/api/auth/register', method: 'POST', description: 'Register new user' },
+      { path: '/api/auth/login', method: 'POST', description: 'Login user' },
+      // ========== END CHANGED ==========
     ],
   });
 });
@@ -272,6 +285,7 @@ server.listen(PORT, '0.0.0.0', () => {
   │   📊 Health Check:   http://localhost:${PORT}/health       │
   │   📋 API Status:     http://localhost:${PORT}/api/status   │
   │   👤 Online Users:   http://localhost:${PORT}/api/users    │
+  │   🔐 Auth Routes:    http://localhost:${PORT}/api/auth/*   │
   │                                                          │
   │   Press Ctrl+C to stop the server                        │
   │                                                          │
