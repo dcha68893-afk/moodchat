@@ -1,4 +1,4 @@
-﻿// src/server.js - UPDATED VERSION
+﻿﻿// src/server.js - UPDATED VERSION WITH DEBUGGING
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -11,47 +11,162 @@ const app = express();
 // ========== CONFIGURATION ==========
 const PORT = process.env.PORT || 4000;
 const NODE_ENV = process.env.NODE_ENV || 'development';
-const JWT_SECRET = process.env.JWT_SECRET || 'development-secret-key-change-in-production';
+const JWT_SECRET = process.env.JWT_ACCESS_SECRET || process.env.JWT_SECRET || 'development-secret-key-change-in-production';
 
-// ========== MIDDLEWARE ==========
-// Security headers
+// ========== DEBUG MIDDLEWARE (Log all requests) ==========
+app.use((req, res, next) => {
+  const timestamp = new Date().toISOString();
+  console.log(`\n=== ${timestamp} ${req.method} ${req.url} ===`);
+  
+  // Log headers (but hide Authorization token for security)
+  const headers = { ...req.headers };
+  if (headers.authorization) {
+    headers.authorization = headers.authorization.substring(0, 20) + '...';
+  }
+  console.log('Headers:', headers);
+  
+  // For POST requests, capture and log the raw body
+  if (req.method === 'POST' || req.method === 'PUT') {
+    const originalEnd = res.end;
+    const chunks = [];
+    
+    // Capture response
+    res.end = function(chunk, encoding) {
+      if (chunk) chunks.push(chunk);
+      const body = Buffer.concat(chunks).toString('utf8');
+      console.log('Response:', body.substring(0, 200) + (body.length > 200 ? '...' : ''));
+      originalEnd.call(this, chunk, encoding);
+    };
+    
+    // Capture request body
+    let requestBody = '';
+    req.on('data', chunk => {
+      requestBody += chunk.toString();
+    });
+    
+    req.on('end', () => {
+      if (requestBody) {
+        console.log('Request body (raw):', requestBody.substring(0, 200) + (requestBody.length > 200 ? '...' : ''));
+        console.log('Request body length:', requestBody.length);
+        
+        // Try to parse and log as JSON if possible
+        try {
+          const parsed = JSON.parse(requestBody);
+          console.log('Request body (parsed):', JSON.stringify(parsed, null, 2).substring(0, 200) + '...');
+        } catch (e) {
+          console.log('Request body is not valid JSON');
+          console.log('First 50 chars hex:', Buffer.from(requestBody.substring(0, 50)).toString('hex'));
+        }
+      }
+    });
+  }
+  
+  next();
+});
+
+// ========== CUSTOM JSON PARSER WITH ERROR HANDLING ==========
+app.use((req, res, next) => {
+  // Only parse JSON if content-type is application/json
+  if (req.headers['content-type'] === 'application/json') {
+    let data = '';
+    
+    req.on('data', chunk => {
+      data += chunk.toString();
+    });
+    
+    req.on('end', () => {
+      // Handle empty body
+      if (!data.trim()) {
+        req.body = {};
+        return next();
+      }
+      
+      try {
+        req.body = JSON.parse(data);
+        next();
+      } catch (error) {
+        console.error('JSON Parse Error:', error.message);
+        console.error('Raw data received:', data);
+        console.error('Data hex dump:', Buffer.from(data).toString('hex'));
+        
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid JSON format',
+          error: error.message,
+          received: data.substring(0, 100) + (data.length > 100 ? '...' : '')
+        });
+      }
+    });
+    
+    req.on('error', (err) => {
+      console.error('Request stream error:', err);
+      res.status(500).json({
+        success: false,
+        message: 'Request processing error'
+      });
+    });
+  } else {
+    // Not JSON content-type, proceed without parsing
+    req.body = {};
+    next();
+  }
+});
+
+// ========== SECURITY MIDDLEWARE ==========
 app.use(helmet());
 
-// CORS - Allow both local and production
-app.use(cors({
+// ========== CORS CONFIGURATION ==========
+const corsOptions = {
   origin: function(origin, callback) {
-    // Allow requests with no origin (like mobile apps or curl requests)
-    if (!origin) return callback(null, true);
+    // Allow requests with no origin (like mobile apps, curl, postman)
+    if (!origin && NODE_ENV === 'development') {
+      return callback(null, true);
+    }
     
     const allowedOrigins = [
       'http://localhost:3000',      // React dev server
       'http://localhost:5500',      // VS Code Live Server
       'http://127.0.0.1:5500',      // VS Code Live Server alternative
-      'http://localhost:5000',      // Your local frontend
-      'https://your-frontend.onrender.com', // Your deployed frontend
+      'http://localhost:5000',      // Other local frontend
+      'http://localhost:8080',      // Another common port
+      'https://fronted-hm86.onrender.com', // Your deployed frontend
       process.env.FRONTEND_URL      // From environment variable
-    ].filter(Boolean); // Remove empty strings
+    ].filter(Boolean);
     
-    if (NODE_ENV === 'development' || allowedOrigins.includes(origin)) {
+    if (NODE_ENV === 'development' || allowedOrigins.includes(origin) || !origin) {
       callback(null, true);
     } else {
+      console.log('CORS blocked origin:', origin);
       callback(new Error(`Origin ${origin} not allowed by CORS`));
     }
   },
-  credentials: true
-}));
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+};
 
-app.use(express.json());
+app.use(cors(corsOptions));
+
+// Handle preflight OPTIONS requests
+app.options('*', cors(corsOptions));
 
 // ========== STORAGE (in-memory for now) ==========
-const users = [];
-const messages = [];
+let users = [];
+let messages = [];
 const rooms = ['general', 'random', 'help', 'tech-support'];
+
+// Log storage state periodically
+setInterval(() => {
+  console.log(`[Storage Stats] Users: ${users.length}, Messages: ${messages.length}`);
+}, 30000); // Every 30 seconds
 
 // ========== AUTH MIDDLEWARE ==========
 function authenticateToken(req, res, next) {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
+  
+  console.log('Auth check - Header:', authHeader ? authHeader.substring(0, 20) + '...' : 'None');
+  console.log('Auth check - Token present:', !!token);
   
   if (!token) {
     return res.status(401).json({ 
@@ -62,12 +177,14 @@ function authenticateToken(req, res, next) {
   
   jwt.verify(token, JWT_SECRET, (err, user) => {
     if (err) {
+      console.log('Token verification failed:', err.message);
       return res.status(403).json({ 
         success: false, 
         message: 'Invalid or expired token' 
       });
     }
     req.user = user;
+    console.log('Token verified for user:', user.email);
     next();
   });
 }
@@ -75,11 +192,14 @@ function authenticateToken(req, res, next) {
 // ========== HEALTH & STATUS ==========
 app.get('/health', (req, res) => {
   res.json({ 
+    success: true,
     status: 'OK',
     environment: NODE_ENV,
     serverTime: new Date().toISOString(),
     usersCount: users.length,
-    messagesCount: messages.length
+    messagesCount: messages.length,
+    uptime: process.uptime(),
+    memory: process.memoryUsage()
   });
 });
 
@@ -89,31 +209,58 @@ app.get('/api/status', (req, res) => {
     message: 'MoodChat API is running',
     version: '1.0.0',
     environment: NODE_ENV,
-    features: ['auth', 'chat', 'profiles']
+    features: ['auth', 'chat', 'profiles'],
+    endpoints: {
+      auth: ['/api/auth/register', '/api/auth/login', '/api/auth/profile'],
+      chat: ['/api/chat/rooms', '/api/chat/messages/:room', '/api/chat/messages']
+    }
+  });
+});
+
+// Test endpoint for JSON validation
+app.post('/api/test-json', (req, res) => {
+  console.log('Test JSON endpoint called');
+  console.log('Request body:', req.body);
+  res.json({
+    success: true,
+    message: 'JSON received successfully',
+    received: req.body,
+    timestamp: new Date().toISOString()
   });
 });
 
 // ========== AUTH ROUTES ==========
 app.post('/api/auth/register', async (req, res) => {
   try {
+    console.log('Register request body:', req.body);
+    
     const { email, password, username } = req.body;
     
+    // Validation
     if (!email || !password || !username) {
+      console.log('Missing fields:', { email: !!email, password: !!password, username: !!username });
       return res.status(400).json({
         success: false,
-        message: 'Email, password, and username are required'
+        message: 'Email, password, and username are required',
+        received: req.body
       });
     }
     
-    if (users.find(u => u.email === email)) {
+    // Check if user already exists
+    const existingUser = users.find(u => u.email === email);
+    if (existingUser) {
+      console.log('User already exists:', email);
       return res.status(400).json({
         success: false,
         message: 'User already exists'
       });
     }
     
+    // Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
+    console.log('Password hashed successfully');
     
+    // Create user
     const user = {
       id: users.length + 1,
       email,
@@ -124,13 +271,18 @@ app.post('/api/auth/register', async (req, res) => {
     };
     
     users.push(user);
+    console.log('User created:', { id: user.id, email: user.email, username: user.username });
     
+    // Generate token
     const token = jwt.sign(
       { userId: user.id, email: user.email, username: user.username },
       JWT_SECRET,
       { expiresIn: '24h' }
     );
     
+    console.log('JWT token generated');
+    
+    // Respond
     res.status(201).json({
       success: true,
       message: 'User registered successfully',
@@ -148,15 +300,19 @@ app.post('/api/auth/register', async (req, res) => {
     console.error('Register error:', error);
     res.status(500).json({
       success: false,
-      message: 'Registration failed'
+      message: 'Registration failed',
+      error: error.message
     });
   }
 });
 
 app.post('/api/auth/login', async (req, res) => {
   try {
+    console.log('Login request body:', req.body);
+    
     const { email, password } = req.body;
     
+    // Validation
     if (!email || !password) {
       return res.status(400).json({
         success: false,
@@ -164,7 +320,9 @@ app.post('/api/auth/login', async (req, res) => {
       });
     }
     
+    // Find user
     const user = users.find(u => u.email === email);
+    console.log('User found:', user ? 'Yes' : 'No');
     
     if (!user) {
       return res.status(401).json({
@@ -173,7 +331,10 @@ app.post('/api/auth/login', async (req, res) => {
       });
     }
     
+    // Check password
+    console.log('Comparing password...');
     const validPassword = await bcrypt.compare(password, user.password);
+    console.log('Password valid:', validPassword);
     
     if (!validPassword) {
       return res.status(401).json({
@@ -182,11 +343,14 @@ app.post('/api/auth/login', async (req, res) => {
       });
     }
     
+    // Generate token
     const token = jwt.sign(
       { userId: user.id, email: user.email, username: user.username },
       JWT_SECRET,
       { expiresIn: '24h' }
     );
+    
+    console.log('Login successful for:', email);
     
     res.json({
       success: true,
@@ -205,13 +369,16 @@ app.post('/api/auth/login', async (req, res) => {
     console.error('Login error:', error);
     res.status(500).json({
       success: false,
-      message: 'Login failed'
+      message: 'Login failed',
+      error: error.message
     });
   }
 });
 
 app.get('/api/auth/profile', authenticateToken, (req, res) => {
   try {
+    console.log('Profile request for user:', req.user.userId);
+    
     const user = users.find(u => u.id === req.user.userId);
     
     if (!user) {
@@ -236,13 +403,16 @@ app.get('/api/auth/profile', authenticateToken, (req, res) => {
     console.error('Profile error:', error);
     res.status(500).json({
       success: false,
-      message: 'Failed to get profile'
+      message: 'Failed to get profile',
+      error: error.message
     });
   }
 });
 
 // ========== CHAT ROUTES ==========
 app.get('/api/chat/rooms', authenticateToken, (req, res) => {
+  console.log('Fetching rooms for user:', req.user.userId);
+  
   res.json({
     success: true,
     rooms: rooms.map(room => ({
@@ -254,6 +424,8 @@ app.get('/api/chat/rooms', authenticateToken, (req, res) => {
 });
 
 app.get('/api/chat/messages/:room', authenticateToken, (req, res) => {
+  console.log('Fetching messages for room:', req.params.room, 'user:', req.user.userId);
+  
   const roomMessages = messages
     .filter(m => m.room === req.params.room)
     .slice(-50);
@@ -267,6 +439,8 @@ app.get('/api/chat/messages/:room', authenticateToken, (req, res) => {
 
 app.post('/api/chat/messages', authenticateToken, (req, res) => {
   try {
+    console.log('Send message request:', req.body);
+    
     const { room, content } = req.body;
     const user = users.find(u => u.id === req.user.userId);
     
@@ -297,6 +471,7 @@ app.post('/api/chat/messages', authenticateToken, (req, res) => {
     };
     
     messages.push(message);
+    console.log('Message sent:', message.id);
     
     res.json({
       success: true,
@@ -308,25 +483,79 @@ app.post('/api/chat/messages', authenticateToken, (req, res) => {
     console.error('Send message error:', error);
     res.status(500).json({
       success: false,
-      message: 'Failed to send message'
+      message: 'Failed to send message',
+      error: error.message
     });
   }
 });
 
+// ========== ERROR HANDLING ==========
+// 404 handler
+app.use((req, res) => {
+  console.log('404 Not Found:', req.method, req.url);
+  res.status(404).json({
+    success: false,
+    message: `Cannot ${req.method} ${req.url}`,
+    availableEndpoints: {
+      GET: ['/health', '/api/status', '/api/auth/profile', '/api/chat/rooms', '/api/chat/messages/:room'],
+      POST: ['/api/auth/register', '/api/auth/login', '/api/chat/messages', '/api/test-json']
+    }
+  });
+});
+
+// Global error handler
+app.use((err, req, res, next) => {
+  console.error('Global error handler:', err);
+  res.status(500).json({
+    success: false,
+    message: 'Internal server error',
+    error: NODE_ENV === 'development' ? err.message : undefined
+  });
+});
+
 // ========== START SERVER ==========
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`┌──────────────────────────────────────────────────────────┐`);
   console.log(`│                                                          │`);
   console.log(`│   🚀 MoodChat Server started successfully!               │`);
   console.log(`│                                                          │`);
   console.log(`│   📍 HTTP Server:    http://localhost:${PORT}            ${PORT < 1000 ? ' ' : ''}`);
   console.log(`│   🌐 Environment:    ${NODE_ENV}                         `);
+  console.log(`│   📊 JWT Secret:     ${JWT_SECRET.substring(0, 10)}...   `);
   console.log(`│                                                          │`);
   console.log(`│   📊 Health Check:   http://localhost:${PORT}/health     ${PORT < 1000 ? ' ' : ''}`);
   console.log(`│   🔐 Auth Routes:    http://localhost:${PORT}/api/auth/* ${PORT < 1000 ? ' ' : ''}`);
   console.log(`│   💬 Chat Routes:    http://localhost:${PORT}/api/chat/* ${PORT < 1000 ? ' ' : ''}`);
+  console.log(`│   🐞 Debug Endpoint: http://localhost:${PORT}/api/test-json`);
   console.log(`│                                                          │`);
   console.log(`│   Press Ctrl+C to stop the server                        │`);
   console.log(`│                                                          │`);
   console.log(`└──────────────────────────────────────────────────────────┘`);
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('SIGTERM received. Shutting down gracefully...');
+  server.close(() => {
+    console.log('Server closed.');
+    process.exit(0);
+  });
+});
+
+process.on('SIGINT', () => {
+  console.log('SIGINT received. Shutting down gracefully...');
+  server.close(() => {
+    console.log('Server closed.');
+    process.exit(0);
+  });
+});
+
+// Handle uncaught errors
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught Exception:', error);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
 });
