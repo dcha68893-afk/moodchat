@@ -1,5 +1,5 @@
 # Use official Node.js LTS image (Alpine variant for smaller size)
-FROM node:18-alpine
+FROM node:20-alpine
 
 # Create app directory
 WORKDIR /usr/src/app
@@ -18,8 +18,7 @@ RUN if [ -f package-lock.json ]; then \
 # Copy source code
 COPY src ./src
 
-# Copy .env file (adjust if using different config method)
-COPY .env ./
+
 
 # Create non-root user for security
 RUN addgroup -g 1001 -S nodejs && \
