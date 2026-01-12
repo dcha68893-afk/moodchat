@@ -10,6 +10,7 @@ const { sendEmail } = require('../utils/helpers');
 
 class AuthService {
   async register(userData) {
+    try {
       // Check if user already exists
       const existingUser = await User.findOne({
         where: {
@@ -42,7 +43,6 @@ class AuthService {
 
       // Generate verification token
       const verificationToken = crypto.randomBytes(32).toString('hex');
-      const verificationExpires = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
 
       // Store verification token in Redis
       await redisClient.setex(
@@ -76,11 +76,14 @@ class AuthService {
         user: user.toJSON(),
         tokens,
       };
+    } catch (error) {
       logger.error('Registration error:', error);
+      throw error;
     }
   }
 
   async login(email, password) {
+    try {
       // Find user
       const user = await User.findOne({ where: { email } });
       if (!user) {
@@ -116,11 +119,14 @@ class AuthService {
         user: user.toJSON(),
         tokens,
       };
+    } catch (error) {
       logger.error('Login error:', error);
+      throw error;
     }
   }
 
   async refreshToken(refreshToken) {
+    try {
       // Verify refresh token
       const decoded = jwt.verify(refreshToken, jwtConfig.secret, {
         issuer: jwtConfig.issuer,
@@ -159,11 +165,14 @@ class AuthService {
         user: user.toJSON(),
         tokens,
       };
+    } catch (error) {
       logger.error('Refresh token error:', error);
+      throw error;
     }
   }
 
   async logout(accessToken, refreshToken) {
+    try {
       // Add access token to blacklist
       const decoded = jwt.decode(accessToken);
       if (decoded && decoded.exp) {
@@ -179,11 +188,14 @@ class AuthService {
       }
 
       return true;
+    } catch (error) {
       logger.error('Logout error:', error);
+      throw error;
     }
   }
 
   async verifyEmail(token) {
+    try {
       // Get user ID from Redis
       const userId = await redisClient.get(`verification:${token}`);
       if (!userId) {
@@ -217,11 +229,14 @@ class AuthService {
       });
 
       return user;
+    } catch (error) {
       logger.error('Email verification error:', error);
+      throw error;
     }
   }
 
   async requestPasswordReset(email) {
+    try {
       const user = await User.findOne({ where: { email } });
       if (!user) {
         // Don't reveal that user doesn't exist
@@ -230,7 +245,6 @@ class AuthService {
 
       // Generate reset token
       const resetToken = crypto.randomBytes(32).toString('hex');
-      const resetExpires = new Date(Date.now() + 1 * 60 * 60 * 1000); // 1 hour
 
       // Store reset token in Redis
       await redisClient.setex(
@@ -251,11 +265,14 @@ class AuthService {
       });
 
       return true;
+    } catch (error) {
       logger.error('Password reset request error:', error);
+      throw error;
     }
   }
 
   async resetPassword(token, newPassword) {
+    try {
       // Get user ID from Redis
       const userId = await redisClient.get(`reset:${token}`);
       if (!userId) {
@@ -285,7 +302,9 @@ class AuthService {
       });
 
       return user;
+    } catch (error) {
       logger.error('Password reset error:', error);
+      throw error;
     }
   }
 
@@ -308,6 +327,7 @@ class AuthService {
   }
 
   async validateToken(token) {
+    try {
       const decoded = jwt.verify(token, jwtConfig.secret, {
         issuer: jwtConfig.issuer,
         audience: jwtConfig.audience,
@@ -320,6 +340,8 @@ class AuthService {
       }
 
       return decoded;
+    } catch (error) {
+      throw error;
     }
   }
 }

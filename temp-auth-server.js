@@ -1,54 +1,19 @@
-﻿// src/server.js - UPDATED VERSION
-require('dotenv').config();
+﻿require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const helmet = require('helmet');
 
 const app = express();
+const PORT = 5000;
 
-// ========== CONFIGURATION ==========
-const PORT = process.env.PORT || 4000;
-const NODE_ENV = process.env.NODE_ENV || 'development';
-const JWT_SECRET = process.env.JWT_SECRET || 'development-secret-key-change-in-production';
-
-// ========== MIDDLEWARE ==========
-// Security headers
-app.use(helmet());
-
-// CORS - Allow both local and production
-app.use(cors({
-  origin: function(origin, callback) {
-    // Allow requests with no origin (like mobile apps or curl requests)
-    if (!origin) return callback(null, true);
-    
-    const allowedOrigins = [
-      'http://localhost:3000',      // React dev server
-      'http://localhost:5500',      // VS Code Live Server
-      'http://127.0.0.1:5500',      // VS Code Live Server alternative
-      'http://localhost:5000',      // Your local frontend
-      'https://your-frontend.onrender.com', // Your deployed frontend
-      process.env.FRONTEND_URL      // From environment variable
-    ].filter(Boolean); // Remove empty strings
-    
-    if (NODE_ENV === 'development' || allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      callback(new Error(`Origin ${origin} not allowed by CORS`));
-    }
-  },
-  credentials: true
-}));
-
+app.use(cors());
 app.use(express.json());
 
-// ========== STORAGE (in-memory for now) ==========
+// In-memory storage
 const users = [];
-const messages = [];
-const rooms = ['general', 'random', 'help', 'tech-support'];
 
-// ========== AUTH MIDDLEWARE ==========
+// JWT verification middleware
 function authenticateToken(req, res, next) {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
@@ -60,7 +25,7 @@ function authenticateToken(req, res, next) {
     });
   }
   
-  jwt.verify(token, JWT_SECRET, (err, user) => {
+  jwt.verify(token, 'test-secret-key-123', (err, user) => {
     if (err) {
       return res.status(403).json({ 
         success: false, 
@@ -72,28 +37,26 @@ function authenticateToken(req, res, next) {
   });
 }
 
-// ========== HEALTH & STATUS ==========
+// ========== PUBLIC ENDPOINTS ==========
+
+// Health check
 app.get('/health', (req, res) => {
   res.json({ 
-    status: 'OK',
-    environment: NODE_ENV,
-    serverTime: new Date().toISOString(),
-    usersCount: users.length,
-    messagesCount: messages.length
+    status: 'OK', 
+    server: 'temp-auth',
+    usersCount: users.length 
   });
 });
 
-app.get('/api/status', (req, res) => {
-  res.json({
-    success: true,
-    message: 'MoodChat API is running',
-    version: '1.0.0',
-    environment: NODE_ENV,
-    features: ['auth', 'chat', 'profiles']
+// Test endpoint
+app.get('/test', (req, res) => {
+  res.json({ 
+    message: 'Test server is running!', 
+    usersCount: users.length 
   });
 });
 
-// ========== AUTH ROUTES ==========
+// Register
 app.post('/api/auth/register', async (req, res) => {
   try {
     const { email, password, username } = req.body;
@@ -127,7 +90,7 @@ app.post('/api/auth/register', async (req, res) => {
     
     const token = jwt.sign(
       { userId: user.id, email: user.email, username: user.username },
-      JWT_SECRET,
+      'test-secret-key-123',
       { expiresIn: '24h' }
     );
     
@@ -153,6 +116,7 @@ app.post('/api/auth/register', async (req, res) => {
   }
 });
 
+// Login
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -184,7 +148,7 @@ app.post('/api/auth/login', async (req, res) => {
     
     const token = jwt.sign(
       { userId: user.id, email: user.email, username: user.username },
-      JWT_SECRET,
+      'test-secret-key-123',
       { expiresIn: '24h' }
     );
     
@@ -210,6 +174,9 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
+// ========== PROTECTED ENDPOINTS (require token) ==========
+
+// Get user profile
 app.get('/api/auth/profile', authenticateToken, (req, res) => {
   try {
     const user = users.find(u => u.id === req.user.userId);
@@ -241,22 +208,120 @@ app.get('/api/auth/profile', authenticateToken, (req, res) => {
   }
 });
 
-// ========== CHAT ROUTES ==========
+// Update profile
+app.put('/api/auth/profile', authenticateToken, async (req, res) => {
+  try {
+    const { username, avatar } = req.body;
+    const user = users.find(u => u.id === req.user.userId);
+    
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+    
+    if (username) user.username = username;
+    if (avatar) user.avatar = avatar;
+    
+    res.json({
+      success: true,
+      message: 'Profile updated successfully',
+      user: {
+        id: user.id,
+        email: user.email,
+        username: user.username,
+        avatar: user.avatar,
+        createdAt: user.createdAt
+      }
+    });
+    
+  } catch (error) {
+    console.error('Update profile error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update profile'
+    });
+  }
+});
+
+// Change password
+app.put('/api/auth/change-password', authenticateToken, async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+    const user = users.find(u => u.id === req.user.userId);
+    
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+    
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({
+        success: false,
+        message: 'Current password and new password are required'
+      });
+    }
+    
+    const validPassword = await bcrypt.compare(currentPassword, user.password);
+    
+    if (!validPassword) {
+      return res.status(401).json({
+        success: false,
+        message: 'Current password is incorrect'
+      });
+    }
+    
+    user.password = await bcrypt.hash(newPassword, 10);
+    
+    res.json({
+      success: true,
+      message: 'Password changed successfully'
+    });
+    
+  } catch (error) {
+    console.error('Change password error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to change password'
+    });
+  }
+});
+
+// Logout (client-side - just returns success)
+app.post('/api/auth/logout', authenticateToken, (req, res) => {
+  res.json({
+    success: true,
+    message: 'Logged out successfully'
+  });
+});
+
+// ========== CHAT ENDPOINTS ==========
+
+const messages = [];
+const rooms = ['general', 'random', 'help', 'tech-support'];
+
+// Get all chat rooms
 app.get('/api/chat/rooms', authenticateToken, (req, res) => {
   res.json({
     success: true,
     rooms: rooms.map(room => ({
       name: room,
       messageCount: messages.filter(m => m.room === room).length,
-      lastMessage: messages.filter(m => m.room === room).slice(-1)[0] || null
+      lastMessage: messages
+        .filter(m => m.room === room)
+        .slice(-1)[0] || null
     }))
   });
 });
 
+// Get messages for a room
 app.get('/api/chat/messages/:room', authenticateToken, (req, res) => {
   const roomMessages = messages
     .filter(m => m.room === req.params.room)
-    .slice(-50);
+    .slice(-50); // Last 50 messages
   
   res.json({
     success: true,
@@ -265,6 +330,7 @@ app.get('/api/chat/messages/:room', authenticateToken, (req, res) => {
   });
 });
 
+// Send a message
 app.post('/api/chat/messages', authenticateToken, (req, res) => {
   try {
     const { room, content } = req.body;
@@ -313,20 +379,32 @@ app.post('/api/chat/messages', authenticateToken, (req, res) => {
   }
 });
 
+// Get all users (for chat)
+app.get('/api/chat/users', authenticateToken, (req, res) => {
+  const onlineUsers = users.map(user => ({
+    id: user.id,
+    username: user.username,
+    avatar: user.avatar,
+    lastActive: new Date().toISOString(),
+    isOnline: true
+  }));
+  
+  res.json({
+    success: true,
+    users: onlineUsers
+  });
+});
+
 // ========== START SERVER ==========
+
 app.listen(PORT, () => {
-  console.log(`┌──────────────────────────────────────────────────────────┐`);
-  console.log(`│                                                          │`);
-  console.log(`│   🚀 MoodChat Server started successfully!               │`);
-  console.log(`│                                                          │`);
-  console.log(`│   📍 HTTP Server:    http://localhost:${PORT}            ${PORT < 1000 ? ' ' : ''}`);
-  console.log(`│   🌐 Environment:    ${NODE_ENV}                         `);
-  console.log(`│                                                          │`);
-  console.log(`│   📊 Health Check:   http://localhost:${PORT}/health     ${PORT < 1000 ? ' ' : ''}`);
-  console.log(`│   🔐 Auth Routes:    http://localhost:${PORT}/api/auth/* ${PORT < 1000 ? ' ' : ''}`);
-  console.log(`│   💬 Chat Routes:    http://localhost:${PORT}/api/chat/* ${PORT < 1000 ? ' ' : ''}`);
-  console.log(`│                                                          │`);
-  console.log(`│   Press Ctrl+C to stop the server                        │`);
-  console.log(`│                                                          │`);
-  console.log(`└──────────────────────────────────────────────────────────┘`);
+  console.log(`🚀 TEMP AUTH SERVER on http://localhost:${PORT}`);
+  console.log(`📌 Test endpoints:`);
+  console.log(`   GET  /health`);
+  console.log(`   GET  /test`);
+  console.log(`   POST /api/auth/register`);
+  console.log(`   POST /api/auth/login`);
+  console.log(`   GET  /api/auth/profile (protected)`);
+  console.log(`   GET  /api/chat/rooms (protected)`);
+  console.log(`\n🔒 Protected endpoints require: Authorization: Bearer <token>`);
 });

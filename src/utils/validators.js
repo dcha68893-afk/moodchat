@@ -1,4 +1,4 @@
-const mongoose = require('mongoose');
+﻿const mongoose = require('mongoose');
 const { ValidationError } = require('./errors');
 
 /**
@@ -553,4 +553,16 @@ class Validators {
   }
 }
 
-module.exports = Validators;
+// Add these helper functions for express-validator
+module.exports.isValidEmail = (email) => {
+  return Validators.validateEmail(email);
+};
+
+module.exports.isValidPassword = (password) => {
+  const result = Validators.validatePassword(password);
+  return result.isValid;
+};
+
+// Also export the Validators class
+module.exports.Validators = Validators;
+

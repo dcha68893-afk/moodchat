@@ -1,172 +1,129 @@
 const { Op } = require('sequelize');
 const { DataTypes } = require('sequelize');
-const sequelize = require('./index');
 
-const ReadReceipt = sequelize.define(
-  'ReadReceipt',
-  {
-    id: {
-      type: DataTypes.INTEGER,
-      primaryKey: true,
-      autoIncrement: true,
-    },
-    messageId: {
-      type: DataTypes.INTEGER,
-      allowNull: false,
-      references: {
-        model: 'messages',
-        key: 'id',
+module.exports = (sequelize, DataTypes) => {
+  const ReadReceipt = sequelize.define(
+    'ReadReceipt',
+    {
+      id: {
+        type: DataTypes.INTEGER,
+        primaryKey: true,
+        autoIncrement: true,
+      },
+      messageId: {
+        type: DataTypes.INTEGER,
+        allowNull: false,
+        references: {
+          model: 'messages',
+          key: 'id',
+        },
+      },
+      userId: {
+        type: DataTypes.INTEGER,
+        allowNull: false,
+        references: {
+          model: 'users',
+          key: 'id',
+        },
+      },
+      readAt: {
+        type: DataTypes.DATE,
+        allowNull: false,
+        defaultValue: DataTypes.NOW,
+      },
+      deviceId: {
+        type: DataTypes.STRING(100),
+        allowNull: true,
+      },
+      ipAddress: {
+        type: DataTypes.STRING(45),
+        allowNull: true,
       },
     },
-    userId: {
-      type: DataTypes.INTEGER,
-      allowNull: false,
-      references: {
-        model: 'users',
-        key: 'id',
-      },
-    },
-    readAt: {
-      type: DataTypes.DATE,
-      allowNull: false,
-      defaultValue: DataTypes.NOW,
-    },
-    deviceId: {
-      type: DataTypes.STRING(100),
-      allowNull: true,
-      comment: 'Device identifier for multi-device sync',
-    },
-    ipAddress: {
-      type: DataTypes.STRING(45),
-      allowNull: true,
-    },
-  },
-  {
-    tableName: 'read_receipts',
-    timestamps: true,
-    underscored: true,
-    indexes: [
-      {
-        fields: ['message_id', 'user_id'],
-        unique: true,
-      },
-      {
-        fields: ['message_id'],
-      },
-      {
-        fields: ['user_id'],
-      },
-      {
-        fields: ['read_at'],
-      },
-    ],
-  }
-);
+    {
+      tableName: 'read_receipts',
+      timestamps: true,
+      underscored: true,
+      indexes: [
+        {
+          fields: ['message_id', 'user_id'],
+          unique: true,
+        },
+        {
+          fields: ['message_id'],
+        },
+        {
+          fields: ['user_id'],
+        },
+        {
+          fields: ['read_at'],
+        },
+      ],
+    }
+  );
 
-// Static methods
-ReadReceipt.markAsRead = async function (messageId, userId, options = {}) {
-  const [receipt, created] = await this.findOrCreate({
-    where: {
-      messageId: messageId,
-      userId: userId,
-    },
-    defaults: {
-      readAt: new Date(),
-      deviceId: options.deviceId,
-      ipAddress: options.ipAddress,
-    },
-  });
+  // Static methods
+  ReadReceipt.markAsRead = async function (messageId, userId, deviceInfo = {}) {
+    const [receipt, created] = await this.findOrCreate({
+      where: {
+        messageId: messageId,
+        userId: userId,
+      },
+      defaults: {
+        readAt: new Date(),
+        deviceId: deviceInfo.deviceId,
+        ipAddress: deviceInfo.ipAddress,
+      },
+    });
 
-  if (!created) {
-    receipt.readAt = new Date();
-    receipt.deviceId = options.deviceId;
-    receipt.ipAddress = options.ipAddress;
-    await receipt.save();
-  }
+    if (!created) {
+      receipt.readAt = new Date();
+      if (deviceInfo.deviceId) receipt.deviceId = deviceInfo.deviceId;
+      if (deviceInfo.ipAddress) receipt.ipAddress = deviceInfo.ipAddress;
+      await receipt.save();
+    }
 
-  return receipt;
-};
-
-ReadReceipt.getUnreadCount = async function (userId, chatId = null) {
-  const Message = sequelize.models.Message;
-  const ChatParticipant = sequelize.models.ChatParticipant;
-
-  const where = {
-    senderId: { [Op.ne]: userId },
+    return receipt;
   };
 
-  if (chatId) {
-    where.chatId = chatId;
-  }
+  ReadReceipt.getUnreadCount = async function (chatId, userId) {
+    const query = `
+      SELECT COUNT(*) as count
+      FROM messages m
+      LEFT JOIN read_receipts rr ON m.id = rr.message_id AND rr.user_id = ?
+      WHERE m.chat_id = ? 
+      AND m.sender_id != ? 
+      AND m.is_deleted = false
+      AND rr.id IS NULL
+    `;
 
-  const messages = await Message.findAll({
-    where: where,
-    attributes: ['id', 'chatId'],
-    include: [
-      {
-        model: ChatParticipant,
-        as: 'chatParticipants',
-        where: {
-          userId: userId,
-        },
-        required: true,
-      },
-    ],
-  });
+    const [results] = await this.sequelize.query(query, {
+      replacements: [userId, chatId, userId],
+      type: this.sequelize.QueryTypes.SELECT,
+    });
 
-  const messageIds = messages.map(m => m.id);
+    return results.count;
+  };
 
-  if (messageIds.length === 0) {
-    return 0;
-  }
+  ReadReceipt.getLastReadMessage = async function (chatId, userId) {
+    const query = `
+      SELECT m.*
+      FROM messages m
+      JOIN read_receipts rr ON m.id = rr.message_id
+      WHERE m.chat_id = ? 
+      AND rr.user_id = ?
+      AND m.is_deleted = false
+      ORDER BY rr.read_at DESC
+      LIMIT 1
+    `;
 
-  const readReceipts = await this.findAll({
-    where: {
-      messageId: messageIds,
-      userId: userId,
-    },
-    attributes: ['messageId'],
-  });
+    const [results] = await this.sequelize.query(query, {
+      replacements: [chatId, userId],
+      type: this.sequelize.QueryTypes.SELECT,
+    });
 
-  const readMessageIds = new Set(readReceipts.map(r => r.messageId));
-  return messageIds.filter(id => !readMessageIds.has(id)).length;
+    return results;
+  };
+
+  return ReadReceipt;
 };
-
-ReadReceipt.getLastReadMessage = async function (chatId, userId) {
-  const Message = sequelize.models.Message;
-
-  const lastRead = await this.findOne({
-    where: {
-      userId: userId,
-    },
-    include: [
-      {
-        model: Message,
-        where: {
-          chatId: chatId,
-        },
-        required: true,
-      },
-    ],
-    order: [['readAt', 'DESC']],
-  });
-
-  return lastRead ? lastRead.Message : null;
-};
-
-ReadReceipt.getReaders = async function (messageId) {
-  return await this.findAll({
-    where: {
-      messageId: messageId,
-    },
-    include: [
-      {
-        model: sequelize.models.User,
-        attributes: ['id', 'username', 'avatar'],
-      },
-    ],
-    order: [['readAt', 'ASC']],
-  });
-};
-
-module.exports = ReadReceipt;

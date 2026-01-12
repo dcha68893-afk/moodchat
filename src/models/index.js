@@ -230,12 +230,13 @@ const SharedMood = sequelize.define(
   }
 );
 
-Mood.hasMany(SharedMood, { foreignKey: 'moodId', as: 'sharedWith' });
+// Mood - SharedMood (One-to-Many)
+Mood.hasMany(SharedMood, { foreignKey: 'moodId', as: 'sharedMoods' });
 SharedMood.belongsTo(Mood, { foreignKey: 'moodId', as: 'mood' });
 User.hasMany(SharedMood, { foreignKey: 'userId', as: 'sharedMoods' });
 SharedMood.belongsTo(User, { foreignKey: 'userId', as: 'user' });
 User.hasMany(SharedMood, { foreignKey: 'sharedWithId', as: 'receivedMoods' });
-SharedMood.belongsTo(User, { foreignKey: 'sharedWithId', as: 'sharedWith' });
+SharedMood.belongsTo(User, { foreignKey: 'sharedWithId', as: 'sharedWithUser' });
 
 // User - Media (One-to-Many)
 User.hasMany(Media, { foreignKey: 'userId', as: 'media' });
