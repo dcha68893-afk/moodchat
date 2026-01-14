@@ -1,4 +1,4 @@
-﻿﻿﻿// src/server.js - UPDATED VERSION WITH DEBUGGING
+﻿﻿﻿// src/server.js - UPDATED VERSION WITH IMPROVED STABILITY
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -13,9 +13,14 @@ const PORT = process.env.PORT || 4000;
 const NODE_ENV = process.env.NODE_ENV || 'development';
 const JWT_SECRET = process.env.JWT_ACCESS_SECRET || process.env.JWT_SECRET || 'development-secret-key-change-in-production';
 
-// ========== CORS CONFIGURATION ==========
+// ========== IMPROVED CORS CONFIGURATION ==========
 const corsOptions = {
   origin: function(origin, callback) {
+    // Allow all origins in development
+    if (NODE_ENV === 'development') {
+      return callback(null, true);
+    }
+    
     // Allow requests with no origin (like mobile apps, curl, postman)
     if (!origin) {
       return callback(null, true);
@@ -31,12 +36,7 @@ const corsOptions = {
       process.env.FRONTEND_URL      // From environment variable
     ].filter(Boolean);
     
-    // Allow all origins in development
-    if (NODE_ENV === 'development') {
-      return callback(null, true);
-    }
-    
-    if (allowedOrigins.indexOf(origin) !== -1 || !origin) {
+    if (allowedOrigins.indexOf(origin) !== -1) {
       callback(null, true);
     } else {
       console.log('CORS blocked origin:', origin);
@@ -44,16 +44,22 @@ const corsOptions = {
     }
   },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
-  optionsSuccessStatus: 200
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH', 'HEAD'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Origin', 'X-Requested-With'],
+  exposedHeaders: ['Authorization'],
+  optionsSuccessStatus: 200,
+  maxAge: 86400 // 24 hours
 };
 
 // ========== ESSENTIAL MIDDLEWARE ==========
-app.use(helmet());
+app.use(helmet({
+  contentSecurityPolicy: false, // Disable for API server
+  crossOriginEmbedderPolicy: false,
+  crossOriginResourcePolicy: { policy: "cross-origin" }
+}));
 app.use(cors(corsOptions));
-app.use(express.json()); // Built-in JSON parser
-app.use(express.urlencoded({ extended: true })); // URL-encoded data parser
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Handle preflight requests globally
 app.options('*', cors(corsOptions));
@@ -134,15 +140,14 @@ function authenticateToken(req, res, next) {
 
 // ========== HEALTH & STATUS ==========
 app.get('/health', (req, res) => {
+  // Minimal processing for fast response
+  res.setHeader('Cache-Control', 'no-cache');
   res.json({ 
     success: true,
     status: 'OK',
     environment: NODE_ENV,
-    serverTime: new Date().toISOString(),
-    usersCount: users.length,
-    messagesCount: messages.length,
-    uptime: process.uptime(),
-    memory: process.memoryUsage()
+    timestamp: Date.now(),
+    uptime: Math.floor(process.uptime())
   });
 });
 
@@ -457,48 +462,75 @@ app.use((err, req, res, next) => {
 });
 
 // ========== START SERVER ==========
-const server = app.listen(PORT, () => {
-  console.log(`┌──────────────────────────────────────────────────────────┐`);
-  console.log(`│                                                          │`);
-  console.log(`│   🚀 MoodChat Server started successfully!               │`);
-  console.log(`│                                                          │`);
-  console.log(`│   📍 HTTP Server:    http://localhost:${PORT}            ${PORT < 1000 ? ' ' : ''}`);
-  console.log(`│   🌐 Environment:    ${NODE_ENV}                         `);
-  console.log(`│   📊 JWT Secret:     ${JWT_SECRET.substring(0, 10)}...   `);
-  console.log(`│                                                          │`);
-  console.log(`│   📊 Health Check:   http://localhost:${PORT}/health     ${PORT < 1000 ? ' ' : ''}`);
-  console.log(`│   🔐 Auth Routes:    http://localhost:${PORT}/api/auth/* ${PORT < 1000 ? ' ' : ''}`);
-  console.log(`│   💬 Chat Routes:    http://localhost:${PORT}/api/chat/* ${PORT < 1000 ? ' ' : ''}`);
-  console.log(`│   🐞 Debug Endpoint: http://localhost:${PORT}/api/test-json`);
-  console.log(`│                                                          │`);
-  console.log(`│   Press Ctrl+C to stop the server                        │`);
-  console.log(`│                                                          │`);
-  console.log(`└──────────────────────────────────────────────────────────┘`);
-});
-
-// Graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('SIGTERM received. Shutting down gracefully...');
-  server.close(() => {
-    console.log('Server closed.');
-    process.exit(0);
+const startServer = () => {
+  const server = app.listen(PORT, '0.0.0.0', () => {
+    console.log(`┌──────────────────────────────────────────────────────────┐`);
+    console.log(`│                                                          │`);
+    console.log(`│   🚀 MoodChat Server started successfully!               │`);
+    console.log(`│                                                          │`);
+    console.log(`│   📍 HTTP Server:    http://localhost:${PORT}            ${PORT < 1000 ? ' ' : ''}`);
+    console.log(`│   🌐 Environment:    ${NODE_ENV}                         `);
+    console.log(`│   📊 JWT Secret:     ${JWT_SECRET.substring(0, 10)}...   `);
+    console.log(`│                                                          │`);
+    console.log(`│   📊 Health Check:   http://localhost:${PORT}/health     ${PORT < 1000 ? ' ' : ''}`);
+    console.log(`│   🔐 Auth Routes:    http://localhost:${PORT}/api/auth/* ${PORT < 1000 ? ' ' : ''}`);
+    console.log(`│   💬 Chat Routes:    http://localhost:${PORT}/api/chat/* ${PORT < 1000 ? ' ' : ''}`);
+    console.log(`│   🐞 Debug Endpoint: http://localhost:${PORT}/api/test-json`);
+    console.log(`│                                                          │`);
+    console.log(`│   Press Ctrl+C to stop the server                        │`);
+    console.log(`│                                                          │`);
+    console.log(`└──────────────────────────────────────────────────────────┘`);
   });
-});
 
-process.on('SIGINT', () => {
-  console.log('SIGINT received. Shutting down gracefully...');
-  server.close(() => {
-    console.log('Server closed.');
-    process.exit(0);
+  // ========== GRACEFUL SHUTDOWN HANDLERS ==========
+  const shutdown = (signal) => {
+    console.log(`\n${signal} received. Starting graceful shutdown...`);
+    
+    server.close(() => {
+      console.log('HTTP server closed.');
+      console.log('Shutdown complete. Goodbye!');
+      process.exit(0);
+    });
+
+    // Force shutdown after 10 seconds
+    setTimeout(() => {
+      console.error('Could not close connections in time, forcefully shutting down');
+      process.exit(1);
+    }, 10000);
+  };
+
+  // Handle termination signals
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
+
+  // Handle uncaught errors and rejections
+  process.on('uncaughtException', (error) => {
+    console.error('Uncaught Exception:', error);
+    // Don't exit, keep server running
   });
-});
 
-// Handle uncaught errors
-process.on('uncaughtException', (error) => {
-  console.error('Uncaught Exception:', error);
-  process.exit(1);
-});
+  process.on('unhandledRejection', (reason, promise) => {
+    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+    // Don't exit, keep server running
+  });
 
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-});
+  // Handle server-specific errors
+  server.on('error', (error) => {
+    if (error.code === 'EADDRINUSE') {
+      console.error(`Port ${PORT} is already in use.`);
+      process.exit(1);
+    } else {
+      console.error('Server error:', error);
+    }
+  });
+
+  return server;
+};
+
+// Start the server
+const server = startServer();
+
+// Keep process alive
+setInterval(() => {
+  // Keep the event loop alive
+}, 1000 * 60 * 60); // Run every hour
