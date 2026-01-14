@@ -1,4 +1,4 @@
-﻿﻿// src/server.js - UPDATED VERSION WITH DEBUGGING
+﻿﻿﻿// src/server.js - UPDATED VERSION WITH DEBUGGING
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -13,113 +13,11 @@ const PORT = process.env.PORT || 4000;
 const NODE_ENV = process.env.NODE_ENV || 'development';
 const JWT_SECRET = process.env.JWT_ACCESS_SECRET || process.env.JWT_SECRET || 'development-secret-key-change-in-production';
 
-// ========== DEBUG MIDDLEWARE (Log all requests) ==========
-app.use((req, res, next) => {
-  const timestamp = new Date().toISOString();
-  console.log(`\n=== ${timestamp} ${req.method} ${req.url} ===`);
-  
-  // Log headers (but hide Authorization token for security)
-  const headers = { ...req.headers };
-  if (headers.authorization) {
-    headers.authorization = headers.authorization.substring(0, 20) + '...';
-  }
-  console.log('Headers:', headers);
-  
-  // For POST requests, capture and log the raw body
-  if (req.method === 'POST' || req.method === 'PUT') {
-    const originalEnd = res.end;
-    const chunks = [];
-    
-    // Capture response
-    res.end = function(chunk, encoding) {
-      if (chunk) chunks.push(chunk);
-      const body = Buffer.concat(chunks).toString('utf8');
-      console.log('Response:', body.substring(0, 200) + (body.length > 200 ? '...' : ''));
-      originalEnd.call(this, chunk, encoding);
-    };
-    
-    // Capture request body
-    let requestBody = '';
-    req.on('data', chunk => {
-      requestBody += chunk.toString();
-    });
-    
-    req.on('end', () => {
-      if (requestBody) {
-        console.log('Request body (raw):', requestBody.substring(0, 200) + (requestBody.length > 200 ? '...' : ''));
-        console.log('Request body length:', requestBody.length);
-        
-        // Try to parse and log as JSON if possible
-        try {
-          const parsed = JSON.parse(requestBody);
-          console.log('Request body (parsed):', JSON.stringify(parsed, null, 2).substring(0, 200) + '...');
-        } catch (e) {
-          console.log('Request body is not valid JSON');
-          console.log('First 50 chars hex:', Buffer.from(requestBody.substring(0, 50)).toString('hex'));
-        }
-      }
-    });
-  }
-  
-  next();
-});
-
-// ========== CUSTOM JSON PARSER WITH ERROR HANDLING ==========
-app.use((req, res, next) => {
-  // Only parse JSON if content-type is application/json
-  if (req.headers['content-type'] === 'application/json') {
-    let data = '';
-    
-    req.on('data', chunk => {
-      data += chunk.toString();
-    });
-    
-    req.on('end', () => {
-      // Handle empty body
-      if (!data.trim()) {
-        req.body = {};
-        return next();
-      }
-      
-      try {
-        req.body = JSON.parse(data);
-        next();
-      } catch (error) {
-        console.error('JSON Parse Error:', error.message);
-        console.error('Raw data received:', data);
-        console.error('Data hex dump:', Buffer.from(data).toString('hex'));
-        
-        return res.status(400).json({
-          success: false,
-          message: 'Invalid JSON format',
-          error: error.message,
-          received: data.substring(0, 100) + (data.length > 100 ? '...' : '')
-        });
-      }
-    });
-    
-    req.on('error', (err) => {
-      console.error('Request stream error:', err);
-      res.status(500).json({
-        success: false,
-        message: 'Request processing error'
-      });
-    });
-  } else {
-    // Not JSON content-type, proceed without parsing
-    req.body = {};
-    next();
-  }
-});
-
-// ========== SECURITY MIDDLEWARE ==========
-app.use(helmet());
-
 // ========== CORS CONFIGURATION ==========
 const corsOptions = {
   origin: function(origin, callback) {
     // Allow requests with no origin (like mobile apps, curl, postman)
-    if (!origin && NODE_ENV === 'development') {
+    if (!origin) {
       return callback(null, true);
     }
     
@@ -133,7 +31,12 @@ const corsOptions = {
       process.env.FRONTEND_URL      // From environment variable
     ].filter(Boolean);
     
-    if (NODE_ENV === 'development' || allowedOrigins.includes(origin) || !origin) {
+    // Allow all origins in development
+    if (NODE_ENV === 'development') {
+      return callback(null, true);
+    }
+    
+    if (allowedOrigins.indexOf(origin) !== -1 || !origin) {
       callback(null, true);
     } else {
       console.log('CORS blocked origin:', origin);
@@ -142,13 +45,53 @@ const corsOptions = {
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
+  optionsSuccessStatus: 200
 };
 
+// ========== ESSENTIAL MIDDLEWARE ==========
+app.use(helmet());
 app.use(cors(corsOptions));
+app.use(express.json()); // Built-in JSON parser
+app.use(express.urlencoded({ extended: true })); // URL-encoded data parser
 
-// Handle preflight OPTIONS requests
+// Handle preflight requests globally
 app.options('*', cors(corsOptions));
+
+// ========== DEBUG MIDDLEWARE (Log all requests) ==========
+app.use((req, res, next) => {
+  const timestamp = new Date().toISOString();
+  console.log(`\n=== ${timestamp} ${req.method} ${req.url} ===`);
+  
+  // Log headers (but hide Authorization token for security)
+  const headers = { ...req.headers };
+  if (headers.authorization) {
+    headers.authorization = headers.authorization.substring(0, 20) + '...';
+  }
+  console.log('Headers:', headers);
+  
+  // Store original send function
+  const originalSend = res.send;
+  const originalJson = res.json;
+  
+  // Capture response for logging
+  res.send = function(body) {
+    console.log('Response:', typeof body === 'string' ? body.substring(0, 200) + (body.length > 200 ? '...' : '') : JSON.stringify(body).substring(0, 200) + '...');
+    originalSend.call(this, body);
+  };
+  
+  res.json = function(body) {
+    console.log('Response:', JSON.stringify(body).substring(0, 200) + (JSON.stringify(body).length > 200 ? '...' : ''));
+    originalJson.call(this, body);
+  };
+  
+  // Log request body if present
+  if (req.body && Object.keys(req.body).length > 0) {
+    console.log('Request body:', JSON.stringify(req.body, null, 2).substring(0, 200) + '...');
+  }
+  
+  next();
+});
 
 // ========== STORAGE (in-memory for now) ==========
 let users = [];
