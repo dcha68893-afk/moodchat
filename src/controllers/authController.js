@@ -1,11 +1,32 @@
 const authService = require('../services/authService');
 const { AppError } = require('../middleware/errorHandler');
 const logger = require('../utils/logger');
+const validator = require('validator');
 
 class AuthController {
   async register(req, res, next) {
     try {
       const { username, email, password, firstName, lastName, profile } = req.body;
+
+      // Validate all required fields
+      if (!email || !password || !username) {
+        throw new AppError('Email, username, and password are required', 400);
+      }
+
+      // Validate email format
+      if (!validator.isEmail(email)) {
+        throw new AppError('Invalid email format', 400);
+      }
+
+      // Validate password strength
+      if (password.length < 8) {
+        throw new AppError('Password must be at least 8 characters long', 400);
+      }
+
+      // Validate username format (alphanumeric with underscores)
+      if (!/^[a-zA-Z0-9_]+$/.test(username)) {
+        throw new AppError('Username can only contain letters, numbers, and underscores', 400);
+      }
 
       const result = await authService.register({
         username,
@@ -15,6 +36,9 @@ class AuthController {
         lastName,
         profile,
       });
+
+      // Log successful registration for debugging
+      logger.info(`User registered successfully: ${email}`, { userId: result.user.id });
 
       res.status(201).json({
         success: true,
@@ -26,6 +50,12 @@ class AuthController {
       });
     } catch (error) {
       logger.error('Registration controller error:', error);
+      
+      // Handle duplicate email/username errors specifically
+      if (error.message.includes('duplicate') || error.code === 11000) {
+        return next(new AppError('Email or username already exists', 409));
+      }
+      
       next(error);
     }
   }
@@ -34,7 +64,15 @@ class AuthController {
     try {
       const { email, password } = req.body;
 
+      // Validate required fields
+      if (!email || !password) {
+        throw new AppError('Email and password are required', 400);
+      }
+
       const result = await authService.login(email, password);
+
+      // Log successful login for debugging
+      logger.info(`User logged in: ${email}`, { userId: result.user.id });
 
       res.json({
         success: true,
@@ -46,6 +84,12 @@ class AuthController {
       });
     } catch (error) {
       logger.error('Login controller error:', error);
+      
+      // Handle invalid credentials specifically
+      if (error.message.includes('Invalid credentials') || error.message.includes('not found')) {
+        return next(new AppError('Invalid email or password', 401));
+      }
+      
       next(error);
     }
   }
@@ -81,6 +125,9 @@ class AuthController {
 
       await authService.logout(accessToken, refreshToken);
 
+      // Log successful logout
+      logger.info('User logged out successfully', { userId: req.user?.id });
+
       res.json({
         success: true,
         message: 'Logged out successfully',
@@ -100,6 +147,9 @@ class AuthController {
       }
 
       const user = await authService.verifyEmail(token);
+
+      // Log successful verification
+      logger.info(`Email verified for user: ${user.email}`, { userId: user.id });
 
       res.json({
         success: true,
@@ -122,7 +172,15 @@ class AuthController {
         throw new AppError('Email is required', 400);
       }
 
+      // Validate email format
+      if (!validator.isEmail(email)) {
+        throw new AppError('Invalid email format', 400);
+      }
+
       await authService.requestPasswordReset(email);
+
+      // Log password reset request
+      logger.info(`Password reset requested for: ${email}`);
 
       res.json({
         success: true,
@@ -142,7 +200,15 @@ class AuthController {
         throw new AppError('Token and new password are required', 400);
       }
 
+      // Validate password strength
+      if (newPassword.length < 8) {
+        throw new AppError('Password must be at least 8 characters long', 400);
+      }
+
       await authService.resetPassword(token, newPassword);
+
+      // Log successful password reset
+      logger.info('Password reset successful');
 
       res.json({
         success: true,
@@ -185,6 +251,10 @@ class AuthController {
   async getCurrentUser(req, res, next) {
     try {
       const user = req.user;
+
+      if (!user) {
+        throw new AppError('User not found', 404);
+      }
 
       res.json({
         success: true,

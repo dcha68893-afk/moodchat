@@ -3,6 +3,85 @@ const { AppError } = require('../middleware/errorHandler');
 const logger = require('../utils/logger');
 
 class UserController {
+  async getAllUsers(req, res, next) {
+    try {
+      // Get query parameters for pagination/filtering
+      const { page = 1, limit = 50, sortBy = 'createdAt', sortOrder = 'desc' } = req.query;
+      
+      // Parse pagination parameters
+      const pageNum = parseInt(page);
+      const limitNum = parseInt(limit);
+      
+      // Validate pagination parameters
+      if (pageNum < 1 || limitNum < 1 || limitNum > 100) {
+        throw new AppError('Invalid pagination parameters. Page must be >= 1, limit between 1 and 100', 400);
+      }
+
+      // Get all users with pagination
+      const result = await userService.getAllUsers({
+        page: pageNum,
+        limit: limitNum,
+        sortBy,
+        sortOrder: sortOrder === 'asc' ? 'asc' : 'desc'
+      });
+
+      // Remove sensitive information from users
+      const safeUsers = result.users.map(user => {
+        const userObj = user.toJSON ? user.toJSON() : user;
+        
+        // Remove sensitive fields
+        delete userObj.password;
+        delete userObj.refreshToken;
+        delete userObj.emailVerificationToken;
+        delete userObj.passwordResetToken;
+        delete userObj.passwordResetExpires;
+        
+        // Keep only essential user information
+        return {
+          id: userObj.id,
+          username: userObj.username,
+          email: userObj.email,
+          firstName: userObj.firstName,
+          lastName: userObj.lastName,
+          avatar: userObj.avatar,
+          bio: userObj.bio,
+          status: userObj.status,
+          lastSeen: userObj.lastSeen,
+          isOnline: userObj.isOnline,
+          createdAt: userObj.createdAt,
+          updatedAt: userObj.updatedAt,
+          settings: userObj.settings,
+          profile: userObj.profile
+        };
+      });
+
+      // Log for debugging
+      logger.info(`Retrieved ${safeUsers.length} users`, { 
+        page: pageNum, 
+        limit: limitNum,
+        total: result.total 
+      });
+
+      res.json({
+        success: true,
+        data: {
+          users: safeUsers,
+          pagination: {
+            page: pageNum,
+            limit: limitNum,
+            total: result.total,
+            pages: Math.ceil(result.total / limitNum),
+            hasNextPage: pageNum * limitNum < result.total,
+            hasPrevPage: pageNum > 1
+          }
+        }
+      });
+    } catch (error) {
+      logger.error('Get all users controller error:', error);
+      next(error);
+    }
+  }
+
   async getProfile(req, res, next) {
     try {
       const userId = req.user.id;
@@ -25,6 +104,15 @@ class UserController {
       const userId = req.user.id;
       const updateData = req.body;
 
+      // Validate update data
+      if (updateData.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(updateData.email)) {
+        throw new AppError('Invalid email format', 400);
+      }
+
+      if (updateData.username && !/^[a-zA-Z0-9_]+$/.test(updateData.username)) {
+        throw new AppError('Username can only contain letters, numbers, and underscores', 400);
+      }
+
       const user = await userService.updateProfile(userId, updateData);
 
       res.json({
@@ -36,6 +124,12 @@ class UserController {
       });
     } catch (error) {
       logger.error('Update profile controller error:', error);
+      
+      // Handle duplicate email/username errors
+      if (error.message.includes('duplicate') || error.code === 11000) {
+        return next(new AppError('Email or username already exists', 409));
+      }
+      
       next(error);
     }
   }
@@ -46,6 +140,18 @@ class UserController {
 
       if (!req.file) {
         throw new AppError('No file uploaded', 400);
+      }
+
+      // Validate file type
+      const allowedMimeTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+      if (!allowedMimeTypes.includes(req.file.mimetype)) {
+        throw new AppError('Invalid file type. Only JPEG, PNG, GIF, and WebP are allowed', 400);
+      }
+
+      // Validate file size (max 5MB)
+      const maxSize = 5 * 1024 * 1024; // 5MB
+      if (req.file.size > maxSize) {
+        throw new AppError('File size exceeds 5MB limit', 400);
       }
 
       const user = await userService.updateAvatar(userId, req.file);
@@ -95,7 +201,25 @@ class UserController {
       const userId = req.user.id;
       const { currentPassword, newPassword } = req.body;
 
+      // Validate required fields
+      if (!currentPassword || !newPassword) {
+        throw new AppError('Current password and new password are required', 400);
+      }
+
+      // Validate new password strength
+      if (newPassword.length < 8) {
+        throw new AppError('New password must be at least 8 characters long', 400);
+      }
+
+      // Ensure new password is different from current password
+      if (currentPassword === newPassword) {
+        throw new AppError('New password must be different from current password', 400);
+      }
+
       await userService.changePassword(userId, currentPassword, newPassword);
+
+      // Log password change for security auditing
+      logger.info(`Password changed for user: ${userId}`);
 
       res.json({
         success: true,
@@ -103,6 +227,12 @@ class UserController {
       });
     } catch (error) {
       logger.error('Change password controller error:', error);
+      
+      // Handle specific error cases
+      if (error.message.includes('Current password is incorrect')) {
+        return next(new AppError('Current password is incorrect', 401));
+      }
+      
       next(error);
     }
   }
@@ -155,6 +285,15 @@ class UserController {
       const userId = req.user.id;
       const { status } = req.body;
 
+      if (!status || typeof status !== 'string') {
+        throw new AppError('Status is required and must be a string', 400);
+      }
+
+      // Validate status length
+      if (status.length > 100) {
+        throw new AppError('Status must be 100 characters or less', 400);
+      }
+
       const user = await userService.updateStatus(userId, status);
 
       res.json({
@@ -195,6 +334,10 @@ class UserController {
       const userId = req.user.id;
       const { settings } = req.body;
 
+      if (!settings || typeof settings !== 'object') {
+        throw new AppError('Settings object is required', 400);
+      }
+
       const updatedSettings = await userService.updateSettings(userId, settings);
 
       res.json({
@@ -219,7 +362,15 @@ class UserController {
         throw new AppError('Please confirm account deactivation', 400);
       }
 
+      // Additional confirmation validation
+      if (confirm !== 'DELETE' && confirm !== 'YES') {
+        throw new AppError('Please type "DELETE" or "YES" to confirm account deactivation', 400);
+      }
+
       await userService.deactivateAccount(userId);
+
+      // Log account deactivation for security auditing
+      logger.warn(`Account deactivated for user: ${userId}`);
 
       res.json({
         success: true,
@@ -236,13 +387,16 @@ class UserController {
       const userId = req.params.userId;
       const currentUserId = req.user.id;
 
+      if (!userId) {
+        throw new AppError('User ID is required', 400);
+      }
+
       // Only allow viewing public profiles or friends
       const friendService = require('../services/friendService');
       const areFriends = await friendService.areFriends(userId, currentUserId);
 
       if (userId !== currentUserId && !areFriends) {
         // Return limited public information
-        const userService = require('../services/userService');
         const user = await userService.getUserProfile(userId);
 
         const publicInfo = {
@@ -251,6 +405,9 @@ class UserController {
           avatar: user.avatar,
           bio: user.bio,
           status: user.status,
+          lastSeen: user.lastSeen,
+          isOnline: user.isOnline,
+          createdAt: user.createdAt,
         };
 
         return res.json({
@@ -274,6 +431,11 @@ class UserController {
       });
     } catch (error) {
       logger.error('Get user by ID controller error:', error);
+      
+      if (error.message.includes('not found') || error.message.includes('User not found')) {
+        return next(new AppError('User not found', 404));
+      }
+      
       next(error);
     }
   }

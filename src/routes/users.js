@@ -26,6 +26,50 @@ const User = require('../models/User');
 router.use(authMiddleware);
 
 /**
+ * GET ALL USERS
+ * Fetch all registered users (for admin purposes or user discovery)
+ * Note: Requires authentication, may need additional authorization checks
+ */
+router.get(
+  '/',
+  apiRateLimiter,
+  asyncHandler(async (req, res) => {
+    const { limit = 50, page = 1, online } = req.query;
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+
+    // Build query - exclude current user from results
+    const query = { _id: { $ne: req.user.id } };
+    
+    // Optional filter by online status
+    if (online !== undefined) {
+      query.online = online === 'true';
+    }
+
+    // Fetch users with pagination, excluding sensitive information
+    const users = await User.find(query)
+      .select('-password -resetPasswordToken -resetPasswordExpires -loginAttempts -lockedUntil -socketIds')
+      .skip(skip)
+      .limit(parseInt(limit))
+      .sort({ online: -1, username: 1 });
+
+    const total = await User.countDocuments(query);
+
+    res.status(200).json({
+      status: 'success',
+      data: {
+        users,
+        pagination: {
+          total,
+          page: parseInt(page),
+          limit: parseInt(limit),
+          pages: Math.ceil(total / parseInt(limit)),
+        },
+      },
+    });
+  })
+);
+
+/**
  * Get current user profile
  */
 router.get(
