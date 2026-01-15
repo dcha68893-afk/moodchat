@@ -1,10 +1,11 @@
-﻿﻿﻿// src/server.js - UPDATED VERSION WITH IMPROVED STABILITY
+﻿﻿// src/server.js - OPTIMIZED VERSION FOR MOODCHAT BACKEND
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const helmet = require('helmet');
+const path = require('path');
 
 const app = express();
 
@@ -12,223 +13,270 @@ const app = express();
 const PORT = process.env.PORT || 4000;
 const NODE_ENV = process.env.NODE_ENV || 'development';
 const JWT_SECRET = process.env.JWT_ACCESS_SECRET || process.env.JWT_SECRET || 'development-secret-key-change-in-production';
-
-// ========== IMPROVED CORS CONFIGURATION ==========
-const corsOptions = {
-  origin: function(origin, callback) {
-    // Allow all origins in development
-    if (NODE_ENV === 'development') {
-      return callback(null, true);
-    }
-    
-    // Allow requests with no origin (like mobile apps, curl, postman)
-    if (!origin) {
-      return callback(null, true);
-    }
-    
-    const allowedOrigins = [
-      'http://localhost:3000',      // React dev server
-      'http://localhost:5500',      // VS Code Live Server
-      'http://127.0.0.1:5500',      // VS Code Live Server alternative
-      'http://localhost:5000',      // Other local frontend
-      'http://localhost:8080',      // Another common port
-      'https://fronted-hm86.onrender.com', // Your deployed frontend
-      process.env.FRONTEND_URL      // From environment variable
-    ].filter(Boolean);
-    
-    if (allowedOrigins.indexOf(origin) !== -1) {
-      callback(null, true);
-    } else {
-      console.log('CORS blocked origin:', origin);
-      callback(new Error(`Origin ${origin} not allowed by CORS`));
-    }
-  },
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH', 'HEAD'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Origin', 'X-Requested-With'],
-  exposedHeaders: ['Authorization'],
-  optionsSuccessStatus: 200,
-  maxAge: 86400 // 24 hours
-};
+const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
 
 // ========== ESSENTIAL MIDDLEWARE ==========
+// Disable Helmet's CSP for API server
 app.use(helmet({
-  contentSecurityPolicy: false, // Disable for API server
+  contentSecurityPolicy: false,
   crossOriginEmbedderPolicy: false,
   crossOriginResourcePolicy: { policy: "cross-origin" }
 }));
-app.use(cors(corsOptions));
+
+// ========== FIXED CORS CONFIGURATION ==========
+// ALLOW ALL ORIGINS IN DEVELOPMENT - This fixes Live Server issues
+if (NODE_ENV === 'development') {
+  // Simple CORS for development - allow everything
+  app.use(cors({
+    origin: '*', // Allow ALL origins
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH', 'HEAD'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Origin', 'X-Requested-With', 'X-Device-ID', 'X-Request-ID'],
+    exposedHeaders: ['Authorization'],
+    optionsSuccessStatus: 200,
+    maxAge: 86400 // 24 hours
+  }));
+  
+  // Also add manual CORS headers as backup
+  app.use((req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, X-Device-ID, X-Request-ID');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH, HEAD');
+    res.header('Access-Control-Allow-Credentials', 'true');
+    next();
+  });
+} else {
+  // Production CORS - more restrictive
+  const corsOptions = {
+    origin: function(origin, callback) {
+      const allowedOrigins = [
+        'http://localhost:3000',
+        'http://localhost:5500',
+        'http://127.0.0.1:5500',
+        'http://localhost:5000',
+        'http://localhost:8080',
+        'https://fronted-hm86.onrender.com',
+        FRONTEND_URL
+      ].filter(Boolean);
+      
+      // Allow no origin (like mobile apps)
+      if (!origin) return callback(null, true);
+      
+      if (allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        console.log('CORS blocked origin:', origin);
+        callback(new Error(`Origin ${origin} not allowed by CORS`));
+      }
+    },
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH', 'HEAD'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Origin', 'X-Requested-With', 'X-Device-ID'],
+    exposedHeaders: ['Authorization'],
+    optionsSuccessStatus: 200,
+    maxAge: 86400
+  };
+  
+  app.use(cors(corsOptions));
+}
+
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Handle preflight requests globally
-app.options('*', cors(corsOptions));
+app.options('*', (req, res) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, X-Device-ID');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH, HEAD');
+  res.header('Access-Control-Allow-Credentials', 'true');
+  res.header('Access-Control-Max-Age', '86400');
+  res.sendStatus(200);
+});
 
-// ========== DEBUG MIDDLEWARE (Log all requests) ==========
+// ========== REQUEST LOGGING MIDDLEWARE ==========
 app.use((req, res, next) => {
   const timestamp = new Date().toISOString();
-  console.log(`\n=== ${timestamp} ${req.method} ${req.url} ===`);
+  console.log(`[${timestamp}] ${req.method} ${req.path} - Origin: ${req.headers.origin || 'no-origin'}`);
   
-  // Log headers (but hide Authorization token for security)
-  const headers = { ...req.headers };
-  if (headers.authorization) {
-    headers.authorization = headers.authorization.substring(0, 20) + '...';
+  // Log request body for POST, PUT, PATCH
+  if (['POST', 'PUT', 'PATCH'].includes(req.method) && req.body && Object.keys(req.body).length > 0) {
+    const logBody = { ...req.body };
+    if (logBody.password) logBody.password = '[REDACTED]';
+    if (logBody.token) logBody.token = '[REDACTED]';
+    console.log('Request Body:', JSON.stringify(logBody).substring(0, 500));
   }
-  console.log('Headers:', headers);
   
-  // Store original send function
-  const originalSend = res.send;
-  const originalJson = res.json;
-  
-  // Capture response for logging
-  res.send = function(body) {
-    console.log('Response:', typeof body === 'string' ? body.substring(0, 200) + (body.length > 200 ? '...' : '') : JSON.stringify(body).substring(0, 200) + '...');
-    originalSend.call(this, body);
-  };
-  
-  res.json = function(body) {
-    console.log('Response:', JSON.stringify(body).substring(0, 200) + (JSON.stringify(body).length > 200 ? '...' : ''));
-    originalJson.call(this, body);
-  };
-  
-  // Log request body if present
-  if (req.body && Object.keys(req.body).length > 0) {
-    console.log('Request body:', JSON.stringify(req.body, null, 2).substring(0, 200) + '...');
+  // Log headers for debugging
+  if (NODE_ENV === 'development') {
+    console.log('Headers:', {
+      origin: req.headers.origin,
+      authorization: req.headers.authorization ? '[PRESENT]' : '[MISSING]',
+      'x-device-id': req.headers['x-device-id'],
+      'x-requested-with': req.headers['x-requested-with']
+    });
   }
   
   next();
 });
 
-// ========== STORAGE (in-memory for now) ==========
+// ========== STATIC FILE SERVING ==========
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+app.use('/assets', express.static(path.join(__dirname, 'public/assets')));
+app.use(express.static(path.join(__dirname, 'public')));
+
+// ========== IN-MEMORY STORAGE ==========
 let users = [];
 let messages = [];
 const rooms = ['general', 'random', 'help', 'tech-support'];
 
 // Log storage state periodically
 setInterval(() => {
-  console.log(`[Storage Stats] Users: ${users.length}, Messages: ${messages.length}`);
+  console.log(`[Storage Stats] Users: ${users.length}, Messages: ${messages.length}, Rooms: ${rooms.length}`);
 }, 30000); // Every 30 seconds
 
-// ========== AUTH MIDDLEWARE ==========
+// ========== AUTHENTICATION MIDDLEWARE ==========
 function authenticateToken(req, res, next) {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
   
-  console.log('Auth check - Header:', authHeader ? authHeader.substring(0, 20) + '...' : 'None');
-  console.log('Auth check - Token present:', !!token);
-  
   if (!token) {
     return res.status(401).json({ 
       success: false, 
-      message: 'Access token required' 
+      message: 'Access token required',
+      timestamp: new Date().toISOString()
     });
   }
   
   jwt.verify(token, JWT_SECRET, (err, user) => {
     if (err) {
-      console.log('Token verification failed:', err.message);
+      console.log('JWT Verification Error:', err.message);
       return res.status(403).json({ 
         success: false, 
-        message: 'Invalid or expired token' 
+        message: 'Invalid or expired token',
+        timestamp: new Date().toISOString()
       });
     }
     req.user = user;
-    console.log('Token verified for user:', user.email);
     next();
   });
 }
 
-// ========== HEALTH & STATUS ==========
+// ========== HEALTH & STATUS ENDPOINTS ==========
 app.get('/health', (req, res) => {
-  // Minimal processing for fast response
   res.setHeader('Cache-Control', 'no-cache');
   res.json({ 
     success: true,
     status: 'OK',
     environment: NODE_ENV,
-    timestamp: Date.now(),
-    uptime: Math.floor(process.uptime())
+    timestamp: new Date().toISOString(),
+    uptime: Math.floor(process.uptime()),
+    cors: 'enabled',
+    allowedOrigins: NODE_ENV === 'development' ? 'ALL (*)' : 'restricted'
   });
 });
 
 app.get('/api/status', (req, res) => {
   res.json({
     success: true,
-    message: 'MoodChat API is running',
-    version: '1.0.0',
+    message: 'Backend API running',
+    timestamp: new Date().toISOString(),
     environment: NODE_ENV,
-    features: ['auth', 'chat', 'profiles'],
+    version: '1.0.0',
+    server: 'MoodChat Backend',
+    cors: 'enabled',
+    origin: req.headers.origin || 'not specified',
     endpoints: {
-      auth: ['/api/auth/register', '/api/auth/login', '/api/auth/profile'],
-      chat: ['/api/chat/rooms', '/api/chat/messages/:room', '/api/chat/messages']
+      health: '/health',
+      status: '/api/status',
+      auth: {
+        register: 'POST /api/auth/register',
+        login: 'POST /api/auth/login',
+        profile: 'GET /api/auth/profile'
+      },
+      chat: {
+        rooms: 'GET /api/chat/rooms',
+        messages: 'GET /api/chat/messages/:room',
+        send: 'POST /api/chat/messages'
+      }
     }
+  });
+});
+
+// Simple test endpoint for debugging
+app.get('/api/debug', (req, res) => {
+  res.json({
+    success: true,
+    timestamp: new Date().toISOString(),
+    headers: {
+      origin: req.headers.origin,
+      'user-agent': req.headers['user-agent'],
+      'x-device-id': req.headers['x-device-id']
+    },
+    cors: 'ALLOWED'
   });
 });
 
 // Test endpoint for JSON validation
 app.post('/api/test-json', (req, res) => {
-  console.log('Test JSON endpoint called');
-  console.log('Request body:', req.body);
   res.json({
     success: true,
     message: 'JSON received successfully',
     received: req.body,
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    environment: NODE_ENV
   });
 });
 
-// ========== AUTH ROUTES ==========
+// ========== AUTHENTICATION ROUTES ==========
 app.post('/api/auth/register', async (req, res) => {
   try {
-    console.log('Register request body:', req.body);
-    
     const { email, password, username } = req.body;
     
     // Validation
     if (!email || !password || !username) {
-      console.log('Missing fields:', { email: !!email, password: !!password, username: !!username });
       return res.status(400).json({
         success: false,
         message: 'Email, password, and username are required',
-        received: req.body
+        timestamp: new Date().toISOString()
       });
     }
     
     // Check if user already exists
     const existingUser = users.find(u => u.email === email);
     if (existingUser) {
-      console.log('User already exists:', email);
       return res.status(400).json({
         success: false,
-        message: 'User already exists'
+        message: 'User already exists',
+        timestamp: new Date().toISOString()
       });
     }
     
     // Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
-    console.log('Password hashed successfully');
     
     // Create user
     const user = {
-      id: users.length + 1,
+      id: Date.now().toString(),
       email,
       username,
       password: hashedPassword,
-      createdAt: new Date(),
-      avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(username)}&background=random`
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(username)}&background=random&color=fff`
     };
     
     users.push(user);
-    console.log('User created:', { id: user.id, email: user.email, username: user.username });
     
     // Generate token
     const token = jwt.sign(
-      { userId: user.id, email: user.email, username: user.username },
+      { 
+        userId: user.id, 
+        email: user.email, 
+        username: user.username 
+      },
       JWT_SECRET,
       { expiresIn: '24h' }
     );
-    
-    console.log('JWT token generated');
     
     // Respond
     res.status(201).json({
@@ -241,7 +289,8 @@ app.post('/api/auth/register', async (req, res) => {
         username: user.username,
         avatar: user.avatar,
         createdAt: user.createdAt
-      }
+      },
+      timestamp: new Date().toISOString()
     });
     
   } catch (error) {
@@ -249,56 +298,53 @@ app.post('/api/auth/register', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Registration failed',
-      error: error.message
+      error: NODE_ENV === 'development' ? error.message : undefined,
+      timestamp: new Date().toISOString()
     });
   }
 });
 
 app.post('/api/auth/login', async (req, res) => {
   try {
-    console.log('Login request body:', req.body);
-    
     const { email, password } = req.body;
     
-    // Validation
-    if (!email || !password) {
-      return res.status(400).json({
-        success: false,
-        message: 'Email and password are required'
-      });
+    // Also accept username for login
+    let user;
+    if (email.includes('@')) {
+      user = users.find(u => u.email === email);
+    } else {
+      user = users.find(u => u.username === email); // Allow username login
     }
-    
-    // Find user
-    const user = users.find(u => u.email === email);
-    console.log('User found:', user ? 'Yes' : 'No');
     
     if (!user) {
       return res.status(401).json({
         success: false,
-        message: 'Invalid credentials'
+        message: 'Invalid credentials',
+        timestamp: new Date().toISOString()
       });
     }
     
     // Check password
-    console.log('Comparing password...');
     const validPassword = await bcrypt.compare(password, user.password);
-    console.log('Password valid:', validPassword);
     
     if (!validPassword) {
       return res.status(401).json({
         success: false,
-        message: 'Invalid credentials'
+        message: 'Invalid credentials',
+        timestamp: new Date().toISOString()
       });
     }
     
     // Generate token
     const token = jwt.sign(
-      { userId: user.id, email: user.email, username: user.username },
+      { 
+        userId: user.id, 
+        email: user.email, 
+        username: user.username 
+      },
       JWT_SECRET,
       { expiresIn: '24h' }
     );
-    
-    console.log('Login successful for:', email);
     
     res.json({
       success: true,
@@ -310,7 +356,8 @@ app.post('/api/auth/login', async (req, res) => {
         username: user.username,
         avatar: user.avatar,
         createdAt: user.createdAt
-      }
+      },
+      timestamp: new Date().toISOString()
     });
     
   } catch (error) {
@@ -318,21 +365,21 @@ app.post('/api/auth/login', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Login failed',
-      error: error.message
+      error: NODE_ENV === 'development' ? error.message : undefined,
+      timestamp: new Date().toISOString()
     });
   }
 });
 
-app.get('/api/auth/profile', authenticateToken, (req, res) => {
+app.get('/api/auth/me', authenticateToken, (req, res) => {
   try {
-    console.log('Profile request for user:', req.user.userId);
-    
     const user = users.find(u => u.id === req.user.userId);
     
     if (!user) {
       return res.status(404).json({
         success: false,
-        message: 'User not found'
+        message: 'User not found',
+        timestamp: new Date().toISOString()
       });
     }
     
@@ -344,7 +391,8 @@ app.get('/api/auth/profile', authenticateToken, (req, res) => {
         username: user.username,
         avatar: user.avatar,
         createdAt: user.createdAt
-      }
+      },
+      timestamp: new Date().toISOString()
     });
     
   } catch (error) {
@@ -352,62 +400,141 @@ app.get('/api/auth/profile', authenticateToken, (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Failed to get profile',
-      error: error.message
+      error: NODE_ENV === 'development' ? error.message : undefined,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+// Alias for /api/auth/profile (for compatibility)
+app.get('/api/auth/profile', authenticateToken, (req, res) => {
+  try {
+    const user = users.find(u => u.id === req.user.userId);
+    
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found',
+        timestamp: new Date().toISOString()
+      });
+    }
+    
+    res.json({
+      success: true,
+      user: {
+        id: user.id,
+        email: user.email,
+        username: user.username,
+        avatar: user.avatar,
+        createdAt: user.createdAt
+      },
+      timestamp: new Date().toISOString()
+    });
+    
+  } catch (error) {
+    console.error('Profile error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get profile',
+      error: NODE_ENV === 'development' ? error.message : undefined,
+      timestamp: new Date().toISOString()
     });
   }
 });
 
 // ========== CHAT ROUTES ==========
 app.get('/api/chat/rooms', authenticateToken, (req, res) => {
-  console.log('Fetching rooms for user:', req.user.userId);
-  
-  res.json({
-    success: true,
-    rooms: rooms.map(room => ({
-      name: room,
-      messageCount: messages.filter(m => m.room === room).length,
-      lastMessage: messages.filter(m => m.room === room).slice(-1)[0] || null
-    }))
-  });
+  try {
+    const roomsWithStats = rooms.map(room => {
+      const roomMessages = messages.filter(m => m.room === room);
+      const lastMessage = roomMessages.slice(-1)[0];
+      
+      return {
+        name: room,
+        messageCount: roomMessages.length,
+        lastMessage: lastMessage ? {
+          content: lastMessage.content,
+          sender: lastMessage.sender.username,
+          timestamp: lastMessage.timestamp
+        } : null
+      };
+    });
+    
+    res.json({
+      success: true,
+      rooms: roomsWithStats,
+      timestamp: new Date().toISOString()
+    });
+    
+  } catch (error) {
+    console.error('Rooms error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch rooms',
+      error: NODE_ENV === 'development' ? error.message : undefined,
+      timestamp: new Date().toISOString()
+    });
+  }
 });
 
 app.get('/api/chat/messages/:room', authenticateToken, (req, res) => {
-  console.log('Fetching messages for room:', req.params.room, 'user:', req.user.userId);
-  
-  const roomMessages = messages
-    .filter(m => m.room === req.params.room)
-    .slice(-50);
-  
-  res.json({
-    success: true,
-    room: req.params.room,
-    messages: roomMessages
-  });
+  try {
+    const { room } = req.params;
+    
+    if (!rooms.includes(room)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid room',
+        timestamp: new Date().toISOString()
+      });
+    }
+    
+    const roomMessages = messages
+      .filter(m => m.room === room)
+      .slice(-100); // Last 100 messages
+    
+    res.json({
+      success: true,
+      room,
+      messages: roomMessages,
+      count: roomMessages.length,
+      timestamp: new Date().toISOString()
+    });
+    
+  } catch (error) {
+    console.error('Messages error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch messages',
+      error: NODE_ENV === 'development' ? error.message : undefined,
+      timestamp: new Date().toISOString()
+    });
+  }
 });
 
 app.post('/api/chat/messages', authenticateToken, (req, res) => {
   try {
-    console.log('Send message request:', req.body);
-    
     const { room, content } = req.body;
     const user = users.find(u => u.id === req.user.userId);
     
     if (!room || !content) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Room and message content are required' 
+      return res.status(400).json({
+        success: false,
+        message: 'Room and message content are required',
+        timestamp: new Date().toISOString()
       });
     }
     
     if (!rooms.includes(room)) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Invalid room' 
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid room',
+        timestamp: new Date().toISOString()
       });
     }
     
     const message = {
-      id: messages.length + 1,
+      id: Date.now().toString(),
       room,
       content,
       sender: {
@@ -419,12 +546,12 @@ app.post('/api/chat/messages', authenticateToken, (req, res) => {
     };
     
     messages.push(message);
-    console.log('Message sent:', message.id);
     
     res.json({
       success: true,
       message: 'Message sent successfully',
-      data: message
+      data: message,
+      timestamp: new Date().toISOString()
     });
     
   } catch (error) {
@@ -432,21 +559,141 @@ app.post('/api/chat/messages', authenticateToken, (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Failed to send message',
-      error: error.message
+      error: NODE_ENV === 'development' ? error.message : undefined,
+      timestamp: new Date().toISOString()
     });
   }
+});
+
+// ========== ADDITIONAL UTILITY ENDPOINTS ==========
+app.get('/api/stats', authenticateToken, (req, res) => {
+  res.json({
+    success: true,
+    stats: {
+      totalUsers: users.length,
+      totalMessages: messages.length,
+      totalRooms: rooms.length,
+      activeUsers: users.length,
+      messagesPerRoom: rooms.reduce((acc, room) => {
+        acc[room] = messages.filter(m => m.room === room).length;
+        return acc;
+      }, {})
+    },
+    timestamp: new Date().toISOString()
+  });
+});
+
+app.get('/api/user/search', authenticateToken, (req, res) => {
+  try {
+    const { query } = req.query;
+    
+    if (!query) {
+      return res.status(400).json({
+        success: false,
+        message: 'Search query is required',
+        timestamp: new Date().toISOString()
+      });
+    }
+    
+    const searchResults = users
+      .filter(user => 
+        user.username.toLowerCase().includes(query.toLowerCase()) ||
+        user.email.toLowerCase().includes(query.toLowerCase())
+      )
+      .map(user => ({
+        id: user.id,
+        username: user.username,
+        avatar: user.avatar,
+        createdAt: user.createdAt
+      }));
+    
+    res.json({
+      success: true,
+      results: searchResults,
+      count: searchResults.length,
+      timestamp: new Date().toISOString()
+    });
+    
+  } catch (error) {
+    console.error('Search error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Search failed',
+      error: NODE_ENV === 'development' ? error.message : undefined,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+// ========== ADD MORE ENDPOINTS FOR YOUR API.JS ==========
+// Add endpoints that your api.js expects
+
+// Friends endpoints (mock for now)
+app.get('/api/friends/list', authenticateToken, (req, res) => {
+  res.json({
+    success: true,
+    friends: [],
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Statuses endpoints (mock for now)
+app.get('/api/statuses/all', authenticateToken, (req, res) => {
+  res.json({
+    success: true,
+    statuses: [],
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Groups endpoints (mock for now)
+app.get('/api/groups/list', authenticateToken, (req, res) => {
+  res.json({
+    success: true,
+    groups: [],
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Chats endpoints (mock for now)
+app.get('/api/chats/list', authenticateToken, (req, res) => {
+  res.json({
+    success: true,
+    chats: [],
+    timestamp: new Date().toISOString()
+  });
 });
 
 // ========== ERROR HANDLING ==========
 // 404 handler
 app.use((req, res) => {
-  console.log('404 Not Found:', req.method, req.url);
   res.status(404).json({
     success: false,
     message: `Cannot ${req.method} ${req.url}`,
+    timestamp: new Date().toISOString(),
     availableEndpoints: {
-      GET: ['/health', '/api/status', '/api/auth/profile', '/api/chat/rooms', '/api/chat/messages/:room'],
-      POST: ['/api/auth/register', '/api/auth/login', '/api/chat/messages', '/api/test-json']
+      GET: [
+        '/health',
+        '/api/status',
+        '/api/debug',
+        '/api/auth/me',
+        '/api/auth/profile',
+        '/api/chat/rooms',
+        '/api/chat/messages/:room',
+        '/api/stats',
+        '/api/user/search',
+        '/api/friends/list',
+        '/api/statuses/all',
+        '/api/groups/list',
+        '/api/chats/list'
+      ],
+      POST: [
+        '/api/auth/register',
+        '/api/auth/login',
+        '/api/chat/messages',
+        '/api/test-json'
+      ],
+      OPTIONS: ['*'] // All endpoints support OPTIONS for CORS
     }
   });
 });
@@ -454,10 +701,22 @@ app.use((req, res) => {
 // Global error handler
 app.use((err, req, res, next) => {
   console.error('Global error handler:', err);
-  res.status(500).json({
+  
+  // Handle CORS errors
+  if (err.message.includes('CORS')) {
+    return res.status(403).json({
+      success: false,
+      message: 'CORS error: ' + err.message,
+      timestamp: new Date().toISOString(),
+      allowedOrigins: NODE_ENV === 'development' ? 'ALL (*)' : 'restricted'
+    });
+  }
+  
+  res.status(err.status || 500).json({
     success: false,
     message: 'Internal server error',
-    error: NODE_ENV === 'development' ? err.message : undefined
+    error: NODE_ENV === 'development' ? err.message : undefined,
+    timestamp: new Date().toISOString()
   });
 });
 
@@ -466,23 +725,24 @@ const startServer = () => {
   const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`┌──────────────────────────────────────────────────────────┐`);
     console.log(`│                                                          │`);
-    console.log(`│   🚀 MoodChat Server started successfully!               │`);
+    console.log(`│   🚀 MoodChat Backend Server Started                     │`);
     console.log(`│                                                          │`);
-    console.log(`│   📍 HTTP Server:    http://localhost:${PORT}            ${PORT < 1000 ? ' ' : ''}`);
-    console.log(`│   🌐 Environment:    ${NODE_ENV}                         `);
-    console.log(`│   📊 JWT Secret:     ${JWT_SECRET.substring(0, 10)}...   `);
+    console.log(`│   📍 Local:    http://localhost:${PORT}                  ${PORT < 1000 ? ' ' : ''}`);
+    console.log(`│   🌐 Env:      ${NODE_ENV}                               `);
+    console.log(`│   ⏱️  Time:     ${new Date().toLocaleString()}           `);
+    console.log(`│   🔓 CORS:     ${NODE_ENV === 'development' ? 'ALLOW ALL ORIGINS' : 'RESTRICTED'}    `);
     console.log(`│                                                          │`);
-    console.log(`│   📊 Health Check:   http://localhost:${PORT}/health     ${PORT < 1000 ? ' ' : ''}`);
-    console.log(`│   🔐 Auth Routes:    http://localhost:${PORT}/api/auth/* ${PORT < 1000 ? ' ' : ''}`);
-    console.log(`│   💬 Chat Routes:    http://localhost:${PORT}/api/chat/* ${PORT < 1000 ? ' ' : ''}`);
-    console.log(`│   🐞 Debug Endpoint: http://localhost:${PORT}/api/test-json`);
+    console.log(`│   📊 Health:   http://localhost:${PORT}/health           ${PORT < 1000 ? ' ' : ''}`);
+    console.log(`│   🔐 Status:   http://localhost:${PORT}/api/status       ${PORT < 1000 ? ' ' : ''}`);
+    console.log(`│   🐛 Debug:    http://localhost:${PORT}/api/debug        ${PORT < 1000 ? ' ' : ''}`);
+    console.log(`│   💬 API Base: http://localhost:${PORT}/api              ${PORT < 1000 ? ' ' : ''}`);
     console.log(`│                                                          │`);
-    console.log(`│   Press Ctrl+C to stop the server                        │`);
+    console.log(`│   Press Ctrl+C to stop                                   │`);
     console.log(`│                                                          │`);
     console.log(`└──────────────────────────────────────────────────────────┘`);
   });
 
-  // ========== GRACEFUL SHUTDOWN HANDLERS ==========
+  // Graceful shutdown handlers
   const shutdown = (signal) => {
     console.log(`\n${signal} received. Starting graceful shutdown...`);
     
@@ -492,29 +752,23 @@ const startServer = () => {
       process.exit(0);
     });
 
-    // Force shutdown after 10 seconds
     setTimeout(() => {
       console.error('Could not close connections in time, forcefully shutting down');
       process.exit(1);
     }, 10000);
   };
 
-  // Handle termination signals
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
 
-  // Handle uncaught errors and rejections
   process.on('uncaughtException', (error) => {
     console.error('Uncaught Exception:', error);
-    // Don't exit, keep server running
   });
 
   process.on('unhandledRejection', (reason, promise) => {
     console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-    // Don't exit, keep server running
   });
 
-  // Handle server-specific errors
   server.on('error', (error) => {
     if (error.code === 'EADDRINUSE') {
       console.error(`Port ${PORT} is already in use.`);
@@ -528,9 +782,8 @@ const startServer = () => {
 };
 
 // Start the server
-const server = startServer();
+if (require.main === module) {
+  startServer();
+}
 
-// Keep process alive
-setInterval(() => {
-  // Keep the event loop alive
-}, 1000 * 60 * 60); // Run every hour
+module.exports = app;
