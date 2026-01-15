@@ -189,8 +189,8 @@ app.get('/api/status', (req, res) => {
       health: '/health',
       status: '/api/status',
       auth: {
-        register: 'POST /api/auth/register',
-        login: 'POST /api/auth/login',
+        register: 'POST /api/register',
+        login: 'POST /api/login',
         profile: 'GET /api/auth/profile'
       },
       chat: {
@@ -227,7 +227,183 @@ app.post('/api/test-json', (req, res) => {
   });
 });
 
-// ========== AUTHENTICATION ROUTES ==========
+// ========== CLOUDINARY ROUTES (if they exist) ==========
+// Add Cloudinary upload/sign routes here if they exist in your application
+app.post('/api/cloudinary/upload', (req, res) => {
+  // Mock Cloudinary upload endpoint - you should replace this with your actual implementation
+  res.json({
+    success: true,
+    message: 'Cloudinary upload endpoint',
+    timestamp: new Date().toISOString()
+  });
+});
+
+app.post('/api/cloudinary/sign', (req, res) => {
+  // Mock Cloudinary sign endpoint - you should replace this with your actual implementation
+  res.json({
+    success: true,
+    signature: 'mock-signature',
+    timestamp: new Date().toISOString()
+  });
+});
+
+// ========== AUTHENTICATION ROUTES (mounted under /api) ==========
+// POST /api/register - Register a new user
+app.post('/api/register', async (req, res) => {
+  try {
+    const { email, password, username } = req.body;
+    
+    // Validation
+    if (!email || !password || !username) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email, password, and username are required',
+        timestamp: new Date().toISOString()
+      });
+    }
+    
+    // Check if user already exists
+    const existingUser = users.find(u => u.email === email);
+    if (existingUser) {
+      return res.status(400).json({
+        success: false,
+        message: 'User already exists',
+        timestamp: new Date().toISOString()
+      });
+    }
+    
+    // Hash password
+    const hashedPassword = await bcrypt.hash(password, 10);
+    
+    // Create user
+    const user = {
+      id: Date.now().toString(),
+      email,
+      username,
+      password: hashedPassword,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(username)}&background=random&color=fff`
+    };
+    
+    users.push(user);
+    
+    // Generate token
+    const token = jwt.sign(
+      { 
+        userId: user.id, 
+        email: user.email, 
+        username: user.username 
+      },
+      JWT_SECRET,
+      { expiresIn: '24h' }
+    );
+    
+    // Respond
+    res.status(201).json({
+      success: true,
+      message: 'User registered successfully',
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        username: user.username,
+        avatar: user.avatar,
+        createdAt: user.createdAt
+      },
+      timestamp: new Date().toISOString()
+    });
+    
+  } catch (error) {
+    console.error('Register error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Registration failed',
+      error: NODE_ENV === 'development' ? error.message : undefined,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+// POST /api/login - Login existing user
+app.post('/api/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    
+    // Also accept username for login
+    let user;
+    if (email.includes('@')) {
+      user = users.find(u => u.email === email);
+    } else {
+      user = users.find(u => u.username === email); // Allow username login
+    }
+    
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid credentials',
+        timestamp: new Date().toISOString()
+      });
+    }
+    
+    // Check password
+    const validPassword = await bcrypt.compare(password, user.password);
+    
+    if (!validPassword) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid credentials',
+        timestamp: new Date().toISOString()
+      });
+    }
+    
+    // Generate token
+    const token = jwt.sign(
+      { 
+        userId: user.id, 
+        email: user.email, 
+        username: user.username 
+      },
+      JWT_SECRET,
+      { expiresIn: '24h' }
+    );
+    
+    res.json({
+      success: true,
+      message: 'Login successful',
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        username: user.username,
+        avatar: user.avatar,
+        createdAt: user.createdAt
+      },
+      timestamp: new Date().toISOString()
+    });
+    
+  } catch (error) {
+    console.error('Login error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Login failed',
+      error: NODE_ENV === 'development' ? error.message : undefined,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+// POST /api/logout - Logout user (invalidate token on client side)
+app.post('/api/logout', (req, res) => {
+  res.json({
+    success: true,
+    message: 'Logged out successfully (client should discard token)',
+    timestamp: new Date().toISOString()
+  });
+});
+
+// ========== COMPATIBILITY AUTH ROUTES (keep existing) ==========
+// These are kept for compatibility with existing code
 app.post('/api/auth/register', async (req, res) => {
   try {
     const { email, password, username } = req.body;
@@ -664,6 +840,29 @@ app.get('/api/chats/list', authenticateToken, (req, res) => {
   });
 });
 
+// ========== STATIC HTML PAGE ROUTES ==========
+// These routes serve your HTML pages from the public directory
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+app.get('/login', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'login.html'));
+});
+
+app.get('/register', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'register.html'));
+});
+
+app.get('/chat', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'chat.html'));
+});
+
+// Add any other static page routes your app needs
+app.get('/dashboard', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'dashboard.html'));
+});
+
 // ========== ERROR HANDLING ==========
 // 404 handler
 app.use((req, res) => {
@@ -673,6 +872,11 @@ app.use((req, res) => {
     timestamp: new Date().toISOString(),
     availableEndpoints: {
       GET: [
+        '/',
+        '/login',
+        '/register',
+        '/chat',
+        '/dashboard',
         '/health',
         '/api/status',
         '/api/debug',
@@ -688,10 +892,15 @@ app.use((req, res) => {
         '/api/chats/list'
       ],
       POST: [
+        '/api/register',
+        '/api/login',
+        '/api/logout',
         '/api/auth/register',
         '/api/auth/login',
         '/api/chat/messages',
-        '/api/test-json'
+        '/api/test-json',
+        '/api/cloudinary/upload',
+        '/api/cloudinary/sign'
       ],
       OPTIONS: ['*'] // All endpoints support OPTIONS for CORS
     }
@@ -736,6 +945,12 @@ const startServer = () => {
     console.log(`│   🔐 Status:   http://localhost:${PORT}/api/status       ${PORT < 1000 ? ' ' : ''}`);
     console.log(`│   🐛 Debug:    http://localhost:${PORT}/api/debug        ${PORT < 1000 ? ' ' : ''}`);
     console.log(`│   💬 API Base: http://localhost:${PORT}/api              ${PORT < 1000 ? ' ' : ''}`);
+    console.log(`│                                                          │`);
+    console.log(`│   📄 Pages:                                               │`);
+    console.log(`│   • Home:      http://localhost:${PORT}/                 ${PORT < 1000 ? ' ' : ''}`);
+    console.log(`│   • Login:     http://localhost:${PORT}/login            ${PORT < 1000 ? ' ' : ''}`);
+    console.log(`│   • Register:  http://localhost:${PORT}/register         ${PORT < 1000 ? ' ' : ''}`);
+    console.log(`│   • Chat:      http://localhost:${PORT}/chat             ${PORT < 1000 ? ' ' : ''}`);
     console.log(`│                                                          │`);
     console.log(`│   Press Ctrl+C to stop                                   │`);
     console.log(`│                                                          │`);
