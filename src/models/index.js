@@ -1,11 +1,12 @@
-const { Op } = require('sequelize');
 const { Sequelize } = require('sequelize');
 const config = require('../config');
 const databaseConfig = require('../config/database');
 
+// Database configuration
 const env = config.nodeEnv || 'development';
 const dbConfig = databaseConfig[env];
 
+// Initialize Sequelize instance
 const sequelize = new Sequelize(dbConfig.name, dbConfig.user, dbConfig.password, {
   host: dbConfig.host,
   port: dbConfig.port,
@@ -19,9 +20,9 @@ const sequelize = new Sequelize(dbConfig.name, dbConfig.user, dbConfig.password,
   },
 });
 
-// Import models
+// Import models using factory pattern
 const User = require('./User')(sequelize, Sequelize.DataTypes);
-const Token = require('./Token')(sequelize, Sequelize.DataTypes); // Added Token import
+const Token = require('./Token')(sequelize, Sequelize.DataTypes);
 const Profile = require('./Profile')(sequelize, Sequelize.DataTypes);
 const Friend = require('./Friend')(sequelize, Sequelize.DataTypes);
 const Chat = require('./Chat')(sequelize, Sequelize.DataTypes);
@@ -34,34 +35,7 @@ const Mood = require('./Mood')(sequelize, Sequelize.DataTypes);
 const Media = require('./Media')(sequelize, Sequelize.DataTypes);
 const Notification = require('./Notification')(sequelize, Sequelize.DataTypes);
 
-// Define associations
-
-// User - Token (One-to-Many)
-Token.belongsTo(User, { foreignKey: 'userId', as: 'user' });
-User.hasMany(Token, { foreignKey: 'userId', as: 'tokens' });
-
-// User - Profile (One-to-One)
-User.hasOne(Profile, { foreignKey: 'userId', as: 'profile' });
-Profile.belongsTo(User, { foreignKey: 'userId', as: 'user' });
-
-// User - Friend (Many-to-Many through Friend table)
-User.belongsToMany(User, {
-  through: Friend,
-  as: 'friends',
-  foreignKey: 'requesterId',
-  otherKey: 'receiverId',
-});
-User.belongsToMany(User, {
-  through: Friend,
-  as: 'friendOf',
-  foreignKey: 'receiverId',
-  otherKey: 'requesterId',
-});
-
-Friend.belongsTo(User, { foreignKey: 'requesterId', as: 'requester' });
-Friend.belongsTo(User, { foreignKey: 'receiverId', as: 'receiver' });
-
-// User - Chat (Many-to-Many through ChatParticipant)
+// Define ChatParticipant junction table (Many-to-Many between User and Chat)
 const ChatParticipant = sequelize.define(
   'ChatParticipant',
   {
@@ -122,65 +96,7 @@ const ChatParticipant = sequelize.define(
   }
 );
 
-User.belongsToMany(Chat, {
-  through: ChatParticipant,
-  as: 'chats',
-  foreignKey: 'userId',
-});
-Chat.belongsToMany(User, {
-  through: ChatParticipant,
-  as: 'participants',
-  foreignKey: 'chatId',
-});
-
-ChatParticipant.belongsTo(User, { foreignKey: 'userId' });
-ChatParticipant.belongsTo(Chat, { foreignKey: 'chatId' });
-
-// Chat - Group (One-to-One)
-Chat.hasOne(Group, { foreignKey: 'chatId', as: 'group' });
-Group.belongsTo(Chat, { foreignKey: 'chatId', as: 'chat' });
-
-// Chat - Message (One-to-Many)
-Chat.hasMany(Message, { foreignKey: 'chatId', as: 'messages' });
-Message.belongsTo(Chat, { foreignKey: 'chatId', as: 'chat' });
-
-// User - Message (One-to-Many)
-User.hasMany(Message, { foreignKey: 'senderId', as: 'sentMessages' });
-Message.belongsTo(User, { foreignKey: 'senderId', as: 'sender' });
-
-// Message - Message (Self-referential for replies)
-Message.belongsTo(Message, { foreignKey: 'replyToId', as: 'replyTo' });
-Message.hasMany(Message, { foreignKey: 'replyToId', as: 'replies' });
-
-// Message - ReadReceipt (One-to-Many)
-Message.hasMany(ReadReceipt, { foreignKey: 'messageId', as: 'readReceipts' });
-ReadReceipt.belongsTo(Message, { foreignKey: 'messageId', as: 'message' });
-
-// User - ReadReceipt (One-to-Many)
-User.hasMany(ReadReceipt, { foreignKey: 'userId', as: 'readReceipts' });
-ReadReceipt.belongsTo(User, { foreignKey: 'userId', as: 'user' });
-
-// Chat - TypingIndicator (One-to-Many)
-Chat.hasMany(TypingIndicator, { foreignKey: 'chatId', as: 'typingIndicators' });
-TypingIndicator.belongsTo(Chat, { foreignKey: 'chatId', as: 'chat' });
-
-// User - TypingIndicator (One-to-Many)
-User.hasMany(TypingIndicator, { foreignKey: 'userId', as: 'typingIndicators' });
-TypingIndicator.belongsTo(User, { foreignKey: 'userId', as: 'user' });
-
-// Chat - Call (One-to-Many)
-Chat.hasMany(Call, { foreignKey: 'chatId', as: 'calls' });
-Call.belongsTo(Chat, { foreignKey: 'chatId', as: 'chat' });
-
-// User - Call (One-to-Many as initiator)
-User.hasMany(Call, { foreignKey: 'initiatorId', as: 'initiatedCalls' });
-Call.belongsTo(User, { foreignKey: 'initiatorId', as: 'initiator' });
-
-// User - Mood (One-to-Many)
-User.hasMany(Mood, { foreignKey: 'userId', as: 'moods' });
-Mood.belongsTo(User, { foreignKey: 'userId', as: 'user' });
-
-// SharedMood model for sharing moods with friends
+// Define SharedMood junction table
 const SharedMood = sequelize.define(
   'SharedMood',
   {
@@ -235,31 +151,120 @@ const SharedMood = sequelize.define(
   }
 );
 
-// Mood - SharedMood (One-to-Many)
+// ===== DEFINE ASSOCIATIONS =====
+
+// User ↔ Token: One-to-Many (A user can have multiple tokens)
+Token.belongsTo(User, { foreignKey: 'userId', as: 'user' });
+User.hasMany(Token, { foreignKey: 'userId', as: 'tokens' });
+
+// User ↔ Profile: One-to-One (A user has one profile)
+User.hasOne(Profile, { foreignKey: 'userId', as: 'profile' });
+Profile.belongsTo(User, { foreignKey: 'userId', as: 'user' });
+
+// User ↔ Friend: Many-to-Many through Friend table (Friendship relationships)
+User.belongsToMany(User, {
+  through: Friend,
+  as: 'friends',
+  foreignKey: 'requesterId',
+  otherKey: 'receiverId',
+});
+User.belongsToMany(User, {
+  through: Friend,
+  as: 'friendOf',
+  foreignKey: 'receiverId',
+  otherKey: 'requesterId',
+});
+Friend.belongsTo(User, { foreignKey: 'requesterId', as: 'requester' });
+Friend.belongsTo(User, { foreignKey: 'receiverId', as: 'receiver' });
+
+// User ↔ Chat: Many-to-Many through ChatParticipant (Chat membership)
+User.belongsToMany(Chat, {
+  through: ChatParticipant,
+  as: 'chats',
+  foreignKey: 'userId',
+});
+Chat.belongsToMany(User, {
+  through: ChatParticipant,
+  as: 'participants',
+  foreignKey: 'chatId',
+});
+ChatParticipant.belongsTo(User, { foreignKey: 'userId' });
+ChatParticipant.belongsTo(Chat, { foreignKey: 'chatId' });
+
+// Chat ↔ Group: One-to-One (A chat can have group info)
+Chat.hasOne(Group, { foreignKey: 'chatId', as: 'group' });
+Group.belongsTo(Chat, { foreignKey: 'chatId', as: 'chat' });
+
+// Chat ↔ Message: One-to-Many (A chat can have many messages)
+Chat.hasMany(Message, { foreignKey: 'chatId', as: 'messages' });
+Message.belongsTo(Chat, { foreignKey: 'chatId', as: 'chat' });
+
+// User ↔ Message: One-to-Many (A user can send many messages)
+User.hasMany(Message, { foreignKey: 'senderId', as: 'sentMessages' });
+Message.belongsTo(User, { foreignKey: 'senderId', as: 'sender' });
+
+// Message ↔ Message: Self-referential for replies (A message can reply to another)
+Message.belongsTo(Message, { foreignKey: 'replyToId', as: 'replyTo' });
+Message.hasMany(Message, { foreignKey: 'replyToId', as: 'replies' });
+
+// Message ↔ ReadReceipt: One-to-Many (A message can have many read receipts)
+Message.hasMany(ReadReceipt, { foreignKey: 'messageId', as: 'readReceipts' });
+ReadReceipt.belongsTo(Message, { foreignKey: 'messageId', as: 'message' });
+
+// User ↔ ReadReceipt: One-to-Many (A user can have many read receipts)
+User.hasMany(ReadReceipt, { foreignKey: 'userId', as: 'readReceipts' });
+ReadReceipt.belongsTo(User, { foreignKey: 'userId', as: 'user' });
+
+// Chat ↔ TypingIndicator: One-to-Many (A chat can have many typing indicators)
+Chat.hasMany(TypingIndicator, { foreignKey: 'chatId', as: 'typingIndicators' });
+TypingIndicator.belongsTo(Chat, { foreignKey: 'chatId', as: 'chat' });
+
+// User ↔ TypingIndicator: One-to-Many (A user can have many typing indicators)
+User.hasMany(TypingIndicator, { foreignKey: 'userId', as: 'typingIndicators' });
+TypingIndicator.belongsTo(User, { foreignKey: 'userId', as: 'user' });
+
+// Chat ↔ Call: One-to-Many (A chat can have many calls)
+Chat.hasMany(Call, { foreignKey: 'chatId', as: 'calls' });
+Call.belongsTo(Chat, { foreignKey: 'chatId', as: 'chat' });
+
+// User ↔ Call: One-to-Many (A user can initiate many calls)
+User.hasMany(Call, { foreignKey: 'initiatorId', as: 'initiatedCalls' });
+Call.belongsTo(User, { foreignKey: 'initiatorId', as: 'initiator' });
+
+// User ↔ Mood: One-to-Many (A user can have many moods)
+User.hasMany(Mood, { foreignKey: 'userId', as: 'moods' });
+Mood.belongsTo(User, { foreignKey: 'userId', as: 'user' });
+
+// Mood ↔ SharedMood: One-to-Many (A mood can be shared with many users)
 Mood.hasMany(SharedMood, { foreignKey: 'moodId', as: 'sharedMoods' });
 SharedMood.belongsTo(Mood, { foreignKey: 'moodId', as: 'mood' });
+
+// User ↔ SharedMood: One-to-Many (A user can share many moods)
 User.hasMany(SharedMood, { foreignKey: 'userId', as: 'sharedMoods' });
 SharedMood.belongsTo(User, { foreignKey: 'userId', as: 'user' });
+
+// User ↔ SharedMood: One-to-Many (A user can receive many shared moods)
 User.hasMany(SharedMood, { foreignKey: 'sharedWithId', as: 'receivedMoods' });
 SharedMood.belongsTo(User, { foreignKey: 'sharedWithId', as: 'sharedWithUser' });
 
-// User - Media (One-to-Many)
+// User ↔ Media: One-to-Many (A user can upload many media files)
 User.hasMany(Media, { foreignKey: 'userId', as: 'media' });
 Media.belongsTo(User, { foreignKey: 'userId', as: 'user' });
 
-// Message - Media (One-to-One)
+// Message ↔ Media: One-to-One (A message can have one media attachment)
 Message.hasOne(Media, { foreignKey: 'messageId', as: 'media' });
 Media.belongsTo(Message, { foreignKey: 'messageId', as: 'message' });
 
-// User - Notification (One-to-Many)
+// User ↔ Notification: One-to-Many (A user can have many notifications)
 User.hasMany(Notification, { foreignKey: 'userId', as: 'notifications' });
 Notification.belongsTo(User, { foreignKey: 'userId', as: 'user' });
 
+// ===== EXPORT ALL MODELS AND SEQUELIZE INSTANCE =====
 module.exports = {
   sequelize,
   Sequelize,
   User,
-  Token, // Added Token to exports
+  Token,
   Profile,
   Friend,
   Chat,

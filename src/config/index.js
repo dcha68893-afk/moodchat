@@ -7,12 +7,12 @@ module.exports = {
 
   // Database
   database: {
-    host: process.env.DB_HOST || 'localhost',
+    host: process.env.DB_HOST || '127.0.0.1',
     port: process.env.DB_PORT || 5432,
     name: process.env.DB_NAME || 'moodchat',
     user: process.env.DB_USER || 'postgres',
-    password: process.env.DB_PASSWORD || 'postgres',
-    dialect: 'postgres',
+    password: process.env.DB_PASSWORD || '24845c1b4df84c17a0526806f7aa0482',
+    dialect: process.env.DB_DIALECT || 'postgres',
     logging: process.env.NODE_ENV === 'development' ? console.log : false,
     pool: {
       max: 10,

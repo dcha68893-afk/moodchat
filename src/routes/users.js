@@ -1,4 +1,3 @@
-
 const ConflictError = class ConflictError extends Error {
   constructor(message) {
     super(message);
@@ -7,11 +6,8 @@ const ConflictError = class ConflictError extends Error {
   }
 };
 
-const express = require('express');
-const router = express.Router();
-const mongoose = require('mongoose');
-
-// Import middleware, controllers and utilities
+const router = require('express').Router();
+const sequelize = require('sequelize');
 const {
   asyncHandler,
   AuthenticationError,
@@ -21,716 +17,252 @@ const {
 } = require('../middleware/errorHandler');
 const { authMiddleware } = require('../middleware/auth');
 const { apiRateLimiter } = require('../middleware/rateLimiter');
-const User = require('../models/User');
-const userController = require('../controllers/userController'); // Import user controller
+const { User, Friend } = require('../models');
+const userController = require('../controllers/userController');
 
-// Apply authentication middleware to all routes
 router.use(authMiddleware);
 
-/**
- * GET ALL USERS
- * Fetch all registered users (for admin purposes or user discovery)
- * Note: Requires authentication, may need additional authorization checks
- */
+console.log('✅ Users routes initialized');
+
 router.get(
   '/',
   apiRateLimiter,
   asyncHandler(async (req, res) => {
-    const { limit = 50, page = 1, online } = req.query;
-    const skip = (parseInt(page) - 1) * parseInt(limit);
+    try {
+      const { limit = 50, page = 1, online } = req.query;
+      const offset = (parseInt(page) - 1) * parseInt(limit);
 
-    // Build query - exclude current user from results
-    const query = { _id: { $ne: req.user.id } };
-    
-    // Optional filter by online status
-    if (online !== undefined) {
-      query.online = online === 'true';
+      const where = { id: { [sequelize.Op.ne]: req.user.id } };
+      
+      if (online !== undefined) {
+        where.online = online === 'true';
+      }
+
+      const { count, rows: users } = await User.findAndCountAll({
+        where,
+        attributes: { 
+          exclude: ['password', 'resetPasswordToken', 'resetPasswordExpires', 'loginAttempts', 'lockedUntil', 'socketIds']
+        },
+        offset,
+        limit: parseInt(limit),
+        order: [['online', 'DESC'], ['username', 'ASC']]
+      });
+
+      const response = userController.getAllUsers(users, count, parseInt(page), parseInt(limit));
+      
+      res.status(200).json(response);
+    } catch (error) {
+      console.error('Error fetching users:', error);
+      res.status(500).json({
+        status: 'error',
+        message: 'Failed to fetch users'
+      });
     }
-
-    // Fetch users with pagination, excluding sensitive information
-    const users = await User.find(query)
-      .select('-password -resetPasswordToken -resetPasswordExpires -loginAttempts -lockedUntil -socketIds')
-      .skip(skip)
-      .limit(parseInt(limit))
-      .sort({ online: -1, username: 1 });
-
-    const total = await User.countDocuments(query);
-
-    // Call controller method for consistency
-    const response = userController.getAllUsers(users, total, parseInt(page), parseInt(limit));
-    
-    res.status(200).json(response);
   })
 );
 
-/**
- * Get current user profile
- */
 router.get(
   '/me',
   apiRateLimiter,
   asyncHandler(async (req, res) => {
-    const user = await User.findById(req.user.id)
-      .select('-password -resetPasswordToken -resetPasswordExpires -loginAttempts -lockedUntil')
-      .populate('friends', 'username avatar online lastActive status')
-      .populate('friendRequests', 'username avatar');
+    try {
+      const user = await User.findByPk(req.user.id, {
+        attributes: { 
+          exclude: ['password', 'resetPasswordToken', 'resetPasswordExpires', 'loginAttempts', 'lockedUntil']
+        },
+        include: [
+          {
+            model: User,
+            as: 'friends',
+            attributes: ['id', 'username', 'avatar', 'online', 'lastActive', 'status'],
+            through: { attributes: [] }
+          },
+          {
+            model: User,
+            as: 'friendRequests',
+            attributes: ['id', 'username', 'avatar'],
+            through: { 
+              as: 'friendRequestData',
+              attributes: ['status', 'createdAt']
+            },
+            where: { '$friendRequestData.status$': 'pending' }
+          }
+        ]
+      });
 
-    if (!user) {
-      throw new NotFoundError('User not found');
+      if (!user) {
+        throw new NotFoundError('User not found');
+      }
+
+      res.status(200).json({
+        status: 'success',
+        data: { user },
+      });
+    } catch (error) {
+      console.error('Error fetching user profile:', error);
+      res.status(500).json({
+        status: 'error',
+        message: 'Failed to fetch user profile'
+      });
     }
-
-    res.status(200).json({
-      status: 'success',
-      data: { user },
-    });
   })
 );
 
-/**
- * Update current user profile
- */
 router.patch(
   '/me',
   apiRateLimiter,
   asyncHandler(async (req, res) => {
-    const allowedUpdates = [
-      'username',
-      'avatar',
-      'bio',
-      'status',
-      'displayName',
-      'emailNotifications',
-      'pushNotifications',
-    ];
-    const updates = {};
+    try {
+      const allowedUpdates = [
+        'username',
+        'avatar',
+        'bio',
+        'status',
+        'displayName',
+        'emailNotifications',
+        'pushNotifications',
+      ];
+      const updates = {};
 
-    // Filter only allowed fields
-    Object.keys(req.body).forEach(key => {
-      if (allowedUpdates.includes(key)) {
-        updates[key] = req.body[key];
-      }
-    });
-
-    // Handle username uniqueness if being updated
-    if (updates.username) {
-      updates.username = updates.username.toLowerCase();
-      const existingUser = await User.findOne({
-        username: updates.username,
-        _id: { $ne: req.user.id },
+      Object.keys(req.body).forEach(key => {
+        if (allowedUpdates.includes(key)) {
+          updates[key] = req.body[key];
+        }
       });
-      if (existingUser) {
-        throw new ConflictError('Username already taken');
-      }
-    }
 
-    // Handle email uniqueness if being updated
-    if (updates.email) {
-      updates.email = updates.email.toLowerCase();
-      const existingUser = await User.findOne({
-        email: updates.email,
-        _id: { $ne: req.user.id },
-      });
-      if (existingUser) {
-        throw new ConflictError('Email already taken');
-      }
-    }
-
-    // Update status timestamp if status is being updated
-    if (updates.status) {
-      updates.statusLastChanged = new Date();
-    }
-
-    const user = await User.findByIdAndUpdate(req.user.id, updates, {
-      new: true,
-      runValidators: true,
-    }).select('-password -resetPasswordToken -resetPasswordExpires -loginAttempts -lockedUntil');
-
-    if (!user) {
-      throw new NotFoundError('User not found');
-    }
-
-    // Emit profile update event to connected sockets
-    if (req.io && req.userSocketIds && req.userSocketIds.length > 0) {
-      req.userSocketIds.forEach(socketId => {
-        req.io.to(socketId).emit('profile:updated', {
-          user: {
-            id: user._id,
-            username: user.username,
-            avatar: user.avatar,
-            bio: user.bio,
-            status: user.status,
-            displayName: user.displayName,
-          },
+      if (updates.username) {
+        updates.username = updates.username.toLowerCase();
+        const existingUser = await User.findOne({
+          where: {
+            username: updates.username,
+            id: { [sequelize.Op.ne]: req.user.id }
+          }
         });
+        if (existingUser) {
+          throw new ConflictError('Username already taken');
+        }
+      }
+
+      if (updates.email) {
+        updates.email = updates.email.toLowerCase();
+        const existingUser = await User.findOne({
+          where: {
+            email: updates.email,
+            id: { [sequelize.Op.ne]: req.user.id }
+          }
+        });
+        if (existingUser) {
+          throw new ConflictError('Email already taken');
+        }
+      }
+
+      if (updates.status) {
+        updates.statusLastChanged = new Date();
+      }
+
+      const user = await User.findByPk(req.user.id);
+      if (!user) {
+        throw new NotFoundError('User not found');
+      }
+
+      await user.update(updates);
+
+      const updatedUser = await User.findByPk(req.user.id, {
+        attributes: { 
+          exclude: ['password', 'resetPasswordToken', 'resetPasswordExpires', 'loginAttempts', 'lockedUntil']
+        }
+      });
+
+      if (req.io && req.userSocketIds && req.userSocketIds.length > 0) {
+        req.userSocketIds.forEach(socketId => {
+          req.io.to(socketId).emit('profile:updated', {
+            user: {
+              id: updatedUser.id,
+              username: updatedUser.username,
+              avatar: updatedUser.avatar,
+              bio: updatedUser.bio,
+              status: updatedUser.status,
+              displayName: updatedUser.displayName,
+            },
+          });
+        });
+      }
+
+      res.status(200).json({
+        status: 'success',
+        message: 'Profile updated successfully',
+        data: { user: updatedUser },
+      });
+    } catch (error) {
+      console.error('Error updating user profile:', error);
+      res.status(500).json({
+        status: 'error',
+        message: 'Failed to update user profile'
       });
     }
-
-    res.status(200).json({
-      status: 'success',
-      message: 'Profile updated successfully',
-      data: { user },
-    });
   })
 );
 
-/**
- * Update user presence status
- */
 router.post(
   '/presence',
   apiRateLimiter,
   asyncHandler(async (req, res) => {
-    const { status } = req.body;
+    try {
+      const { status } = req.body;
 
-    const validStatuses = ['online', 'away', 'busy', 'offline'];
-    if (!validStatuses.includes(status)) {
-      throw new ValidationError(`Status must be one of: ${validStatuses.join(', ')}`);
-    }
-
-    const updateData = {
-      status,
-      statusLastChanged: new Date(),
-    };
-
-    // Update lastActive if status is online
-    if (status === 'online') {
-      updateData.lastActive = new Date();
-    }
-
-    const user = await User.findByIdAndUpdate(req.user.id, updateData, { new: true }).select(
-      'username avatar status lastActive'
-    );
-
-    if (!user) {
-      throw new NotFoundError('User not found');
-    }
-
-    // Broadcast presence update to friends
-    if (req.io) {
-      // Get user's friends
-      const currentUser = await User.findById(req.user.id).select('friends');
-
-      if (currentUser.friends && currentUser.friends.length > 0) {
-        // Find online friends
-        const onlineFriends = await User.find({
-          _id: { $in: currentUser.friends },
-          online: true,
-        }).select('socketIds');
-
-        // Send presence update to each online friend
-        onlineFriends.forEach(friend => {
-          if (friend.socketIds && friend.socketIds.length > 0) {
-            friend.socketIds.forEach(socketId => {
-              req.io.to(socketId).emit('presence:update', {
-                userId: user._id,
-                username: user.username,
-                avatar: user.avatar,
-                status: user.status,
-                lastActive: user.lastActive,
-                timestamp: new Date(),
-              });
-            });
-          }
-        });
+      const validStatuses = ['online', 'away', 'busy', 'offline'];
+      if (!validStatuses.includes(status)) {
+        throw new ValidationError(`Status must be one of: ${validStatuses.join(', ')}`);
       }
-    }
 
-    res.status(200).json({
-      status: 'success',
-      message: 'Presence updated',
-      data: { user },
-    });
-  })
-);
+      const updateData = {
+        status,
+        statusLastChanged: new Date(),
+      };
 
-/**
- * Get user by ID or username
- */
-router.get(
-  '/:identifier',
-  apiRateLimiter,
-  asyncHandler(async (req, res) => {
-    const { identifier } = req.params;
-
-    let query;
-    if (mongoose.Types.ObjectId.isValid(identifier)) {
-      query = { _id: identifier };
-    } else {
-      query = { username: identifier.toLowerCase() };
-    }
-
-    const user = await User.findOne(query)
-      .select(
-        '-password -email -resetPasswordToken -resetPasswordExpires -loginAttempts -lockedUntil -socketIds'
-      )
-      .populate('friends', 'username avatar online status lastActive');
-
-    if (!user) {
-      throw new NotFoundError('User not found');
-    }
-
-    // Check friendship status if requesting user is authenticated
-    let friendshipStatus = 'none';
-    if (req.user && user._id.toString() !== req.user.id) {
-      const currentUser = await User.findById(req.user.id);
-
-      if (currentUser.friends.includes(user._id)) {
-        friendshipStatus = 'friends';
-      } else if (currentUser.friendRequests.includes(user._id)) {
-        friendshipStatus = 'request_received';
-      } else if (user.friendRequests.includes(currentUser._id)) {
-        friendshipStatus = 'request_sent';
+      if (status === 'online') {
+        updateData.lastActive = new Date();
       }
-    }
 
-    const userResponse = user.toObject();
-    userResponse.friendshipStatus = friendshipStatus;
+      const user = await User.findByPk(req.user.id);
+      if (!user) {
+        throw new NotFoundError('User not found');
+      }
 
-    res.status(200).json({
-      status: 'success',
-      data: { user: userResponse },
-    });
-  })
-);
+      await user.update(updateData);
 
-/**
- * Search users by username or display name
- */
-router.get(
-  '/search/:query',
-  apiRateLimiter,
-  asyncHandler(async (req, res) => {
-    const { query } = req.params;
-    const { limit = 20, page = 1 } = req.query;
-
-    const skip = (parseInt(page) - 1) * parseInt(limit);
-
-    // Search for users (case-insensitive, partial match)
-    const users = await User.find({
-      $or: [
-        { username: { $regex: query, $options: 'i' } },
-        { displayName: { $regex: query, $options: 'i' } },
-      ],
-      _id: { $ne: req.user.id }, // Exclude current user
-    })
-      .select('username avatar displayName online status lastActive bio')
-      .skip(skip)
-      .limit(parseInt(limit))
-      .sort({ online: -1, username: 1 });
-
-    const total = await User.countDocuments({
-      $or: [
-        { username: { $regex: query, $options: 'i' } },
-        { displayName: { $regex: query, $options: 'i' } },
-      ],
-      _id: { $ne: req.user.id },
-    });
-
-    res.status(200).json({
-      status: 'success',
-      data: {
-        users,
-        pagination: {
-          total,
-          page: parseInt(page),
-          limit: parseInt(limit),
-          pages: Math.ceil(total / parseInt(limit)),
-        },
-      },
-    });
-  })
-);
-
-/**
- * Get user's friends list
- */
-router.get(
-  '/me/friends',
-  apiRateLimiter,
-  asyncHandler(async (req, res) => {
-    const { status } = req.query; // Optional: filter by online status
-
-    const user = await User.findById(req.user.id).populate({
-      path: 'friends',
-      select: 'username avatar displayName online status lastActive bio',
-      match: status ? { online: status === 'online' } : {},
-      options: { sort: { online: -1, username: 1 } },
-    });
-
-    if (!user) {
-      throw new NotFoundError('User not found');
-    }
-
-    res.status(200).json({
-      status: 'success',
-      data: { friends: user.friends },
-    });
-  })
-);
-
-/**
- * Get user's friend requests
- */
-router.get(
-  '/me/friend-requests',
-  apiRateLimiter,
-  asyncHandler(async (req, res) => {
-    const user = await User.findById(req.user.id).populate(
-      'friendRequests',
-      'username avatar displayName'
-    );
-
-    if (!user) {
-      throw new NotFoundError('User not found');
-    }
-
-    res.status(200).json({
-      status: 'success',
-      data: { friendRequests: user.friendRequests },
-    });
-  })
-);
-
-/**
- * Send friend request
- */
-router.post(
-  '/:userId/friend-request',
-  apiRateLimiter,
-  asyncHandler(async (req, res) => {
-    const { userId } = req.params;
-
-    if (userId === req.user.id) {
-      throw new ValidationError('Cannot send friend request to yourself');
-    }
-
-    const [targetUser, currentUser] = await Promise.all([
-      User.findById(userId),
-      User.findById(req.user.id),
-    ]);
-
-    if (!targetUser) {
-      throw new NotFoundError('User not found');
-    }
-
-    // Check if already friends
-    if (currentUser.friends.includes(targetUser._id)) {
-      throw new ConflictError('Already friends with this user');
-    }
-
-    // Check if request already sent
-    if (targetUser.friendRequests.includes(currentUser._id)) {
-      throw new ConflictError('Friend request already sent');
-    }
-
-    // Check if request already received
-    if (currentUser.friendRequests.includes(targetUser._id)) {
-      throw new ConflictError('This user has already sent you a friend request');
-    }
-
-    // Add to target user's friend requests
-    targetUser.friendRequests.push(currentUser._id);
-    await targetUser.save();
-
-    // Send notification via WebSocket if target is online
-    if (req.io && targetUser.socketIds && targetUser.socketIds.length > 0) {
-      targetUser.socketIds.forEach(socketId => {
-        req.io.to(socketId).emit('friend:request-received', {
-          from: {
-            id: currentUser._id,
-            username: currentUser.username,
-            avatar: currentUser.avatar,
-            displayName: currentUser.displayName,
-          },
-          timestamp: new Date(),
-        });
+      const updatedUser = await User.findByPk(req.user.id, {
+        attributes: ['id', 'username', 'avatar', 'status', 'lastActive']
       });
-    }
 
-    res.status(200).json({
-      status: 'success',
-      message: 'Friend request sent',
-    });
-  })
-);
-
-/**
- * Accept friend request
- */
-router.post(
-  '/:userId/friend-request/accept',
-  apiRateLimiter,
-  asyncHandler(async (req, res) => {
-    const { userId } = req.params;
-
-    const [targetUser, currentUser] = await Promise.all([
-      User.findById(userId),
-      User.findById(req.user.id),
-    ]);
-
-    if (!targetUser) {
-      throw new NotFoundError('User not found');
-    }
-
-    // Check if request exists
-    if (!currentUser.friendRequests.includes(targetUser._id)) {
-      throw new ValidationError('No friend request from this user');
-    }
-
-    // Remove from friend requests
-    currentUser.friendRequests = currentUser.friendRequests.filter(
-      id => id.toString() !== targetUser._id.toString()
-    );
-
-    // Add to friends list for both users
-    if (!currentUser.friends.includes(targetUser._id)) {
-      currentUser.friends.push(targetUser._id);
-    }
-
-    if (!targetUser.friends.includes(currentUser._id)) {
-      targetUser.friends.push(currentUser._id);
-    }
-
-    await Promise.all([currentUser.save(), targetUser.save()]);
-
-    // Send notifications via WebSocket
-    if (req.io) {
-      // Notify the user who sent the request
-      if (targetUser.socketIds && targetUser.socketIds.length > 0) {
-        targetUser.socketIds.forEach(socketId => {
-          req.io.to(socketId).emit('friend:request-accepted', {
-            by: {
-              id: currentUser._id,
-              username: currentUser.username,
-              avatar: currentUser.avatar,
-            },
-            timestamp: new Date(),
-          });
-        });
-      }
-
-      // Notify the user who accepted the request
-      if (currentUser.socketIds && currentUser.socketIds.length > 0) {
-        currentUser.socketIds.forEach(socketId => {
-          req.io.to(socketId).emit('friend:added', {
-            user: {
-              id: targetUser._id,
-              username: targetUser.username,
-              avatar: targetUser.avatar,
-              online: targetUser.online,
-              status: targetUser.status,
-            },
-            timestamp: new Date(),
-          });
-        });
-      }
-    }
-
-    res.status(200).json({
-      status: 'success',
-      message: 'Friend request accepted',
-    });
-  })
-);
-
-/**
- * Reject friend request
- */
-router.post(
-  '/:userId/friend-request/reject',
-  apiRateLimiter,
-  asyncHandler(async (req, res) => {
-    const { userId } = req.params;
-
-    const currentUser = await User.findById(req.user.id);
-
-    // Remove from friend requests
-    currentUser.friendRequests = currentUser.friendRequests.filter(id => id.toString() !== userId);
-
-    await currentUser.save();
-
-    res.status(200).json({
-      status: 'success',
-      message: 'Friend request rejected',
-    });
-  })
-);
-
-/**
- * Remove friend
- */
-router.delete(
-  '/:userId/friend',
-  apiRateLimiter,
-  asyncHandler(async (req, res) => {
-    const { userId } = req.params;
-
-    const [targetUser, currentUser] = await Promise.all([
-      User.findById(userId),
-      User.findById(req.user.id),
-    ]);
-
-    if (!targetUser) {
-      throw new NotFoundError('User not found');
-    }
-
-    // Remove from friends list for both users
-    currentUser.friends = currentUser.friends.filter(
-      id => id.toString() !== targetUser._id.toString()
-    );
-
-    targetUser.friends = targetUser.friends.filter(
-      id => id.toString() !== currentUser._id.toString()
-    );
-
-    await Promise.all([currentUser.save(), targetUser.save()]);
-
-    // Send notification via WebSocket if target is online
-    if (req.io && targetUser.socketIds && targetUser.socketIds.length > 0) {
-      targetUser.socketIds.forEach(socketId => {
-        req.io.to(socketId).emit('friend:removed', {
-          by: {
-            id: currentUser._id,
-            username: currentUser.username,
-          },
-          timestamp: new Date(),
-        });
-      });
-    }
-
-    res.status(200).json({
-      status: 'success',
-      message: 'Friend removed',
-    });
-  })
-);
-
-/**
- * Get online friends count
- */
-router.get(
-  '/me/friends/online-count',
-  apiRateLimiter,
-  asyncHandler(async (req, res) => {
-    const user = await User.findById(req.user.id).populate({
-      path: 'friends',
-      match: { online: true },
-      select: '_id',
-    });
-
-    if (!user) {
-      throw new NotFoundError('User not found');
-    }
-
-    res.status(200).json({
-      status: 'success',
-      data: { onlineCount: user.friends.length },
-    });
-  })
-);
-
-/**
- * Update user's socket ID (for WebSocket connection tracking)
- * This endpoint is called by the WebSocket server when a user connects
- */
-router.post(
-  '/socket/:socketId',
-  asyncHandler(async (req, res) => {
-    const { socketId } = req.params;
-
-    const user = await User.findByIdAndUpdate(
-      req.user.id,
-      {
-        $addToSet: { socketIds: socketId },
-        $set: {
-          online: true,
-          lastActive: new Date(),
-        },
-      },
-      { new: true }
-    ).select('username avatar online status');
-
-    if (!user) {
-      throw new NotFoundError('User not found');
-    }
-
-    // Notify friends about online status
-    if (req.io) {
-      const currentUser = await User.findById(req.user.id).select('friends');
-
-      if (currentUser.friends && currentUser.friends.length > 0) {
-        const onlineFriends = await User.find({
-          _id: { $in: currentUser.friends },
-          online: true,
-        }).select('socketIds');
-
-        onlineFriends.forEach(friend => {
-          if (friend.socketIds && friend.socketIds.length > 0) {
-            friend.socketIds.forEach(friendSocketId => {
-              req.io.to(friendSocketId).emit('presence:online', {
-                userId: user._id,
-                username: user.username,
-                avatar: user.avatar,
-                status: user.status,
-                timestamp: new Date(),
-              });
-            });
-          }
-        });
-      }
-    }
-
-    res.status(200).json({
-      status: 'success',
-      data: { user },
-    });
-  })
-);
-
-/**
- * Remove user's socket ID (for WebSocket connection tracking)
- * This endpoint is called by the WebSocket server when a user disconnects
- */
-router.delete(
-  '/socket/:socketId',
-  asyncHandler(async (req, res) => {
-    const { socketId } = req.params;
-
-    const user = await User.findByIdAndUpdate(
-      req.user.id,
-      {
-        $pull: { socketIds: socketId },
-      },
-      { new: true }
-    );
-
-    if (!user) {
-      throw new NotFoundError('User not found');
-    }
-
-    // If no more socket IDs, set user as offline
-    if (user.socketIds.length === 0) {
-      user.online = false;
-      user.status = 'offline';
-      user.statusLastChanged = new Date();
-      await user.save();
-
-      // Notify friends about offline status
       if (req.io) {
-        const currentUser = await User.findById(req.user.id).select('friends');
+        const currentUser = await User.findByPk(req.user.id, {
+          include: [{
+            model: User,
+            as: 'friends',
+            attributes: ['id'],
+            through: { attributes: [] }
+          }]
+        });
 
         if (currentUser.friends && currentUser.friends.length > 0) {
-          const onlineFriends = await User.find({
-            _id: { $in: currentUser.friends },
-            online: true,
-          }).select('socketIds');
+          const onlineFriends = await User.findAll({
+            where: {
+              id: currentUser.friends.map(f => f.id),
+              online: true
+            },
+            attributes: ['id', 'socketIds']
+          });
 
           onlineFriends.forEach(friend => {
             if (friend.socketIds && friend.socketIds.length > 0) {
-              friend.socketIds.forEach(friendSocketId => {
-                req.io.to(friendSocketId).emit('presence:offline', {
-                  userId: user._id,
-                  username: user.username,
+              friend.socketIds.forEach(socketId => {
+                req.io.to(socketId).emit('presence:update', {
+                  userId: updatedUser.id,
+                  username: updatedUser.username,
+                  avatar: updatedUser.avatar,
+                  status: updatedUser.status,
+                  lastActive: updatedUser.lastActive,
                   timestamp: new Date(),
                 });
               });
@@ -738,12 +270,655 @@ router.delete(
           });
         }
       }
-    }
 
-    res.status(200).json({
-      status: 'success',
-      data: { user },
-    });
+      res.status(200).json({
+        status: 'success',
+        message: 'Presence updated',
+        data: { user: updatedUser },
+      });
+    } catch (error) {
+      console.error('Error updating presence:', error);
+      res.status(500).json({
+        status: 'error',
+        message: 'Failed to update presence'
+      });
+    }
+  })
+);
+
+router.get(
+  '/:identifier',
+  apiRateLimiter,
+  asyncHandler(async (req, res) => {
+    try {
+      const { identifier } = req.params;
+
+      let where;
+      if (/^[0-9a-fA-F-]{36}$/.test(identifier)) {
+        where = { id: identifier };
+      } else {
+        where = { username: identifier.toLowerCase() };
+      }
+
+      const user = await User.findOne({
+        where,
+        attributes: { 
+          exclude: ['password', 'email', 'resetPasswordToken', 'resetPasswordExpires', 'loginAttempts', 'lockedUntil', 'socketIds']
+        },
+        include: [{
+          model: User,
+          as: 'friends',
+          attributes: ['id', 'username', 'avatar', 'online', 'status', 'lastActive'],
+          through: { attributes: [] }
+        }]
+      });
+
+      if (!user) {
+        throw new NotFoundError('User not found');
+      }
+
+      let friendshipStatus = 'none';
+      if (req.user && user.id !== req.user.id) {
+        const currentUser = await User.findByPk(req.user.id);
+
+        const isFriend = await Friend.findOne({
+          where: {
+            [sequelize.Op.or]: [
+              { userId: req.user.id, friendId: user.id },
+              { userId: user.id, friendId: req.user.id }
+            ],
+            status: 'accepted'
+          }
+        });
+
+        if (isFriend) {
+          friendshipStatus = 'friends';
+        } else {
+          const receivedRequest = await Friend.findOne({
+            where: {
+              userId: req.user.id,
+              friendId: user.id,
+              status: 'pending'
+            }
+          });
+
+          if (receivedRequest) {
+            friendshipStatus = 'request_received';
+          } else {
+            const sentRequest = await Friend.findOne({
+              where: {
+                userId: user.id,
+                friendId: req.user.id,
+                status: 'pending'
+              }
+            });
+
+            if (sentRequest) {
+              friendshipStatus = 'request_sent';
+            }
+          }
+        }
+      }
+
+      const userResponse = user.toJSON();
+      userResponse.friendshipStatus = friendshipStatus;
+
+      res.status(200).json({
+        status: 'success',
+        data: { user: userResponse },
+      });
+    } catch (error) {
+      console.error('Error fetching user:', error);
+      res.status(500).json({
+        status: 'error',
+        message: 'Failed to fetch user'
+      });
+    }
+  })
+);
+
+router.get(
+  '/search/:query',
+  apiRateLimiter,
+  asyncHandler(async (req, res) => {
+    try {
+      const { query } = req.params;
+      const { limit = 20, page = 1 } = req.query;
+
+      const offset = (parseInt(page) - 1) * parseInt(limit);
+
+      const { count, rows: users } = await User.findAndCountAll({
+        where: {
+          [sequelize.Op.or]: [
+            { username: { [sequelize.Op.iLike]: `%${query}%` } },
+            { displayName: { [sequelize.Op.iLike]: `%${query}%` } }
+          ],
+          id: { [sequelize.Op.ne]: req.user.id }
+        },
+        attributes: ['id', 'username', 'avatar', 'displayName', 'online', 'status', 'lastActive', 'bio'],
+        offset,
+        limit: parseInt(limit),
+        order: [['online', 'DESC'], ['username', 'ASC']]
+      });
+
+      res.status(200).json({
+        status: 'success',
+        data: {
+          users,
+          pagination: {
+            total: count,
+            page: parseInt(page),
+            limit: parseInt(limit),
+            pages: Math.ceil(count / parseInt(limit)),
+          },
+        },
+      });
+    } catch (error) {
+      console.error('Error searching users:', error);
+      res.status(500).json({
+        status: 'error',
+        message: 'Failed to search users'
+      });
+    }
+  })
+);
+
+router.get(
+  '/me/friends',
+  apiRateLimiter,
+  asyncHandler(async (req, res) => {
+    try {
+      const { status } = req.query;
+
+      const user = await User.findByPk(req.user.id, {
+        include: [{
+          model: User,
+          as: 'friends',
+          attributes: ['id', 'username', 'avatar', 'displayName', 'online', 'status', 'lastActive', 'bio'],
+          through: { attributes: [] },
+          where: status ? { online: status === 'online' } : undefined,
+          required: false
+        }]
+      });
+
+      if (!user) {
+        throw new NotFoundError('User not found');
+      }
+
+      res.status(200).json({
+        status: 'success',
+        data: { friends: user.friends },
+      });
+    } catch (error) {
+      console.error('Error fetching friends:', error);
+      res.status(500).json({
+        status: 'error',
+        message: 'Failed to fetch friends'
+      });
+    }
+  })
+);
+
+router.get(
+  '/me/friend-requests',
+  apiRateLimiter,
+  asyncHandler(async (req, res) => {
+    try {
+      const user = await User.findByPk(req.user.id, {
+        include: [{
+          model: User,
+          as: 'friendRequests',
+          attributes: ['id', 'username', 'avatar', 'displayName'],
+          through: { 
+            as: 'friendRequestData',
+            attributes: ['status', 'createdAt']
+          },
+          where: { '$friendRequestData.status$': 'pending' }
+        }]
+      });
+
+      if (!user) {
+        throw new NotFoundError('User not found');
+      }
+
+      res.status(200).json({
+        status: 'success',
+        data: { friendRequests: user.friendRequests },
+      });
+    } catch (error) {
+      console.error('Error fetching friend requests:', error);
+      res.status(500).json({
+        status: 'error',
+        message: 'Failed to fetch friend requests'
+      });
+    }
+  })
+);
+
+router.post(
+  '/:userId/friend-request',
+  apiRateLimiter,
+  asyncHandler(async (req, res) => {
+    try {
+      const { userId } = req.params;
+
+      if (userId === req.user.id) {
+        throw new ValidationError('Cannot send friend request to yourself');
+      }
+
+      const [targetUser, currentUser] = await Promise.all([
+        User.findByPk(userId),
+        User.findByPk(req.user.id)
+      ]);
+
+      if (!targetUser) {
+        throw new NotFoundError('User not found');
+      }
+
+      const existingFriendship = await Friend.findOne({
+        where: {
+          [sequelize.Op.or]: [
+            { userId: req.user.id, friendId: userId },
+            { userId: userId, friendId: req.user.id }
+          ]
+        }
+      });
+
+      if (existingFriendship) {
+        if (existingFriendship.status === 'accepted') {
+          throw new ConflictError('Already friends with this user');
+        } else if (existingFriendship.status === 'pending') {
+          if (existingFriendship.userId === req.user.id) {
+            throw new ConflictError('Friend request already sent');
+          } else {
+            throw new ConflictError('This user has already sent you a friend request');
+          }
+        }
+      }
+
+      await Friend.create({
+        userId: req.user.id,
+        friendId: userId,
+        status: 'pending'
+      });
+
+      if (req.io && targetUser.socketIds && targetUser.socketIds.length > 0) {
+        targetUser.socketIds.forEach(socketId => {
+          req.io.to(socketId).emit('friend:request-received', {
+            from: {
+              id: currentUser.id,
+              username: currentUser.username,
+              avatar: currentUser.avatar,
+              displayName: currentUser.displayName,
+            },
+            timestamp: new Date(),
+          });
+        });
+      }
+
+      res.status(200).json({
+        status: 'success',
+        message: 'Friend request sent',
+      });
+    } catch (error) {
+      console.error('Error sending friend request:', error);
+      res.status(500).json({
+        status: 'error',
+        message: 'Failed to send friend request'
+      });
+    }
+  })
+);
+
+router.post(
+  '/:userId/friend-request/accept',
+  apiRateLimiter,
+  asyncHandler(async (req, res) => {
+    try {
+      const { userId } = req.params;
+
+      const [targetUser, currentUser] = await Promise.all([
+        User.findByPk(userId),
+        User.findByPk(req.user.id)
+      ]);
+
+      if (!targetUser) {
+        throw new NotFoundError('User not found');
+      }
+
+      const friendRequest = await Friend.findOne({
+        where: {
+          userId: userId,
+          friendId: req.user.id,
+          status: 'pending'
+        }
+      });
+
+      if (!friendRequest) {
+        throw new ValidationError('No friend request from this user');
+      }
+
+      await friendRequest.update({ status: 'accepted' });
+
+      await Friend.create({
+        userId: req.user.id,
+        friendId: userId,
+        status: 'accepted'
+      });
+
+      if (req.io) {
+        if (targetUser.socketIds && targetUser.socketIds.length > 0) {
+          targetUser.socketIds.forEach(socketId => {
+            req.io.to(socketId).emit('friend:request-accepted', {
+              by: {
+                id: currentUser.id,
+                username: currentUser.username,
+                avatar: currentUser.avatar,
+              },
+              timestamp: new Date(),
+            });
+          });
+        }
+
+        if (currentUser.socketIds && currentUser.socketIds.length > 0) {
+          currentUser.socketIds.forEach(socketId => {
+            req.io.to(socketId).emit('friend:added', {
+              user: {
+                id: targetUser.id,
+                username: targetUser.username,
+                avatar: targetUser.avatar,
+                online: targetUser.online,
+                status: targetUser.status,
+              },
+              timestamp: new Date(),
+            });
+          });
+        }
+      }
+
+      res.status(200).json({
+        status: 'success',
+        message: 'Friend request accepted',
+      });
+    } catch (error) {
+      console.error('Error accepting friend request:', error);
+      res.status(500).json({
+        status: 'error',
+        message: 'Failed to accept friend request'
+      });
+    }
+  })
+);
+
+router.post(
+  '/:userId/friend-request/reject',
+  apiRateLimiter,
+  asyncHandler(async (req, res) => {
+    try {
+      const { userId } = req.params;
+
+      const friendRequest = await Friend.findOne({
+        where: {
+          userId: userId,
+          friendId: req.user.id,
+          status: 'pending'
+        }
+      });
+
+      if (!friendRequest) {
+        throw new ValidationError('No friend request from this user');
+      }
+
+      await friendRequest.destroy();
+
+      res.status(200).json({
+        status: 'success',
+        message: 'Friend request rejected',
+      });
+    } catch (error) {
+      console.error('Error rejecting friend request:', error);
+      res.status(500).json({
+        status: 'error',
+        message: 'Failed to reject friend request'
+      });
+    }
+  })
+);
+
+router.delete(
+  '/:userId/friend',
+  apiRateLimiter,
+  asyncHandler(async (req, res) => {
+    try {
+      const { userId } = req.params;
+
+      const [targetUser, currentUser] = await Promise.all([
+        User.findByPk(userId),
+        User.findByPk(req.user.id)
+      ]);
+
+      if (!targetUser) {
+        throw new NotFoundError('User not found');
+      }
+
+      const friendships = await Friend.findAll({
+        where: {
+          [sequelize.Op.or]: [
+            { userId: req.user.id, friendId: userId },
+            { userId: userId, friendId: req.user.id }
+          ],
+          status: 'accepted'
+        }
+      });
+
+      if (friendships.length === 0) {
+        throw new ValidationError('This user is not in your friends list');
+      }
+
+      await Promise.all(friendships.map(f => f.destroy()));
+
+      if (req.io && targetUser.socketIds && targetUser.socketIds.length > 0) {
+        targetUser.socketIds.forEach(socketId => {
+          req.io.to(socketId).emit('friend:removed', {
+            by: {
+              id: currentUser.id,
+              username: currentUser.username,
+            },
+            timestamp: new Date(),
+          });
+        });
+      }
+
+      res.status(200).json({
+        status: 'success',
+        message: 'Friend removed',
+      });
+    } catch (error) {
+      console.error('Error removing friend:', error);
+      res.status(500).json({
+        status: 'error',
+        message: 'Failed to remove friend'
+      });
+    }
+  })
+);
+
+router.get(
+  '/me/friends/online-count',
+  apiRateLimiter,
+  asyncHandler(async (req, res) => {
+    try {
+      const user = await User.findByPk(req.user.id, {
+        include: [{
+          model: User,
+          as: 'friends',
+          attributes: ['id'],
+          through: { attributes: [] },
+          where: { online: true }
+        }]
+      });
+
+      if (!user) {
+        throw new NotFoundError('User not found');
+      }
+
+      res.status(200).json({
+        status: 'success',
+        data: { onlineCount: user.friends.length },
+      });
+    } catch (error) {
+      console.error('Error fetching online friends count:', error);
+      res.status(500).json({
+        status: 'error',
+        message: 'Failed to fetch online friends count'
+      });
+    }
+  })
+);
+
+router.post(
+  '/socket/:socketId',
+  asyncHandler(async (req, res) => {
+    try {
+      const { socketId } = req.params;
+
+      const user = await User.findByPk(req.user.id);
+      if (!user) {
+        throw new NotFoundError('User not found');
+      }
+
+      const socketIds = user.socketIds || [];
+      if (!socketIds.includes(socketId)) {
+        socketIds.push(socketId);
+      }
+
+      await user.update({
+        socketIds: socketIds,
+        online: true,
+        lastActive: new Date()
+      });
+
+      const updatedUser = await User.findByPk(req.user.id, {
+        attributes: ['id', 'username', 'avatar', 'online', 'status']
+      });
+
+      if (req.io) {
+        const currentUser = await User.findByPk(req.user.id, {
+          include: [{
+            model: User,
+            as: 'friends',
+            attributes: ['id'],
+            through: { attributes: [] }
+          }]
+        });
+
+        if (currentUser.friends && currentUser.friends.length > 0) {
+          const onlineFriends = await User.findAll({
+            where: {
+              id: currentUser.friends.map(f => f.id),
+              online: true
+            },
+            attributes: ['id', 'socketIds']
+          });
+
+          onlineFriends.forEach(friend => {
+            if (friend.socketIds && friend.socketIds.length > 0) {
+              friend.socketIds.forEach(socketId => {
+                req.io.to(socketId).emit('presence:online', {
+                  userId: updatedUser.id,
+                  username: updatedUser.username,
+                  avatar: updatedUser.avatar,
+                  status: updatedUser.status,
+                  timestamp: new Date(),
+                });
+              });
+            }
+          });
+        }
+      }
+
+      res.status(200).json({
+        status: 'success',
+        data: { user: updatedUser },
+      });
+    } catch (error) {
+      console.error('Error adding socket ID:', error);
+      res.status(500).json({
+        status: 'error',
+        message: 'Failed to add socket ID'
+      });
+    }
+  })
+);
+
+router.delete(
+  '/socket/:socketId',
+  asyncHandler(async (req, res) => {
+    try {
+      const { socketId } = req.params;
+
+      const user = await User.findByPk(req.user.id);
+      if (!user) {
+        throw new NotFoundError('User not found');
+      }
+
+      const socketIds = user.socketIds || [];
+      const updatedSocketIds = socketIds.filter(id => id !== socketId);
+
+      await user.update({ socketIds: updatedSocketIds });
+
+      if (updatedSocketIds.length === 0) {
+        await user.update({
+          online: false,
+          status: 'offline',
+          statusLastChanged: new Date()
+        });
+
+        if (req.io) {
+          const currentUser = await User.findByPk(req.user.id, {
+            include: [{
+              model: User,
+              as: 'friends',
+              attributes: ['id'],
+              through: { attributes: [] }
+            }]
+          });
+
+          if (currentUser.friends && currentUser.friends.length > 0) {
+            const onlineFriends = await User.findAll({
+              where: {
+                id: currentUser.friends.map(f => f.id),
+                online: true
+              },
+              attributes: ['id', 'socketIds']
+            });
+
+            onlineFriends.forEach(friend => {
+              if (friend.socketIds && friend.socketIds.length > 0) {
+                friend.socketIds.forEach(socketId => {
+                  req.io.to(socketId).emit('presence:offline', {
+                    userId: user.id,
+                    username: user.username,
+                    timestamp: new Date(),
+                  });
+                });
+              }
+            });
+          }
+        }
+      }
+
+      res.status(200).json({
+        status: 'success',
+        data: { user },
+      });
+    } catch (error) {
+      console.error('Error removing socket ID:', error);
+      res.status(500).json({
+        status: 'error',
+        message: 'Failed to remove socket ID'
+      });
+    }
   })
 );
 

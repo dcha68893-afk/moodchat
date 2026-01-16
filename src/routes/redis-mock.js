@@ -1,4 +1,3 @@
-// Put this in src/utils/redis-mock.js
 console.log('✅ Using mock Redis (in-memory) - No Redis server needed');
 
 module.exports = {
@@ -24,7 +23,6 @@ module.exports = {
   },
   
   on() {
-    // Ignore all events
     return this;
   },
   

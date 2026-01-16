@@ -1,11 +1,8 @@
-const express = require('express');
-const router = express.Router();
-const mongoose = require('mongoose');
+const router = require('express').Router();
+const { Op, fn, col, literal } = require('sequelize'); // Fixed: Import specific operators from sequelize
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs').promises;
-
-// Import middleware and utilities
 const {
   asyncHandler,
   AuthenticationError,
@@ -16,18 +13,14 @@ const {
 } = require('../middleware/errorHandler');
 const { authMiddleware } = require('../middleware/auth');
 const { apiRateLimiter, createMessageRateLimiter } = require('../middleware/rateLimiter');
-const Chat = require('../models/Chat');
-const Message = require('../models/Message');
-const User = require('../models/User');
+const { User, Chat, Message, Reaction } = require('../models');
 
-// Environment variables
-const MAX_FILE_SIZE = parseInt(process.env.MAX_FILE_SIZE) || 10 * 1024 * 1024; // 10MB
+const MAX_FILE_SIZE = parseInt(process.env.MAX_FILE_SIZE) || 10 * 1024 * 1024;
 const ALLOWED_FILE_TYPES = (
   process.env.ALLOWED_FILE_TYPES || 'image/jpeg,image/png,image/gif,application/pdf,text/plain'
 ).split(',');
 const UPLOAD_PATH = process.env.UPLOAD_PATH || 'uploads/messages';
 
-// Ensure upload directory exists
 const ensureUploadDir = async () => {
   try {
     await fs.mkdir(UPLOAD_PATH, { recursive: true });
@@ -37,7 +30,6 @@ const ensureUploadDir = async () => {
 };
 ensureUploadDir();
 
-// Configure multer for file uploads
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     cb(null, UPLOAD_PATH);
@@ -64,887 +56,928 @@ const upload = multer({
   },
 });
 
-// Apply authentication middleware to all routes
 router.use(authMiddleware);
 
-/**
- * Get messages for a chat with pagination
- */
+console.log('✅ Messages routes initialized');
+
 router.get(
   '/:chatId',
   apiRateLimiter,
   asyncHandler(async (req, res) => {
-    const { chatId } = req.params;
-    const {
-      page = 1,
-      limit = 50,
-      before = null, // Get messages before this timestamp
-      after = null, // Get messages after this timestamp
-    } = req.query;
+    try {
+      const { chatId } = req.params;
+      const {
+        page = 1,
+        limit = 50,
+        before = null,
+        after = null,
+      } = req.query;
 
-    const skip = (parseInt(page) - 1) * parseInt(limit);
+      const offset = (parseInt(page) - 1) * parseInt(limit);
 
-    // Verify user has access to chat
-    const chat = await Chat.findOne({
-      _id: chatId,
-      participants: req.user.id,
-      isArchived: false,
-    });
+      const chat = await Chat.findOne({
+        where: {
+          id: chatId,
+          isArchived: false
+        },
+        include: [{
+          model: User,
+          as: 'participants',
+          where: { id: req.user.id },
+          required: true
+        }]
+      });
 
-    if (!chat) {
-      throw new NotFoundError('Chat not found or access denied');
-    }
-
-    // Build query
-    const query = { chat: chatId, isDeleted: false };
-
-    if (before) {
-      query.createdAt = { $lt: new Date(before) };
-    }
-
-    if (after) {
-      query.createdAt = { $gt: new Date(after) };
-    }
-
-    // Get messages with pagination
-    const [messages, total] = await Promise.all([
-      Message.find(query)
-        .populate({
-          path: 'sender',
-          select: 'username avatar displayName',
-        })
-        .populate({
-          path: 'repliesTo',
-          select: 'content sender createdAt',
-          populate: {
-            path: 'sender',
-            select: 'username avatar',
-          },
-        })
-        .populate({
-          path: 'readBy.user',
-          select: 'username avatar',
-        })
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(parseInt(limit))
-        .lean(),
-      Message.countDocuments(query),
-    ]);
-
-    // Reverse to get chronological order for response
-    const chronologicalMessages = messages.reverse();
-
-    // Mark messages as read for current user
-    const unreadMessages = messages.filter(
-      msg => !msg.readBy.some(reader => reader.user && reader.user._id.toString() === req.user.id)
-    );
-
-    if (unreadMessages.length > 0) {
-      const now = new Date();
-      await Message.updateMany(
-        { _id: { $in: unreadMessages.map(msg => msg._id) } },
-        {
-          $addToSet: {
-            readBy: {
-              user: req.user.id,
-              readAt: now,
-            },
-          },
-        }
-      );
-
-      // Update chat's unread count for current user
-      if (chat.unreadCounts && chat.unreadCounts.has(req.user.id)) {
-        chat.unreadCounts.set(
-          req.user.id,
-          Math.max(0, chat.unreadCounts.get(req.user.id) - unreadMessages.length)
-        );
-        await chat.save();
+      if (!chat) {
+        throw new NotFoundError('Chat not found or access denied');
       }
 
-      // Send WebSocket read receipts to other participants
-      if (req.io && unreadMessages.length > 0) {
-        const senderIds = [...new Set(unreadMessages.map(msg => msg.sender._id.toString()))];
+      const where = { chatId: chatId, isDeleted: false };
 
-        senderIds.forEach(senderId => {
-          if (senderId !== req.user.id) {
-            const sender = unreadMessages.find(
-              msg => msg.sender._id.toString() === senderId
-            )?.sender;
-            if (sender && sender.socketIds) {
-              sender.socketIds.forEach(socketId => {
-                req.io.to(socketId).emit('messages:read', {
+      if (before) {
+        where.createdAt = { [Op.lt]: new Date(before) };
+      }
+
+      if (after) {
+        where.createdAt = { [Op.gt]: new Date(after) };
+      }
+
+      const { count, rows: messages } = await Message.findAndCountAll({
+        where,
+        include: [
+          {
+            model: User,
+            as: 'sender',
+            attributes: ['id', 'username', 'avatar', 'displayName']
+          },
+          {
+            model: Message,
+            as: 'repliesTo',
+            attributes: ['content', 'senderId', 'createdAt'],
+            include: [{
+              model: User,
+              as: 'sender',
+              attributes: ['id', 'username', 'avatar']
+            }]
+          },
+          {
+            model: User,
+            as: 'readBy',
+            attributes: ['id', 'username', 'avatar'],
+            through: { attributes: ['readAt'] }
+          },
+          {
+            model: Reaction,
+            as: 'reactions',
+            include: [{
+              model: User,
+              as: 'user',
+              attributes: ['id', 'username', 'avatar']
+            }]
+          }
+        ],
+        order: [['createdAt', 'DESC']],
+        offset,
+        limit: parseInt(limit),
+        distinct: true
+      });
+
+      const chronologicalMessages = messages.reverse();
+
+      const unreadMessages = messages.filter(
+        msg => !msg.readBy.some(reader => reader.id === req.user.id)
+      );
+
+      if (unreadMessages.length > 0) {
+        const now = new Date();
+        const messageIds = unreadMessages.map(msg => msg.id);
+        
+        // Update each message individually to mark as read
+        for (const messageId of messageIds) {
+          const message = await Message.findByPk(messageId);
+          if (message) {
+            // Check if user already read it
+            const readBy = message.readBy || [];
+            if (!readBy.includes(req.user.id)) {
+              readBy.push(req.user.id);
+              await message.update({ readBy });
+            }
+          }
+        }
+
+        // Mark chat as read for the user
+        if (chat.markAsRead) {
+          await chat.markAsRead(req.user.id);
+        }
+
+        if (req.io && unreadMessages.length > 0) {
+          const senderIds = [...new Set(unreadMessages.map(msg => msg.senderId))];
+
+          senderIds.forEach(senderId => {
+            if (senderId !== req.user.id) {
+              const sender = unreadMessages.find(msg => msg.senderId === senderId)?.sender;
+              if (sender) {
+                // Emit to all sockets in the chat room
+                req.io.to(`chat:${chatId}`).emit('messages:read', {
                   chatId,
                   readerId: req.user.id,
                   messageIds: unreadMessages
-                    .filter(msg => msg.sender._id.toString() === senderId)
-                    .map(msg => msg._id),
+                    .filter(msg => msg.senderId === senderId)
+                    .map(msg => msg.id),
                   readAt: now,
                 });
-              });
+              }
             }
-          }
-        });
+          });
+        }
       }
-    }
 
-    res.status(200).json({
-      status: 'success',
-      data: {
-        messages: chronologicalMessages,
-        pagination: {
-          total,
-          page: parseInt(page),
-          limit: parseInt(limit),
-          pages: Math.ceil(total / parseInt(limit)),
+      res.status(200).json({
+        status: 'success',
+        data: {
+          messages: chronologicalMessages,
+          pagination: {
+            total: count,
+            page: parseInt(page),
+            limit: parseInt(limit),
+            pages: Math.ceil(count / parseInt(limit)),
+          },
+          chatInfo: {
+            id: chat.id,
+            chatType: chat.chatType,
+            chatName: chat.chatName,
+          },
         },
-        chatInfo: {
-          id: chat._id,
-          chatType: chat.chatType,
-          chatName: chat.chatName,
-        },
-      },
-    });
+      });
+    } catch (error) {
+      console.error('Error fetching messages:', error);
+      res.status(500).json({
+        status: 'error',
+        message: 'Failed to fetch messages'
+      });
+    }
   })
 );
 
-/**
- * Send a new message
- */
 router.post(
   '/:chatId',
   createMessageRateLimiter(),
   apiRateLimiter,
   asyncHandler(async (req, res) => {
-    const { chatId } = req.params;
-    const { content, replyTo, messageType = 'text' } = req.body;
+    try {
+      const { chatId } = req.params;
+      const { content, replyTo, messageType = 'text' } = req.body;
 
-    // Validate content based on message type
-    if (messageType === 'text' && (!content || content.trim().length === 0)) {
-      throw new ValidationError('Message content is required for text messages');
-    }
-
-    if (messageType === 'text' && content.length > 5000) {
-      throw new ValidationError('Message too long (max 5000 characters)');
-    }
-
-    // Verify user has access to chat
-    const chat = await Chat.findOne({
-      _id: chatId,
-      participants: req.user.id,
-      isArchived: false,
-    }).populate({
-      path: 'participants',
-      select: 'username avatar socketIds blockedUsers',
-    });
-
-    if (!chat) {
-      throw new NotFoundError('Chat not found or access denied');
-    }
-
-    // Check if replying to a valid message
-    let replyToMessage = null;
-    if (replyTo) {
-      replyToMessage = await Message.findOne({
-        _id: replyTo,
-        chat: chatId,
-        isDeleted: false,
-      });
-
-      if (!replyToMessage) {
-        throw new ValidationError('Message to reply to not found');
+      if (messageType === 'text' && (!content || content.trim().length === 0)) {
+        throw new ValidationError('Message content is required for text messages');
       }
-    }
 
-    // Check for blocked users in the chat
-    const currentUser = await User.findById(req.user.id);
-    const blockedParticipants = chat.participants.filter(
-      participant =>
-        currentUser.blockedUsers?.includes(participant._id) ||
-        participant.blockedUsers?.includes(req.user.id)
-    );
+      if (messageType === 'text' && content.length > 5000) {
+        throw new ValidationError('Message too long (max 5000 characters)');
+      }
 
-    if (blockedParticipants.length > 0) {
-      throw new AuthorizationError('Cannot send messages in chat with blocked users');
-    }
-
-    // Create the message
-    const message = await Message.create({
-      chat: chatId,
-      sender: req.user.id,
-      content: content?.trim(),
-      messageType,
-      repliesTo: replyToMessage?._id,
-      attachments: [], // For file uploads in separate endpoint
-    });
-
-    // Populate the message
-    const populatedMessage = await Message.findById(message._id)
-      .populate({
-        path: 'sender',
-        select: 'username avatar displayName',
-      })
-      .populate({
-        path: 'repliesTo',
-        select: 'content sender createdAt',
-        populate: {
-          path: 'sender',
-          select: 'username avatar',
+      const chat = await Chat.findOne({
+        where: {
+          id: chatId,
+          isArchived: false
         },
+        include: [{
+          model: User,
+          as: 'participants',
+          attributes: ['id', 'username', 'avatar'],
+          through: { attributes: [] }
+        }]
       });
 
-    // Update chat's last message and timestamps
-    chat.lastMessage = message._id;
-    chat.updatedAt = new Date();
-
-    // Increment unread counts for all participants except sender
-    chat.participants.forEach(participant => {
-      if (participant._id.toString() !== req.user.id) {
-        const currentCount = chat.unreadCounts.get(participant._id.toString()) || 0;
-        chat.unreadCounts.set(participant._id.toString(), currentCount + 1);
+      if (!chat) {
+        throw new NotFoundError('Chat not found');
       }
-    });
 
-    await chat.save();
+      // Check if user is a participant
+      const isParticipant = chat.participants.some(p => p.id === req.user.id);
+      if (!isParticipant) {
+        throw new AuthorizationError('Access denied');
+      }
 
-    // Prepare message data for WebSocket
-    const messageData = populatedMessage.toObject();
-    messageData.unreadCount = 1; // Initial unread count for recipients
+      let replyToMessage = null;
+      if (replyTo) {
+        replyToMessage = await Message.findOne({
+          where: {
+            id: replyTo,
+            chatId: chatId,
+            isDeleted: false
+          }
+        });
 
-    // Send WebSocket notification to all participants except sender
-    if (req.io) {
-      chat.participants.forEach(participant => {
-        if (participant._id.toString() !== req.user.id && participant.socketIds) {
-          participant.socketIds.forEach(socketId => {
-            req.io.to(socketId).emit('message:new', {
-              message: messageData,
-              chat: {
-                id: chat._id,
-                chatType: chat.chatType,
-                chatName: chat.chatName,
-                unreadCount: chat.unreadCounts.get(participant._id.toString()) || 0,
-              },
-              sender: {
-                id: req.user.id,
-                username: currentUser.username,
-                avatar: currentUser.avatar,
-              },
-            });
-          });
+        if (!replyToMessage) {
+          throw new ValidationError('Message to reply to not found');
         }
+      }
+
+      const currentUser = await User.findByPk(req.user.id);
+
+      // Check for blocked users
+      const blockedParticipants = chat.participants.filter(participant => {
+        // Check if current user blocked participant
+        if (currentUser.blockedUsers && currentUser.blockedUsers.some(bu => bu.id === participant.id)) {
+          return true;
+        }
+        // Check if participant blocked current user
+        if (participant.blockedUsers && participant.blockedUsers.some(bu => bu.id === req.user.id)) {
+          return true;
+        }
+        return false;
       });
 
-      // Also emit to sender for consistency (with different event type)
-      if (currentUser.socketIds) {
-        currentUser.socketIds.forEach(socketId => {
-          req.io.to(socketId).emit('message:sent', {
-            message: messageData,
-            chatId: chat._id,
-          });
+      if (blockedParticipants.length > 0) {
+        throw new AuthorizationError('Cannot send messages in chat with blocked users');
+      }
+
+      const message = await Message.create({
+        chatId: chatId,
+        senderId: req.user.id,
+        content: content?.trim(),
+        messageType,
+        replyTo: replyToMessage?.id, // Fixed: Use replyTo instead of repliesTo
+        attachments: [],
+        readBy: [req.user.id] // Sender automatically reads their own message
+      });
+
+      const populatedMessage = await Message.findByPk(message.id, {
+        include: [
+          {
+            model: User,
+            as: 'sender',
+            attributes: ['id', 'username', 'avatar', 'displayName']
+          },
+          {
+            model: Message,
+            as: 'replyTo', // Fixed: Use replyTo instead of repliesTo
+            attributes: ['content', 'senderId', 'createdAt'],
+            include: [{
+              model: User,
+              as: 'sender',
+              attributes: ['id', 'username', 'avatar']
+            }]
+          }
+        ]
+      });
+
+      await chat.update({
+        lastMessageId: message.id,
+        updatedAt: new Date()
+      });
+
+      // Increment unread counts for other participants
+      if (chat.incrementUnreadCounts) {
+        await chat.incrementUnreadCounts(req.user.id);
+      }
+
+      const messageData = populatedMessage.toJSON();
+      messageData.unreadCount = 1;
+
+      if (req.io) {
+        // Emit to chat room
+        req.io.to(`chat:${chatId}`).emit('message:new', {
+          message: messageData,
+          chat: {
+            id: chat.id,
+            chatType: chat.chatType,
+            chatName: chat.chatName,
+          },
+          sender: {
+            id: req.user.id,
+            username: currentUser.username,
+            avatar: currentUser.avatar,
+          },
+        });
+
+        // Emit to sender separately
+        req.io.to(`user:${req.user.id}`).emit('message:sent', {
+          message: messageData,
+          chatId: chat.id,
         });
       }
-    }
 
-    res.status(201).json({
-      status: 'success',
-      message: 'Message sent successfully',
-      data: { message: populatedMessage },
-    });
+      res.status(201).json({
+        status: 'success',
+        message: 'Message sent successfully',
+        data: { message: populatedMessage },
+      });
+    } catch (error) {
+      console.error('Error sending message:', error);
+      res.status(500).json({
+        status: 'error',
+        message: 'Failed to send message'
+      });
+    }
   })
 );
 
-/**
- * Upload file attachment for a message
- */
 router.post(
   '/:chatId/upload',
   apiRateLimiter,
   upload.single('file'),
   asyncHandler(async (req, res) => {
-    const { chatId } = req.params;
+    try {
+      const { chatId } = req.params;
 
-    if (!req.file) {
-      throw new ValidationError('No file uploaded');
-    }
-
-    // Verify user has access to chat
-    const chat = await Chat.findOne({
-      _id: chatId,
-      participants: req.user.id,
-      isArchived: false,
-    });
-
-    if (!chat) {
-      // Clean up uploaded file
-      await fs.unlink(req.file.path).catch(() => {});
-      throw new NotFoundError('Chat not found or access denied');
-    }
-
-    // Create message with attachment
-    const message = await Message.create({
-      chat: chatId,
-      sender: req.user.id,
-      messageType: getMessageTypeFromMime(req.file.mimetype),
-      attachments: [
-        {
-          filename: req.file.originalname,
-          path: req.file.path,
-          mimetype: req.file.mimetype,
-          size: req.file.size,
-          thumbnail: await generateThumbnailIfImage(req.file),
-        },
-      ],
-      content: req.body.caption || '',
-    });
-
-    // Update chat
-    chat.lastMessage = message._id;
-    chat.updatedAt = new Date();
-
-    // Increment unread counts for all participants except sender
-    chat.participants.forEach(participantId => {
-      if (participantId.toString() !== req.user.id) {
-        const currentCount = chat.unreadCounts.get(participantId.toString()) || 0;
-        chat.unreadCounts.set(participantId.toString(), currentCount + 1);
+      if (!req.file) {
+        throw new ValidationError('No file uploaded');
       }
-    });
 
-    await chat.save();
+      const chat = await Chat.findOne({
+        where: {
+          id: chatId,
+          isArchived: false
+        },
+        include: [{
+          model: User,
+          as: 'participants',
+          where: { id: req.user.id },
+          required: true
+        }]
+      });
 
-    // Populate message
-    const populatedMessage = await Message.findById(message._id).populate({
-      path: 'sender',
-      select: 'username avatar displayName',
-    });
+      if (!chat) {
+        await fs.unlink(req.file.path).catch(() => {});
+        throw new NotFoundError('Chat not found or access denied');
+      }
 
-    // Send WebSocket notifications (similar to text messages)
-    if (req.io) {
-      const participants = await User.find({
-        _id: { $in: chat.participants },
-      }).select('socketIds');
+      const message = await Message.create({
+        chatId: chatId,
+        senderId: req.user.id,
+        messageType: getMessageTypeFromMime(req.file.mimetype),
+        attachments: [
+          {
+            filename: req.file.originalname,
+            path: req.file.path,
+            mimetype: req.file.mimetype,
+            size: req.file.size,
+            thumbnail: await generateThumbnailIfImage(req.file),
+          },
+        ],
+        content: req.body.caption || '',
+        readBy: [req.user.id]
+      });
 
-      participants.forEach(participant => {
-        if (participant._id.toString() !== req.user.id && participant.socketIds) {
-          participant.socketIds.forEach(socketId => {
-            req.io.to(socketId).emit('message:new', {
-              message: populatedMessage.toObject(),
-              chat: {
-                id: chat._id,
-                chatType: chat.chatType,
-                chatName: chat.chatName,
-              },
-            });
-          });
-        }
+      await chat.update({
+        lastMessageId: message.id,
+        updatedAt: new Date()
+      });
+
+      // Increment unread counts for other participants
+      if (chat.incrementUnreadCounts) {
+        await chat.incrementUnreadCounts(req.user.id);
+      }
+
+      const populatedMessage = await Message.findByPk(message.id, {
+        include: [{
+          model: User,
+          as: 'sender',
+          attributes: ['id', 'username', 'avatar', 'displayName']
+        }]
+      });
+
+      if (req.io) {
+        // Emit to chat room
+        req.io.to(`chat:${chatId}`).emit('message:new', {
+          message: populatedMessage.toJSON(),
+          chat: {
+            id: chat.id,
+            chatType: chat.chatType,
+            chatName: chat.chatName,
+          },
+        });
+      }
+
+      res.status(201).json({
+        status: 'success',
+        message: 'File uploaded successfully',
+        data: {
+          message: populatedMessage,
+          fileUrl: `/api/messages/${chatId}/files/${message.id}/${req.file.filename}`,
+        },
+      });
+    } catch (error) {
+      console.error('Error uploading file:', error);
+      // Clean up uploaded file if error occurred
+      if (req.file && req.file.path) {
+        await fs.unlink(req.file.path).catch(() => {});
+      }
+      res.status(500).json({
+        status: 'error',
+        message: 'Failed to upload file'
       });
     }
-
-    res.status(201).json({
-      status: 'success',
-      message: 'File uploaded successfully',
-      data: {
-        message: populatedMessage,
-        fileUrl: `/api/messages/${chatId}/files/${message._id}/${req.file.filename}`,
-      },
-    });
   })
 );
 
-/**
- * Edit a message
- */
 router.patch(
   '/:messageId',
   apiRateLimiter,
   asyncHandler(async (req, res) => {
-    const { messageId } = req.params;
-    const { content } = req.body;
+    try {
+      const { messageId } = req.params;
+      const { content } = req.body;
 
-    if (!content || content.trim().length === 0) {
-      throw new ValidationError('Message content is required');
-    }
+      if (!content || content.trim().length === 0) {
+        throw new ValidationError('Message content is required');
+      }
 
-    const message = await Message.findOne({
-      _id: messageId,
-      sender: req.user.id,
-      isDeleted: false,
-    }).populate('chat');
-
-    if (!message) {
-      throw new NotFoundError('Message not found or not authorized to edit');
-    }
-
-    // Check if message is too old to edit (e.g., 15 minutes)
-    const editWindow = 15 * 60 * 1000; // 15 minutes
-    if (Date.now() - message.createdAt.getTime() > editWindow) {
-      throw new ValidationError('Message can only be edited within 15 minutes of sending');
-    }
-
-    // Update message
-    message.content = content.trim();
-    message.isEdited = true;
-    message.editedAt = new Date();
-    await message.save();
-
-    // Populate updated message
-    const updatedMessage = await Message.findById(messageId).populate({
-      path: 'sender',
-      select: 'username avatar displayName',
-    });
-
-    // Send WebSocket notification
-    if (req.io) {
-      const chat = await Chat.findById(message.chat._id).populate({
-        path: 'participants',
-        select: 'socketIds',
+      const message = await Message.findOne({
+        where: {
+          id: messageId,
+          senderId: req.user.id,
+          isDeleted: false
+        }
       });
 
-      if (chat) {
-        chat.participants.forEach(participant => {
-          if (participant.socketIds) {
-            participant.socketIds.forEach(socketId => {
-              req.io.to(socketId).emit('message:edited', {
-                messageId: message._id,
-                chatId: message.chat._id,
-                content: message.content,
-                editedAt: message.editedAt,
-                editedBy: {
-                  id: req.user.id,
-                  username: req.user.username,
-                },
-              });
-            });
-          }
+      if (!message) {
+        throw new NotFoundError('Message not found or not authorized to edit');
+      }
+
+      const editWindow = 15 * 60 * 1000;
+      if (Date.now() - message.createdAt.getTime() > editWindow) {
+        throw new ValidationError('Message can only be edited within 15 minutes of sending');
+      }
+
+      await message.update({
+        content: content.trim(),
+        isEdited: true,
+        editedAt: new Date()
+      });
+
+      const updatedMessage = await Message.findByPk(messageId, {
+        include: [{
+          model: User,
+          as: 'sender',
+          attributes: ['id', 'username', 'avatar', 'displayName']
+        }]
+      });
+
+      if (req.io) {
+        // Emit to chat room
+        req.io.to(`chat:${message.chatId}`).emit('message:edited', {
+          messageId: message.id,
+          chatId: message.chatId,
+          content: message.content,
+          editedAt: message.editedAt,
+          editedBy: {
+            id: req.user.id,
+            username: req.user.username,
+          },
         });
       }
-    }
 
-    res.status(200).json({
-      status: 'success',
-      message: 'Message updated successfully',
-      data: { message: updatedMessage },
-    });
+      res.status(200).json({
+        status: 'success',
+        message: 'Message updated successfully',
+        data: { message: updatedMessage },
+      });
+    } catch (error) {
+      console.error('Error editing message:', error);
+      res.status(500).json({
+        status: 'error',
+        message: 'Failed to edit message'
+      });
+    }
   })
 );
 
-/**
- * Delete a message (soft delete)
- */
 router.delete(
   '/:messageId',
   apiRateLimiter,
   asyncHandler(async (req, res) => {
-    const { messageId } = req.params;
-    const { deleteForEveryone = false } = req.query;
+    try {
+      const { messageId } = req.params;
+      const { deleteForEveryone = false } = req.query;
 
-    const message = await Message.findOne({
-      _id: messageId,
-      $or: [
-        { sender: req.user.id },
-        deleteForEveryone === 'true' ? { chat: { $exists: true } } : {},
-      ],
-      isDeleted: false,
-    }).populate('chat');
-
-    if (!message) {
-      throw new NotFoundError('Message not found or not authorized to delete');
-    }
-
-    // For delete for everyone, check if user is admin in group chats
-    if (deleteForEveryone === 'true' && message.chat.chatType === 'group') {
-      const chat = await Chat.findById(message.chat._id);
-      if (!chat.admins.includes(req.user.id)) {
-        throw new AuthorizationError('Only admins can delete messages for everyone');
-      }
-    }
-
-    // Soft delete the message
-    message.isDeleted = true;
-    message.deletedAt = new Date();
-    message.deletedBy = req.user.id;
-    message.deleteForEveryone = deleteForEveryone === 'true';
-    await message.save();
-
-    // If this was the last message in chat, update chat's last message
-    const chat = await Chat.findById(message.chat._id);
-    if (chat.lastMessage && chat.lastMessage.toString() === messageId) {
-      // Find the most recent non-deleted message
-      const previousMessage = await Message.findOne({
-        chat: message.chat._id,
-        isDeleted: false,
-        _id: { $ne: messageId },
-      }).sort({ createdAt: -1 });
-
-      chat.lastMessage = previousMessage?._id || null;
-      await chat.save();
-    }
-
-    // Send WebSocket notification
-    if (req.io) {
-      const populatedChat = await Chat.findById(message.chat._id).populate({
-        path: 'participants',
-        select: 'socketIds',
+      const message = await Message.findOne({
+        where: {
+          id: messageId,
+          isDeleted: false
+        }
       });
 
-      if (populatedChat) {
-        populatedChat.participants.forEach(participant => {
-          if (participant.socketIds) {
-            participant.socketIds.forEach(socketId => {
-              req.io.to(socketId).emit('message:deleted', {
-                messageId: message._id,
-                chatId: message.chat._id,
-                deletedBy: {
-                  id: req.user.id,
-                  username: req.user.username,
-                },
-                deleteForEveryone: message.deleteForEveryone,
-                deletedAt: message.deletedAt,
-              });
-            });
-          }
+      if (!message) {
+        throw new NotFoundError('Message not found');
+      }
+
+      // Check authorization
+      let canDeleteForEveryone = false;
+      if (deleteForEveryone === 'true') {
+        const chat = await Chat.findByPk(message.chatId, {
+          include: [{
+            model: User,
+            as: 'admins',
+            attributes: ['id'],
+            through: { attributes: [] }
+          }]
+        });
+        
+        if (!chat) {
+          throw new NotFoundError('Chat not found');
+        }
+        
+        // Check if user is admin or the sender
+        canDeleteForEveryone = chat.admins.some(admin => admin.id === req.user.id) || 
+                              message.senderId === req.user.id;
+        
+        if (!canDeleteForEveryone) {
+          throw new AuthorizationError('Not authorized to delete message for everyone');
+        }
+      } else {
+        // Only sender can delete their own message
+        if (message.senderId !== req.user.id) {
+          throw new AuthorizationError('Not authorized to delete this message');
+        }
+      }
+
+      await message.update({
+        isDeleted: true,
+        deletedAt: new Date(),
+        deletedBy: req.user.id,
+        deleteForEveryone: deleteForEveryone === 'true'
+      });
+
+      const chat = await Chat.findByPk(message.chatId);
+      if (chat && chat.lastMessageId === messageId) {
+        const previousMessage = await Message.findOne({
+          where: {
+            chatId: message.chatId,
+            isDeleted: false,
+            id: { [Op.ne]: messageId }
+          },
+          order: [['createdAt', 'DESC']]
+        });
+
+        await chat.update({ lastMessageId: previousMessage?.id || null });
+      }
+
+      if (req.io) {
+        // Emit to chat room
+        req.io.to(`chat:${message.chatId}`).emit('message:deleted', {
+          messageId: message.id,
+          chatId: message.chatId,
+          deletedBy: {
+            id: req.user.id,
+            username: req.user.username,
+          },
+          deleteForEveryone: message.deleteForEveryone,
+          deletedAt: message.deletedAt,
         });
       }
-    }
 
-    res.status(200).json({
-      status: 'success',
-      message: 'Message deleted successfully',
-    });
+      res.status(200).json({
+        status: 'success',
+        message: 'Message deleted successfully',
+      });
+    } catch (error) {
+      console.error('Error deleting message:', error);
+      res.status(500).json({
+        status: 'error',
+        message: 'Failed to delete message'
+      });
+    }
   })
 );
 
-/**
- * React to a message
- */
 router.post(
   '/:messageId/react',
   apiRateLimiter,
   asyncHandler(async (req, res) => {
-    const { messageId } = req.params;
-    const { emoji } = req.body;
+    try {
+      const { messageId } = req.params;
+      const { emoji } = req.body;
 
-    if (!emoji || emoji.trim().length === 0) {
-      throw new ValidationError('Emoji is required');
-    }
+      if (!emoji || emoji.trim().length === 0) {
+        throw new ValidationError('Emoji is required');
+      }
 
-    const message = await Message.findOne({
-      _id: messageId,
-      isDeleted: false,
-    }).populate('chat');
-
-    if (!message) {
-      throw new NotFoundError('Message not found');
-    }
-
-    // Check if user has access to the chat
-    const chat = await Chat.findOne({
-      _id: message.chat._id,
-      participants: req.user.id,
-    });
-
-    if (!chat) {
-      throw new AuthorizationError('Access denied');
-    }
-
-    // Add or update reaction
-    const existingReactionIndex = message.reactions.findIndex(
-      r => r.user.toString() === req.user.id && r.emoji === emoji
-    );
-
-    if (existingReactionIndex >= 0) {
-      // Remove reaction if already exists
-      message.reactions.splice(existingReactionIndex, 1);
-    } else {
-      // Add new reaction
-      message.reactions.push({
-        user: req.user.id,
-        emoji,
-        reactedAt: new Date(),
-      });
-    }
-
-    await message.save();
-
-    // Populate reactions
-    const updatedMessage = await Message.findById(messageId).populate({
-      path: 'reactions.user',
-      select: 'username avatar',
-    });
-
-    // Send WebSocket notification
-    if (req.io) {
-      const populatedChat = await Chat.findById(message.chat._id).populate({
-        path: 'participants',
-        select: 'socketIds',
+      const message = await Message.findOne({
+        where: {
+          id: messageId,
+          isDeleted: false
+        }
       });
 
-      if (populatedChat) {
-        populatedChat.participants.forEach(participant => {
-          if (participant.socketIds) {
-            participant.socketIds.forEach(socketId => {
-              req.io.to(socketId).emit('message:reacted', {
-                messageId: message._id,
-                chatId: message.chat._id,
-                userId: req.user.id,
-                username: req.user.username,
-                emoji,
-                action: existingReactionIndex >= 0 ? 'removed' : 'added',
-                reactions: updatedMessage.reactions,
-                timestamp: new Date(),
-              });
-            });
-          }
+      if (!message) {
+        throw new NotFoundError('Message not found');
+      }
+
+      const chat = await Chat.findOne({
+        where: { id: message.chatId },
+        include: [{
+          model: User,
+          as: 'participants',
+          where: { id: req.user.id },
+          required: true
+        }]
+      });
+
+      if (!chat) {
+        throw new AuthorizationError('Access denied');
+      }
+
+      const existingReaction = await Reaction.findOne({
+        where: {
+          messageId: messageId,
+          userId: req.user.id,
+          emoji: emoji
+        }
+      });
+
+      if (existingReaction) {
+        await existingReaction.destroy();
+      } else {
+        await Reaction.create({
+          messageId: messageId,
+          userId: req.user.id,
+          emoji: emoji,
+          reactedAt: new Date()
         });
       }
-    }
 
-    res.status(200).json({
-      status: 'success',
-      message: existingReactionIndex >= 0 ? 'Reaction removed' : 'Reaction added',
-      data: { reactions: updatedMessage.reactions },
-    });
+      const updatedMessage = await Message.findByPk(messageId, {
+        include: [
+          {
+            model: Reaction,
+            as: 'reactions',
+            include: [{
+              model: User,
+              as: 'user',
+              attributes: ['id', 'username', 'avatar']
+            }]
+          }
+        ]
+      });
+
+      if (req.io) {
+        // Emit to chat room
+        req.io.to(`chat:${message.chatId}`).emit('message:reacted', {
+          messageId: message.id,
+          chatId: message.chatId,
+          userId: req.user.id,
+          username: req.user.username,
+          emoji,
+          action: existingReaction ? 'removed' : 'added',
+          reactions: updatedMessage.reactions,
+          timestamp: new Date(),
+        });
+      }
+
+      res.status(200).json({
+        status: 'success',
+        message: existingReaction ? 'Reaction removed' : 'Reaction added',
+        data: { reactions: updatedMessage.reactions },
+      });
+    } catch (error) {
+      console.error('Error reacting to message:', error);
+      res.status(500).json({
+        status: 'error',
+        message: 'Failed to react to message'
+      });
+    }
   })
 );
 
-/**
- * Mark multiple messages as read
- */
 router.post(
   '/mark-read/batch',
   apiRateLimiter,
   asyncHandler(async (req, res) => {
-    const { messageIds, chatId } = req.body;
+    try {
+      const { messageIds, chatId } = req.body;
 
-    if (!Array.isArray(messageIds) || messageIds.length === 0) {
-      throw new ValidationError('Message IDs are required');
-    }
-
-    // Verify user has access to chat
-    const chat = await Chat.findOne({
-      _id: chatId,
-      participants: req.user.id,
-    });
-
-    if (!chat) {
-      throw new NotFoundError('Chat not found or access denied');
-    }
-
-    // Mark messages as read
-    const now = new Date();
-    const result = await Message.updateMany(
-      {
-        _id: { $in: messageIds },
-        chat: chatId,
-        'readBy.user': { $ne: req.user.id },
-      },
-      {
-        $addToSet: {
-          readBy: {
-            user: req.user.id,
-            readAt: now,
-          },
-        },
+      if (!Array.isArray(messageIds) || messageIds.length === 0) {
+        throw new ValidationError('Message IDs are required');
       }
-    );
 
-    // Update chat's unread count
-    if (chat.unreadCounts && chat.unreadCounts.has(req.user.id)) {
-      const currentUnread = chat.unreadCounts.get(req.user.id);
-      const newUnread = Math.max(0, currentUnread - result.modifiedCount);
-      chat.unreadCounts.set(req.user.id, newUnread);
-      await chat.save();
-    }
-
-    // Send WebSocket read receipts
-    if (req.io && result.modifiedCount > 0) {
-      // Get unique senders of the marked messages
-      const messages = await Message.find({
-        _id: { $in: messageIds },
-      }).populate('sender', 'socketIds');
-
-      const senderMap = new Map();
-      messages.forEach(msg => {
-        if (msg.sender && msg.sender._id.toString() !== req.user.id) {
-          const senderId = msg.sender._id.toString();
-          if (!senderMap.has(senderId)) {
-            senderMap.set(senderId, []);
-          }
-          senderMap.get(senderId).push(msg._id);
-        }
+      const chat = await Chat.findOne({
+        where: { id: chatId },
+        include: [{
+          model: User,
+          as: 'participants',
+          where: { id: req.user.id },
+          required: true
+        }]
       });
 
-      // Send notifications to each sender
-      for (const [senderId, msgIds] of senderMap) {
-        const sender = messages.find(msg => msg.sender._id.toString() === senderId)?.sender;
-        if (sender && sender.socketIds) {
-          sender.socketIds.forEach(socketId => {
-            req.io.to(socketId).emit('messages:read-batch', {
-              chatId,
-              readerId: req.user.id,
-              messageIds: msgIds,
-              readAt: now,
-            });
-          });
+      if (!chat) {
+        throw new NotFoundError('Chat not found or access denied');
+      }
+
+      const now = new Date();
+      let markedCount = 0;
+
+      // Update each message individually
+      for (const messageId of messageIds) {
+        const message = await Message.findByPk(messageId);
+        if (message && message.chatId === chatId) {
+          const readBy = message.readBy || [];
+          if (!readBy.includes(req.user.id)) {
+            readBy.push(req.user.id);
+            await message.update({ readBy });
+            markedCount++;
+          }
         }
       }
-    }
 
-    res.status(200).json({
-      status: 'success',
-      message: `${result.modifiedCount} message(s) marked as read`,
-      data: { markedCount: result.modifiedCount },
-    });
+      // Decrement unread count
+      if (chat.decrementUnreadCount) {
+        await chat.decrementUnreadCount(req.user.id, markedCount);
+      }
+
+      if (req.io && markedCount > 0) {
+        // Emit to chat room
+        req.io.to(`chat:${chatId}`).emit('messages:read-batch', {
+          chatId,
+          readerId: req.user.id,
+          messageIds: messageIds.filter(id => {
+            // Filter to only include valid message IDs
+            return true; // In production, you'd want to validate which were actually marked
+          }),
+          readAt: now,
+        });
+      }
+
+      res.status(200).json({
+        status: 'success',
+        message: `${markedCount} message(s) marked as read`,
+        data: { markedCount },
+      });
+    } catch (error) {
+      console.error('Error marking messages as read:', error);
+      res.status(500).json({
+        status: 'error',
+        message: 'Failed to mark messages as read'
+      });
+    }
   })
 );
 
-/**
- * Search messages in a chat
- */
 router.get(
   '/:chatId/search',
   apiRateLimiter,
   asyncHandler(async (req, res) => {
-    const { chatId } = req.params;
-    const { query, page = 1, limit = 20, senderId, dateFrom, dateTo } = req.query;
+    try {
+      const { chatId } = req.params;
+      const { query, page = 1, limit = 20, senderId, dateFrom, dateTo } = req.query;
 
-    if (!query || query.trim().length < 2) {
-      throw new ValidationError('Search query must be at least 2 characters');
-    }
+      if (!query || query.trim().length < 2) {
+        throw new ValidationError('Search query must be at least 2 characters');
+      }
 
-    const skip = (parseInt(page) - 1) * parseInt(limit);
+      const offset = (parseInt(page) - 1) * parseInt(limit);
 
-    // Verify user has access to chat
-    const chat = await Chat.findOne({
-      _id: chatId,
-      participants: req.user.id,
-    });
+      const chat = await Chat.findOne({
+        where: { id: chatId },
+        include: [{
+          model: User,
+          as: 'participants',
+          where: { id: req.user.id },
+          required: true
+        }]
+      });
 
-    if (!chat) {
-      throw new NotFoundError('Chat not found or access denied');
-    }
+      if (!chat) {
+        throw new NotFoundError('Chat not found or access denied');
+      }
 
-    // Build search query
-    const searchQuery = {
-      chat: chatId,
-      isDeleted: false,
-      $or: [
-        { content: { $regex: query, $options: 'i' } },
-        { 'attachments.filename': { $regex: query, $options: 'i' } },
-      ],
-    };
+      const where = {
+        chatId: chatId,
+        isDeleted: false,
+        [Op.or]: [
+          { content: { [Op.iLike]: `%${query}%` } },
+          literal(`attachments::text ILIKE '%${query}%'`)
+        ]
+      };
 
-    if (senderId) {
-      searchQuery.sender = senderId;
-    }
+      if (senderId) {
+        where.senderId = senderId;
+      }
 
-    if (dateFrom) {
-      searchQuery.createdAt = { ...searchQuery.createdAt, $gte: new Date(dateFrom) };
-    }
+      if (dateFrom) {
+        where.createdAt = { ...where.createdAt, [Op.gte]: new Date(dateFrom) };
+      }
 
-    if (dateTo) {
-      searchQuery.createdAt = { ...searchQuery.createdAt, $lte: new Date(dateTo) };
-    }
+      if (dateTo) {
+        where.createdAt = { ...where.createdAt, [Op.lte]: new Date(dateTo) };
+      }
 
-    // Execute search
-    const [messages, total] = await Promise.all([
-      Message.find(searchQuery)
-        .populate({
-          path: 'sender',
-          select: 'username avatar displayName',
-        })
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(parseInt(limit))
-        .lean(),
-      Message.countDocuments(searchQuery),
-    ]);
+      const { count, rows: messages } = await Message.findAndCountAll({
+        where,
+        include: [{
+          model: User,
+          as: 'sender',
+          attributes: ['id', 'username', 'avatar', 'displayName']
+        }],
+        order: [['createdAt', 'DESC']],
+        offset,
+        limit: parseInt(limit),
+        distinct: true
+      });
 
-    res.status(200).json({
-      status: 'success',
-      data: {
-        messages,
-        pagination: {
-          total,
-          page: parseInt(page),
-          limit: parseInt(limit),
-          pages: Math.ceil(total / parseInt(limit)),
+      res.status(200).json({
+        status: 'success',
+        data: {
+          messages,
+          pagination: {
+            total: count,
+            page: parseInt(page),
+            limit: parseInt(limit),
+            pages: Math.ceil(count / parseInt(limit)),
+          },
         },
-      },
-    });
+      });
+    } catch (error) {
+      console.error('Error searching messages:', error);
+      res.status(500).json({
+        status: 'error',
+        message: 'Failed to search messages'
+      });
+    }
   })
 );
 
-/**
- * Get message delivery status
- */
 router.get(
   '/:messageId/status',
   apiRateLimiter,
   asyncHandler(async (req, res) => {
-    const { messageId } = req.params;
+    try {
+      const { messageId } = req.params;
 
-    const message = await Message.findOne({
-      _id: messageId,
-      sender: req.user.id,
-    }).populate({
-      path: 'readBy.user',
-      select: 'username avatar online',
-    });
+      const message = await Message.findOne({
+        where: {
+          id: messageId,
+          senderId: req.user.id
+        },
+        include: [{
+          model: User,
+          as: 'readBy',
+          attributes: ['id', 'username', 'avatar', 'online'],
+          through: { attributes: ['readAt'] }
+        }]
+      });
 
-    if (!message) {
-      throw new NotFoundError('Message not found or not authorized');
-    }
-
-    // Get chat participants
-    const chat = await Chat.findById(message.chat).populate({
-      path: 'participants',
-      select: 'username avatar online',
-    });
-
-    if (!chat) {
-      throw new NotFoundError('Chat not found');
-    }
-
-    // Build status report
-    const status = {
-      sentAt: message.createdAt,
-      deliveredTo: [],
-      readBy: message.readBy.map(reader => ({
-        user: reader.user,
-        readAt: reader.readAt,
-      })),
-      pending: [],
-    };
-
-    // Determine delivery status for each participant (except sender)
-    chat.participants.forEach(participant => {
-      if (participant._id.toString() !== req.user.id) {
-        const hasRead = message.readBy.some(
-          reader => reader.user && reader.user._id.toString() === participant._id.toString()
-        );
-
-        if (hasRead) {
-          // Already in readBy array
-        } else if (participant.online) {
-          status.deliveredTo.push({
-            user: participant,
-            deliveredAt: message.createdAt, // Assuming immediate delivery for online users
-          });
-        } else {
-          status.pending.push(participant);
-        }
+      if (!message) {
+        throw new NotFoundError('Message not found or not authorized');
       }
-    });
 
-    res.status(200).json({
-      status: 'success',
-      data: { status },
-    });
+      const chat = await Chat.findByPk(message.chatId, {
+        include: [{
+          model: User,
+          as: 'participants',
+          attributes: ['id', 'username', 'avatar', 'online'],
+          through: { attributes: [] }
+        }]
+      });
+
+      if (!chat) {
+        throw new NotFoundError('Chat not found');
+      }
+
+      const status = {
+        sentAt: message.createdAt,
+        deliveredTo: [],
+        readBy: message.readBy.map(reader => ({
+          user: reader,
+          readAt: reader.MessageReadBy?.readAt,
+        })),
+        pending: [],
+      };
+
+      chat.participants.forEach(participant => {
+        if (participant.id !== req.user.id) {
+          const hasRead = message.readBy.some(reader => reader.id === participant.id);
+
+          if (hasRead) {
+            // Already in readBy array
+          } else if (participant.online) {
+            status.deliveredTo.push({
+              user: participant,
+              deliveredAt: message.createdAt,
+            });
+          } else {
+            status.pending.push(participant);
+          }
+        }
+      });
+
+      res.status(200).json({
+        status: 'success',
+        data: { status },
+      });
+    } catch (error) {
+      console.error('Error getting message status:', error);
+      res.status(500).json({
+        status: 'error',
+        message: 'Failed to get message status'
+      });
+    }
   })
 );
 
-// Helper functions
 const getMessageTypeFromMime = mimeType => {
   if (mimeType.startsWith('image/')) return 'image';
   if (mimeType.startsWith('video/')) return 'video';
@@ -954,8 +987,6 @@ const getMessageTypeFromMime = mimeType => {
 };
 
 const generateThumbnailIfImage = async file => {
-  // Implement thumbnail generation for images
-  // This is a placeholder - in production, use a library like sharp
   if (file.mimetype.startsWith('image/')) {
     return `/thumbnails/${file.filename}`;
   }

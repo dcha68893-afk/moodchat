@@ -1,10 +1,5 @@
-const { Op } = require('sequelize');
-const { DataTypes } = require('sequelize');
 const bcrypt = require('bcryptjs');
 
-// Remove this line: const sequelize = require('./index');
-
-// Change User from sequelize.define to a function that takes sequelize and DataTypes
 module.exports = (sequelize, DataTypes) => {
   const User = sequelize.define(
     'User',
@@ -116,12 +111,14 @@ module.exports = (sequelize, DataTypes) => {
       timestamps: true,
       underscored: true,
       hooks: {
-        beforeCreate: async user => {
+        // Hash password before creating user
+        beforeCreate: async (user) => {
           if (user.password) {
             user.password = await bcrypt.hash(user.password, 12);
           }
         },
-        beforeUpdate: async user => {
+        // Hash password before updating if it changed
+        beforeUpdate: async (user) => {
           if (user.changed('password')) {
             user.password = await bcrypt.hash(user.password, 12);
           }
@@ -130,11 +127,21 @@ module.exports = (sequelize, DataTypes) => {
     }
   );
 
-  // Instance methods
+  // ===== INSTANCE METHODS =====
+
+  /**
+   * Validate user password
+   * @param {string} password - Plain text password to validate
+   * @returns {Promise<boolean>} True if password matches
+   */
   User.prototype.validatePassword = async function (password) {
     return await bcrypt.compare(password, this.password);
   };
 
+  /**
+   * Convert user instance to JSON, removing sensitive data
+   * @returns {Object} User object without password and updatedAt
+   */
   User.prototype.toJSON = function () {
     const values = Object.assign({}, this.get());
     delete values.password;
@@ -142,21 +149,44 @@ module.exports = (sequelize, DataTypes) => {
     return values;
   };
 
+  /**
+   * Get public profile data (safe for public viewing)
+   * @returns {Object} Public user profile
+   */
   User.prototype.getPublicProfile = function () {
     const { id, username, firstName, lastName, avatar, bio, status, lastSeen } = this;
     return { id, username, firstName, lastName, avatar, bio, status, lastSeen };
   };
 
-  // Static methods
+  // ===== STATIC METHODS =====
+
+  /**
+   * Find user by email
+   * @param {string} email - Email address
+   * @returns {Promise<User|null>} Found user or null
+   */
   User.findByEmail = async function (email) {
     return await this.findOne({ where: { email } });
   };
 
+  /**
+   * Find user by username
+   * @param {string} username - Username
+   * @returns {Promise<User|null>} Found user or null
+   */
   User.findByUsername = async function (username) {
     return await this.findOne({ where: { username } });
   };
 
+  /**
+   * Search users by username, name, or email
+   * @param {string} query - Search query
+   * @param {number} limit - Maximum results (default: 20)
+   * @returns {Promise<Array<User>>} Array of matching users
+   */
   User.search = async function (query, limit = 20) {
+    const { Op } = sequelize.Sequelize;
+    
     return await this.findAll({
       where: {
         [Op.or]: [

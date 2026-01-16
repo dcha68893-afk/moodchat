@@ -1,4 +1,4 @@
-﻿﻿// src/server.js - OPTIMIZED VERSION FOR MOODCHAT BACKEND
+﻿﻿﻿﻿// src/server.js - UPDATED PRODUCTION VERSION FOR MOODCHAT BACKEND
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -6,6 +6,8 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const helmet = require('helmet');
 const path = require('path');
+const fs = require('fs'); // Added for file system operations to mount routes
+const { Sequelize } = require('sequelize');
 
 const app = express();
 
@@ -14,6 +16,100 @@ const PORT = process.env.PORT || 3000;
 const NODE_ENV = process.env.NODE_ENV || 'development';
 const JWT_SECRET = process.env.JWT_ACCESS_SECRET || process.env.JWT_SECRET || 'development-secret-key-change-in-production';
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
+
+// ========== DATABASE CONNECTION - FIXED ==========
+// Initialize database connection variables
+let sequelize;
+let dbConnected = false;
+let models;
+
+// Function to initialize database connection
+async function initializeDatabase() {
+  try {
+    // Direct Sequelize initialization using environment variables
+    sequelize = new Sequelize(
+      process.env.DB_NAME || 'moodchat',
+      process.env.DB_USER || 'postgres',
+      process.env.DB_PASSWORD || '24845c1b4df84c17a0526806f7aa0482',
+      {
+        host: process.env.DB_HOST || '127.0.0.1',
+        port: process.env.DB_PORT || 5432,
+        dialect: process.env.DB_DIALECT || 'postgres',
+        logging: process.env.NODE_ENV === 'development' ? console.log : false,
+        pool: {
+          max: 10,
+          min: 0,
+          acquire: 30000,
+          idle: 10000
+        },
+        dialectOptions: NODE_ENV === 'production' && process.env.DB_SSL === 'true' ? {
+          ssl: {
+            require: true,
+            rejectUnauthorized: false
+          }
+        } : {}
+      }
+    );
+    
+    // Test database connection
+    console.log('🔌 Testing database connection...');
+    await sequelize.authenticate();
+    dbConnected = true;
+    console.log('✅ Database connection established successfully.');
+    
+    // Import models from the correct location
+    try {
+      models = require('./models/index.js');
+      console.log('📦 Models loaded successfully from models/index.js');
+      
+      // Log all models that were loaded
+      const modelNames = Object.keys(models).filter(key => 
+        key !== 'sequelize' && key !== 'Sequelize' && !key.startsWith('_')
+      );
+      console.log(`📦 Loaded ${modelNames.length} models:`, modelNames.join(', '));
+    } catch (modelError) {
+      console.warn('⚠️  Could not load models from models/index.js:', modelError.message);
+      models = {};
+    }
+    
+    // Sync models only if configured (use with caution in production)
+    if (process.env.DB_SYNC === 'true' && NODE_ENV !== 'production') {
+      console.log('🔄 Syncing database models...');
+      await sequelize.sync({ alter: true });
+      console.log('✅ Database models synced.');
+    } else if (process.env.DB_SYNC === 'true' && NODE_ENV === 'production') {
+      console.warn('⚠️  DB_SYNC=true is not recommended in production. Use migrations instead.');
+    }
+    
+    return true;
+    
+  } catch (error) {
+    console.error('❌ Database connection failed:', error.message);
+    
+    // More detailed error information for debugging
+    console.error('Error details:', {
+      name: error.name,
+      code: error.code,
+      original: error.original,
+      stack: error.stack ? error.stack.split('\n')[0] : 'No stack trace'
+    });
+    
+    // Fail in production if database is required
+    if (NODE_ENV === 'production' && process.env.DB_REQUIRED === 'true') {
+      console.error('💀 CRITICAL: Cannot start without database connection in production');
+      process.exit(1);
+    }
+    
+    return false;
+  }
+}
+
+// Initialize database connection
+initializeDatabase().then(success => {
+  dbConnected = success;
+}).catch(err => {
+  console.error('❌ Unexpected error during database initialization:', err);
+});
 
 // ========== ESSENTIAL MIDDLEWARE ==========
 // Disable Helmet's CSP for API server
@@ -124,14 +220,107 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 app.use('/assets', express.static(path.join(__dirname, 'public/assets')));
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ========== IN-MEMORY STORAGE ==========
+// ========== MOUNT ALL EXISTING API ROUTES - FIXED ==========
+// CRITICAL FIX: Mount routes from routes directory under /api prefix
+const mountedRoutes = [];
+const routesPath = path.join(__dirname, 'routes');
+
+// Function to mount all routes from the routes directory
+function mountRoutes() {
+  // Check if routes directory exists
+  if (fs.existsSync(routesPath)) {
+    console.log(`📁 Routes directory found at: ${routesPath}`);
+    
+    // Read all route files
+    const routeFiles = fs.readdirSync(routesPath).filter(file => file.endsWith('.js'));
+    
+    if (routeFiles.length === 0) {
+      console.warn('⚠️  No route files found in routes directory');
+    } else {
+      console.log(`📋 Found ${routeFiles.length} route file(s):`, routeFiles);
+      
+      // Mount each route file
+      routeFiles.forEach(file => {
+        try {
+          const routeName = file.replace('.js', '');
+          const routePath = path.join(routesPath, file);
+          
+          // Clear require cache to ensure fresh import
+          delete require.cache[require.resolve(routePath)];
+          
+          // Import the route module
+          const routeModule = require(routePath);
+          
+          // Determine the base path for the route
+          let basePath = `/api/${routeName}`;
+          
+          // Special handling for index.js
+          if (file === 'index.js') {
+            basePath = '/api';
+          }
+          
+          // Check if the route file exports a router
+          if (routeModule && typeof routeModule === 'function') {
+            // Mount the router
+            app.use(basePath, routeModule);
+            mountedRoutes.push(`${basePath}/*`);
+            console.log(`✅ Mounted ${file} at ${basePath}`);
+          } else if (routeModule && routeModule.router && typeof routeModule.router === 'function') {
+            // Some routes export { router }
+            app.use(basePath, routeModule.router);
+            mountedRoutes.push(`${basePath}/*`);
+            console.log(`✅ Mounted ${file} (router export) at ${basePath}`);
+          } else {
+            console.warn(`⚠️  Route file ${file} does not export a valid router`);
+          }
+        } catch (error) {
+          console.error(`❌ Failed to mount route ${file}:`, error.message);
+          console.error('Error details:', error.stack ? error.stack.split('\n')[0] : 'No stack trace');
+        }
+      });
+    }
+  } else {
+    console.warn(`⚠️  Routes directory not found at: ${routesPath}. Creating it...`);
+    
+    // Create routes directory if it doesn't exist
+    try {
+      fs.mkdirSync(routesPath, { recursive: true });
+      console.log(`✅ Created routes directory at: ${routesPath}`);
+      
+      // Create a sample route file
+      const sampleRoute = `
+const express = require('express');
+const router = express.Router();
+
+router.get('/', (req, res) => {
+  res.json({ 
+    message: 'Sample API route is working',
+    timestamp: new Date().toISOString()
+  });
+});
+
+module.exports = router;
+      `;
+      
+      fs.writeFileSync(path.join(routesPath, 'sample.js'), sampleRoute.trim());
+      console.log(`✅ Created sample route at: ${routesPath}/sample.js`);
+    } catch (error) {
+      console.error(`❌ Failed to create routes directory:`, error.message);
+    }
+  }
+}
+
+// Mount routes
+mountRoutes();
+
+// ========== IN-MEMORY STORAGE (FOR BACKWARD COMPATIBILITY) ==========
 let users = [];
 let messages = [];
 const rooms = ['general', 'random', 'help', 'tech-support'];
 
 // Log storage state periodically
 setInterval(() => {
-  console.log(`[Storage Stats] Users: ${users.length}, Messages: ${messages.length}, Rooms: ${rooms.length}`);
+  console.log(`[Storage Stats] Users: ${users.length}, Messages: ${messages.length}, Rooms: ${rooms.length}, DB Connected: ${dbConnected}`);
 }, 30000); // Every 30 seconds
 
 // ========== AUTHENTICATION MIDDLEWARE ==========
@@ -162,6 +351,7 @@ function authenticateToken(req, res, next) {
 }
 
 // ========== HEALTH & STATUS ENDPOINTS ==========
+// REAL HEALTH ENDPOINT: No auth, no DB queries, always responds
 app.get('/health', (req, res) => {
   res.setHeader('Cache-Control', 'no-cache');
   res.json({ 
@@ -175,6 +365,7 @@ app.get('/health', (req, res) => {
   });
 });
 
+// API STATUS ENDPOINT
 app.get('/api/status', (req, res) => {
   res.json({
     success: true,
@@ -184,9 +375,11 @@ app.get('/api/status', (req, res) => {
     version: '1.0.0',
     server: 'MoodChat Backend',
     cors: 'enabled',
+    database: dbConnected ? 'connected' : 'disconnected',
     origin: req.headers.origin || 'not specified',
+    mountedRoutes: mountedRoutes.length > 0 ? mountedRoutes : 'No routes mounted from routes directory',
     endpoints: {
-      health: '/health',
+      health: '/api/health',
       status: '/api/status',
       auth: {
         register: 'POST /api/register',
@@ -202,14 +395,17 @@ app.get('/api/status', (req, res) => {
   });
 });
 
-// Add /api/health endpoint
+// REAL API HEALTH ENDPOINT: Critical fix - always available, no dependencies
 app.get('/api/health', (req, res) => {
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
   res.status(200).json({
-    success: true,
-    status: 200,
-    message: 'Backend API running',
+    status: 'ok',
+    uptime: Math.floor(process.uptime()),
+    timestamp: new Date().toISOString(),
+    environment: NODE_ENV,
+    database: dbConnected ? 'connected' : 'disconnected',
     service: 'moodchat-backend',
-    timestamp: new Date().toISOString()
+    version: '1.0.0'
   });
 });
 
@@ -223,7 +419,9 @@ app.get('/api/debug', (req, res) => {
       'user-agent': req.headers['user-agent'],
       'x-device-id': req.headers['x-device-id']
     },
-    cors: 'ALLOWED'
+    cors: 'ALLOWED',
+    mountedRoutes: mountedRoutes,
+    dbConnected: dbConnected
   });
 });
 
@@ -258,7 +456,7 @@ app.post('/api/cloudinary/sign', (req, res) => {
   });
 });
 
-// ========== AUTHENTICATION ROUTES (mounted under /api) ==========
+// ========== AUTHENTICATION ROUTES (LEGACY - KEPT FOR COMPATIBILITY) ==========
 // POST /api/register - Register a new user
 app.post('/api/register', async (req, res) => {
   try {
@@ -273,7 +471,63 @@ app.post('/api/register', async (req, res) => {
       });
     }
     
-    // Check if user already exists
+    // Use database if available
+    if (dbConnected && sequelize && models && models.User) {
+      try {
+        const User = models.User;
+        // Check if user already exists in database
+        const existingUser = await User.findOne({ where: { email } });
+        if (existingUser) {
+          return res.status(400).json({
+            success: false,
+            message: 'User already exists',
+            timestamp: new Date().toISOString()
+          });
+        }
+        
+        // Hash password
+        const hashedPassword = await bcrypt.hash(password, 10);
+        
+        // Create user in database
+        const user = await User.create({
+          email,
+          username,
+          password: hashedPassword,
+          avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(username)}&background=random&color=fff`
+        });
+        
+        // Generate token
+        const token = jwt.sign(
+          { 
+            userId: user.id, 
+            email: user.email, 
+            username: user.username 
+          },
+          JWT_SECRET,
+          { expiresIn: '24h' }
+        );
+        
+        // Respond
+        return res.status(201).json({
+          success: true,
+          message: 'User registered successfully in database',
+          token,
+          user: {
+            id: user.id,
+            email: user.email,
+            username: user.username,
+            avatar: user.avatar,
+            createdAt: user.createdAt
+          },
+          timestamp: new Date().toISOString()
+        });
+      } catch (dbError) {
+        console.error('Database registration error:', dbError);
+        // Fall through to in-memory storage
+      }
+    }
+    
+    // Fallback to in-memory storage if database not available
     const existingUser = users.find(u => u.email === email);
     if (existingUser) {
       return res.status(400).json({
@@ -313,7 +567,7 @@ app.post('/api/register', async (req, res) => {
     // Respond
     res.status(201).json({
       success: true,
-      message: 'User registered successfully',
+      message: 'User registered successfully in memory',
       token,
       user: {
         id: user.id,
@@ -341,7 +595,69 @@ app.post('/api/login', async (req, res) => {
   try {
     const { email, password } = req.body;
     
-    // Also accept username for login
+    // Use database if available
+    if (dbConnected && sequelize && models && models.User) {
+      try {
+        const User = models.User;
+        
+        let user;
+        // Try email first, then username
+        if (email.includes('@')) {
+          user = await User.findOne({ where: { email } });
+        } else {
+          user = await User.findOne({ where: { username: email } });
+        }
+        
+        if (!user) {
+          return res.status(401).json({
+            success: false,
+            message: 'Invalid credentials',
+            timestamp: new Date().toISOString()
+          });
+        }
+        
+        // Check password
+        const validPassword = await bcrypt.compare(password, user.password);
+        
+        if (!validPassword) {
+          return res.status(401).json({
+            success: false,
+            message: 'Invalid credentials',
+            timestamp: new Date().toISOString()
+          });
+        }
+        
+        // Generate token
+        const token = jwt.sign(
+          { 
+            userId: user.id, 
+            email: user.email, 
+            username: user.username 
+          },
+          JWT_SECRET,
+          { expiresIn: '24h' }
+        );
+        
+        return res.json({
+          success: true,
+          message: 'Login successful (database)',
+          token,
+          user: {
+            id: user.id,
+            email: user.email,
+            username: user.username,
+            avatar: user.avatar,
+            createdAt: user.createdAt
+          },
+          timestamp: new Date().toISOString()
+        });
+      } catch (dbError) {
+        console.error('Database login error:', dbError);
+        // Fall through to in-memory storage
+      }
+    }
+    
+    // Fallback to in-memory storage if database not available
     let user;
     if (email.includes('@')) {
       user = users.find(u => u.email === email);
@@ -381,7 +697,7 @@ app.post('/api/login', async (req, res) => {
     
     res.json({
       success: true,
-      message: 'Login successful',
+      message: 'Login successful (memory)',
       token,
       user: {
         id: user.id,
@@ -560,6 +876,42 @@ app.post('/api/auth/login', async (req, res) => {
 
 app.get('/api/auth/me', authenticateToken, (req, res) => {
   try {
+    // Try database first
+    if (dbConnected && sequelize && models && models.User) {
+      try {
+        const User = models.User;
+        User.findByPk(req.user.userId)
+          .then(user => {
+            if (!user) {
+              return res.status(404).json({
+                success: false,
+                message: 'User not found in database',
+                timestamp: new Date().toISOString()
+              });
+            }
+            
+            res.json({
+              success: true,
+              user: {
+                id: user.id,
+                email: user.email,
+                username: user.username,
+                avatar: user.avatar,
+                createdAt: user.createdAt
+              },
+              timestamp: new Date().toISOString()
+            });
+          })
+          .catch(dbError => {
+            console.error('Database profile error:', dbError);
+            // Fall through to in-memory
+          });
+      } catch (error) {
+        // Fall through to in-memory
+      }
+    }
+    
+    // Fallback to in-memory
     const user = users.find(u => u.id === req.user.userId);
     
     if (!user) {
@@ -812,42 +1164,33 @@ app.get('/api/user/search', authenticateToken, (req, res) => {
   }
 });
 
-// ========== ADD MORE ENDPOINTS FOR YOUR API.JS ==========
-// Add endpoints that your api.js expects
-
-// Friends endpoints (mock for now)
-app.get('/api/friends/list', authenticateToken, (req, res) => {
-  res.json({
-    success: true,
-    friends: [],
-    timestamp: new Date().toISOString()
-  });
-});
-
-// Statuses endpoints (mock for now)
-app.get('/api/statuses/all', authenticateToken, (req, res) => {
-  res.json({
-    success: true,
-    statuses: [],
-    timestamp: new Date().toISOString()
-  });
-});
-
-// Groups endpoints (mock for now)
-app.get('/api/groups/list', authenticateToken, (req, res) => {
-  res.json({
-    success: true,
-    groups: [],
-    timestamp: new Date().toISOString()
-  });
-});
-
-// Chats endpoints (mock for now)
-app.get('/api/chats/list', authenticateToken, (req, res) => {
-  res.json({
-    success: true,
-    chats: [],
-    timestamp: new Date().toISOString()
+// ========== API CATCH-ALL HANDLER ==========
+// CRITICAL FIX: Handle all unmatched /api/* routes with JSON 404
+app.all('/api/*', (req, res) => {
+  console.warn(`⚠️  Unhandled API route: ${req.method} ${req.path}`);
+  res.status(404).json({
+    success: false,
+    message: `API endpoint ${req.method} ${req.path} not found`,
+    timestamp: new Date().toISOString(),
+    availableEndpoints: mountedRoutes.length > 0 ? mountedRoutes : [
+      '/api/health',
+      '/api/status',
+      '/api/debug',
+      '/api/register',
+      '/api/login',
+      '/api/logout',
+      '/api/auth/register',
+      '/api/auth/login',
+      '/api/auth/me',
+      '/api/auth/profile',
+      '/api/chat/rooms',
+      '/api/chat/messages/:room',
+      '/api/chat/messages',
+      '/api/stats',
+      '/api/user/search',
+      '/api/test-json'
+    ],
+    suggestion: 'Check that the route is properly defined in the routes directory'
   });
 });
 
@@ -875,8 +1218,13 @@ app.get('/dashboard', (req, res) => {
 });
 
 // ========== ERROR HANDLING ==========
-// 404 handler
+// 404 handler for non-API routes
 app.use((req, res) => {
+  if (req.path.startsWith('/api/')) {
+    // Already handled by the /api/* catch-all above
+    return;
+  }
+  
   res.status(404).json({
     success: false,
     message: `Cannot ${req.method} ${req.url}`,
@@ -897,11 +1245,7 @@ app.use((req, res) => {
         '/api/chat/rooms',
         '/api/chat/messages/:room',
         '/api/stats',
-        '/api/user/search',
-        '/api/friends/list',
-        '/api/statuses/all',
-        '/api/groups/list',
-        '/api/chats/list'
+        '/api/user/search'
       ],
       POST: [
         '/api/register',
@@ -921,7 +1265,13 @@ app.use((req, res) => {
 
 // Global error handler
 app.use((err, req, res, next) => {
-  console.error('Global error handler:', err);
+  console.error('🚨 Global error handler:', {
+    message: err.message,
+    stack: err.stack,
+    path: req.path,
+    method: req.method,
+    body: req.body
+  });
   
   // Handle CORS errors
   if (err.message.includes('CORS')) {
@@ -930,6 +1280,42 @@ app.use((err, req, res, next) => {
       message: 'CORS error: ' + err.message,
       timestamp: new Date().toISOString(),
       allowedOrigins: NODE_ENV === 'development' ? 'ALL (*)' : 'restricted'
+    });
+  }
+  
+  // Handle JWT errors
+  if (err.name === 'JsonWebTokenError') {
+    return res.status(401).json({
+      success: false,
+      message: 'Invalid token',
+      timestamp: new Date().toISOString()
+    });
+  }
+  
+  if (err.name === 'TokenExpiredError') {
+    return res.status(401).json({
+      success: false,
+      message: 'Token expired',
+      timestamp: new Date().toISOString()
+    });
+  }
+  
+  // Handle database errors
+  if (err.name && err.name.includes('Sequelize')) {
+    return res.status(500).json({
+      success: false,
+      message: 'Database error',
+      error: NODE_ENV === 'development' ? err.message : undefined,
+      timestamp: new Date().toISOString()
+    });
+  }
+  
+  // Handle bcrypt errors
+  if (err.message.includes('bcrypt')) {
+    return res.status(500).json({
+      success: false,
+      message: 'Password processing error',
+      timestamp: new Date().toISOString()
     });
   }
   
@@ -951,9 +1337,11 @@ const startServer = () => {
     console.log(`│   📍 Local:    http://localhost:${PORT}                  ${PORT < 1000 ? ' ' : ''}`);
     console.log(`│   🌐 Env:      ${NODE_ENV}                               `);
     console.log(`│   ⏱️  Time:     ${new Date().toLocaleString()}           `);
+    console.log(`│   🗄️  Database: ${dbConnected ? '✅ Connected' : '⚠️  Not Connected'}    `);
     console.log(`│   🔓 CORS:     ${NODE_ENV === 'development' ? 'ALLOW ALL ORIGINS' : 'RESTRICTED'}    `);
+    console.log(`│   🛣️  Routes:   ${mountedRoutes.length} mounted           `);
     console.log(`│                                                          │`);
-    console.log(`│   📊 Health:   http://localhost:${PORT}/health           ${PORT < 1000 ? ' ' : ''}`);
+    console.log(`│   📊 Health:   http://localhost:${PORT}/api/health       ${PORT < 1000 ? ' ' : ''}`);
     console.log(`│   🔐 Status:   http://localhost:${PORT}/api/status       ${PORT < 1000 ? ' ' : ''}`);
     console.log(`│   🏥 API Health: http://localhost:${PORT}/api/health     ${PORT < 1000 ? ' ' : ''}`);
     console.log(`│   🐛 Debug:    http://localhost:${PORT}/api/debug        ${PORT < 1000 ? ' ' : ''}`);
@@ -964,6 +1352,15 @@ const startServer = () => {
     console.log(`│   • Login:     http://localhost:${PORT}/login            ${PORT < 1000 ? ' ' : ''}`);
     console.log(`│   • Register:  http://localhost:${PORT}/register         ${PORT < 1000 ? ' ' : ''}`);
     console.log(`│   • Chat:      http://localhost:${PORT}/chat             ${PORT < 1000 ? ' ' : ''}`);
+    console.log(`│                                                          │`);
+    if (mountedRoutes.length > 0) {
+      console.log(`│   📋 Mounted API Routes:                                 │`);
+      mountedRoutes.forEach(route => {
+        console.log(`│   • ${route.padEnd(53)}│`);
+      });
+    } else {
+      console.log(`│   ⚠️  No routes mounted from routes directory           │`);
+    }
     console.log(`│                                                          │`);
     console.log(`│   Press Ctrl+C to stop                                   │`);
     console.log(`│                                                          │`);
@@ -976,6 +1373,14 @@ const startServer = () => {
     
     server.close(() => {
       console.log('HTTP server closed.');
+      
+      // Close database connection if exists
+      if (dbConnected && sequelize) {
+        sequelize.close()
+          .then(() => console.log('Database connection closed.'))
+          .catch(err => console.error('Error closing database:', err.message));
+      }
+      
       console.log('Shutdown complete. Goodbye!');
       process.exit(0);
     });
@@ -990,19 +1395,25 @@ const startServer = () => {
   process.on('SIGINT', () => shutdown('SIGINT'));
 
   process.on('uncaughtException', (error) => {
-    console.error('Uncaught Exception:', error);
+    console.error('🚨 Uncaught Exception:', error);
+    // Don't exit immediately in development
+    if (NODE_ENV === 'production') {
+      shutdown('UNCAUGHT_EXCEPTION');
+    }
   });
 
   process.on('unhandledRejection', (reason, promise) => {
-    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+    console.error('🚨 Unhandled Rejection at:', promise, 'reason:', reason);
   });
 
   server.on('error', (error) => {
     if (error.code === 'EADDRINUSE') {
-      console.error(`Port ${PORT} is already in use.`);
+      console.error(`❌ Port ${PORT} is already in use.`);
+      console.error(`   Try: kill -9 $(lsof -t -i:${PORT}) or use a different port`);
       process.exit(1);
     } else {
-      console.error('Server error:', error);
+      console.error('❌ Server error:', error);
+      process.exit(1);
     }
   });
 
