@@ -53,8 +53,7 @@ const authValidation = {
       ),
 
     body('confirmPassword')
-      .notEmpty()
-      .withMessage('Confirm password is required')
+      .optional()
       .custom((value, { req }) => value === req.body.password)
       .withMessage('Passwords do not match'),
   ]),
@@ -62,7 +61,15 @@ const authValidation = {
   login: validate([
     body('identifier')
       .notEmpty()
-      .withMessage('Email or username is required'),
+      .withMessage('Email or username is required')
+      .custom(value => {
+        const isValidEmail = required('validator').isEmail(value);
+        const isUsername = /^[a-zA-Z0-9_]+$/.test(value);
+        if (!isValidEmail && !isUsername) {
+          throw new Error('Identifier must be a valid email or username');
+        }
+        return true;
+      }),
     body('password').notEmpty().withMessage('Password is required'),
   ]),
 
