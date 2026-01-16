@@ -10,7 +10,7 @@ const path = require('path');
 const app = express();
 
 // ========== CONFIGURATION ==========
-const PORT = process.env.PORT || 4000;
+const PORT = process.env.PORT || 3000;
 const NODE_ENV = process.env.NODE_ENV || 'development';
 const JWT_SECRET = process.env.JWT_ACCESS_SECRET || process.env.JWT_SECRET || 'development-secret-key-change-in-production';
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
@@ -199,6 +199,17 @@ app.get('/api/status', (req, res) => {
         send: 'POST /api/chat/messages'
       }
     }
+  });
+});
+
+// Add /api/health endpoint
+app.get('/api/health', (req, res) => {
+  res.status(200).json({
+    success: true,
+    status: 200,
+    message: 'Backend API running',
+    service: 'moodchat-backend',
+    timestamp: new Date().toISOString()
   });
 });
 
@@ -879,6 +890,7 @@ app.use((req, res) => {
         '/dashboard',
         '/health',
         '/api/status',
+        '/api/health',
         '/api/debug',
         '/api/auth/me',
         '/api/auth/profile',
@@ -943,6 +955,7 @@ const startServer = () => {
     console.log(`│                                                          │`);
     console.log(`│   📊 Health:   http://localhost:${PORT}/health           ${PORT < 1000 ? ' ' : ''}`);
     console.log(`│   🔐 Status:   http://localhost:${PORT}/api/status       ${PORT < 1000 ? ' ' : ''}`);
+    console.log(`│   🏥 API Health: http://localhost:${PORT}/api/health     ${PORT < 1000 ? ' ' : ''}`);
     console.log(`│   🐛 Debug:    http://localhost:${PORT}/api/debug        ${PORT < 1000 ? ' ' : ''}`);
     console.log(`│   💬 API Base: http://localhost:${PORT}/api              ${PORT < 1000 ? ' ' : ''}`);
     console.log(`│                                                          │`);
