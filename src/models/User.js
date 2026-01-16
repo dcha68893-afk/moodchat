@@ -12,35 +12,68 @@ module.exports = (sequelize, DataTypes) => {
       username: {
         type: DataTypes.STRING(50),
         allowNull: false,
-        unique: true,
+        unique: {
+          name: 'username',
+          msg: 'Username already exists'
+        },
         validate: {
-          len: [3, 50],
-          is: /^[a-zA-Z0-9_]+$/,
+          len: {
+            args: [3, 30],
+            msg: 'Username must be between 3 and 30 characters'
+          },
+          is: {
+            args: /^[a-zA-Z0-9_]+$/,
+            msg: 'Username can only contain letters, numbers, and underscores'
+          }
         },
       },
       email: {
         type: DataTypes.STRING(100),
         allowNull: false,
-        unique: true,
+        unique: {
+          name: 'email',
+          msg: 'Email already exists'
+        },
         validate: {
-          isEmail: true,
-          len: [1, 100],
+          isEmail: {
+            args: true,
+            msg: 'Invalid email format'
+          },
+          len: {
+            args: [1, 100],
+            msg: 'Email must be less than 100 characters'
+          }
         },
       },
       password: {
         type: DataTypes.STRING,
         allowNull: false,
         validate: {
-          len: [8, 100],
+          len: {
+            args: [8, 100],
+            msg: 'Password must be at least 8 characters long'
+          }
         },
       },
       firstName: {
         type: DataTypes.STRING(50),
         allowNull: true,
+        validate: {
+          len: {
+            args: [0, 50],
+            msg: 'First name cannot exceed 50 characters'
+          }
+        }
       },
       lastName: {
         type: DataTypes.STRING(50),
         allowNull: true,
+        validate: {
+          len: {
+            args: [0, 50],
+            msg: 'Last name cannot exceed 50 characters'
+          }
+        }
       },
       avatar: {
         type: DataTypes.STRING,
@@ -49,13 +82,22 @@ module.exports = (sequelize, DataTypes) => {
       bio: {
         type: DataTypes.TEXT,
         allowNull: true,
+        validate: {
+          len: {
+            args: [0, 500],
+            msg: 'Bio cannot exceed 500 characters'
+          }
+        }
       },
       phone: {
         type: DataTypes.STRING(20),
         allowNull: true,
         validate: {
-          is: /^\+?[1-9]\d{1,14}$/,
-        },
+          is: {
+            args: /^\+?[1-9]\d{1,14}$/,
+            msg: 'Invalid phone number format'
+          }
+        }
       },
       dateOfBirth: {
         type: DataTypes.DATEONLY,
@@ -144,8 +186,11 @@ module.exports = (sequelize, DataTypes) => {
    */
   User.prototype.toJSON = function () {
     const values = Object.assign({}, this.get());
+    
+    // Remove sensitive fields
     delete values.password;
     delete values.updatedAt;
+    
     return values;
   };
 
@@ -158,6 +203,15 @@ module.exports = (sequelize, DataTypes) => {
     return { id, username, firstName, lastName, avatar, bio, status, lastSeen };
   };
 
+  /**
+   * Update user's last seen timestamp
+   * @returns {Promise<User>} Updated user instance
+   */
+  User.prototype.updateLastSeen = async function () {
+    this.lastSeen = new Date();
+    return await this.save();
+  };
+
   // ===== STATIC METHODS =====
 
   /**
@@ -166,7 +220,11 @@ module.exports = (sequelize, DataTypes) => {
    * @returns {Promise<User|null>} Found user or null
    */
   User.findByEmail = async function (email) {
-    return await this.findOne({ where: { email } });
+    return await this.findOne({ 
+      where: { 
+        email: email.toLowerCase().trim() 
+      } 
+    });
   };
 
   /**
@@ -175,7 +233,11 @@ module.exports = (sequelize, DataTypes) => {
    * @returns {Promise<User|null>} Found user or null
    */
   User.findByUsername = async function (username) {
-    return await this.findOne({ where: { username } });
+    return await this.findOne({ 
+      where: { 
+        username: username.trim() 
+      } 
+    });
   };
 
   /**
@@ -197,7 +259,7 @@ module.exports = (sequelize, DataTypes) => {
         ],
       },
       limit: limit,
-      attributes: ['id', 'username', 'firstName', 'lastName', 'avatar', 'bio'],
+      attributes: ['id', 'username', 'firstName', 'lastName', 'avatar', 'bio', 'status'],
     });
   };
 

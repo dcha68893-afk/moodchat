@@ -1,12 +1,5 @@
-const ConflictError = class ConflictError extends Error {
-  constructor(message) {
-    super(message);
-    this.name = 'ConflictError';
-    this.statusCode = 409;
-  }
-};
-
-const router = require('express').Router();
+const express = require('express');
+const router = express.Router();
 const sequelize = require('sequelize');
 const {
   asyncHandler,
@@ -19,6 +12,14 @@ const { authMiddleware } = require('../middleware/auth');
 const { apiRateLimiter } = require('../middleware/rateLimiter');
 const { User, Friend } = require('../models');
 const userController = require('../controllers/userController');
+
+const ConflictError = class ConflictError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'ConflictError';
+    this.statusCode = 409;
+  }
+};
 
 router.use(authMiddleware);
 

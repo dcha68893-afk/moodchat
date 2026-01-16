@@ -1,4 +1,3 @@
-
 const express = require('express');
 const router = express.Router();
 const {
@@ -11,11 +10,11 @@ const {
 const { authenticate } = require('../middleware/auth');
 const { apiRateLimiter } = require('../middleware/rateLimiter');
 const { User, Chat, Call, Message } = require('../models');
+const sequelize = require('sequelize');
 
 const CALL_HISTORY_RETENTION_DAYS = parseInt(process.env.CALL_HISTORY_RETENTION_DAYS) || 365;
 const MAX_CALL_DURATION = parseInt(process.env.MAX_CALL_DURATION) || 14400;
 
-// All routes require authentication
 router.use(authenticate);
 
 console.log('✅ Calls routes initialized');

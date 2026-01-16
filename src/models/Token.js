@@ -1,5 +1,7 @@
-const Token = (sequelize, DataTypes) => {
-  const TokenModel = sequelize.define(
+const crypto = require('crypto');
+
+module.exports = (sequelize, DataTypes) => {
+  const Token = sequelize.define(
     'Token',
     {
       id: {
@@ -14,20 +16,55 @@ const Token = (sequelize, DataTypes) => {
           model: 'users',
           key: 'id',
         },
+        validate: {
+          notNull: {
+            msg: 'User ID is required'
+          },
+          isInt: {
+            msg: 'User ID must be an integer'
+          }
+        }
       },
       token: {
         type: DataTypes.STRING(500),
         allowNull: false,
-        unique: true,
+        unique: {
+          name: 'token',
+          msg: 'Token already exists'
+        },
+        validate: {
+          notEmpty: {
+            msg: 'Token cannot be empty'
+          },
+          len: {
+            args: [10, 500],
+            msg: 'Token must be between 10 and 500 characters'
+          }
+        }
       },
       tokenType: {
         type: DataTypes.ENUM('access', 'refresh', 'verification', 'password_reset', 'api'),
         defaultValue: 'access',
         allowNull: false,
+        validate: {
+          isIn: {
+            args: [['access', 'refresh', 'verification', 'password_reset', 'api']],
+            msg: 'Invalid token type'
+          }
+        }
       },
       expiresAt: {
         type: DataTypes.DATE,
         allowNull: false,
+        validate: {
+          isDate: {
+            msg: 'Expires at must be a valid date'
+          },
+          isAfter: {
+            args: new Date().toISOString(),
+            msg: 'Expires at must be in the future'
+          }
+        }
       },
       isRevoked: {
         type: DataTypes.BOOLEAN,
@@ -41,6 +78,11 @@ const Token = (sequelize, DataTypes) => {
       ipAddress: {
         type: DataTypes.STRING(45),
         allowNull: true,
+        validate: {
+          isIP: {
+            msg: 'Invalid IP address'
+          }
+        }
       },
       deviceInfo: {
         type: DataTypes.JSON,
@@ -62,6 +104,7 @@ const Token = (sequelize, DataTypes) => {
         },
         {
           fields: ['token'],
+          unique: true
         },
         {
           fields: ['token_type'],
@@ -72,10 +115,13 @@ const Token = (sequelize, DataTypes) => {
         {
           fields: ['is_revoked'],
         },
+        {
+          fields: ['user_id', 'token_type'],
+        },
       ],
       hooks: {
         // Auto-set expiration date based on token type if not provided
-        beforeCreate: async (token) => {
+        beforeValidate: async (token) => {
           if (!token.expiresAt) {
             const expiresIn =
               {
@@ -93,13 +139,22 @@ const Token = (sequelize, DataTypes) => {
     }
   );
 
+  // ===== ASSOCIATIONS =====
+  Token.associate = function(models) {
+    Token.belongsTo(models.User, {
+      foreignKey: 'userId',
+      as: 'user',
+      onDelete: 'CASCADE'
+    });
+  };
+
   // ===== INSTANCE METHODS =====
 
   /**
    * Check if the token is expired
    * @returns {boolean} True if token is expired
    */
-  TokenModel.prototype.isExpired = function () {
+  Token.prototype.isExpired = function () {
     return this.expiresAt < new Date();
   };
 
@@ -107,7 +162,7 @@ const Token = (sequelize, DataTypes) => {
    * Check if the token is valid (not revoked and not expired)
    * @returns {boolean} True if token is valid
    */
-  TokenModel.prototype.isValid = function () {
+  Token.prototype.isValid = function () {
     return !this.isRevoked && !this.isExpired();
   };
 
@@ -115,7 +170,7 @@ const Token = (sequelize, DataTypes) => {
    * Revoke the token
    * @returns {Promise<Token>} Updated token instance
    */
-  TokenModel.prototype.revoke = async function () {
+  Token.prototype.revoke = async function () {
     this.isRevoked = true;
     return await this.save();
   };
@@ -125,7 +180,7 @@ const Token = (sequelize, DataTypes) => {
    * @param {number} additionalTimeMs - Additional time in milliseconds
    * @returns {Promise<Token>} Updated token instance
    */
-  TokenModel.prototype.extend = async function (additionalTimeMs) {
+  Token.prototype.extend = async function (additionalTimeMs) {
     this.expiresAt = new Date(this.expiresAt.getTime() + additionalTimeMs);
     return await this.save();
   };
@@ -135,7 +190,7 @@ const Token = (sequelize, DataTypes) => {
    * @param {Object} deviceInfo - Device information object
    * @returns {Promise<Token>} Updated token instance
    */
-  TokenModel.prototype.updateDeviceInfo = async function (deviceInfo) {
+  Token.prototype.updateDeviceInfo = async function (deviceInfo) {
     this.deviceInfo = { ...this.deviceInfo, ...deviceInfo };
     return await this.save();
   };
@@ -148,7 +203,7 @@ const Token = (sequelize, DataTypes) => {
    * @param {boolean} includeUser - Whether to include user data
    * @returns {Promise<Token|null>} Found token or null
    */
-  TokenModel.findByToken = async function (tokenString, includeUser = false) {
+  Token.findByToken = async function (tokenString, includeUser = false) {
     const options = {
       where: { token: tokenString },
     };
@@ -156,8 +211,8 @@ const Token = (sequelize, DataTypes) => {
     if (includeUser) {
       options.include = [
         {
-          model: sequelize.models.User,
-          attributes: ['id', 'username', 'email', 'isActive'],
+          model: this.sequelize.models.User,
+          attributes: ['id', 'username', 'email', 'isActive', 'isVerified'],
         },
       ];
     }
@@ -171,11 +226,11 @@ const Token = (sequelize, DataTypes) => {
    * @param {string|null} tokenType - Optional token type filter
    * @returns {Promise<Array<Token>>} Array of valid tokens
    */
-  TokenModel.findValidByUserId = async function (userId, tokenType = null) {
+  Token.findValidByUserId = async function (userId, tokenType = null) {
     const where = {
       userId,
       isRevoked: false,
-      expiresAt: { [sequelize.Sequelize.Op.gt]: new Date() },
+      expiresAt: { [this.sequelize.Sequelize.Op.gt]: new Date() },
     };
 
     if (tokenType) {
@@ -194,27 +249,28 @@ const Token = (sequelize, DataTypes) => {
    * @param {string|null} exceptToken - Token to exclude from revocation
    * @returns {Promise<number>} Number of revoked tokens
    */
-  TokenModel.revokeAllUserTokens = async function (userId, exceptToken = null) {
+  Token.revokeAllUserTokens = async function (userId, exceptToken = null) {
     const where = {
       userId,
       isRevoked: false,
     };
 
     if (exceptToken) {
-      where.token = { [sequelize.Sequelize.Op.ne]: exceptToken };
+      where.token = { [this.sequelize.Sequelize.Op.ne]: exceptToken };
     }
 
-    return await this.update({ isRevoked: true }, { where: where });
+    const [affectedRows] = await this.update({ isRevoked: true }, { where: where });
+    return affectedRows;
   };
 
   /**
    * Clean up expired tokens from database
    * @returns {Promise<number>} Number of deleted tokens
    */
-  TokenModel.cleanupExpiredTokens = async function () {
+  Token.cleanupExpiredTokens = async function () {
     return await this.destroy({
       where: {
-        expiresAt: { [sequelize.Sequelize.Op.lt]: new Date() },
+        expiresAt: { [this.sequelize.Sequelize.Op.lt]: new Date() },
       },
     });
   };
@@ -224,11 +280,9 @@ const Token = (sequelize, DataTypes) => {
    * @param {number} length - Length of token in bytes (default: 64)
    * @returns {string} Random token string
    */
-  TokenModel.generateRandomToken = function (length = 64) {
-    return require('crypto').randomBytes(length).toString('hex');
+  Token.generateRandomToken = function (length = 64) {
+    return crypto.randomBytes(length).toString('hex');
   };
 
-  return TokenModel;
+  return Token;
 };
-
-module.exports = Token;

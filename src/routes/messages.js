@@ -1,5 +1,6 @@
-const router = require('express').Router();
-const { Op, fn, col, literal } = require('sequelize'); // Fixed: Import specific operators from sequelize
+const express = require('express');
+const router = express.Router();
+const { Op, fn, col, literal } = require('sequelize');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs').promises;
@@ -152,11 +153,9 @@ router.get(
         const now = new Date();
         const messageIds = unreadMessages.map(msg => msg.id);
         
-        // Update each message individually to mark as read
         for (const messageId of messageIds) {
           const message = await Message.findByPk(messageId);
           if (message) {
-            // Check if user already read it
             const readBy = message.readBy || [];
             if (!readBy.includes(req.user.id)) {
               readBy.push(req.user.id);
@@ -165,7 +164,6 @@ router.get(
           }
         }
 
-        // Mark chat as read for the user
         if (chat.markAsRead) {
           await chat.markAsRead(req.user.id);
         }
@@ -177,7 +175,6 @@ router.get(
             if (senderId !== req.user.id) {
               const sender = unreadMessages.find(msg => msg.senderId === senderId)?.sender;
               if (sender) {
-                // Emit to all sockets in the chat room
                 req.io.to(`chat:${chatId}`).emit('messages:read', {
                   chatId,
                   readerId: req.user.id,
@@ -253,7 +250,6 @@ router.post(
         throw new NotFoundError('Chat not found');
       }
 
-      // Check if user is a participant
       const isParticipant = chat.participants.some(p => p.id === req.user.id);
       if (!isParticipant) {
         throw new AuthorizationError('Access denied');
@@ -276,13 +272,10 @@ router.post(
 
       const currentUser = await User.findByPk(req.user.id);
 
-      // Check for blocked users
       const blockedParticipants = chat.participants.filter(participant => {
-        // Check if current user blocked participant
         if (currentUser.blockedUsers && currentUser.blockedUsers.some(bu => bu.id === participant.id)) {
           return true;
         }
-        // Check if participant blocked current user
         if (participant.blockedUsers && participant.blockedUsers.some(bu => bu.id === req.user.id)) {
           return true;
         }
@@ -298,9 +291,9 @@ router.post(
         senderId: req.user.id,
         content: content?.trim(),
         messageType,
-        replyTo: replyToMessage?.id, // Fixed: Use replyTo instead of repliesTo
+        replyTo: replyToMessage?.id,
         attachments: [],
-        readBy: [req.user.id] // Sender automatically reads their own message
+        readBy: [req.user.id]
       });
 
       const populatedMessage = await Message.findByPk(message.id, {
@@ -312,7 +305,7 @@ router.post(
           },
           {
             model: Message,
-            as: 'replyTo', // Fixed: Use replyTo instead of repliesTo
+            as: 'replyTo',
             attributes: ['content', 'senderId', 'createdAt'],
             include: [{
               model: User,
@@ -328,7 +321,6 @@ router.post(
         updatedAt: new Date()
       });
 
-      // Increment unread counts for other participants
       if (chat.incrementUnreadCounts) {
         await chat.incrementUnreadCounts(req.user.id);
       }
@@ -337,7 +329,6 @@ router.post(
       messageData.unreadCount = 1;
 
       if (req.io) {
-        // Emit to chat room
         req.io.to(`chat:${chatId}`).emit('message:new', {
           message: messageData,
           chat: {
@@ -352,7 +343,6 @@ router.post(
           },
         });
 
-        // Emit to sender separately
         req.io.to(`user:${req.user.id}`).emit('message:sent', {
           message: messageData,
           chatId: chat.id,
@@ -426,7 +416,6 @@ router.post(
         updatedAt: new Date()
       });
 
-      // Increment unread counts for other participants
       if (chat.incrementUnreadCounts) {
         await chat.incrementUnreadCounts(req.user.id);
       }
@@ -440,7 +429,6 @@ router.post(
       });
 
       if (req.io) {
-        // Emit to chat room
         req.io.to(`chat:${chatId}`).emit('message:new', {
           message: populatedMessage.toJSON(),
           chat: {
@@ -461,7 +449,6 @@ router.post(
       });
     } catch (error) {
       console.error('Error uploading file:', error);
-      // Clean up uploaded file if error occurred
       if (req.file && req.file.path) {
         await fs.unlink(req.file.path).catch(() => {});
       }
@@ -517,7 +504,6 @@ router.patch(
       });
 
       if (req.io) {
-        // Emit to chat room
         req.io.to(`chat:${message.chatId}`).emit('message:edited', {
           messageId: message.id,
           chatId: message.chatId,
@@ -564,7 +550,6 @@ router.delete(
         throw new NotFoundError('Message not found');
       }
 
-      // Check authorization
       let canDeleteForEveryone = false;
       if (deleteForEveryone === 'true') {
         const chat = await Chat.findByPk(message.chatId, {
@@ -580,7 +565,6 @@ router.delete(
           throw new NotFoundError('Chat not found');
         }
         
-        // Check if user is admin or the sender
         canDeleteForEveryone = chat.admins.some(admin => admin.id === req.user.id) || 
                               message.senderId === req.user.id;
         
@@ -588,7 +572,6 @@ router.delete(
           throw new AuthorizationError('Not authorized to delete message for everyone');
         }
       } else {
-        // Only sender can delete their own message
         if (message.senderId !== req.user.id) {
           throw new AuthorizationError('Not authorized to delete this message');
         }
@@ -616,7 +599,6 @@ router.delete(
       }
 
       if (req.io) {
-        // Emit to chat room
         req.io.to(`chat:${message.chatId}`).emit('message:deleted', {
           messageId: message.id,
           chatId: message.chatId,
@@ -714,7 +696,6 @@ router.post(
       });
 
       if (req.io) {
-        // Emit to chat room
         req.io.to(`chat:${message.chatId}`).emit('message:reacted', {
           messageId: message.id,
           chatId: message.chatId,
@@ -770,7 +751,6 @@ router.post(
       const now = new Date();
       let markedCount = 0;
 
-      // Update each message individually
       for (const messageId of messageIds) {
         const message = await Message.findByPk(messageId);
         if (message && message.chatId === chatId) {
@@ -783,20 +763,15 @@ router.post(
         }
       }
 
-      // Decrement unread count
       if (chat.decrementUnreadCount) {
         await chat.decrementUnreadCount(req.user.id, markedCount);
       }
 
       if (req.io && markedCount > 0) {
-        // Emit to chat room
         req.io.to(`chat:${chatId}`).emit('messages:read-batch', {
           chatId,
           readerId: req.user.id,
-          messageIds: messageIds.filter(id => {
-            // Filter to only include valid message IDs
-            return true; // In production, you'd want to validate which were actually marked
-          }),
+          messageIds: messageIds.filter(id => true),
           readAt: now,
         });
       }
@@ -952,7 +927,6 @@ router.get(
           const hasRead = message.readBy.some(reader => reader.id === participant.id);
 
           if (hasRead) {
-            // Already in readBy array
           } else if (participant.online) {
             status.deliveredTo.push({
               user: participant,

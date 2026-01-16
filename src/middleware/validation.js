@@ -60,11 +60,9 @@ const authValidation = {
   ]),
 
   login: validate([
-    body('email')
+    body('identifier')
       .notEmpty()
-      .withMessage('Email is required')
-      .isEmail()
-      .withMessage('Invalid email format'),
+      .withMessage('Email or username is required'),
     body('password').notEmpty().withMessage('Password is required'),
   ]),
 
