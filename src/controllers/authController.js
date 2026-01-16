@@ -50,6 +50,9 @@ class AuthController {
         id: result.user.id,
         username: result.user.username,
         email: result.user.email,
+        firstName: result.user.firstName,
+        lastName: result.user.lastName,
+        profile: result.user.profile,
         displayName: `${result.user.firstName || ''} ${result.user.lastName || ''}`.trim() || result.user.username
       };
 
@@ -58,13 +61,9 @@ class AuthController {
 
       res.status(201).json({
         success: true,
-        message: 'Registration successful. Please check your email for verification.',
-        token: token, // Add token to response
-        user: sanitizedUser, // Add sanitized user object
-        data: {
-          user: result.user,
-          tokens: result.tokens,
-        },
+        token: token,
+        user: sanitizedUser,
+        message: 'Registration successful. Please check your email for verification.'
       });
     } catch (error) {
       logger.error('Registration controller error:', error);
@@ -101,21 +100,20 @@ class AuthController {
         id: result.user.id,
         username: result.user.username,
         email: result.user.email,
+        firstName: result.user.firstName,
+        lastName: result.user.lastName,
+        profile: result.user.profile,
         displayName: `${result.user.firstName || ''} ${result.user.lastName || ''}`.trim() || result.user.username
       };
 
       // Log successful login for debugging
       logger.info(`User logged in: ${email}`, { userId: result.user.id });
 
-      res.json({
+      res.status(200).json({
         success: true,
-        message: 'Login successful',
-        token: token, // Add token to response
-        user: sanitizedUser, // Add sanitized user object
-        data: {
-          user: result.user,
-          tokens: result.tokens,
-        },
+        token: token,
+        user: sanitizedUser,
+        message: 'Login successful'
       });
     } catch (error) {
       logger.error('Login controller error:', error);
