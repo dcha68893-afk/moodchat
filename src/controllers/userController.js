@@ -5,80 +5,42 @@ const logger = require('../utils/logger');
 class UserController {
   async getAllUsers(req, res, next) {
     try {
-      // Get query parameters for pagination/filtering
-      const { page = 1, limit = 50, sortBy = 'createdAt', sortOrder = 'desc' } = req.query;
+      // Get current user ID from authenticated request
+      const currentUserId = req.user.id;
       
-      // Parse pagination parameters
-      const pageNum = parseInt(page);
-      const limitNum = parseInt(limit);
-      
-      // Validate pagination parameters
-      if (pageNum < 1 || limitNum < 1 || limitNum > 100) {
-        throw new AppError('Invalid pagination parameters. Page must be >= 1, limit between 1 and 100', 400);
-      }
+      // Get all registered users excluding the current user
+      const users = await userService.getAllRegisteredUsers(currentUserId);
 
-      // Get all users with pagination
-      const result = await userService.getAllUsers({
-        page: pageNum,
-        limit: limitNum,
-        sortBy,
-        sortOrder: sortOrder === 'asc' ? 'asc' : 'desc'
-      });
-
-      // Remove sensitive information from users
-      const safeUsers = result.users.map(user => {
-        const userObj = user.toJSON ? user.toJSON() : user;
-        
-        // Remove sensitive fields
-        delete userObj.password;
-        delete userObj.refreshToken;
-        delete userObj.emailVerificationToken;
-        delete userObj.passwordResetToken;
-        delete userObj.passwordResetExpires;
-        
-        // Keep only essential user information
-        return {
-          id: userObj.id,
-          username: userObj.username,
-          email: userObj.email,
-          firstName: userObj.firstName,
-          lastName: userObj.lastName,
-          avatar: userObj.avatar,
-          bio: userObj.bio,
-          status: userObj.status,
-          lastSeen: userObj.lastSeen,
-          isOnline: userObj.isOnline,
-          createdAt: userObj.createdAt,
-          updatedAt: userObj.updatedAt,
-          settings: userObj.settings,
-          profile: userObj.profile
-        };
-      });
+      // Format response to only include required fields
+      const formattedUsers = users.map(user => ({
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        avatar: user.avatar
+      }));
 
       // Log for debugging
-      logger.info(`Retrieved ${safeUsers.length} users`, { 
-        page: pageNum, 
-        limit: limitNum,
-        total: result.total 
-      });
+      logger.info(`Retrieved ${formattedUsers.length} users for current user: ${currentUserId}`);
 
       res.json({
         success: true,
         data: {
-          users: safeUsers,
-          pagination: {
-            page: pageNum,
-            limit: limitNum,
-            total: result.total,
-            pages: Math.ceil(result.total / limitNum),
-            hasNextPage: pageNum * limitNum < result.total,
-            hasPrevPage: pageNum > 1
-          }
+          users: formattedUsers,
+          count: formattedUsers.length
         }
       });
     } catch (error) {
       logger.error('Get all users controller error:', error);
-      next(error);
+      
+      // Return 500 error with descriptive JSON if DB fetch fails
+      res.status(500).json({
+        success: false,
+        error: {
+          code: 'DATABASE_ERROR',
+          message: 'Failed to fetch users from database',
+          details: process.env.NODE_ENV === 'development' ? error.message : undefined
+        }
+      });
     }
   }
 

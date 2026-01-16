@@ -1,3 +1,4 @@
+
 const ConflictError = class ConflictError extends Error {
   constructor(message) {
     super(message);
@@ -10,7 +11,7 @@ const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
 
-// Import middleware and utilities
+// Import middleware, controllers and utilities
 const {
   asyncHandler,
   AuthenticationError,
@@ -21,6 +22,7 @@ const {
 const { authMiddleware } = require('../middleware/auth');
 const { apiRateLimiter } = require('../middleware/rateLimiter');
 const User = require('../models/User');
+const userController = require('../controllers/userController'); // Import user controller
 
 // Apply authentication middleware to all routes
 router.use(authMiddleware);
@@ -54,18 +56,10 @@ router.get(
 
     const total = await User.countDocuments(query);
 
-    res.status(200).json({
-      status: 'success',
-      data: {
-        users,
-        pagination: {
-          total,
-          page: parseInt(page),
-          limit: parseInt(limit),
-          pages: Math.ceil(total / parseInt(limit)),
-        },
-      },
-    });
+    // Call controller method for consistency
+    const response = userController.getAllUsers(users, total, parseInt(page), parseInt(limit));
+    
+    res.status(200).json(response);
   })
 );
 

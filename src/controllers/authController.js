@@ -19,24 +19,52 @@ class AuthController {
         throw new AppError('Invalid email format', 400);
       }
 
+      // Validate email domain (basic example)
+      const emailDomain = email.split('@')[1];
+      if (!emailDomain || !validator.isFQDN(emailDomain)) {
+        throw new AppError('Invalid email domain', 400);
+      }
+
       // Validate password strength
       if (password.length < 8) {
         throw new AppError('Password must be at least 8 characters long', 400);
       }
-
-      // Validate username format (alphanumeric with underscores)
-      if (!/^[a-zA-Z0-9_]+$/.test(username)) {
-        throw new AppError('Username can only contain letters, numbers, and underscores', 400);
+      
+      // Additional password complexity (optional)
+      if (!/[A-Z]/.test(password)) {
+        throw new AppError('Password must contain at least one uppercase letter', 400);
+      }
+      if (!/[a-z]/.test(password)) {
+        throw new AppError('Password must contain at least one lowercase letter', 400);
+      }
+      if (!/[0-9]/.test(password)) {
+        throw new AppError('Password must contain at least one number', 400);
       }
 
-      const result = await authService.register({
-        username,
-        email,
+      // Validate username format (alphanumeric with underscores, 3-30 chars)
+      if (!/^[a-zA-Z0-9_]{3,30}$/.test(username)) {
+        throw new AppError('Username must be 3-30 characters and can only contain letters, numbers, and underscores', 400);
+      }
+
+      // Trim and validate optional fields
+      const sanitizedData = {
+        username: username.trim(),
+        email: email.toLowerCase().trim(),
         password,
-        firstName,
-        lastName,
-        profile,
-      });
+        firstName: firstName ? firstName.trim() : null,
+        lastName: lastName ? lastName.trim() : null,
+        profile: profile || null
+      };
+
+      // Additional validation for optional fields
+      if (sanitizedData.firstName && sanitizedData.firstName.length > 50) {
+        throw new AppError('First name cannot exceed 50 characters', 400);
+      }
+      if (sanitizedData.lastName && sanitizedData.lastName.length > 50) {
+        throw new AppError('Last name cannot exceed 50 characters', 400);
+      }
+
+      const result = await authService.register(sanitizedData);
 
       // Generate JWT token
       const token = jwt.sign(
@@ -45,7 +73,7 @@ class AuthController {
         { expiresIn: '24h' }
       );
 
-      // Create sanitized user object
+      // Create sanitized user object (avatar field included)
       const sanitizedUser = {
         id: result.user.id,
         username: result.user.username,
@@ -53,6 +81,7 @@ class AuthController {
         firstName: result.user.firstName,
         lastName: result.user.lastName,
         profile: result.user.profile,
+        avatar: result.user.profile?.avatar || result.user.avatar || null, // Include avatar field
         displayName: `${result.user.firstName || ''} ${result.user.lastName || ''}`.trim() || result.user.username
       };
 
@@ -69,8 +98,9 @@ class AuthController {
       logger.error('Registration controller error:', error);
       
       // Handle duplicate email/username errors specifically
-      if (error.message.includes('duplicate') || error.code === 11000) {
-        return next(new AppError('Email or username already exists', 409));
+      if (error.message.includes('duplicate') || error.code === 11000 || error.message.includes('already exists')) {
+        const field = error.message.includes('email') ? 'Email' : 'Username';
+        return next(new AppError(`${field} already exists`, 409));
       }
       
       next(error);
@@ -79,14 +109,26 @@ class AuthController {
 
   async login(req, res, next) {
     try {
-      const { email, password } = req.body;
+      const { identifier, password } = req.body;
 
       // Validate required fields
-      if (!email || !password) {
-        throw new AppError('Email and password are required', 400);
+      if (!identifier || !password) {
+        throw new AppError('Identifier (email or username) and password are required', 400);
       }
 
-      const result = await authService.login(email, password);
+      // Validate identifier format (either email or username)
+      let isEmail = false;
+      let isUsername = false;
+      
+      if (validator.isEmail(identifier)) {
+        isEmail = true;
+      } else if (/^[a-zA-Z0-9_]{3,30}$/.test(identifier)) {
+        isUsername = true;
+      } else {
+        throw new AppError('Identifier must be a valid email or username (3-30 characters, letters, numbers, underscores only)', 400);
+      }
+
+      const result = await authService.login(identifier, password, isEmail);
 
       // Generate JWT token
       const token = jwt.sign(
@@ -95,7 +137,7 @@ class AuthController {
         { expiresIn: '24h' }
       );
 
-      // Create sanitized user object
+      // Create sanitized user object with avatar field
       const sanitizedUser = {
         id: result.user.id,
         username: result.user.username,
@@ -103,24 +145,34 @@ class AuthController {
         firstName: result.user.firstName,
         lastName: result.user.lastName,
         profile: result.user.profile,
+        avatar: result.user.profile?.avatar || result.user.avatar || null, // Include avatar field
         displayName: `${result.user.firstName || ''} ${result.user.lastName || ''}`.trim() || result.user.username
       };
 
       // Log successful login for debugging
-      logger.info(`User logged in: ${email}`, { userId: result.user.id });
+      logger.info(`User logged in: ${result.user.email}`, { userId: result.user.id });
 
       res.status(200).json({
-        success: true,
         token: token,
-        user: sanitizedUser,
-        message: 'Login successful'
+        user: sanitizedUser
       });
     } catch (error) {
       logger.error('Login controller error:', error);
       
       // Handle invalid credentials specifically
-      if (error.message.includes('Invalid credentials') || error.message.includes('not found')) {
-        return next(new AppError('Invalid email or password', 401));
+      if (error.message.includes('Invalid credentials') || 
+          error.message.includes('not found') ||
+          error.message.includes('incorrect password')) {
+        return res.status(401).json({
+          error: "Invalid credentials"
+        });
+      }
+      
+      // Handle email not verified
+      if (error.message.includes('not verified') || error.message.includes('verify')) {
+        return res.status(403).json({
+          error: "Please verify your email address before logging in"
+        });
       }
       
       next(error);
@@ -135,6 +187,11 @@ class AuthController {
         throw new AppError('Refresh token is required', 400);
       }
 
+      // Validate refresh token format
+      if (typeof refreshToken !== 'string' || refreshToken.length < 10) {
+        throw new AppError('Invalid refresh token format', 400);
+      }
+
       const result = await authService.refreshToken(refreshToken);
 
       res.json({
@@ -147,6 +204,14 @@ class AuthController {
       });
     } catch (error) {
       logger.error('Refresh token controller error:', error);
+      
+      // Handle invalid refresh token
+      if (error.message.includes('invalid') || error.message.includes('expired')) {
+        return res.status(401).json({
+          error: "Invalid or expired refresh token"
+        });
+      }
+      
       next(error);
     }
   }
@@ -155,6 +220,11 @@ class AuthController {
     try {
       const accessToken = req.headers.authorization?.split(' ')[1];
       const { refreshToken } = req.body;
+
+      // Validate tokens
+      if (!accessToken && !refreshToken) {
+        throw new AppError('At least one token is required for logout', 400);
+      }
 
       await authService.logout(accessToken, refreshToken);
 
@@ -179,6 +249,11 @@ class AuthController {
         throw new AppError('Verification token is required', 400);
       }
 
+      // Validate token format
+      if (typeof token !== 'string' || token.length < 10) {
+        throw new AppError('Invalid verification token format', 400);
+      }
+
       const user = await authService.verifyEmail(token);
 
       // Log successful verification
@@ -193,6 +268,14 @@ class AuthController {
       });
     } catch (error) {
       logger.error('Verify email controller error:', error);
+      
+      // Handle invalid or expired token
+      if (error.message.includes('invalid') || error.message.includes('expired')) {
+        return res.status(400).json({
+          error: "Invalid or expired verification token"
+        });
+      }
+      
       next(error);
     }
   }
@@ -233,9 +316,25 @@ class AuthController {
         throw new AppError('Token and new password are required', 400);
       }
 
+      // Validate token format
+      if (typeof token !== 'string' || token.length < 10) {
+        throw new AppError('Invalid reset token format', 400);
+      }
+
       // Validate password strength
       if (newPassword.length < 8) {
         throw new AppError('Password must be at least 8 characters long', 400);
+      }
+      
+      // Additional password complexity
+      if (!/[A-Z]/.test(newPassword)) {
+        throw new AppError('Password must contain at least one uppercase letter', 400);
+      }
+      if (!/[a-z]/.test(newPassword)) {
+        throw new AppError('Password must contain at least one lowercase letter', 400);
+      }
+      if (!/[0-9]/.test(newPassword)) {
+        throw new AppError('Password must contain at least one number', 400);
       }
 
       await authService.resetPassword(token, newPassword);
@@ -249,6 +348,14 @@ class AuthController {
       });
     } catch (error) {
       logger.error('Reset password controller error:', error);
+      
+      // Handle invalid or expired token
+      if (error.message.includes('invalid') || error.message.includes('expired')) {
+        return res.status(400).json({
+          error: "Invalid or expired reset token"
+        });
+      }
+      
       next(error);
     }
   }
@@ -271,8 +378,8 @@ class AuthController {
         },
       });
     } catch (error) {
-      res.json({
-        success: true,
+      res.status(401).json({
+        success: false,
         data: {
           valid: false,
           error: error.message,
@@ -286,17 +393,38 @@ class AuthController {
       const user = req.user;
 
       if (!user) {
-        throw new AppError('User not found', 404);
+        return res.status(401).json({
+          error: "Unauthorized"
+        });
       }
 
+      // Create sanitized user object with avatar
+      const sanitizedUser = {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        profile: user.profile,
+        avatar: user.profile?.avatar || user.avatar || null,
+        displayName: `${user.firstName || ''} ${user.lastName || ''}`.trim() || user.username,
+        emailVerified: user.emailVerified || false,
+        createdAt: user.createdAt,
+        updatedAt: user.updatedAt
+      };
+
       res.json({
-        success: true,
-        data: {
-          user,
-        },
+        user: sanitizedUser
       });
     } catch (error) {
       logger.error('Get current user controller error:', error);
+      
+      if (error.message.includes('Unauthorized') || error.message.includes('invalid token')) {
+        return res.status(401).json({
+          error: "Unauthorized"
+        });
+      }
+      
       next(error);
     }
   }

@@ -6,101 +6,119 @@ const { authenticate } = require('../middleware/auth');
 const { authLimiter } = require('../middleware/rateLimiter');
 
 // Public routes
-router.post('/register', authLimiter, authValidation.register, (req, res) => {
+router.post('/register', authLimiter, authValidation.register, async (req, res) => {
   try {
-    const result = authController.register(req.body);
-    res.json(result);
+    const result = await authController.register(req.body);
+    res.status(201).json(result);
   } catch (error) {
-    res.status(error.status || 500).json({
+    const statusCode = error.status || 500;
+    res.status(statusCode).json({
+      success: false,
       error: error.message || 'Registration failed'
     });
   }
 });
 
-router.post('/login', authLimiter, authValidation.login, (req, res) => {
+router.post('/login', authLimiter, authValidation.login, async (req, res) => {
   try {
-    const result = authController.login(req.body);
-    res.json(result);
+    const result = await authController.login(req.body);
+    res.status(200).json(result);
   } catch (error) {
-    res.status(error.status || 500).json({
+    const statusCode = error.status || 401;
+    res.status(statusCode).json({
+      success: false,
       error: error.message || 'Login failed'
     });
   }
 });
 
-router.post('/refresh-token', authValidation.refreshToken, (req, res) => {
+router.post('/refresh-token', authValidation.refreshToken, async (req, res) => {
   try {
-    const result = authController.refreshToken(req.body);
-    res.json(result);
+    const result = await authController.refreshToken(req.body);
+    res.status(200).json(result);
   } catch (error) {
-    res.status(error.status || 400).json({
+    const statusCode = error.status || 400;
+    res.status(statusCode).json({
+      success: false,
       error: error.message || 'Token refresh failed'
     });
   }
 });
 
-router.post('/logout', (req, res) => {
+router.post('/logout', authenticate, async (req, res) => {
   try {
-    const result = authController.logout(req.body);
-    res.json(result);
+    const result = await authController.logout(req.user);
+    res.status(200).json(result);
   } catch (error) {
-    res.status(error.status || 400).json({
+    const statusCode = error.status || 400;
+    res.status(statusCode).json({
+      success: false,
       error: error.message || 'Logout failed'
     });
   }
 });
 
-router.get('/verify-email', (req, res) => {
+router.get('/verify-email', async (req, res) => {
   try {
-    const result = authController.verifyEmail(req.query);
-    res.json(result);
+    const result = await authController.verifyEmail(req.query);
+    res.status(200).json(result);
   } catch (error) {
-    res.status(error.status || 400).json({
+    const statusCode = error.status || 400;
+    res.status(statusCode).json({
+      success: false,
       error: error.message || 'Email verification failed'
     });
   }
 });
 
-router.post('/request-password-reset', authLimiter, (req, res) => {
+router.post('/request-password-reset', authLimiter, async (req, res) => {
   try {
-    const result = authController.requestPasswordReset(req.body);
-    res.json(result);
+    const result = await authController.requestPasswordReset(req.body);
+    res.status(200).json(result);
   } catch (error) {
-    res.status(error.status || 400).json({
+    const statusCode = error.status || 400;
+    res.status(statusCode).json({
+      success: false,
       error: error.message || 'Password reset request failed'
     });
   }
 });
 
-router.post('/reset-password', (req, res) => {
+router.post('/reset-password', async (req, res) => {
   try {
-    const result = authController.resetPassword(req.body);
-    res.json(result);
+    const result = await authController.resetPassword(req.body);
+    res.status(200).json(result);
   } catch (error) {
-    res.status(error.status || 400).json({
+    const statusCode = error.status || 400;
+    res.status(statusCode).json({
+      success: false,
       error: error.message || 'Password reset failed'
     });
   }
 });
 
-router.get('/validate-token', (req, res) => {
+router.get('/validate-token', async (req, res) => {
   try {
-    const result = authController.validateToken(req.query);
-    res.json(result);
+    const result = await authController.validateToken(req.query);
+    res.status(200).json(result);
   } catch (error) {
-    res.status(error.status || 400).json({
+    const statusCode = error.status || 400;
+    res.status(statusCode).json({
+      success: false,
       error: error.message || 'Token validation failed'
     });
   }
 });
 
 // Protected routes
-router.get('/me', authenticate, (req, res) => {
+router.get('/me', authenticate, async (req, res) => {
   try {
-    const result = authController.getCurrentUser(req.user);
-    res.json(result);
+    const result = await authController.getMe(req.user);
+    res.status(200).json(result);
   } catch (error) {
-    res.status(error.status || 401).json({
+    const statusCode = error.status || 401;
+    res.status(statusCode).json({
+      success: false,
       error: error.message || 'Failed to fetch user data'
     });
   }
