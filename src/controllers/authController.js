@@ -3,6 +3,7 @@ const { AppError } = require('../middleware/errorHandler');
 const logger = require('../utils/logger');
 const validator = require('validator');
 const jwt = require('jsonwebtoken');
+const { User, Token } = require('../models'); // Import User and Token models
 
 class AuthController {
   async register(req, res, next) {
@@ -64,35 +65,31 @@ class AuthController {
         throw new AppError('Last name cannot exceed 50 characters', 400);
       }
 
-      const result = await authService.register(sanitizedData);
+      // Create user using User model directly
+      const user = await User.create({
+        username: sanitizedData.username,
+        email: sanitizedData.email,
+        password: sanitizedData.password,
+        firstName: sanitizedData.firstName,
+        lastName: sanitizedData.lastName,
+        profile: sanitizedData.profile
+      });
 
-      // Generate JWT token
-      const token = jwt.sign(
-        { userId: result.user.id },
-        process.env.JWT_SECRET || 'your-jwt-secret',
-        { expiresIn: '24h' }
-      );
-
-      // Create sanitized user object (avatar field included)
-      const sanitizedUser = {
-        id: result.user.id,
-        username: result.user.username,
-        email: result.user.email,
-        firstName: result.user.firstName,
-        lastName: result.user.lastName,
-        profile: result.user.profile,
-        avatar: result.user.profile?.avatar || result.user.avatar || null, // Include avatar field
-        displayName: `${result.user.firstName || ''} ${result.user.lastName || ''}`.trim() || result.user.username
-      };
+      // Create access token for the new user
+      const token = await Token.create({
+        userId: user.id,
+        token: Token.generateRandomToken(64),
+        tokenType: 'access',
+        expiresAt: new Date(Date.now() + 15 * 60 * 1000), // 15 minutes
+      });
 
       // Log successful registration for debugging
-      logger.info(`User registered successfully: ${email}`, { userId: result.user.id });
+      logger.info(`User registered successfully: ${email}`, { userId: user.id });
 
-      res.status(201).json({
-        success: true,
-        token: token,
-        user: sanitizedUser,
-        message: 'Registration successful. Please check your email for verification.'
+      // Return JSON response with user and token
+      return res.status(201).json({
+        user: user.toJSON(),
+        token: token.token
       });
     } catch (error) {
       logger.error('Registration controller error:', error);
@@ -128,45 +125,44 @@ class AuthController {
         throw new AppError('Identifier must be a valid email or username (3-30 characters, letters, numbers, underscores only)', 400);
       }
 
-      const result = await authService.login(identifier, password, isEmail);
+      // Find user by email or username
+      let user;
+      if (isEmail) {
+        user = await User.findOne({ where: { email: identifier } });
+      } else {
+        user = await User.findOne({ where: { username: identifier } });
+      }
 
-      // Generate JWT token
-      const token = jwt.sign(
-        { userId: result.user.id },
-        process.env.JWT_SECRET || 'your-jwt-secret',
-        { expiresIn: '24h' }
-      );
-
-      // Create sanitized user object with avatar field
-      const sanitizedUser = {
-        id: result.user.id,
-        username: result.user.username,
-        email: result.user.email,
-        firstName: result.user.firstName,
-        lastName: result.user.lastName,
-        profile: result.user.profile,
-        avatar: result.user.profile?.avatar || result.user.avatar || null, // Include avatar field
-        displayName: `${result.user.firstName || ''} ${result.user.lastName || ''}`.trim() || result.user.username
-      };
-
-      // Log successful login for debugging
-      logger.info(`User logged in: ${result.user.email}`, { userId: result.user.id });
-
-      res.status(200).json({
-        token: token,
-        user: sanitizedUser
-      });
-    } catch (error) {
-      logger.error('Login controller error:', error);
-      
-      // Handle invalid credentials specifically
-      if (error.message.includes('Invalid credentials') || 
-          error.message.includes('not found') ||
-          error.message.includes('incorrect password')) {
+      // If user not found, return 401 Unauthorized
+      if (!user) {
         return res.status(401).json({
           error: "Invalid credentials"
         });
       }
+
+      // Validate password
+      const isValid = await user.validatePassword(password);
+      if (!isValid) {
+        return res.status(401).json({
+          error: "Invalid credentials"
+        });
+      }
+
+      // Create a new access token for this user
+      const token = await Token.create({
+        userId: user.id,
+        token: Token.generateRandomToken(64),
+        tokenType: 'access',
+        expiresAt: new Date(Date.now() + 15 * 60 * 1000), // 15 minutes
+      });
+
+      // Return JSON response with user and token
+      return res.json({
+        user: user.toJSON(),
+        token: token.token
+      });
+    } catch (error) {
+      logger.error('Login controller error:', error);
       
       // Handle email not verified
       if (error.message.includes('not verified') || error.message.includes('verify')) {

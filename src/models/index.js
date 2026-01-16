@@ -21,6 +21,7 @@ const sequelize = new Sequelize(dbConfig.name, dbConfig.user, dbConfig.password,
 
 // Import models
 const User = require('./User')(sequelize, Sequelize.DataTypes);
+const Token = require('./Token')(sequelize, Sequelize.DataTypes); // Added Token import
 const Profile = require('./Profile')(sequelize, Sequelize.DataTypes);
 const Friend = require('./Friend')(sequelize, Sequelize.DataTypes);
 const Chat = require('./Chat')(sequelize, Sequelize.DataTypes);
@@ -34,6 +35,10 @@ const Media = require('./Media')(sequelize, Sequelize.DataTypes);
 const Notification = require('./Notification')(sequelize, Sequelize.DataTypes);
 
 // Define associations
+
+// User - Token (One-to-Many)
+Token.belongsTo(User, { foreignKey: 'userId', as: 'user' });
+User.hasMany(Token, { foreignKey: 'userId', as: 'tokens' });
 
 // User - Profile (One-to-One)
 User.hasOne(Profile, { foreignKey: 'userId', as: 'profile' });
@@ -254,6 +259,7 @@ module.exports = {
   sequelize,
   Sequelize,
   User,
+  Token, // Added Token to exports
   Profile,
   Friend,
   Chat,

@@ -6,31 +6,9 @@ const { authenticate } = require('../middleware/auth');
 const { authLimiter } = require('../middleware/rateLimiter');
 
 // Public routes
-router.post('/register', authLimiter, authValidation.register, async (req, res) => {
-  try {
-    const result = await authController.register(req.body);
-    res.status(201).json(result);
-  } catch (error) {
-    const statusCode = error.status || 500;
-    res.status(statusCode).json({
-      success: false,
-      error: error.message || 'Registration failed'
-    });
-  }
-});
+router.post('/register', authLimiter, authValidation.register, authController.register);
 
-router.post('/login', authLimiter, authValidation.login, async (req, res) => {
-  try {
-    const result = await authController.login(req.body);
-    res.status(200).json(result);
-  } catch (error) {
-    const statusCode = error.status || 401;
-    res.status(statusCode).json({
-      success: false,
-      error: error.message || 'Login failed'
-    });
-  }
-});
+router.post('/login', authLimiter, authValidation.login, authController.login);
 
 router.post('/refresh-token', authValidation.refreshToken, async (req, res) => {
   try {
@@ -111,17 +89,6 @@ router.get('/validate-token', async (req, res) => {
 });
 
 // Protected routes
-router.get('/me', authenticate, async (req, res) => {
-  try {
-    const result = await authController.getMe(req.user);
-    res.status(200).json(result);
-  } catch (error) {
-    const statusCode = error.status || 401;
-    res.status(statusCode).json({
-      success: false,
-      error: error.message || 'Failed to fetch user data'
-    });
-  }
-});
+router.get('/me', authenticate, authController.getCurrentUser);
 
 module.exports = router;
