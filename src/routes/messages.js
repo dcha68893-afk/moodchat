@@ -1,3 +1,4 @@
+const asyncHandler = require('express-async-handler');
 const express = require('express');
 const router = express.Router();
 const { Op, fn, col, literal } = require('sequelize');
@@ -5,7 +6,6 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs').promises;
 const {
-  asyncHandler,
   AuthenticationError,
   AuthorizationError,
   NotFoundError,

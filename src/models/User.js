@@ -153,18 +153,41 @@ module.exports = (sequelize, DataTypes) => {
       timestamps: true,
       underscored: true,
       hooks: {
-        // Hash password before creating user
+        // Hash password before creating user - FIXED: Ensure it only hashes when password exists
         beforeCreate: async (user) => {
-          if (user.password) {
-            user.password = await bcrypt.hash(user.password, 12);
+          if (user.password && user.password.length > 0) {
+            try {
+              user.password = await bcrypt.hash(user.password, 12);
+            } catch (error) {
+              throw new Error(`Password hashing failed: ${error.message}`);
+            }
+          } else {
+            throw new Error('Password is required');
           }
         },
-        // Hash password before updating if it changed
+        // Hash password before updating if it changed - FIXED: Explicit error handling
         beforeUpdate: async (user) => {
           if (user.changed('password')) {
-            user.password = await bcrypt.hash(user.password, 12);
+            if (user.password && user.password.length > 0) {
+              try {
+                user.password = await bcrypt.hash(user.password, 12);
+              } catch (error) {
+                throw new Error(`Password hashing failed: ${error.message}`);
+              }
+            } else {
+              throw new Error('Password cannot be empty');
+            }
           }
         },
+        // FIXED: Add beforeSave hook to ensure validation errors are thrown properly
+        beforeSave: async (user) => {
+          // Ensure password is hashed if it's a new user or password was changed
+          if ((user.isNewRecord || user.changed('password')) && user.password) {
+            if (user.password.length < 8) {
+              throw new Error('Password must be at least 8 characters long');
+            }
+          }
+        }
       },
     }
   );
@@ -172,12 +195,20 @@ module.exports = (sequelize, DataTypes) => {
   // ===== INSTANCE METHODS =====
 
   /**
-   * Validate user password
+   * Validate user password - FIXED: Explicit error handling
    * @param {string} password - Plain text password to validate
    * @returns {Promise<boolean>} True if password matches
    */
   User.prototype.validatePassword = async function (password) {
-    return await bcrypt.compare(password, this.password);
+    if (!password || !this.password) {
+      return false;
+    }
+    try {
+      return await bcrypt.compare(password, this.password);
+    } catch (error) {
+      console.error('Password validation error:', error);
+      return false;
+    }
   };
 
   /**
@@ -208,36 +239,57 @@ module.exports = (sequelize, DataTypes) => {
    * @returns {Promise<User>} Updated user instance
    */
   User.prototype.updateLastSeen = async function () {
-    this.lastSeen = new Date();
-    return await this.save();
+    try {
+      this.lastSeen = new Date();
+      return await this.save();
+    } catch (error) {
+      console.error('Failed to update last seen:', error);
+      throw error;
+    }
   };
 
   // ===== STATIC METHODS =====
 
   /**
-   * Find user by email
+   * Find user by email - FIXED: Explicit error handling
    * @param {string} email - Email address
    * @returns {Promise<User|null>} Found user or null
    */
   User.findByEmail = async function (email) {
-    return await this.findOne({ 
-      where: { 
-        email: email.toLowerCase().trim() 
-      } 
-    });
+    if (!email) {
+      throw new Error('Email is required');
+    }
+    try {
+      return await this.findOne({ 
+        where: { 
+          email: email.toLowerCase().trim() 
+        } 
+      });
+    } catch (error) {
+      console.error('Error finding user by email:', error);
+      throw error;
+    }
   };
 
   /**
-   * Find user by username
+   * Find user by username - FIXED: Explicit error handling
    * @param {string} username - Username
    * @returns {Promise<User|null>} Found user or null
    */
   User.findByUsername = async function (username) {
-    return await this.findOne({ 
-      where: { 
-        username: username.trim() 
-      } 
-    });
+    if (!username) {
+      throw new Error('Username is required');
+    }
+    try {
+      return await this.findOne({ 
+        where: { 
+          username: username.trim() 
+        } 
+      });
+    } catch (error) {
+      console.error('Error finding user by username:', error);
+      throw error;
+    }
   };
 
   /**
@@ -247,20 +299,29 @@ module.exports = (sequelize, DataTypes) => {
    * @returns {Promise<Array<User>>} Array of matching users
    */
   User.search = async function (query, limit = 20) {
-    const { Op } = sequelize.Sequelize;
+    if (!query || query.length < 2) {
+      throw new Error('Search query must be at least 2 characters');
+    }
     
-    return await this.findAll({
-      where: {
-        [Op.or]: [
-          { username: { [Op.iLike]: `%${query}%` } },
-          { firstName: { [Op.iLike]: `%${query}%` } },
-          { lastName: { [Op.iLike]: `%${query}%` } },
-          { email: { [Op.iLike]: `%${query}%` } },
-        ],
-      },
-      limit: limit,
-      attributes: ['id', 'username', 'firstName', 'lastName', 'avatar', 'bio', 'status'],
-    });
+    try {
+      const { Op } = sequelize.Sequelize;
+      
+      return await this.findAll({
+        where: {
+          [Op.or]: [
+            { username: { [Op.iLike]: `%${query}%` } },
+            { firstName: { [Op.iLike]: `%${query}%` } },
+            { lastName: { [Op.iLike]: `%${query}%` } },
+            { email: { [Op.iLike]: `%${query}%` } },
+          ],
+        },
+        limit: limit,
+        attributes: ['id', 'username', 'firstName', 'lastName', 'avatar', 'bio', 'status'],
+      });
+    } catch (error) {
+      console.error('User search error:', error);
+      throw error;
+    }
   };
 
   return User;

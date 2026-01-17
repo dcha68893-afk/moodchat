@@ -14,32 +14,37 @@ class AuthService {
       // Check if user already exists
       const existingUser = await User.findOne({
         where: {
-          [Op.or]: [{ email: userData.email }, { username: userData.username }],
+          [Op.or]: [
+            { email: userData.email.toLowerCase().trim() }, 
+            { username: userData.username.trim() }
+          ],
         },
       });
 
       if (existingUser) {
         throw new Error(
-          existingUser.email === userData.email
+          existingUser.email === userData.email.toLowerCase().trim()
             ? 'Email already registered'
             : 'Username already taken'
         );
       }
 
-      // Create user
+      // Create user - FIXED: Ensure we await the creation
       const user = await User.create({
-        username: userData.username,
-        email: userData.email,
+        username: userData.username.trim(),
+        email: userData.email.toLowerCase().trim(),
         password: userData.password,
         firstName: userData.firstName,
         lastName: userData.lastName,
       });
 
-      // Create profile
-      await Profile.create({
-        userId: user.id,
-        ...userData.profile,
-      });
+      // Create profile if profile data exists
+      if (userData.profile) {
+        await Profile.create({
+          userId: user.id,
+          ...userData.profile,
+        });
+      }
 
       // Generate verification token
       const verificationToken = crypto.randomBytes(32).toString('hex');
@@ -84,13 +89,13 @@ class AuthService {
 
   async login(email, password) {
     try {
-      // Find user
-      const user = await User.findOne({ where: { email } });
+      // Find user - FIXED: Use findByEmail method for consistency
+      const user = await User.findByEmail(email);
       if (!user) {
         throw new Error('Invalid credentials');
       }
 
-      // Check password
+      // Check password - FIXED: Use instance method for validation
       const isValidPassword = await user.validatePassword(password);
       if (!isValidPassword) {
         throw new Error('Invalid credentials');
@@ -174,11 +179,13 @@ class AuthService {
   async logout(accessToken, refreshToken) {
     try {
       // Add access token to blacklist
-      const decoded = jwt.decode(accessToken);
-      if (decoded && decoded.exp) {
-        const ttl = decoded.exp - Math.floor(Date.now() / 1000);
-        if (ttl > 0) {
-          await redisClient.setex(`blacklist:${accessToken}`, ttl, '1');
+      if (accessToken) {
+        const decoded = jwt.decode(accessToken);
+        if (decoded && decoded.exp) {
+          const ttl = decoded.exp - Math.floor(Date.now() / 1000);
+          if (ttl > 0) {
+            await redisClient.setex(`blacklist:${accessToken}`, ttl, '1');
+          }
         }
       }
 
@@ -237,7 +244,7 @@ class AuthService {
 
   async requestPasswordReset(email) {
     try {
-      const user = await User.findOne({ where: { email } });
+      const user = await User.findOne({ where: { email: email.toLowerCase().trim() } });
       if (!user) {
         // Don't reveal that user doesn't exist
         return true;
@@ -309,6 +316,10 @@ class AuthService {
   }
 
   generateTokens(userId) {
+    if (!jwtConfig.secret) {
+      throw new Error('JWT secret is not configured');
+    }
+
     const accessToken = jwt.sign({ userId, type: 'access' }, jwtConfig.secret, {
       expiresIn: jwtConfig.accessToken.expiresIn,
       issuer: jwtConfig.issuer,
@@ -328,6 +339,10 @@ class AuthService {
 
   async validateToken(token) {
     try {
+      if (!jwtConfig.secret) {
+        throw new Error('JWT secret is not configured');
+      }
+
       const decoded = jwt.verify(token, jwtConfig.secret, {
         issuer: jwtConfig.issuer,
         audience: jwtConfig.audience,

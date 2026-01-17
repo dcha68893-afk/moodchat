@@ -27,8 +27,20 @@ const authLimiter = createLimiter({
   message: 'Too many login attempts, please try again later.',
 });
 
+// Message-specific rate limiter
+const createMessageRateLimiter = () => createLimiter({
+  windowMs: 60 * 1000, // 1 minute
+  max: 10, // Limit each IP to 10 messages per minute
+  message: 'Too many messages, please slow down.',
+});
+
+// API rate limiter (alias for defaultLimiter - used by calls.js)
+const apiRateLimiter = defaultLimiter;
+
 // Export all limiters
 module.exports = {
+  apiRateLimiter,
   defaultLimiter,
   authLimiter,
+  createMessageRateLimiter,
 };

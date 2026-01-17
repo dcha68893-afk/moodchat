@@ -17,6 +17,14 @@ const authenticate = async (req, res, next) => {
 
     const token = authHeader.split(' ')[1];
 
+    // Validate token format
+    if (typeof token !== 'string' || token.length < 10) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid token format',
+      });
+    }
+
     // Check if token is blacklisted
     const isBlacklisted = await redisClient.get(`blacklist:${token}`);
     if (isBlacklisted) {
@@ -26,10 +34,34 @@ const authenticate = async (req, res, next) => {
       });
     }
 
-    const decoded = jwt.verify(token, jwtConfig.secret, {
-      issuer: jwtConfig.issuer,
-      audience: jwtConfig.audience,
-    });
+    // Verify token - FIXED: Handle verification errors gracefully
+    let decoded;
+    try {
+      decoded = jwt.verify(token, jwtConfig.secret, {
+        issuer: jwtConfig.issuer,
+        audience: jwtConfig.audience,
+      });
+    } catch (error) {
+      if (error.name === 'TokenExpiredError') {
+        return res.status(401).json({
+          success: false,
+          message: 'Token has expired',
+        });
+      }
+
+      if (error.name === 'JsonWebTokenError') {
+        return res.status(401).json({
+          success: false,
+          message: 'Invalid token',
+        });
+      }
+
+      logger.error('JWT verification error:', error);
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication failed',
+      });
+    }
 
     // Get user from database
     const user = await User.findByPk(decoded.userId, {
@@ -54,28 +86,25 @@ const authenticate = async (req, res, next) => {
     req.token = token;
     next();
   } catch (error) {
-    logger.error('Authentication error:', error);
+    logger.error('Authentication middleware error:', error);
 
-    if (error.name === 'TokenExpiredError') {
-      return res.status(401).json({
+    // Handle database errors
+    if (error.name === 'SequelizeDatabaseError' || error.name === 'SequelizeConnectionError') {
+      return res.status(503).json({
         success: false,
-        message: 'Token has expired',
+        message: 'Service temporarily unavailable',
       });
     }
 
-    if (error.name === 'JsonWebTokenError') {
-      return res.status(401).json({
-        success: false,
-        message: 'Invalid token',
-      });
-    }
-
-    res.status(401).json({
+    res.status(500).json({
       success: false,
-      message: 'Authentication failed',
+      message: 'Internal server error',
     });
   }
 };
+
+// Alias for authMiddleware (used by messages.js)
+const authMiddleware = authenticate;
 
 const authorize = (...roles) => {
   return (req, res, next) => {
@@ -111,10 +140,18 @@ const socketAuthenticate = async (socket, next) => {
       return next(new Error('Authentication error: Token invalidated'));
     }
 
-    const decoded = jwt.verify(token, jwtConfig.secret, {
-      issuer: jwtConfig.issuer,
-      audience: jwtConfig.audience,
-    });
+    let decoded;
+    try {
+      decoded = jwt.verify(token, jwtConfig.secret, {
+        issuer: jwtConfig.issuer,
+        audience: jwtConfig.audience,
+      });
+    } catch (error) {
+      if (error.name === 'TokenExpiredError') {
+        return next(new Error('Authentication error: Token expired'));
+      }
+      return next(new Error('Authentication error: Invalid token'));
+    }
 
     const user = await User.findByPk(decoded.userId, {
       attributes: ['id', 'username', 'email', 'role', 'isActive'],
@@ -135,6 +172,7 @@ const socketAuthenticate = async (socket, next) => {
 
 module.exports = {
   authenticate,
+  authMiddleware,  // Added for messages.js
   authorize,
   socketAuthenticate,
 };

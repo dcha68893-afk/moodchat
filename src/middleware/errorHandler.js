@@ -93,8 +93,20 @@ class AppError extends Error {
   }
 }
 
+class AuthenticationError extends AppError {
+  constructor(message = 'Authentication failed') {
+    super(message, 401);
+  }
+}
+
+class AuthorizationError extends AppError {
+  constructor(message = 'Authorization failed') {
+    super(message, 403);
+  }
+}
+
 class ValidationError extends AppError {
-  constructor(message, errors = []) {
+  constructor(message = 'Validation failed', errors = []) {
     super(message, 400);
     this.errors = errors;
   }
@@ -127,6 +139,8 @@ class ConflictError extends AppError {
 module.exports = {
   errorHandler,
   AppError,
+  AuthenticationError,  // Added for calls.js
+  AuthorizationError,   // Added for calls.js
   ValidationError,
   UnauthorizedError,
   ForbiddenError,

@@ -3,18 +3,23 @@ const { AppError } = require('../middleware/errorHandler');
 const logger = require('../utils/logger');
 const validator = require('validator');
 const jwt = require('jsonwebtoken');
-const { User, Token } = require('../models'); // Import User and Token models
+const bcrypt = require('bcrypt');
+const { User, Token, LoginAttempt } = require('../models'); // Import models
+
+// In-memory store for login attempts (for simplicity)
+// In production, use Redis or database
+const loginAttemptsStore = new Map();
 
 class AuthController {
   async register(req, res, next) {
     try {
-      console.log("AUTH BODY (Register):", req.body);
+      console.log("AUTH BODY (Register):", { ...req.body, password: '[REDACTED]' });
       
-      const { username, email, password, firstName, lastName, profile } = req.body;
+      const { username, email, password } = req.body;
 
       logger.info(`Registration attempt for: ${email}`, { username });
 
-      // Validate all required fields - middleware already validated, but double-check
+      // Validate all required fields
       if (!email || !password || !username) {
         return res.status(400).json({
           success: false,
@@ -30,74 +35,44 @@ class AuthController {
         });
       }
 
-      // Check if user already exists with this email or username
-      const existingUser = await User.findOne({
-        where: {
-          [User.sequelize.Op.or]: [
-            { email: email.toLowerCase().trim() },
-            { username: username.trim() }
-          ]
-        }
-      });
-
-      if (existingUser) {
-        const field = existingUser.email === email.toLowerCase().trim() ? 'Email' : 'Username';
-        return res.status(409).json({
+      // Validate username format
+      if (!/^[a-zA-Z0-9_]+$/.test(username)) {
+        return res.status(400).json({
           success: false,
-          message: `${field} already exists`
+          message: 'Username can only contain letters, numbers, and underscores'
         });
       }
 
-      // Trim and validate optional fields
-      const sanitizedData = {
+      // Validate password strength
+      if (password.length < 8) {
+        return res.status(400).json({
+          success: false,
+          message: 'Password must be at least 8 characters long'
+        });
+      }
+
+      // Call authService.register - FIXED: Use authService for registration logic
+      const result = await authService.register({
         username: username.trim(),
         email: email.toLowerCase().trim(),
-        password,
-        firstName: firstName ? firstName.trim() : null,
-        lastName: lastName ? lastName.trim() : null,
-        profile: profile || null,
-        isActive: true,
-        isVerified: true // Set to true so users can login immediately after registration
-      };
-
-      // Additional validation for optional fields
-      if (sanitizedData.firstName && sanitizedData.firstName.length > 50) {
-        return res.status(400).json({
-          success: false,
-          message: 'First name cannot exceed 50 characters'
-        });
-      }
-      if (sanitizedData.lastName && sanitizedData.lastName.length > 50) {
-        return res.status(400).json({
-          success: false,
-          message: 'Last name cannot exceed 50 characters'
-        });
-      }
-
-      // Create user using User model directly
-      const user = await User.create(sanitizedData);
-
-      // Create access token for the new user
-      const token = await Token.create({
-        userId: user.id,
-        token: Token.generateRandomToken(64),
-        tokenType: 'access',
-        expiresAt: new Date(Date.now() + 15 * 60 * 1000), // 15 minutes
+        password: password,
+        firstName: req.body.firstName,
+        lastName: req.body.lastName
       });
 
       // Log successful registration
       logger.info(`User registered successfully: ${email}`, { 
-        userId: user.id,
-        username: user.username 
+        userId: result.user.id,
+        username: result.user.username 
       });
 
-      // Return JSON response with user and token
+      // Return JSON response with user and tokens
       return res.status(201).json({
         success: true,
         message: 'Registration successful',
         data: {
-          user: user.toJSON(),
-          token: token.token
+          user: result.user,
+          tokens: result.tokens
         }
       });
     } catch (error) {
@@ -107,21 +82,32 @@ class AuthController {
         email: req.body.email
       });
       
-      // Handle duplicate email/username errors specifically
-      if (error.name === 'SequelizeUniqueConstraintError') {
-        const field = error.errors[0]?.path || 'field';
+      // Handle specific error cases
+      if (error.message.includes('already exists') || 
+          error.message.includes('already taken') || 
+          error.message.includes('already registered')) {
         return res.status(409).json({
           success: false,
-          message: `${field} already exists`
+          message: error.message
         });
       }
       
       // Handle validation errors
-      if (error.name === 'SequelizeValidationError') {
-        const messages = error.errors.map(err => err.message);
+      if (error.name === 'SequelizeValidationError' || 
+          error.name === 'ValidationError') {
+        const messages = error.errors ? error.errors.map(err => err.message) : [error.message];
         return res.status(400).json({
           success: false,
           message: messages.join(', ')
+        });
+      }
+      
+      // Handle database errors
+      if (error.name === 'SequelizeDatabaseError' || 
+          error.name === 'SequelizeUniqueConstraintError') {
+        return res.status(400).json({
+          success: false,
+          message: 'Database error occurred'
         });
       }
       
@@ -134,7 +120,7 @@ class AuthController {
 
   async login(req, res, next) {
     try {
-      console.log("AUTH BODY (Login):", req.body);
+      console.log("AUTH BODY (Login):", { ...req.body, password: '[REDACTED]' });
       
       const { identifier, password } = req.body;
 
@@ -148,84 +134,106 @@ class AuthController {
         });
       }
 
-      let user;
-      const { Op } = User.sequelize.Sequelize;
-
-      // Find user by email or username
+      // ============================================================================
+      // PROGRESSIVE LOGIN ATTEMPT LIMITING
+      // ============================================================================
+      
+      // Generate a key for tracking attempts (email or username + IP)
+      const clientIp = req.ip || req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+      const attemptKey = `${identifier}_${clientIp}`;
+      
+      // Check existing attempts
+      let attempts = loginAttemptsStore.get(attemptKey) || { count: 0, lastAttempt: null };
+      
+      // Progressive delays: 20s, 40s, 60s
+      const delays = [20000, 40000, 60000];
+      const maxAttempts = 3;
+      
+      if (attempts.count >= maxAttempts) {
+        // After 3 attempts, block for 1 minute and suggest password recovery
+        const blockTime = 60000; // 1 minute
+        const timeSinceLastAttempt = Date.now() - attempts.lastAttempt;
+        
+        if (timeSinceLastAttempt < blockTime) {
+          const remainingTime = Math.ceil((blockTime - timeSinceLastAttempt) / 1000);
+          
+          return res.status(429).json({
+            success: false,
+            message: `Too many login attempts. Please wait ${remainingTime} seconds or use password recovery.`,
+            blockTime: blockTime,
+            remainingTime: remainingTime,
+            suggestPasswordRecovery: true
+          });
+        } else {
+          // Reset after block time expires
+          attempts.count = 0;
+        }
+      } else if (attempts.count > 0) {
+        // Apply progressive delay based on attempt count
+        const delayIndex = Math.min(attempts.count - 1, delays.length - 1);
+        const delayTime = delays[delayIndex];
+        const timeSinceLastAttempt = Date.now() - attempts.lastAttempt;
+        
+        if (timeSinceLastAttempt < delayTime) {
+          const remainingTime = Math.ceil((delayTime - timeSinceLastAttempt) / 1000);
+          
+          return res.status(429).json({
+            success: false,
+            message: `Please wait ${remainingTime} seconds before trying again.`,
+            blockTime: delayTime,
+            remainingTime: remainingTime,
+            attemptCount: attempts.count,
+            maxAttempts: maxAttempts
+          });
+        }
+      }
+      
+      // Call authService.login - FIXED: Use authService for login logic
+      let result;
       if (validator.isEmail(identifier)) {
-        user = await User.findOne({ 
-          where: { 
-            email: identifier.toLowerCase().trim(),
-            isActive: true 
-          } 
-        });
+        result = await authService.login(identifier.toLowerCase().trim(), password);
       } else {
-        user = await User.findOne({ 
+        // For username login, we need to find the user first to get email
+        const user = await User.findOne({ 
           where: { 
             username: identifier.trim(),
             isActive: true 
           } 
         });
+        
+        if (!user) {
+          // Record failed attempt
+          attempts.count++;
+          attempts.lastAttempt = Date.now();
+          loginAttemptsStore.set(attemptKey, attempts);
+          
+          return res.status(401).json({
+            success: false,
+            message: 'Invalid credentials',
+            attemptCount: attempts.count,
+            maxAttempts: maxAttempts
+          });
+        }
+        
+        result = await authService.login(user.email, password);
       }
 
-      // If user not found, return 401 Unauthorized
-      if (!user) {
-        logger.warn(`Login failed: User not found for identifier: ${identifier}`);
-        return res.status(401).json({
-          success: false,
-          message: 'Invalid credentials'
-        });
-      }
-
-      // REMOVED email verification check so users can login immediately after registration
-      // if (!user.isVerified) {
-      //   logger.warn(`Login failed: Email not verified for user: ${user.email}`);
-      //   return res.status(403).json({
-      //     success: false,
-      //     message: 'Please verify your email address before logging in'
-      //   });
-      // }
-
-      // Validate password
-      const isValid = await user.validatePassword(password);
-      if (!isValid) {
-        logger.warn(`Login failed: Invalid password for user: ${user.email}`);
-        return res.status(401).json({
-          success: false,
-          message: 'Invalid credentials'
-        });
-      }
-
-      // Revoke existing tokens for this user (optional security measure)
-      await Token.revokeAllUserTokens(user.id);
-
-      // Create a new access token for this user
-      const token = await Token.create({
-        userId: user.id,
-        token: Token.generateRandomToken(64),
-        tokenType: 'access',
-        expiresAt: new Date(Date.now() + 15 * 60 * 1000), // 15 minutes
-        userAgent: req.headers['user-agent'],
-        ipAddress: req.ip
-      });
-
-      // Update user's last seen timestamp
-      user.lastSeen = new Date();
-      await user.save();
+      // SUCCESSFUL LOGIN - Reset attempts for this identifier
+      loginAttemptsStore.delete(attemptKey);
 
       // Log successful login
-      logger.info(`User logged in successfully: ${user.email}`, { 
-        userId: user.id,
-        username: user.username 
+      logger.info(`User logged in successfully: ${result.user.email}`, { 
+        userId: result.user.id,
+        username: result.user.username 
       });
 
-      // Return JSON response with user and token
+      // Return JSON response with user and tokens
       return res.json({
         success: true,
         message: 'Login successful',
         data: {
-          user: user.toJSON(),
-          token: token.token
+          user: result.user,
+          tokens: result.tokens
         }
       });
     } catch (error) {
@@ -234,6 +242,15 @@ class AuthController {
         stack: error.stack,
         identifier: req.body.identifier
       });
+      
+      // Handle specific error cases
+      if (error.message.includes('Invalid credentials') || 
+          error.message.includes('Account is deactivated')) {
+        return res.status(401).json({
+          success: false,
+          message: error.message
+        });
+      }
       
       return res.status(500).json({
         success: false,
@@ -261,6 +278,15 @@ class AuthController {
         });
       }
 
+      // Check JWT_SECRET configuration
+      if (!process.env.JWT_SECRET || process.env.JWT_SECRET.trim() === '') {
+        logger.error('JWT_SECRET is missing or empty');
+        return res.status(500).json({
+          success: false,
+          message: 'Server configuration error'
+        });
+      }
+
       const result = await authService.refreshToken(refreshToken);
 
       res.json({
@@ -279,6 +305,14 @@ class AuthController {
         return res.status(401).json({
           success: false,
           message: "Invalid or expired refresh token"
+        });
+      }
+      
+      // Handle JWT signing errors
+      if (error.message.includes('secret') || error.message.includes('sign')) {
+        return res.status(500).json({
+          success: false,
+          message: 'Server configuration error'
         });
       }
       
@@ -425,31 +459,11 @@ class AuthController {
         });
       }
 
-      // Validate password strength
+      // Only require minimum length
       if (newPassword.length < 8) {
         return res.status(400).json({
           success: false,
           message: 'Password must be at least 8 characters long'
-        });
-      }
-      
-      // Additional password complexity
-      if (!/[A-Z]/.test(newPassword)) {
-        return res.status(400).json({
-          success: false,
-          message: 'Password must contain at least one uppercase letter'
-        });
-      }
-      if (!/[a-z]/.test(newPassword)) {
-        return res.status(400).json({
-          success: false,
-          message: 'Password must contain at least one lowercase letter'
-        });
-      }
-      if (!/[0-9]/.test(newPassword)) {
-        return res.status(400).json({
-          success: false,
-          message: 'Password must contain at least one number'
         });
       }
 
@@ -488,6 +502,18 @@ class AuthController {
         return res.status(400).json({
           success: false,
           message: 'Token is required'
+        });
+      }
+
+      // Check JWT_SECRET configuration
+      if (!process.env.JWT_SECRET || process.env.JWT_SECRET.trim() === '') {
+        logger.error('JWT_SECRET is missing or empty');
+        return res.status(500).json({
+          success: false,
+          data: {
+            valid: false,
+            error: 'Server configuration error'
+          }
         });
       }
 
@@ -563,6 +589,27 @@ class AuthController {
       });
     }
   }
+  
+  // ============================================================================
+  // HELPER METHOD: Clean up old login attempts (for memory management)
+  // ============================================================================
+  static cleanupOldAttempts() {
+    const now = Date.now();
+    const oneHourAgo = now - 3600000; // 1 hour
+    
+    for (const [key, attempt] of loginAttemptsStore.entries()) {
+      if (attempt.lastAttempt < oneHourAgo) {
+        loginAttemptsStore.delete(key);
+      }
+    }
+    
+    logger.info(`Cleaned up old login attempts. Remaining: ${loginAttemptsStore.size}`);
+  }
 }
+
+// Start periodic cleanup of old login attempts
+setInterval(() => {
+  AuthController.cleanupOldAttempts();
+}, 3600000); // Run every hour
 
 module.exports = new AuthController();

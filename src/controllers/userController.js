@@ -178,7 +178,11 @@ class UserController {
         throw new AppError('New password must be different from current password', 400);
       }
 
-      await userService.changePassword(userId, currentPassword, newPassword);
+      await userService.changePassword(userId, { 
+        currentPassword, 
+        newPassword, 
+        confirmPassword: newPassword 
+      });
 
       // Log password change for security auditing
       logger.info(`Password changed for user: ${userId}`);
@@ -208,13 +212,17 @@ class UserController {
         throw new AppError('Search query must be at least 2 characters', 400);
       }
 
-      const users = await userService.searchUsers(query, userId, parseInt(limit));
+      const users = await userService.searchUsers(query, { 
+        currentUserId: userId, 
+        limit: parseInt(limit) 
+      });
 
       res.json({
         success: true,
         data: {
-          users,
-          count: users.length,
+          users: users.users || [],
+          count: users.users ? users.users.length : 0,
+          pagination: users.pagination,
         },
       });
     } catch (error) {
