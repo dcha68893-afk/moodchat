@@ -8,18 +8,26 @@ const { User, Token } = require('../models'); // Import User and Token models
 class AuthController {
   async register(req, res, next) {
     try {
+      console.log("AUTH BODY (Register):", req.body);
+      
       const { username, email, password, firstName, lastName, profile } = req.body;
 
       logger.info(`Registration attempt for: ${email}`, { username });
 
       // Validate all required fields - middleware already validated, but double-check
       if (!email || !password || !username) {
-        throw new AppError('Email, username, and password are required', 400);
+        return res.status(400).json({
+          success: false,
+          message: 'Email, username, and password are required'
+        });
       }
 
       // Validate email format
       if (!validator.isEmail(email)) {
-        throw new AppError('Invalid email format', 400);
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid email format'
+        });
       }
 
       // Check if user already exists with this email or username
@@ -34,7 +42,10 @@ class AuthController {
 
       if (existingUser) {
         const field = existingUser.email === email.toLowerCase().trim() ? 'Email' : 'Username';
-        throw new AppError(`${field} already exists`, 409);
+        return res.status(409).json({
+          success: false,
+          message: `${field} already exists`
+        });
       }
 
       // Trim and validate optional fields
@@ -46,15 +57,21 @@ class AuthController {
         lastName: lastName ? lastName.trim() : null,
         profile: profile || null,
         isActive: true,
-        isVerified: false // Email verification will be handled separately
+        isVerified: true // Set to true so users can login immediately after registration
       };
 
       // Additional validation for optional fields
       if (sanitizedData.firstName && sanitizedData.firstName.length > 50) {
-        throw new AppError('First name cannot exceed 50 characters', 400);
+        return res.status(400).json({
+          success: false,
+          message: 'First name cannot exceed 50 characters'
+        });
       }
       if (sanitizedData.lastName && sanitizedData.lastName.length > 50) {
-        throw new AppError('Last name cannot exceed 50 characters', 400);
+        return res.status(400).json({
+          success: false,
+          message: 'Last name cannot exceed 50 characters'
+        });
       }
 
       // Create user using User model directly
@@ -93,28 +110,42 @@ class AuthController {
       // Handle duplicate email/username errors specifically
       if (error.name === 'SequelizeUniqueConstraintError') {
         const field = error.errors[0]?.path || 'field';
-        return next(new AppError(`${field} already exists`, 409));
+        return res.status(409).json({
+          success: false,
+          message: `${field} already exists`
+        });
       }
       
       // Handle validation errors
       if (error.name === 'SequelizeValidationError') {
         const messages = error.errors.map(err => err.message);
-        return next(new AppError(messages.join(', '), 400));
+        return res.status(400).json({
+          success: false,
+          message: messages.join(', ')
+        });
       }
       
-      next(error);
+      return res.status(500).json({
+        success: false,
+        message: 'Internal server error'
+      });
     }
   }
 
   async login(req, res, next) {
     try {
+      console.log("AUTH BODY (Login):", req.body);
+      
       const { identifier, password } = req.body;
 
       logger.info(`Login attempt for identifier: ${identifier}`);
 
       // Validate required fields
       if (!identifier || !password) {
-        throw new AppError('Identifier (email or username) and password are required', 400);
+        return res.status(400).json({
+          success: false,
+          message: 'Identifier (email or username) and password are required'
+        });
       }
 
       let user;
@@ -146,14 +177,14 @@ class AuthController {
         });
       }
 
-      // Check if email is verified (if your app requires email verification)
-      if (!user.isVerified) {
-        logger.warn(`Login failed: Email not verified for user: ${user.email}`);
-        return res.status(403).json({
-          success: false,
-          message: 'Please verify your email address before logging in'
-        });
-      }
+      // REMOVED email verification check so users can login immediately after registration
+      // if (!user.isVerified) {
+      //   logger.warn(`Login failed: Email not verified for user: ${user.email}`);
+      //   return res.status(403).json({
+      //     success: false,
+      //     message: 'Please verify your email address before logging in'
+      //   });
+      // }
 
       // Validate password
       const isValid = await user.validatePassword(password);
@@ -204,7 +235,10 @@ class AuthController {
         identifier: req.body.identifier
       });
       
-      next(error);
+      return res.status(500).json({
+        success: false,
+        message: 'Internal server error'
+      });
     }
   }
 
@@ -213,12 +247,18 @@ class AuthController {
       const { refreshToken } = req.body;
 
       if (!refreshToken) {
-        throw new AppError('Refresh token is required', 400);
+        return res.status(400).json({
+          success: false,
+          message: 'Refresh token is required'
+        });
       }
 
       // Validate refresh token format
       if (typeof refreshToken !== 'string' || refreshToken.length < 10) {
-        throw new AppError('Invalid refresh token format', 400);
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid refresh token format'
+        });
       }
 
       const result = await authService.refreshToken(refreshToken);
@@ -237,11 +277,15 @@ class AuthController {
       // Handle invalid refresh token
       if (error.message.includes('invalid') || error.message.includes('expired')) {
         return res.status(401).json({
-          error: "Invalid or expired refresh token"
+          success: false,
+          message: "Invalid or expired refresh token"
         });
       }
       
-      next(error);
+      return res.status(500).json({
+        success: false,
+        message: 'Internal server error'
+      });
     }
   }
 
@@ -252,7 +296,10 @@ class AuthController {
 
       // Validate tokens
       if (!accessToken && !refreshToken) {
-        throw new AppError('At least one token is required for logout', 400);
+        return res.status(400).json({
+          success: false,
+          message: 'At least one token is required for logout'
+        });
       }
 
       await authService.logout(accessToken, refreshToken);
@@ -266,7 +313,10 @@ class AuthController {
       });
     } catch (error) {
       logger.error('Logout controller error:', error);
-      next(error);
+      return res.status(500).json({
+        success: false,
+        message: 'Internal server error'
+      });
     }
   }
 
@@ -275,12 +325,18 @@ class AuthController {
       const { token } = req.query;
 
       if (!token) {
-        throw new AppError('Verification token is required', 400);
+        return res.status(400).json({
+          success: false,
+          message: 'Verification token is required'
+        });
       }
 
       // Validate token format
       if (typeof token !== 'string' || token.length < 10) {
-        throw new AppError('Invalid verification token format', 400);
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid verification token format'
+        });
       }
 
       const user = await authService.verifyEmail(token);
@@ -301,11 +357,15 @@ class AuthController {
       // Handle invalid or expired token
       if (error.message.includes('invalid') || error.message.includes('expired')) {
         return res.status(400).json({
-          error: "Invalid or expired verification token"
+          success: false,
+          message: "Invalid or expired verification token"
         });
       }
       
-      next(error);
+      return res.status(500).json({
+        success: false,
+        message: 'Internal server error'
+      });
     }
   }
 
@@ -314,12 +374,18 @@ class AuthController {
       const { email } = req.body;
 
       if (!email) {
-        throw new AppError('Email is required', 400);
+        return res.status(400).json({
+          success: false,
+          message: 'Email is required'
+        });
       }
 
       // Validate email format
       if (!validator.isEmail(email)) {
-        throw new AppError('Invalid email format', 400);
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid email format'
+        });
       }
 
       await authService.requestPasswordReset(email);
@@ -333,7 +399,10 @@ class AuthController {
       });
     } catch (error) {
       logger.error('Request password reset controller error:', error);
-      next(error);
+      return res.status(500).json({
+        success: false,
+        message: 'Internal server error'
+      });
     }
   }
 
@@ -342,28 +411,46 @@ class AuthController {
       const { token, newPassword } = req.body;
 
       if (!token || !newPassword) {
-        throw new AppError('Token and new password are required', 400);
+        return res.status(400).json({
+          success: false,
+          message: 'Token and new password are required'
+        });
       }
 
       // Validate token format
       if (typeof token !== 'string' || token.length < 10) {
-        throw new AppError('Invalid reset token format', 400);
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid reset token format'
+        });
       }
 
       // Validate password strength
       if (newPassword.length < 8) {
-        throw new AppError('Password must be at least 8 characters long', 400);
+        return res.status(400).json({
+          success: false,
+          message: 'Password must be at least 8 characters long'
+        });
       }
       
       // Additional password complexity
       if (!/[A-Z]/.test(newPassword)) {
-        throw new AppError('Password must contain at least one uppercase letter', 400);
+        return res.status(400).json({
+          success: false,
+          message: 'Password must contain at least one uppercase letter'
+        });
       }
       if (!/[a-z]/.test(newPassword)) {
-        throw new AppError('Password must contain at least one lowercase letter', 400);
+        return res.status(400).json({
+          success: false,
+          message: 'Password must contain at least one lowercase letter'
+        });
       }
       if (!/[0-9]/.test(newPassword)) {
-        throw new AppError('Password must contain at least one number', 400);
+        return res.status(400).json({
+          success: false,
+          message: 'Password must contain at least one number'
+        });
       }
 
       await authService.resetPassword(token, newPassword);
@@ -381,11 +468,15 @@ class AuthController {
       // Handle invalid or expired token
       if (error.message.includes('invalid') || error.message.includes('expired')) {
         return res.status(400).json({
-          error: "Invalid or expired reset token"
+          success: false,
+          message: "Invalid or expired reset token"
         });
       }
       
-      next(error);
+      return res.status(500).json({
+        success: false,
+        message: 'Internal server error'
+      });
     }
   }
 
@@ -394,7 +485,10 @@ class AuthController {
       const token = req.headers.authorization?.split(' ')[1];
 
       if (!token) {
-        throw new AppError('Token is required', 400);
+        return res.status(400).json({
+          success: false,
+          message: 'Token is required'
+        });
       }
 
       const decoded = await authService.validateToken(token);
@@ -463,7 +557,10 @@ class AuthController {
         });
       }
       
-      next(error);
+      return res.status(500).json({
+        success: false,
+        message: 'Internal server error'
+      });
     }
   }
 }

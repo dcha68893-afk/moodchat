@@ -1,4 +1,4 @@
-﻿﻿﻿﻿// src/server.js - UPDATED PRODUCTION VERSION FOR MOODCHAT BACKEND
+﻿﻿// src/server.js - UPDATED PRODUCTION VERSION FOR MOODCHAT BACKEND
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -119,6 +119,10 @@ app.use(helmet({
   crossOriginResourcePolicy: { policy: "cross-origin" }
 }));
 
+// ========== FIXED: JSON & URLENCODED PARSING - MUST BE BEFORE ROUTES ==========
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
 // ========== FIXED CORS CONFIGURATION ==========
 // ALLOW ALL ORIGINS IN DEVELOPMENT - This fixes Live Server issues
 if (NODE_ENV === 'development') {
@@ -176,9 +180,6 @@ if (NODE_ENV === 'development') {
   app.use(cors(corsOptions));
 }
 
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-
 // Handle preflight requests globally
 app.options('*', (req, res) => {
   res.header('Access-Control-Allow-Origin', '*');
@@ -189,15 +190,23 @@ app.options('*', (req, res) => {
   res.sendStatus(200);
 });
 
-// ========== REQUEST LOGGING MIDDLEWARE ==========
+// ========== TEMPORARY REQUEST LOGGER FOR AUTH ROUTES ==========
 app.use((req, res, next) => {
   const timestamp = new Date().toISOString();
+  
+  // Always log basic info
   console.log(`[${timestamp}] ${req.method} ${req.path} - Origin: ${req.headers.origin || 'no-origin'}`);
   
-  // Log request body for POST, PUT, PATCH
+  // Log request body for /api/auth/* routes
+  if (req.path.startsWith('/api/auth/')) {
+    console.log(`[AUTH LOG] ${req.method} ${req.path} - Body:`, req.body ? JSON.stringify(req.body) : 'No body');
+  }
+  
+  // Log request body for POST, PUT, PATCH on other routes (except sensitive info)
   if (['POST', 'PUT', 'PATCH'].includes(req.method) && req.body && Object.keys(req.body).length > 0) {
     const logBody = { ...req.body };
     if (logBody.password) logBody.password = '[REDACTED]';
+    if (logBody.confirmPassword) logBody.confirmPassword = '[REDACTED]';
     if (logBody.token) logBody.token = '[REDACTED]';
     console.log('Request Body:', JSON.stringify(logBody).substring(0, 500));
   }

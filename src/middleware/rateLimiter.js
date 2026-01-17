@@ -5,6 +5,12 @@ const createLimiter = (options) => rateLimit({
   ...options,
   standardHeaders: true,
   legacyHeaders: false,
+  handler: (req, res) => {
+    res.status(429).json({
+      success: false,
+      message: options.message || 'Too many requests, please try again later.'
+    });
+  }
 });
 
 // Default rate limiter
