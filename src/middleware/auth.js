@@ -1,110 +1,96 @@
 const jwt = require('jsonwebtoken');
-const jwtConfig = require('../config/jwt');
-const { User } = require('../models');
-const logger = require('../utils/logger');
-const redisClient = require('../utils/redisClient');
+const { Token } = require('../models');
+
+const JWT_SECRET = process.env.JWT_ACCESS_SECRET || process.env.JWT_SECRET || 'development-secret-key-change-in-production';
 
 const authenticate = async (req, res, next) => {
   try {
-    const authHeader = req.headers.authorization;
-
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    const authHeader = req.headers['authorization'];
+    
+    if (!authHeader) {
       return res.status(401).json({
         success: false,
-        message: 'No token provided',
+        message: 'Authorization header required',
+        timestamp: new Date().toISOString()
+      });
+    }
+    
+    const token = authHeader.startsWith('Bearer ') 
+      ? authHeader.split(' ')[1] 
+      : authHeader;
+    
+    if (!token) {
+      return res.status(401).json({
+        success: false,
+        message: 'Token required',
+        timestamp: new Date().toISOString()
       });
     }
 
-    const token = authHeader.split(' ')[1];
+    // Check if token is blacklisted/revoked in database
+    if (req.app.locals.dbConnected && req.app.locals.models && req.app.locals.models.Token) {
+      try {
+        const tokenRecord = await req.app.locals.models.Token.findOne({
+          where: {
+            token: token,
+            isRevoked: false,
+            expiresAt: { [req.app.locals.sequelize.Sequelize.Op.gt]: new Date() }
+          }
+        });
 
-    // Validate token format
-    if (typeof token !== 'string' || token.length < 10) {
-      return res.status(401).json({
-        success: false,
-        message: 'Invalid token format',
-      });
+        if (!tokenRecord) {
+          return res.status(401).json({
+            success: false,
+            message: 'Token has been revoked or is expired',
+            timestamp: new Date().toISOString()
+          });
+        }
+      } catch (dbError) {
+        console.error('Token validation error:', dbError);
+        // Continue with JWT verification if DB check fails
+      }
     }
-
-    // Check if token is blacklisted
-    const isBlacklisted = await redisClient.get(`blacklist:${token}`);
-    if (isBlacklisted) {
-      return res.status(401).json({
-        success: false,
-        message: 'Token has been invalidated',
-      });
-    }
-
-    // Verify token - FIXED: Handle verification errors gracefully
-    let decoded;
-    try {
-      decoded = jwt.verify(token, jwtConfig.secret, {
-        issuer: jwtConfig.issuer,
-        audience: jwtConfig.audience,
-      });
-    } catch (error) {
-      if (error.name === 'TokenExpiredError') {
-        return res.status(401).json({
+    
+    jwt.verify(token, JWT_SECRET, (err, decoded) => {
+      if (err) {
+        if (err.name === 'TokenExpiredError') {
+          return res.status(403).json({
+            success: false,
+            message: 'Token expired',
+            timestamp: new Date().toISOString()
+          });
+        }
+        
+        if (err.name === 'JsonWebTokenError') {
+          return res.status(403).json({
+            success: false,
+            message: 'Invalid token',
+            timestamp: new Date().toISOString()
+          });
+        }
+        
+        return res.status(403).json({
           success: false,
-          message: 'Token has expired',
+          message: 'Token verification failed',
+          timestamp: new Date().toISOString()
         });
       }
-
-      if (error.name === 'JsonWebTokenError') {
-        return res.status(401).json({
-          success: false,
-          message: 'Invalid token',
-        });
-      }
-
-      logger.error('JWT verification error:', error);
-      return res.status(401).json({
-        success: false,
-        message: 'Authentication failed',
-      });
-    }
-
-    // Get user from database
-    const user = await User.findByPk(decoded.userId, {
-      attributes: { exclude: ['password'] },
+      
+      req.user = decoded;
+      req.token = token;
+      next();
     });
-
-    if (!user) {
-      return res.status(401).json({
-        success: false,
-        message: 'User not found',
-      });
-    }
-
-    if (!user.isActive) {
-      return res.status(401).json({
-        success: false,
-        message: 'Account is deactivated',
-      });
-    }
-
-    req.user = user;
-    req.token = token;
-    next();
+    
   } catch (error) {
-    logger.error('Authentication middleware error:', error);
-
-    // Handle database errors
-    if (error.name === 'SequelizeDatabaseError' || error.name === 'SequelizeConnectionError') {
-      return res.status(503).json({
-        success: false,
-        message: 'Service temporarily unavailable',
-      });
-    }
-
-    res.status(500).json({
+    console.error('Authentication middleware error:', error);
+    
+    return res.status(500).json({
       success: false,
-      message: 'Internal server error',
+      message: 'Authentication error',
+      timestamp: new Date().toISOString()
     });
   }
 };
-
-// Alias for authMiddleware (used by messages.js)
-const authMiddleware = authenticate;
 
 const authorize = (...roles) => {
   return (req, res, next) => {
@@ -112,67 +98,101 @@ const authorize = (...roles) => {
       return res.status(401).json({
         success: false,
         message: 'Authentication required',
+        timestamp: new Date().toISOString()
       });
     }
-
-    if (!roles.includes(req.user.role)) {
+    
+    // If roles are specified, check user role
+    if (roles.length > 0 && req.user.role && !roles.includes(req.user.role)) {
       return res.status(403).json({
         success: false,
         message: 'Insufficient permissions',
+        timestamp: new Date().toISOString()
       });
     }
-
+    
     next();
   };
 };
 
+// Socket.io authentication middleware
 const socketAuthenticate = async (socket, next) => {
   try {
-    const token = socket.handshake.auth.token;
-
+    const token = socket.handshake.auth.token || socket.handshake.headers.authorization?.split(' ')[1];
+    
     if (!token) {
       return next(new Error('Authentication error: No token provided'));
     }
+    
+    // Check token in database if available
+    if (socket.request.app.locals.dbConnected && socket.request.app.locals.models && socket.request.app.locals.models.Token) {
+      try {
+        const tokenRecord = await socket.request.app.locals.models.Token.findOne({
+          where: {
+            token: token,
+            isRevoked: false,
+            expiresAt: { [socket.request.app.locals.sequelize.Sequelize.Op.gt]: new Date() }
+          }
+        });
 
-    // Check if token is blacklisted
-    const isBlacklisted = await redisClient.get(`blacklist:${token}`);
-    if (isBlacklisted) {
-      return next(new Error('Authentication error: Token invalidated'));
+        if (!tokenRecord) {
+          return next(new Error('Authentication error: Token invalidated'));
+        }
+      } catch (dbError) {
+        console.error('Socket token validation error:', dbError);
+      }
     }
-
+    
     let decoded;
     try {
-      decoded = jwt.verify(token, jwtConfig.secret, {
-        issuer: jwtConfig.issuer,
-        audience: jwtConfig.audience,
-      });
+      decoded = jwt.verify(token, JWT_SECRET);
     } catch (error) {
       if (error.name === 'TokenExpiredError') {
         return next(new Error('Authentication error: Token expired'));
       }
       return next(new Error('Authentication error: Invalid token'));
     }
-
-    const user = await User.findByPk(decoded.userId, {
-      attributes: ['id', 'username', 'email', 'role', 'isActive'],
-    });
-
-    if (!user || !user.isActive) {
+    
+    // Get user from database or in-memory
+    let user = null;
+    if (socket.request.app.locals.dbConnected && socket.request.app.locals.models && socket.request.app.locals.models.User) {
+      try {
+        user = await socket.request.app.locals.models.User.findByPk(decoded.userId, {
+          attributes: { exclude: ['password'] }
+        });
+      } catch (dbError) {
+        console.error('Socket user lookup error:', dbError);
+      }
+    }
+    
+    // If database not available, check in-memory
+    if (!user && socket.request.app.locals.users) {
+      user = socket.request.app.locals.users.find(u => u.id === decoded.userId);
+      if (user) {
+        delete user.password;
+      }
+    }
+    
+    if (!user || (user.isActive === false)) {
       return next(new Error('Authentication error: User not found or inactive'));
     }
-
+    
     socket.user = user;
     socket.userId = user.id;
+    socket.token = token;
     next();
   } catch (error) {
-    logger.error('Socket authentication error:', error);
+    console.error('Socket authentication error:', error);
     next(new Error('Authentication error'));
   }
 };
 
+// Alias for compatibility with existing code
+const authMiddleware = authenticate;
+
 module.exports = {
   authenticate,
-  authMiddleware,  // Added for messages.js
+  authMiddleware,
   authorize,
-  socketAuthenticate,
+  socketAuthenticate
 };

@@ -1,16 +1,10 @@
 const asyncHandler = require('express-async-handler');
 const express = require('express');
 const router = express.Router();
-const {
-  AuthenticationError,
-  AuthorizationError,
-  NotFoundError,
-  ValidationError,
-} = require('../middleware/errorHandler');
 const { authenticate } = require('../middleware/auth');
 const { apiRateLimiter } = require('../middleware/rateLimiter');
-const { User, Chat, Call, Message } = require('../models');
-const sequelize = require('sequelize');
+const { User, Chat, Call } = require('../models');
+const { Op, fn, col, literal } = require('sequelize');
 
 const CALL_HISTORY_RETENTION_DAYS = parseInt(process.env.CALL_HISTORY_RETENTION_DAYS) || 365;
 const MAX_CALL_DURATION = parseInt(process.env.MAX_CALL_DURATION) || 14400;
@@ -38,11 +32,11 @@ router.get(
       const offset = (parseInt(page) - 1) * parseInt(limit);
 
       const where = {
-        [sequelize.Op.or]: [
+        [Op.or]: [
           { callerId: req.user.id },
           { '$participants.id$': req.user.id }
         ],
-        endedAt: { [sequelize.Op.ne]: null },
+        endedAt: { [Op.ne]: null },
       };
 
       if (callType) {
@@ -51,7 +45,7 @@ router.get(
 
       if (direction) {
         if (direction === 'incoming') {
-          where.callerId = { [sequelize.Op.ne]: req.user.id };
+          where.callerId = { [Op.ne]: req.user.id };
           where['$participants.id$'] = req.user.id;
         } else if (direction === 'outgoing') {
           where.callerId = req.user.id;
@@ -62,15 +56,15 @@ router.get(
       }
 
       if (participantId) {
-        where[sequelize.Op.and] = [
+        where[Op.and] = [
           {
-            [sequelize.Op.or]: [
+            [Op.or]: [
               { callerId: participantId },
               { '$participants.id$': participantId }
             ]
           },
           {
-            [sequelize.Op.or]: [
+            [Op.or]: [
               { callerId: req.user.id },
               { '$participants.id$': req.user.id }
             ]
@@ -84,8 +78,8 @@ router.get(
 
       if (startDate || endDate) {
         where.startedAt = {};
-        if (startDate) where.startedAt[sequelize.Op.gte] = new Date(startDate);
-        if (endDate) where.startedAt[sequelize.Op.lte] = new Date(endDate);
+        if (startDate) where.startedAt[Op.gte] = new Date(startDate);
+        if (endDate) where.startedAt[Op.lte] = new Date(endDate);
       }
 
       const { count, rows: calls } = await Call.findAndCountAll({
@@ -101,7 +95,7 @@ router.get(
             as: 'participants',
             attributes: ['username', 'avatar', 'displayName'],
             through: { attributes: [] },
-            where: { id: { [sequelize.Op.ne]: req.user.id } },
+            where: { id: { [Op.ne]: req.user.id } },
             required: false
           },
           {
@@ -140,11 +134,11 @@ router.get(
 
       const stats = await Call.findAll({
         where: {
-          [sequelize.Op.or]: [
+          [Op.or]: [
             { callerId: req.user.id },
             { '$participants.id$': req.user.id }
           ],
-          startedAt: { [sequelize.Op.gte]: thirtyDaysAgo }
+          startedAt: { [Op.gte]: thirtyDaysAgo }
         },
         include: [{
           model: User,
@@ -155,22 +149,22 @@ router.get(
         }],
         raw: true,
         attributes: [
-          [sequelize.fn('COUNT', sequelize.col('Call.id')), 'totalCalls'],
+          [fn('COUNT', col('Call.id')), 'totalCalls'],
           [
-            sequelize.fn('SUM',
-              sequelize.literal("EXTRACT(EPOCH FROM (endedAt - startedAt))")
+            fn('SUM',
+              literal("EXTRACT(EPOCH FROM (endedAt - startedAt))")
             ),
             'totalDuration'
           ],
           [
-            sequelize.fn('SUM',
-              sequelize.literal("CASE WHEN status = 'completed' THEN 1 ELSE 0 END")
+            fn('SUM',
+              literal("CASE WHEN status = 'completed' THEN 1 ELSE 0 END")
             ),
             'completedCalls'
           ],
           [
-            sequelize.fn('SUM',
-              sequelize.literal("CASE WHEN status = 'missed' THEN 1 ELSE 0 END")
+            fn('SUM',
+              literal("CASE WHEN status = 'missed' THEN 1 ELSE 0 END")
             ),
             'missedCalls'
           ]
@@ -215,7 +209,7 @@ router.get(
       const call = await Call.findOne({
         where: {
           id: callId,
-          [sequelize.Op.or]: [
+          [Op.or]: [
             { callerId: req.user.id },
             { '$participants.id$': req.user.id }
           ]
@@ -247,7 +241,10 @@ router.get(
       });
 
       if (!call) {
-        throw new NotFoundError('Call not found or access denied');
+        return res.status(404).json({
+          status: 'error',
+          message: 'Call not found or access denied'
+        });
       }
 
       const callData = call.toJSON();
@@ -289,11 +286,17 @@ router.post(
       const { participantIds, chatId, callType = 'audio', isGroupCall = false } = req.body;
 
       if (!Array.isArray(participantIds) && !chatId) {
-        throw new ValidationError('Either participantIds or chatId is required');
+        return res.status(400).json({
+          status: 'error',
+          message: 'Either participantIds or chatId is required'
+        });
       }
 
       if (callType !== 'audio' && callType !== 'video') {
-        throw new ValidationError('Call type must be audio or video');
+        return res.status(400).json({
+          status: 'error',
+          message: 'Call type must be audio or video'
+        });
       }
 
       let participants = [];
@@ -314,11 +317,17 @@ router.post(
         });
 
         if (!chat) {
-          throw new NotFoundError('Chat not found or access denied');
+          return res.status(404).json({
+            status: 'error',
+            message: 'Chat not found or access denied'
+          });
         }
 
         if (chat.chatType === 'direct' && isGroupCall) {
-          throw new ValidationError('Cannot start group call in direct chat');
+          return res.status(400).json({
+            status: 'error',
+            message: 'Cannot start group call in direct chat'
+          });
         }
 
         participants = chat.participants
@@ -339,19 +348,31 @@ router.post(
         );
 
         if (blockedParticipants.length > 0) {
-          throw new AuthorizationError('Cannot call blocked users');
+          return res.status(403).json({
+            status: 'error',
+            message: 'Cannot call blocked users'
+          });
         }
 
         if (isGroupCall && participants.length > 10) {
-          throw new ValidationError('Group calls are limited to 10 participants');
+          return res.status(400).json({
+            status: 'error',
+            message: 'Group calls are limited to 10 participants'
+          });
         }
       } else {
         if (participantIds.length === 0) {
-          throw new ValidationError('At least one participant is required');
+          return res.status(400).json({
+            status: 'error',
+            message: 'At least one participant is required'
+          });
         }
 
         if (!isGroupCall && participantIds.length > 1) {
-          throw new ValidationError('Audio/Video calls support only one participant');
+          return res.status(400).json({
+            status: 'error',
+            message: 'Audio/Video calls support only one participant'
+          });
         }
 
         const participantUsers = await User.findAll({
@@ -360,7 +381,10 @@ router.post(
         });
 
         if (participantUsers.length !== participantIds.length) {
-          throw new NotFoundError('One or more participants not found');
+          return res.status(404).json({
+            status: 'error',
+            message: 'One or more participants not found'
+          });
         }
 
         const currentUser = await User.findByPk(req.user.id, {
@@ -377,7 +401,10 @@ router.post(
         );
 
         if (blockedParticipants.length > 0) {
-          throw new AuthorizationError('Cannot call blocked users');
+          return res.status(403).json({
+            status: 'error',
+            message: 'Cannot call blocked users'
+          });
         }
 
         participants = participantUsers.map(p => p.id);
@@ -484,7 +511,10 @@ router.post(
       });
 
       if (!call) {
-        throw new NotFoundError('Call not found or already answered');
+        return res.status(404).json({
+          status: 'error',
+          message: 'Call not found or already answered'
+        });
       }
 
       const answeredBy = call.answeredBy || [];
@@ -561,7 +591,7 @@ router.post(
         where: {
           id: callId,
           '$participants.id$': req.user.id,
-          status: { [sequelize.Op.in]: ['ringing', 'ongoing'] }
+          status: { [Op.in]: ['ringing', 'ongoing'] }
         },
         include: [{
           model: User,
@@ -572,7 +602,10 @@ router.post(
       });
 
       if (!call) {
-        throw new NotFoundError('Call not found or already ended');
+        return res.status(404).json({
+          status: 'error',
+          message: 'Call not found or already ended'
+        });
       }
 
       const declinedBy = call.declinedBy || [];
@@ -655,20 +688,26 @@ router.post(
       const call = await Call.findOne({
         where: {
           id: callId,
-          [sequelize.Op.or]: [
+          [Op.or]: [
             { callerId: req.user.id },
             { '$participants.id$': req.user.id }
           ],
-          status: { [sequelize.Op.in]: ['ringing', 'ongoing'] }
+          status: { [Op.in]: ['ringing', 'ongoing'] }
         }
       });
 
       if (!call) {
-        throw new NotFoundError('Call not found or already ended');
+        return res.status(404).json({
+          status: 'error',
+          message: 'Call not found or already ended'
+        });
       }
 
       if (duration && (duration < 0 || duration > MAX_CALL_DURATION)) {
-        throw new ValidationError(`Duration must be between 0 and ${MAX_CALL_DURATION} seconds`);
+        return res.status(400).json({
+          status: 'error',
+          message: `Duration must be between 0 and ${MAX_CALL_DURATION} seconds`
+        });
       }
 
       const actualDuration = duration || 
@@ -744,9 +783,9 @@ router.get(
       const missedCount = await Call.count({
         where: {
           '$participants.id$': req.user.id,
-          callerId: { [sequelize.Op.ne]: req.user.id },
+          callerId: { [Op.ne]: req.user.id },
           status: 'missed',
-          startedAt: { [sequelize.Op.gte]: twentyFourHoursAgo }
+          startedAt: { [Op.gte]: twentyFourHoursAgo }
         },
         include: [{
           model: User,
@@ -781,7 +820,7 @@ router.post(
 
       if (callIds && Array.isArray(callIds)) {
         await Call.update(
-          { readBy: sequelize.fn('array_append', sequelize.col('readBy'), req.user.id) },
+          { readBy: fn('array_append', col('readBy'), req.user.id) },
           {
             where: {
               id: callIds,
@@ -802,14 +841,14 @@ router.post(
         twentyFourHoursAgo.setHours(twentyFourHoursAgo.getHours() - 24);
 
         await Call.update(
-          { readBy: sequelize.fn('array_append', sequelize.col('readBy'), req.user.id) },
+          { readBy: fn('array_append', col('readBy'), req.user.id) },
           {
             where: {
               '$participants.id$': req.user.id,
-              callerId: { [sequelize.Op.ne]: req.user.id },
+              callerId: { [Op.ne]: req.user.id },
               status: 'missed',
-              startedAt: { [sequelize.Op.gte]: twentyFourHoursAgo },
-              readBy: { [sequelize.Op.not]: sequelize.literal(`'${req.user.id}' = ANY(readBy)`) }
+              startedAt: { [Op.gte]: twentyFourHoursAgo },
+              readBy: { [Op.not]: literal(`'${req.user.id}' = ANY(readBy)`) }
             },
             include: [{
               model: User,
@@ -846,7 +885,7 @@ router.delete(
       if (deleteAll) {
         const result = await Call.destroy({
           where: {
-            [sequelize.Op.or]: [
+            [Op.or]: [
               { callerId: req.user.id },
               { '$participants.id$': req.user.id }
             ]
@@ -870,7 +909,10 @@ router.delete(
       if (olderThanDays) {
         const days = parseInt(olderThanDays);
         if (isNaN(days) || days < 1) {
-          throw new ValidationError('olderThanDays must be a positive number');
+          return res.status(400).json({
+            status: 'error',
+            message: 'olderThanDays must be a positive number'
+          });
         }
 
         const cutoffDate = new Date();
@@ -878,11 +920,11 @@ router.delete(
 
         const result = await Call.destroy({
           where: {
-            [sequelize.Op.or]: [
+            [Op.or]: [
               { callerId: req.user.id },
               { '$participants.id$': req.user.id }
             ],
-            startedAt: { [sequelize.Op.lt]: cutoffDate }
+            startedAt: { [Op.lt]: cutoffDate }
           },
           include: [{
             model: User,
@@ -904,7 +946,7 @@ router.delete(
         const result = await Call.destroy({
           where: {
             id: callIds,
-            [sequelize.Op.or]: [
+            [Op.or]: [
               { callerId: req.user.id },
               { '$participants.id$': req.user.id }
             ]
@@ -925,7 +967,10 @@ router.delete(
         });
       }
 
-      throw new ValidationError('Provide callIds, deleteAll=true, or olderThanDays');
+      return res.status(400).json({
+        status: 'error',
+        message: 'Provide callIds, deleteAll=true, or olderThanDays'
+      });
     } catch (error) {
       console.error('Error deleting call history:', error);
       res.status(500).json({
@@ -958,16 +1003,19 @@ router.get(
           startDate.setDate(startDate.getDate() - 365);
           break;
         default:
-          throw new ValidationError('Invalid period. Use: 7d, 30d, 90d, 365d');
+          return res.status(400).json({
+            status: 'error',
+            message: 'Invalid period. Use: 7d, 30d, 90d, 365d'
+          });
       }
 
       const stats = await Call.findAll({
         where: {
-          [sequelize.Op.or]: [
+          [Op.or]: [
             { callerId: req.user.id },
             { '$participants.id$': req.user.id }
           ],
-          startedAt: { [sequelize.Op.gte]: startDate }
+          startedAt: { [Op.gte]: startDate }
         },
         include: [
           {
@@ -984,28 +1032,28 @@ router.get(
           }
         ],
         attributes: [
-          [sequelize.fn('COUNT', sequelize.col('Call.id')), 'totalCalls'],
+          [fn('COUNT', col('Call.id')), 'totalCalls'],
           [
-            sequelize.fn('SUM',
-              sequelize.literal("EXTRACT(EPOCH FROM (endedAt - startedAt))")
+            fn('SUM',
+              literal("EXTRACT(EPOCH FROM (endedAt - startedAt))")
             ),
             'totalDuration'
           ],
           [
-            sequelize.fn('AVG',
-              sequelize.literal("EXTRACT(EPOCH FROM (endedAt - startedAt))")
+            fn('AVG',
+              literal("EXTRACT(EPOCH FROM (endedAt - startedAt))")
             ),
             'avgDuration'
           ],
           [
-            sequelize.fn('MAX',
-              sequelize.literal("EXTRACT(EPOCH FROM (endedAt - startedAt))")
+            fn('MAX',
+              literal("EXTRACT(EPOCH FROM (endedAt - startedAt))")
             ),
             'longestCall'
           ],
           [
-            sequelize.fn('MIN',
-              sequelize.literal("EXTRACT(EPOCH FROM (endedAt - startedAt))")
+            fn('MIN',
+              literal("EXTRACT(EPOCH FROM (endedAt - startedAt))")
             ),
             'shortestCall'
           ]
@@ -1024,11 +1072,11 @@ router.get(
 
       const typeBreakdown = await Call.findAll({
         where: {
-          [sequelize.Op.or]: [
+          [Op.or]: [
             { callerId: req.user.id },
             { '$participants.id$': req.user.id }
           ],
-          startedAt: { [sequelize.Op.gte]: startDate }
+          startedAt: { [Op.gte]: startDate }
         },
         include: [{
           model: User,
@@ -1039,10 +1087,10 @@ router.get(
         }],
         attributes: [
           'callType',
-          [sequelize.fn('COUNT', sequelize.col('Call.id')), 'count'],
+          [fn('COUNT', col('Call.id')), 'count'],
           [
-            sequelize.fn('AVG',
-              sequelize.literal("EXTRACT(EPOCH FROM (endedAt - startedAt))")
+            fn('AVG',
+              literal("EXTRACT(EPOCH FROM (endedAt - startedAt))")
             ),
             'avgDuration'
           ]
@@ -1077,18 +1125,18 @@ router.get(
       const { format = 'json', startDate, endDate } = req.query;
 
       const where = {
-        [sequelize.Op.or]: [
+        [Op.or]: [
           { callerId: req.user.id },
           { '$participants.id$': req.user.id }
         ]
       };
 
       if (startDate) {
-        where.startedAt = { ...where.startedAt, [sequelize.Op.gte]: new Date(startDate) };
+        where.startedAt = { ...where.startedAt, [Op.gte]: new Date(startDate) };
       }
 
       if (endDate) {
-        where.startedAt = { ...where.startedAt, [sequelize.Op.lte]: new Date(endDate) };
+        where.startedAt = { ...where.startedAt, [Op.lte]: new Date(endDate) };
       }
 
       const calls = await Call.findAll({

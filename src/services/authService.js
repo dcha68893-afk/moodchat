@@ -1,4 +1,3 @@
-
 const { Op } = require('sequelize');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
@@ -119,9 +118,18 @@ class AuthService {
       // Clean old tokens periodically
       this.cleanupOldTokens();
 
+      // Extract password from user object
+      const userWithoutPassword = user.toJSON();
+      delete userWithoutPassword.password;
+
       return {
-        user: user.toJSON(),
-        tokens,
+        user: userWithoutPassword,
+        tokens: {
+          accessToken: tokens.accessToken,
+          refreshToken: tokens.refreshToken,
+          tokenType: tokens.tokenType,
+          expiresIn: tokens.expiresIn
+        },
         verificationToken: process.env.NODE_ENV === 'development' ? verificationToken : undefined
       };
     } catch (error) {
@@ -186,9 +194,18 @@ class AuthService {
 
       console.log("✅ [AuthService] Login successful for user:", user.id);
 
+      // Extract password from user object
+      const userWithoutPassword = user.toJSON();
+      delete userWithoutPassword.password;
+
       return {
-        user: user.toJSON(),
-        tokens,
+        user: userWithoutPassword,
+        tokens: {
+          accessToken: tokens.accessToken,
+          refreshToken: tokens.refreshToken,
+          tokenType: tokens.tokenType,
+          expiresIn: tokens.expiresIn
+        },
       };
     } catch (error) {
       console.error('❌ [AuthService] Login error:', error.message);
@@ -237,7 +254,12 @@ class AuthService {
 
       return {
         user: user.toJSON(),
-        tokens,
+        tokens: {
+          accessToken: tokens.accessToken,
+          refreshToken: tokens.refreshToken,
+          tokenType: tokens.tokenType,
+          expiresIn: tokens.expiresIn
+        },
       };
     } catch (error) {
       console.error('❌ [AuthService] Refresh token error:', error.message);

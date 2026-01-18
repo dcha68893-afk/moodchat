@@ -1,9 +1,14 @@
 const logger = require('../utils/logger');
 
 const errorHandler = (err, req, res, next) => {
+  // Ensure we have a valid error object
+  if (!err) {
+    err = new Error('Unknown error occurred');
+  }
+
   // Log the error
   logger.error('Error:', {
-    message: err.message,
+    message: err.message || 'Unknown error',
     stack: err.stack,
     path: req.path,
     method: req.method,
@@ -14,7 +19,7 @@ const errorHandler = (err, req, res, next) => {
   // Default error response
   const response = {
     success: false,
-    message: process.env.NODE_ENV === 'production' ? 'Internal server error' : err.message,
+    message: process.env.NODE_ENV === 'production' ? 'Internal server error' : err.message || 'Unknown error',
     timestamp: new Date().toISOString(),
   };
 
@@ -23,27 +28,27 @@ const errorHandler = (err, req, res, next) => {
     response.stack = err.stack;
   }
 
-  // Handle specific error types
+  // Handle specific error types safely
   if (err.name === 'ValidationError') {
     response.message = 'Validation failed';
-    response.errors = err.errors || err.details;
+    response.errors = err.errors || err.details || [];
     return res.status(400).json(response);
   }
 
   if (err.name === 'SequelizeValidationError') {
     response.message = 'Database validation failed';
-    response.errors = err.errors.map(e => ({
-      field: e.path,
-      message: e.message,
+    response.errors = (err.errors || []).map(e => ({
+      field: e.path || 'unknown',
+      message: e.message || 'Validation error',
     }));
     return res.status(400).json(response);
   }
 
   if (err.name === 'SequelizeUniqueConstraintError') {
     response.message = 'Duplicate entry';
-    response.errors = err.errors.map(e => ({
-      field: e.path,
-      message: `${e.path} already exists`,
+    response.errors = (err.errors || []).map(e => ({
+      field: e.path || 'unknown',
+      message: `${e.path || 'Field'} already exists`,
     }));
     return res.status(409).json(response);
   }
@@ -58,17 +63,17 @@ const errorHandler = (err, req, res, next) => {
     return res.status(401).json(response);
   }
 
-  if (err.name === 'UnauthorizedError') {
+  if (err.name === 'UnauthorizedError' || err.message?.includes('Unauthorized')) {
     response.message = 'Unauthorized';
     return res.status(401).json(response);
   }
 
-  if (err.name === 'ForbiddenError') {
+  if (err.name === 'ForbiddenError' || err.message?.includes('Forbidden')) {
     response.message = 'Forbidden';
     return res.status(403).json(response);
   }
 
-  if (err.name === 'NotFoundError') {
+  if (err.name === 'NotFoundError' || err.message?.includes('Not found')) {
     response.message = 'Resource not found';
     return res.status(404).json(response);
   }
@@ -77,6 +82,25 @@ const errorHandler = (err, req, res, next) => {
   if (err.status === 429) {
     response.message = 'Too many requests';
     return res.status(429).json(response);
+  }
+
+  // Handle Sequelize database errors
+  if (err.name?.startsWith('Sequelize')) {
+    response.message = 'Database error occurred';
+    return res.status(500).json(response);
+  }
+
+  // Handle bcrypt errors
+  if (err.message?.includes('bcrypt') || err.message?.includes('password')) {
+    response.message = 'Password processing error';
+    return res.status(500).json(response);
+  }
+
+  // Handle CORS errors
+  if (err.message?.includes('CORS')) {
+    response.message = 'CORS error: ' + err.message;
+    response.allowedOrigins = process.env.NODE_ENV === 'development' ? 'ALL (*)' : 'restricted';
+    return res.status(403).json(response);
   }
 
   // Default to 500 internal server error
@@ -139,8 +163,8 @@ class ConflictError extends AppError {
 module.exports = {
   errorHandler,
   AppError,
-  AuthenticationError,  // Added for calls.js
-  AuthorizationError,   // Added for calls.js
+  AuthenticationError,
+  AuthorizationError,
   ValidationError,
   UnauthorizedError,
   ForbiddenError,

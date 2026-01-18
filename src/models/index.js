@@ -6,7 +6,7 @@ const databaseConfig = require('../config/database');
 const env = config.nodeEnv || 'development';
 const dbConfig = databaseConfig[env];
 
-// Initialize Sequelize instance
+// Initialize Sequelize instance FIRST
 const sequelize = new Sequelize(dbConfig.name, dbConfig.user, dbConfig.password, {
   host: dbConfig.host,
   port: dbConfig.port,
@@ -20,7 +20,7 @@ const sequelize = new Sequelize(dbConfig.name, dbConfig.user, dbConfig.password,
   },
 });
 
-// Import models using factory pattern
+// Import models using factory pattern with explicit sequelize instance
 const User = require('./User')(sequelize, Sequelize.DataTypes);
 const Token = require('./Token')(sequelize, Sequelize.DataTypes);
 const Profile = require('./Profile')(sequelize, Sequelize.DataTypes);

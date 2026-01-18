@@ -1,17 +1,16 @@
-
-const authService = require('../services/authService');
-const { AppError } = require('../middleware/errorHandler');
-const logger = require('../utils/logger');
-const validator = require('validator');
 const jwt = require('jsonwebtoken');
-const bcrypt = require('bcrypt');
-const { User, Token, LoginAttempt } = require('../models');
+const bcrypt = require('bcryptjs');
+const validator = require('validator');
+const { User, Token } = require('../models');
+const { Op } = require('sequelize');
 
-// In-memory store for login attempts
+const JWT_SECRET = process.env.JWT_ACCESS_SECRET || process.env.JWT_SECRET || 'development-secret-key-change-in-production';
+
+// In-memory store for login attempts (fallback)
 const loginAttemptsStore = new Map();
 
 class AuthController {
-  async register(req, res, next) {
+  async register(req, res) {
     try {
       console.log("📝 [AuthController] Registration request received");
       console.log("Request body:", { 
@@ -26,7 +25,8 @@ class AuthController {
       if (!email || !password || !username) {
         return res.status(400).json({
           success: false,
-          message: 'Email, username, and password are required'
+          message: 'Email, username, and password are required',
+          timestamp: new Date().toISOString()
         });
       }
 
@@ -34,7 +34,8 @@ class AuthController {
       if (!password || password.trim() === '') {
         return res.status(400).json({
           success: false,
-          message: 'Password cannot be empty'
+          message: 'Password cannot be empty',
+          timestamp: new Date().toISOString()
         });
       }
 
@@ -42,32 +43,137 @@ class AuthController {
       if (!validator.isEmail(email)) {
         return res.status(400).json({
           success: false,
-          message: 'Invalid email format'
+          message: 'Invalid email format',
+          timestamp: new Date().toISOString()
         });
       }
 
-      console.log("🔧 [AuthController] Calling authService.register...");
+      console.log("🔧 [AuthController] Checking for existing user...");
 
-      // Call authService.register
-      const result = await authService.register({
-        username: username.trim(),
-        email: email.toLowerCase().trim(),
-        password: password,
-        firstName: firstName,
-        lastName: lastName
-      });
+      // Check if user already exists in database
+      let existingUser = null;
+      if (req.app.locals.models && req.app.locals.models.User) {
+        try {
+          existingUser = await req.app.locals.models.User.findOne({
+            where: {
+              [Op.or]: [
+                { email: email.toLowerCase().trim() },
+                { username: username.trim() }
+              ]
+            }
+          });
+        } catch (dbError) {
+          console.error('Database check error:', dbError);
+        }
+      }
 
-      console.log("✅ [AuthController] Registration successful for user:", result.user.id);
+      // If database not available, check in-memory
+      if (!existingUser && req.app.locals.users) {
+        existingUser = req.app.locals.users.find(u => 
+          u.email === email.toLowerCase().trim() || 
+          u.username === username.trim()
+        );
+      }
 
-      // Return JSON response with user and tokens
+      if (existingUser) {
+        return res.status(409).json({
+          success: false,
+          message: 'User already exists with this email or username',
+          timestamp: new Date().toISOString()
+        });
+      }
+
+      // Hash password
+      const hashedPassword = await bcrypt.hash(password, 10);
+
+      // Create avatar URL
+      const avatar = `https://ui-avatars.com/api/?name=${encodeURIComponent(username)}&background=random&color=fff`;
+
+      let user;
+      
+      // Try to save to database first
+      if (req.app.locals.models && req.app.locals.models.User) {
+        try {
+          user = await req.app.locals.models.User.create({
+            email: email.toLowerCase().trim(),
+            username: username.trim(),
+            password: hashedPassword,
+            avatar: avatar,
+            firstName: firstName || null,
+            lastName: lastName || null
+          });
+          console.log("✅ User saved to database");
+        } catch (dbError) {
+          console.error('Database save error:', dbError);
+          // Fall through to in-memory
+        }
+      }
+
+      // If database save failed or not available, use in-memory
+      if (!user && req.app.locals.users) {
+        user = {
+          id: Date.now().toString(),
+          email: email.toLowerCase().trim(),
+          username: username.trim(),
+          password: hashedPassword,
+          avatar: avatar,
+          firstName: firstName || null,
+          lastName: lastName || null,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        };
+        req.app.locals.users.push(user);
+        console.log("✅ User saved to in-memory storage");
+      }
+
+      if (!user) {
+        throw new Error('Failed to create user in any storage');
+      }
+
+      // Generate JWT token
+      const token = jwt.sign(
+        { 
+          userId: user.id, 
+          email: user.email, 
+          username: user.username 
+        },
+        JWT_SECRET,
+        { expiresIn: '24h' }
+      );
+
+      // Save token to database if available
+      if (req.app.locals.models && req.app.locals.models.Token) {
+        try {
+          await req.app.locals.models.Token.create({
+            userId: user.id,
+            token: token,
+            tokenType: 'access',
+            expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000)
+          });
+        } catch (tokenError) {
+          console.error('Token save error:', tokenError);
+        }
+      }
+
+      console.log("✅ [AuthController] Registration successful for user:", user.id);
+
+      // Return response
       return res.status(201).json({
         success: true,
         message: 'Registration successful',
-        data: {
-          user: result.user,
-          tokens: result.tokens
-        }
+        token: token,
+        user: {
+          id: user.id,
+          email: user.email,
+          username: user.username,
+          avatar: user.avatar,
+          firstName: user.firstName,
+          lastName: user.lastName,
+          createdAt: user.createdAt || new Date().toISOString()
+        },
+        timestamp: new Date().toISOString()
       });
+      
     } catch (error) {
       console.error('❌ [AuthController] Registration error:', error.message);
       console.error('Error stack:', error.stack);
@@ -78,7 +184,8 @@ class AuthController {
           error.message.includes('already registered')) {
         return res.status(409).json({
           success: false,
-          message: error.message
+          message: error.message,
+          timestamp: new Date().toISOString()
         });
       }
       
@@ -88,29 +195,21 @@ class AuthController {
           error.message.includes('Password cannot be empty')) {
         return res.status(400).json({
           success: false,
-          message: error.message
-        });
-      }
-      
-      // Handle database errors
-      if (error.message.includes('Database error') || 
-          error.name === 'SequelizeDatabaseError' || 
-          error.name === 'SequelizeUniqueConstraintError') {
-        return res.status(500).json({
-          success: false,
-          message: 'Database error occurred. Please try again.'
+          message: error.message,
+          timestamp: new Date().toISOString()
         });
       }
       
       // Default internal server error
       return res.status(500).json({
         success: false,
-        message: 'Internal server error: ' + error.message
+        message: 'Registration failed: ' + error.message,
+        timestamp: new Date().toISOString()
       });
     }
   }
 
-  async login(req, res, next) {
+  async login(req, res) {
     try {
       console.log("📝 [AuthController] Login request received");
       console.log("Request body:", { 
@@ -124,7 +223,8 @@ class AuthController {
       if (!identifier || !password) {
         return res.status(400).json({
           success: false,
-          message: 'Identifier (email or username) and password are required'
+          message: 'Identifier (email or username) and password are required',
+          timestamp: new Date().toISOString()
         });
       }
 
@@ -146,7 +246,8 @@ class AuthController {
             success: false,
             message: `Too many login attempts. Please wait ${remainingTime} minutes before trying again.`,
             blockTime: blockTime,
-            remainingTime: remainingTime
+            remainingTime: remainingTime,
+            timestamp: new Date().toISOString()
           });
         } else {
           // Reset after block time expires
@@ -154,174 +255,302 @@ class AuthController {
         }
       }
 
-      console.log("🔧 [AuthController] Calling authService.login...");
+      console.log("🔧 [AuthController] Looking up user...");
 
-      // Call authService.login (which now uses validatePassword internally)
-      let result;
-      if (validator.isEmail(identifier)) {
-        result = await authService.login(identifier.toLowerCase().trim(), password);
-      } else {
-        // For username login
-        result = await authService.login(identifier.trim(), password);
+      let user = null;
+      
+      // Try database first
+      if (req.app.locals.models && req.app.locals.models.User) {
+        try {
+          if (validator.isEmail(identifier)) {
+            user = await req.app.locals.models.User.findOne({ 
+              where: { email: identifier.toLowerCase().trim() } 
+            });
+          } else {
+            user = await req.app.locals.models.User.findOne({ 
+              where: { username: identifier.trim() } 
+            });
+          }
+        } catch (dbError) {
+          console.error('Database lookup error:', dbError);
+        }
       }
 
-      // Reset attempts on successful login
-      loginAttemptsStore.delete(attemptKey);
-
-      console.log("✅ [AuthController] Login successful for user:", result.user.id);
-
-      // Return JSON response with user and tokens
-      return res.json({
-        success: true,
-        message: 'Login successful',
-        data: {
-          user: result.user,
-          tokens: result.tokens
+      // If database not available or user not found, check in-memory
+      if (!user && req.app.locals.users) {
+        if (validator.isEmail(identifier)) {
+          user = req.app.locals.users.find(u => u.email === identifier.toLowerCase().trim());
+        } else {
+          user = req.app.locals.users.find(u => u.username === identifier.trim());
         }
-      });
-    } catch (error) {
-      console.error('❌ [AuthController] Login error:', error.message);
-      
-      // Handle specific error cases
-      if (error.message.includes('Invalid credentials') || 
-          error.message.includes('Account is deactivated')) {
-        
+      }
+
+      if (!user) {
         // Increment failed attempts
-        const clientIp = req.ip || req.headers['x-forwarded-for'] || req.connection.remoteAddress;
-        const attemptKey = `${req.body.identifier}_${clientIp}`;
-        let attempts = loginAttemptsStore.get(attemptKey) || { count: 0, lastAttempt: null };
         attempts.count++;
         attempts.lastAttempt = Date.now();
         loginAttemptsStore.set(attemptKey, attempts);
         
         return res.status(401).json({
           success: false,
-          message: error.message,
+          message: 'Invalid credentials',
           attemptCount: attempts.count,
-          maxAttempts: 5
+          maxAttempts: maxAttempts,
+          timestamp: new Date().toISOString()
         });
       }
+
+      // Check password
+      const validPassword = await bcrypt.compare(password, user.password);
+      
+      if (!validPassword) {
+        // Increment failed attempts
+        attempts.count++;
+        attempts.lastAttempt = Date.now();
+        loginAttemptsStore.set(attemptKey, attempts);
+        
+        return res.status(401).json({
+          success: false,
+          message: 'Invalid credentials',
+          attemptCount: attempts.count,
+          maxAttempts: maxAttempts,
+          timestamp: new Date().toISOString()
+        });
+      }
+
+      // Reset attempts on successful login
+      loginAttemptsStore.delete(attemptKey);
+
+      // Generate JWT token
+      const token = jwt.sign(
+        { 
+          userId: user.id, 
+          email: user.email, 
+          username: user.username 
+        },
+        JWT_SECRET,
+        { expiresIn: '24h' }
+      );
+
+      // Save token to database if available
+      if (req.app.locals.models && req.app.locals.models.Token) {
+        try {
+          await req.app.locals.models.Token.create({
+            userId: user.id,
+            token: token,
+            tokenType: 'access',
+            expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000)
+          });
+        } catch (tokenError) {
+          console.error('Token save error:', tokenError);
+        }
+      }
+
+      console.log("✅ [AuthController] Login successful for user:", user.id);
+
+      // Return response
+      return res.json({
+        success: true,
+        message: 'Login successful',
+        token: token,
+        user: {
+          id: user.id,
+          email: user.email,
+          username: user.username,
+          avatar: user.avatar,
+          firstName: user.firstName,
+          lastName: user.lastName,
+          createdAt: user.createdAt || new Date().toISOString()
+        },
+        timestamp: new Date().toISOString()
+      });
+      
+    } catch (error) {
+      console.error('❌ [AuthController] Login error:', error.message);
       
       return res.status(500).json({
         success: false,
-        message: 'Internal server error'
+        message: 'Login failed: ' + error.message,
+        timestamp: new Date().toISOString()
       });
     }
   }
 
-  async refreshToken(req, res, next) {
+  async logout(req, res) {
+    try {
+      const token = req.headers.authorization?.split(' ')[1];
+      
+      if (token && req.app.locals.models && req.app.locals.models.Token) {
+        // Revoke token in database
+        await req.app.locals.models.Token.update(
+          { isRevoked: true },
+          { where: { token: token } }
+        );
+      }
+      
+      return res.json({
+        success: true,
+        message: 'Logged out successfully',
+        timestamp: new Date().toISOString()
+      });
+      
+    } catch (error) {
+      console.error('Logout error:', error);
+      
+      return res.status(500).json({
+        success: false,
+        message: 'Logout failed',
+        timestamp: new Date().toISOString()
+      });
+    }
+  }
+
+  async refreshToken(req, res) {
     try {
       const { refreshToken } = req.body;
-
+      
       if (!refreshToken) {
         return res.status(400).json({
           success: false,
-          message: 'Refresh token is required'
+          message: 'Refresh token is required',
+          timestamp: new Date().toISOString()
         });
       }
-
-      const result = await authService.refreshToken(refreshToken);
-
-      res.json({
+      
+      // Check if Token model is available
+      if (!req.app.locals.models || !req.app.locals.models.Token) {
+        return res.status(501).json({
+          success: false,
+          message: 'Token refresh not implemented',
+          timestamp: new Date().toISOString()
+        });
+      }
+      
+      // Find and validate refresh token
+      const tokenRecord = await req.app.locals.models.Token.findOne({
+        where: {
+          token: refreshToken,
+          tokenType: 'refresh',
+          isRevoked: false,
+          expiresAt: { [Op.gt]: new Date() }
+        },
+        include: [{ 
+          model: req.app.locals.models.User, 
+          attributes: ['id', 'email', 'username'] 
+        }]
+      });
+      
+      if (!tokenRecord) {
+        return res.status(401).json({
+          success: false,
+          message: 'Invalid or expired refresh token',
+          timestamp: new Date().toISOString()
+        });
+      }
+      
+      // Generate new access token
+      const accessToken = jwt.sign(
+        { 
+          userId: tokenRecord.User.id, 
+          email: tokenRecord.User.email, 
+          username: tokenRecord.User.username 
+        },
+        JWT_SECRET,
+        { expiresIn: '15m' }
+      );
+      
+      // Create new token record
+      await req.app.locals.models.Token.create({
+        userId: tokenRecord.User.id,
+        token: accessToken,
+        tokenType: 'access',
+        expiresAt: new Date(Date.now() + 15 * 60 * 1000) // 15 minutes
+      });
+      
+      return res.json({
         success: true,
         message: 'Token refreshed successfully',
-        data: {
-          user: result.user,
-          tokens: result.tokens,
+        accessToken: accessToken,
+        user: {
+          id: tokenRecord.User.id,
+          email: tokenRecord.User.email,
+          username: tokenRecord.User.username
         },
+        timestamp: new Date().toISOString()
       });
-    } catch (error) {
-      console.error('Refresh token controller error:', error);
       
-      if (error.message.includes('invalid') || error.message.includes('expired')) {
+    } catch (error) {
+      console.error('Refresh token error:', error);
+      
+      return res.status(500).json({
+        success: false,
+        message: 'Token refresh failed',
+        timestamp: new Date().toISOString()
+      });
+    }
+  }
+
+  async getCurrentUser(req, res) {
+    try {
+      if (!req.user) {
         return res.status(401).json({
           success: false,
-          message: "Invalid or expired refresh token"
+          message: "Not authenticated",
+          timestamp: new Date().toISOString()
         });
       }
+
+      let user = null;
       
-      return res.status(500).json({
-        success: false,
-        message: 'Internal server error'
-      });
-    }
-  }
-
-  async logout(req, res, next) {
-    try {
-      const accessToken = req.headers.authorization?.split(' ')[1];
-      const { refreshToken } = req.body;
-
-      if (!accessToken && !refreshToken) {
-        return res.status(400).json({
-          success: false,
-          message: 'At least one token is required for logout'
-        });
+      // Try database first
+      if (req.app.locals.models && req.app.locals.models.User) {
+        try {
+          user = await req.app.locals.models.User.findByPk(req.user.userId, {
+            attributes: ['id', 'email', 'username', 'avatar', 'firstName', 'lastName', 'createdAt']
+          });
+        } catch (dbError) {
+          console.error('Database lookup error:', dbError);
+        }
       }
 
-      await authService.logout(accessToken, refreshToken);
-
-      res.json({
-        success: true,
-        message: 'Logged out successfully',
-      });
-    } catch (error) {
-      console.error('Logout controller error:', error);
-      return res.status(500).json({
-        success: false,
-        message: 'Internal server error'
-      });
-    }
-  }
-
-  async getCurrentUser(req, res, next) {
-    try {
-      const user = req.user;
+      // If database not available, check in-memory
+      if (!user && req.app.locals.users) {
+        user = req.app.locals.users.find(u => u.id === req.user.userId);
+      }
 
       if (!user) {
-        return res.status(401).json({
+        return res.status(404).json({
           success: false,
-          message: "Unauthorized"
+          message: 'User not found',
+          timestamp: new Date().toISOString()
         });
       }
 
+      // Return sanitized user data
       const sanitizedUser = {
         id: user.id,
         username: user.username,
         email: user.email,
-        firstName: user.firstName,
-        lastName: user.lastName,
+        firstName: user.firstName || null,
+        lastName: user.lastName || null,
         avatar: user.avatar || null,
-        bio: user.bio || null,
-        phone: user.phone || null,
         displayName: `${user.firstName || ''} ${user.lastName || ''}`.trim() || user.username,
-        isVerified: user.isVerified || false,
-        status: user.status || 'offline',
-        lastSeen: user.lastSeen,
-        settings: user.settings || {},
-        createdAt: user.createdAt,
-        updatedAt: user.updatedAt
+        createdAt: user.createdAt || new Date().toISOString()
       };
 
       res.json({
         success: true,
-        data: {
-          user: sanitizedUser
-        }
+        user: sanitizedUser,
+        timestamp: new Date().toISOString()
       });
-    } catch (error) {
-      console.error('Get current user controller error:', error);
       
-      if (error.message.includes('Unauthorized') || error.message.includes('invalid token')) {
-        return res.status(401).json({
-          success: false,
-          message: "Unauthorized"
-        });
-      }
+    } catch (error) {
+      console.error('Get current user error:', error);
       
       return res.status(500).json({
         success: false,
-        message: 'Internal server error'
+        message: 'Failed to get user profile',
+        timestamp: new Date().toISOString()
       });
     }
   }

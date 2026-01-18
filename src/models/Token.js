@@ -118,6 +118,9 @@ module.exports = (sequelize, DataTypes) => {
         {
           fields: ['user_id', 'token_type'],
         },
+        {
+          fields: ['created_at'],
+        }
       ],
       hooks: {
         // Auto-set expiration date based on token type if not provided
@@ -135,6 +138,12 @@ module.exports = (sequelize, DataTypes) => {
             token.expiresAt = new Date(Date.now() + expiresIn);
           }
         },
+        // Generate token if not provided
+        beforeCreate: async (token) => {
+          if (!token.token) {
+            token.token = crypto.randomBytes(64).toString('hex');
+          }
+        }
       },
     }
   );
@@ -204,6 +213,10 @@ module.exports = (sequelize, DataTypes) => {
    * @returns {Promise<Token|null>} Found token or null
    */
   Token.findByToken = async function (tokenString, includeUser = false) {
+    if (!tokenString) {
+      throw new Error('Token string is required');
+    }
+    
     const options = {
       where: { token: tokenString },
     };
@@ -227,10 +240,15 @@ module.exports = (sequelize, DataTypes) => {
    * @returns {Promise<Array<Token>>} Array of valid tokens
    */
   Token.findValidByUserId = async function (userId, tokenType = null) {
+    if (!userId) {
+      throw new Error('User ID is required');
+    }
+    
+    const { Op } = this.sequelize.Sequelize;
     const where = {
       userId,
       isRevoked: false,
-      expiresAt: { [this.sequelize.Sequelize.Op.gt]: new Date() },
+      expiresAt: { [Op.gt]: new Date() },
     };
 
     if (tokenType) {
@@ -250,16 +268,38 @@ module.exports = (sequelize, DataTypes) => {
    * @returns {Promise<number>} Number of revoked tokens
    */
   Token.revokeAllUserTokens = async function (userId, exceptToken = null) {
+    if (!userId) {
+      throw new Error('User ID is required');
+    }
+    
+    const { Op } = this.sequelize.Sequelize;
     const where = {
       userId,
       isRevoked: false,
     };
 
     if (exceptToken) {
-      where.token = { [this.sequelize.Sequelize.Op.ne]: exceptToken };
+      where.token = { [Op.ne]: exceptToken };
     }
 
     const [affectedRows] = await this.update({ isRevoked: true }, { where: where });
+    return affectedRows;
+  };
+
+  /**
+   * Revoke a specific token
+   * @param {string} tokenString - Token string to revoke
+   * @returns {Promise<number>} Number of revoked tokens (0 or 1)
+   */
+  Token.revokeToken = async function (tokenString) {
+    if (!tokenString) {
+      throw new Error('Token string is required');
+    }
+    
+    const [affectedRows] = await this.update(
+      { isRevoked: true },
+      { where: { token: tokenString } }
+    );
     return affectedRows;
   };
 
@@ -268,9 +308,10 @@ module.exports = (sequelize, DataTypes) => {
    * @returns {Promise<number>} Number of deleted tokens
    */
   Token.cleanupExpiredTokens = async function () {
+    const { Op } = this.sequelize.Sequelize;
     return await this.destroy({
       where: {
-        expiresAt: { [this.sequelize.Sequelize.Op.lt]: new Date() },
+        expiresAt: { [Op.lt]: new Date() },
       },
     });
   };
@@ -282,6 +323,64 @@ module.exports = (sequelize, DataTypes) => {
    */
   Token.generateRandomToken = function (length = 64) {
     return crypto.randomBytes(length).toString('hex');
+  };
+
+  /**
+   * Create access and refresh tokens for a user
+   * @param {number} userId - User ID
+   * @param {Object} options - Options including userAgent, ipAddress, deviceInfo
+   * @returns {Promise<{accessToken: Token, refreshToken: Token}>} Created tokens
+   */
+  Token.createTokenPair = async function (userId, options = {}) {
+    if (!userId) {
+      throw new Error('User ID is required');
+    }
+    
+    const { userAgent, ipAddress, deviceInfo } = options;
+    
+    // Create refresh token
+    const refreshToken = await this.create({
+      userId,
+      tokenType: 'refresh',
+      userAgent,
+      ipAddress,
+      deviceInfo,
+      scope: ['refresh']
+    });
+    
+    // Create access token
+    const accessToken = await this.create({
+      userId,
+      tokenType: 'access',
+      userAgent,
+      ipAddress,
+      deviceInfo,
+      scope: ['read', 'write']
+    });
+    
+    return {
+      accessToken,
+      refreshToken
+    };
+  };
+
+  /**
+   * Verify and return valid token with user
+   * @param {string} tokenString - Token string
+   * @returns {Promise<Token|null>} Valid token with user or null
+   */
+  Token.verify = async function (tokenString) {
+    if (!tokenString) {
+      return null;
+    }
+    
+    const token = await this.findByToken(tokenString, true);
+    
+    if (!token || !token.isValid() || !token.user || !token.user.isActive) {
+      return null;
+    }
+    
+    return token;
   };
 
   return Token;

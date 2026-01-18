@@ -1,4 +1,3 @@
-
 const bcrypt = require('bcryptjs');
 
 module.exports = (sequelize, DataTypes) => {
@@ -17,6 +16,22 @@ module.exports = (sequelize, DataTypes) => {
           name: 'username',
           msg: 'Username already exists'
         },
+        validate: {
+          notNull: {
+            msg: 'Username is required'
+          },
+          notEmpty: {
+            msg: 'Username cannot be empty'
+          },
+          len: {
+            args: [3, 50],
+            msg: 'Username must be between 3 and 50 characters'
+          },
+          is: {
+            args: /^[a-zA-Z0-9_]+$/,
+            msg: 'Username can only contain letters, numbers, and underscores'
+          }
+        }
       },
       email: {
         type: DataTypes.STRING(100),
@@ -30,6 +45,12 @@ module.exports = (sequelize, DataTypes) => {
             args: true,
             msg: 'Invalid email format'
           },
+          notNull: {
+            msg: 'Email is required'
+          },
+          notEmpty: {
+            msg: 'Email cannot be empty'
+          },
           len: {
             args: [1, 100],
             msg: 'Email must be less than 100 characters'
@@ -39,6 +60,18 @@ module.exports = (sequelize, DataTypes) => {
       password: {
         type: DataTypes.STRING,
         allowNull: false,
+        validate: {
+          notNull: {
+            msg: 'Password is required'
+          },
+          notEmpty: {
+            msg: 'Password cannot be empty'
+          },
+          len: {
+            args: [6, 100],
+            msg: 'Password must be at least 6 characters'
+          }
+        }
       },
       firstName: {
         type: DataTypes.STRING(50),
@@ -63,6 +96,7 @@ module.exports = (sequelize, DataTypes) => {
       avatar: {
         type: DataTypes.STRING,
         allowNull: true,
+        defaultValue: null
       },
       bio: {
         type: DataTypes.TEXT,
@@ -87,11 +121,26 @@ module.exports = (sequelize, DataTypes) => {
       dateOfBirth: {
         type: DataTypes.DATEONLY,
         allowNull: true,
+        validate: {
+          isDate: {
+            msg: 'Invalid date format'
+          },
+          isBefore: {
+            args: new Date().toISOString().split('T')[0],
+            msg: 'Date of birth must be in the past'
+          }
+        }
       },
       role: {
         type: DataTypes.ENUM('user', 'admin', 'moderator'),
         defaultValue: 'user',
         allowNull: false,
+        validate: {
+          isIn: {
+            args: [['user', 'admin', 'moderator']],
+            msg: 'Invalid role'
+          }
+        }
       },
       isVerified: {
         type: DataTypes.BOOLEAN,
@@ -106,11 +155,18 @@ module.exports = (sequelize, DataTypes) => {
       lastSeen: {
         type: DataTypes.DATE,
         allowNull: true,
+        defaultValue: null
       },
       status: {
         type: DataTypes.ENUM('online', 'offline', 'away', 'busy', 'invisible'),
         defaultValue: 'offline',
         allowNull: false,
+        validate: {
+          isIn: {
+            args: [['online', 'offline', 'away', 'busy', 'invisible']],
+            msg: 'Invalid status'
+          }
+        }
       },
       settings: {
         type: DataTypes.JSONB,
@@ -131,6 +187,13 @@ module.exports = (sequelize, DataTypes) => {
           language: 'en',
         },
         allowNull: false,
+        validate: {
+          isObject(value) {
+            if (typeof value !== 'object' || value === null) {
+              throw new Error('Settings must be an object');
+            }
+          }
+        }
       },
     },
     {
@@ -162,6 +225,12 @@ module.exports = (sequelize, DataTypes) => {
             } else {
               throw new Error('Password cannot be empty');
             }
+          }
+        },
+        // Set default avatar if not provided
+        beforeCreate: async (user) => {
+          if (!user.avatar) {
+            user.avatar = `https://ui-avatars.com/api/?name=${encodeURIComponent(user.username)}&background=random&color=fff`;
           }
         }
       },
@@ -196,7 +265,6 @@ module.exports = (sequelize, DataTypes) => {
     
     // Remove sensitive fields
     delete values.password;
-    delete values.updatedAt;
     
     return values;
   };
@@ -207,7 +275,18 @@ module.exports = (sequelize, DataTypes) => {
    */
   User.prototype.getPublicProfile = function () {
     const { id, username, firstName, lastName, avatar, bio, status, lastSeen } = this;
-    return { id, username, firstName, lastName, avatar, bio, status, lastSeen };
+    return { 
+      id, 
+      username, 
+      firstName, 
+      lastName, 
+      avatar, 
+      bio, 
+      status, 
+      lastSeen,
+      displayName: `${firstName || ''} ${lastName || ''}`.trim() || username,
+      isOnline: status === 'online'
+    };
   };
 
   /**
@@ -220,6 +299,22 @@ module.exports = (sequelize, DataTypes) => {
       return await this.save();
     } catch (error) {
       console.error('Failed to update last seen:', error);
+      throw error;
+    }
+  };
+
+  /**
+   * Update user status
+   * @param {string} status - New status
+   * @returns {Promise<User>} Updated user instance
+   */
+  User.prototype.updateStatus = async function (status) {
+    try {
+      this.status = status;
+      this.lastSeen = new Date();
+      return await this.save();
+    } catch (error) {
+      console.error('Failed to update status:', error);
       throw error;
     }
   };
@@ -269,6 +364,32 @@ module.exports = (sequelize, DataTypes) => {
   };
 
   /**
+   * Find active user by email or username
+   * @param {string} identifier - Email or username
+   * @returns {Promise<User|null>} Found user or null
+   */
+  User.findActiveByIdentifier = async function (identifier) {
+    if (!identifier) {
+      throw new Error('Identifier is required');
+    }
+    try {
+      const { Op } = this.sequelize.Sequelize;
+      return await this.findOne({
+        where: {
+          [Op.or]: [
+            { email: identifier.toLowerCase().trim() },
+            { username: identifier.trim() }
+          ],
+          isActive: true
+        }
+      });
+    } catch (error) {
+      console.error('Error finding active user:', error);
+      throw error;
+    }
+  };
+
+  /**
    * Search users by username, name, or email
    * @param {string} query - Search query
    * @param {number} limit - Maximum results (default: 20)
@@ -280,7 +401,7 @@ module.exports = (sequelize, DataTypes) => {
     }
     
     try {
-      const { Op } = sequelize.Sequelize;
+      const { Op } = this.sequelize.Sequelize;
       
       return await this.findAll({
         where: {
@@ -290,13 +411,100 @@ module.exports = (sequelize, DataTypes) => {
             { lastName: { [Op.iLike]: `%${query}%` } },
             { email: { [Op.iLike]: `%${query}%` } },
           ],
+          isActive: true
         },
         limit: limit,
-        attributes: ['id', 'username', 'firstName', 'lastName', 'avatar', 'bio', 'status'],
+        attributes: ['id', 'username', 'firstName', 'lastName', 'avatar', 'bio', 'status', 'lastSeen'],
+        order: [['username', 'ASC']]
       });
     } catch (error) {
       console.error('User search error:', error);
       throw error;
+    }
+  };
+
+  /**
+   * Get all active users
+   * @param {number} limit - Maximum results (default: 100)
+   * @returns {Promise<Array<User>>} Array of active users
+   */
+  User.getAllActive = async function (limit = 100) {
+    try {
+      return await this.findAll({
+        where: {
+          isActive: true
+        },
+        limit: limit,
+        attributes: ['id', 'username', 'email', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'createdAt'],
+        order: [['createdAt', 'DESC']]
+      });
+    } catch (error) {
+      console.error('Get all active users error:', error);
+      throw error;
+    }
+  };
+
+  /**
+   * Update multiple users' status
+   * @param {Array<number>} userIds - Array of user IDs
+   * @param {string} status - New status
+   * @returns {Promise<number>} Number of updated rows
+   */
+  User.bulkUpdateStatus = async function (userIds, status) {
+    if (!Array.isArray(userIds) || userIds.length === 0) {
+      throw new Error('User IDs array is required');
+    }
+    
+    if (!['online', 'offline', 'away', 'busy', 'invisible'].includes(status)) {
+      throw new Error('Invalid status');
+    }
+    
+    try {
+      const [affectedRows] = await this.update(
+        { 
+          status: status,
+          lastSeen: new Date()
+        },
+        {
+          where: {
+            id: userIds
+          }
+        }
+      );
+      
+      return affectedRows;
+    } catch (error) {
+      console.error('Bulk update status error:', error);
+      throw error;
+    }
+  };
+
+  // ===== ASSOCIATIONS =====
+  User.associate = function(models) {
+    // User has many Tokens
+    User.hasMany(models.Token, {
+      foreignKey: 'userId',
+      as: 'tokens',
+      onDelete: 'CASCADE'
+    });
+    
+    // User has many Messages (if Message model exists)
+    if (models.Message) {
+      User.hasMany(models.Message, {
+        foreignKey: 'userId',
+        as: 'messages',
+        onDelete: 'CASCADE'
+      });
+    }
+    
+    // User has many Rooms (if Room model exists)
+    if (models.Room) {
+      User.belongsToMany(models.Room, {
+        through: 'user_rooms',
+        foreignKey: 'userId',
+        as: 'rooms',
+        onDelete: 'CASCADE'
+      });
     }
   };
 

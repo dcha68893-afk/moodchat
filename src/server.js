@@ -190,7 +190,7 @@ app.options('*', (req, res) => {
   res.sendStatus(200);
 });
 
-// ========== TEMPORARY REQUEST LOGGER FOR AUTH ROUTES ==========
+// ========== TEMPORARY REQUEST LOGGER FOR authS ==========
 app.use((req, res, next) => {
   const timestamp = new Date().toISOString();
   
@@ -738,7 +738,7 @@ app.post('/api/logout', (req, res) => {
   });
 });
 
-// ========== COMPATIBILITY AUTH ROUTES (keep existing) ==========
+// ========== COMPATIBILITY authS (keep existing) ==========
 // These are kept for compatibility with existing code
 app.post('/api/auth/register', async (req, res) => {
   try {

@@ -1,36 +1,76 @@
-const userService = require('../services/userService');
-const { AppError } = require('../middleware/errorHandler');
-const logger = require('../utils/logger');
+const { Op } = require('sequelize');
+const bcrypt = require('bcryptjs');
 
 class UserController {
   async getAllUsers(req, res, next) {
     try {
       // Get current user ID from authenticated request
-      const currentUserId = req.user.id;
+      const currentUserId = req.user.userId;
       
-      // Get all registered users excluding the current user
-      const users = await userService.getAllRegisteredUsers(currentUserId);
+      let users = [];
+      
+      // Try database first
+      if (req.app.locals.dbConnected && req.app.locals.models && req.app.locals.models.User) {
+        try {
+          users = await req.app.locals.models.User.findAll({
+            where: {
+              id: { [Op.ne]: currentUserId }, // Exclude current user
+              isActive: true
+            },
+            attributes: ['id', 'username', 'email', 'avatar', 'firstName', 'lastName', 'role', 'status', 'lastSeen', 'createdAt'],
+            order: [['createdAt', 'DESC']]
+          });
+        } catch (dbError) {
+          console.error('Database fetch error:', dbError);
+          // Fall through to in-memory
+        }
+      }
 
-      // Format response to only include required fields
+      // If database not available or empty, use in-memory
+      if ((!users || users.length === 0) && req.app.locals.users) {
+        users = req.app.locals.users
+          .filter(user => user.id !== currentUserId && (user.isActive !== false))
+          .map(user => ({
+            id: user.id,
+            username: user.username,
+            email: user.email,
+            avatar: user.avatar,
+            firstName: user.firstName,
+            lastName: user.lastName,
+            role: user.role || 'user',
+            status: user.status || 'offline',
+            lastSeen: user.lastSeen,
+            createdAt: user.createdAt
+          }));
+      }
+
+      // Format response
       const formattedUsers = users.map(user => ({
         id: user.id,
         username: user.username,
         email: user.email,
-        avatar: user.avatar
+        avatar: user.avatar,
+        displayName: `${user.firstName || ''} ${user.lastName || ''}`.trim() || user.username,
+        role: user.role || 'user',
+        status: user.status || 'offline',
+        lastSeen: user.lastSeen,
+        isOnline: user.status === 'online',
+        createdAt: user.createdAt
       }));
 
       // Log for debugging
-      logger.info(`Retrieved ${formattedUsers.length} users for current user: ${currentUserId}`);
+      console.log(`Retrieved ${formattedUsers.length} users for current user: ${currentUserId}`);
 
       res.json({
         success: true,
         data: {
           users: formattedUsers,
           count: formattedUsers.length
-        }
+        },
+        timestamp: new Date().toISOString()
       });
     } catch (error) {
-      logger.error('Get all users controller error:', error);
+      console.error('Get all users controller error:', error);
       
       // Return 500 error with descriptive JSON if DB fetch fails
       res.status(500).json({
@@ -39,374 +79,1196 @@ class UserController {
           code: 'DATABASE_ERROR',
           message: 'Failed to fetch users from database',
           details: process.env.NODE_ENV === 'development' ? error.message : undefined
-        }
+        },
+        timestamp: new Date().toISOString()
       });
     }
   }
 
   async getProfile(req, res, next) {
     try {
-      const userId = req.user.id;
-      const user = await userService.getUserProfile(userId);
+      const userId = req.user.userId;
+      
+      let user = null;
+      
+      // Try database first
+      if (req.app.locals.dbConnected && req.app.locals.models && req.app.locals.models.User) {
+        try {
+          user = await req.app.locals.models.User.findByPk(userId, {
+            attributes: { exclude: ['password'] }
+          });
+        } catch (dbError) {
+          console.error('Database fetch error:', dbError);
+        }
+      }
+
+      // If database not available, check in-memory
+      if (!user && req.app.locals.users) {
+        const foundUser = req.app.locals.users.find(u => u.id === userId);
+        if (foundUser) {
+          user = { ...foundUser };
+          delete user.password;
+        }
+      }
+
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: 'User not found',
+          timestamp: new Date().toISOString()
+        });
+      }
 
       res.json({
         success: true,
         data: {
-          user,
+          user: {
+            id: user.id,
+            username: user.username,
+            email: user.email,
+            firstName: user.firstName,
+            lastName: user.lastName,
+            avatar: user.avatar,
+            bio: user.bio,
+            phone: user.phone,
+            dateOfBirth: user.dateOfBirth,
+            role: user.role || 'user',
+            isVerified: user.isVerified || false,
+            isActive: user.isActive !== false,
+            status: user.status || 'offline',
+            lastSeen: user.lastSeen,
+            settings: user.settings || {},
+            createdAt: user.createdAt,
+            updatedAt: user.updatedAt
+          }
         },
+        timestamp: new Date().toISOString()
       });
     } catch (error) {
-      logger.error('Get profile controller error:', error);
-      next(error);
+      console.error('Get profile controller error:', error);
+      
+      res.status(500).json({
+        success: false,
+        message: 'Failed to get profile',
+        error: process.env.NODE_ENV === 'development' ? error.message : undefined,
+        timestamp: new Date().toISOString()
+      });
     }
   }
 
   async updateProfile(req, res, next) {
     try {
-      const userId = req.user.id;
+      const userId = req.user.userId;
       const updateData = req.body;
 
       // Validate update data
       if (updateData.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(updateData.email)) {
-        throw new AppError('Invalid email format', 400);
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid email format',
+          timestamp: new Date().toISOString()
+        });
       }
 
-      if (updateData.username && !/^[^<>]{3,30}$/.test(updateData.username)) {
-        throw new AppError('Username can only contain letters, numbers, and underscores', 400);
+      if (updateData.username && !/^[a-zA-Z0-9_]{3,30}$/.test(updateData.username)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Username can only contain letters, numbers, and underscores (3-30 characters)',
+          timestamp: new Date().toISOString()
+        });
       }
 
-      const user = await userService.updateProfile(userId, updateData);
+      if (updateData.bio && updateData.bio.length > 500) {
+        return res.status(400).json({
+          success: false,
+          message: 'Bio cannot exceed 500 characters',
+          timestamp: new Date().toISOString()
+        });
+      }
+
+      let updatedUser = null;
+      
+      // Try database update
+      if (req.app.locals.dbConnected && req.app.locals.models && req.app.locals.models.User) {
+        try {
+          const [affectedRows] = await req.app.locals.models.User.update(updateData, {
+            where: { id: userId },
+            returning: true,
+            individualHooks: true
+          });
+          
+          if (affectedRows > 0) {
+            updatedUser = await req.app.locals.models.User.findByPk(userId, {
+              attributes: { exclude: ['password'] }
+            });
+          }
+        } catch (dbError) {
+          console.error('Database update error:', dbError);
+          // Check for duplicate error
+          if (dbError.name === 'SequelizeUniqueConstraintError') {
+            return res.status(409).json({
+              success: false,
+              message: 'Email or username already exists',
+              timestamp: new Date().toISOString()
+            });
+          }
+        }
+      }
+
+      // If database not available, update in-memory
+      if (!updatedUser && req.app.locals.users) {
+        const userIndex = req.app.locals.users.findIndex(u => u.id === userId);
+        if (userIndex !== -1) {
+          req.app.locals.users[userIndex] = {
+            ...req.app.locals.users[userIndex],
+            ...updateData,
+            updatedAt: new Date().toISOString()
+          };
+          updatedUser = { ...req.app.locals.users[userIndex] };
+          delete updatedUser.password;
+        }
+      }
+
+      if (!updatedUser) {
+        return res.status(404).json({
+          success: false,
+          message: 'User not found',
+          timestamp: new Date().toISOString()
+        });
+      }
 
       res.json({
         success: true,
         message: 'Profile updated successfully',
         data: {
-          user,
+          user: {
+            id: updatedUser.id,
+            username: updatedUser.username,
+            email: updatedUser.email,
+            firstName: updatedUser.firstName,
+            lastName: updatedUser.lastName,
+            avatar: updatedUser.avatar,
+            bio: updatedUser.bio,
+            phone: updatedUser.phone,
+            dateOfBirth: updatedUser.dateOfBirth,
+            role: updatedUser.role,
+            isVerified: updatedUser.isVerified,
+            status: updatedUser.status,
+            lastSeen: updatedUser.lastSeen,
+            settings: updatedUser.settings,
+            createdAt: updatedUser.createdAt,
+            updatedAt: updatedUser.updatedAt
+          }
         },
+        timestamp: new Date().toISOString()
       });
+      
     } catch (error) {
-      logger.error('Update profile controller error:', error);
+      console.error('Update profile controller error:', error);
       
       // Handle duplicate email/username errors
       if (error.message.includes('duplicate') || error.code === 11000) {
-        return next(new AppError('Email or username already exists', 409));
+        return res.status(409).json({
+          success: false,
+          message: 'Email or username already exists',
+          timestamp: new Date().toISOString()
+        });
       }
       
-      next(error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to update profile',
+        error: process.env.NODE_ENV === 'development' ? error.message : undefined,
+        timestamp: new Date().toISOString()
+      });
     }
   }
 
   async updateAvatar(req, res, next) {
     try {
-      const userId = req.user.id;
+      const userId = req.user.userId;
 
       if (!req.file) {
-        throw new AppError('No file uploaded', 400);
+        return res.status(400).json({
+          success: false,
+          message: 'No file uploaded',
+          timestamp: new Date().toISOString()
+        });
       }
 
       // Validate file type
       const allowedMimeTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
       if (!allowedMimeTypes.includes(req.file.mimetype)) {
-        throw new AppError('Invalid file type. Only JPEG, PNG, GIF, and WebP are allowed', 400);
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid file type. Only JPEG, PNG, GIF, and WebP are allowed',
+          timestamp: new Date().toISOString()
+        });
       }
 
       // Validate file size (max 5MB)
       const maxSize = 5 * 1024 * 1024; // 5MB
       if (req.file.size > maxSize) {
-        throw new AppError('File size exceeds 5MB limit', 400);
+        return res.status(400).json({
+          success: false,
+          message: 'File size exceeds 5MB limit',
+          timestamp: new Date().toISOString()
+        });
       }
 
-      const user = await userService.updateAvatar(userId, req.file);
+      // In a real app, you would upload to Cloudinary/S3 and get URL
+      // For now, we'll simulate it
+      const avatarUrl = `/uploads/avatars/${req.file.filename}`;
+
+      let updatedUser = null;
+      
+      // Try database update
+      if (req.app.locals.dbConnected && req.app.locals.models && req.app.locals.models.User) {
+        try {
+          const [affectedRows] = await req.app.locals.models.User.update(
+            { avatar: avatarUrl },
+            { where: { id: userId } }
+          );
+          
+          if (affectedRows > 0) {
+            updatedUser = await req.app.locals.models.User.findByPk(userId, {
+              attributes: ['id', 'username', 'avatar']
+            });
+          }
+        } catch (dbError) {
+          console.error('Database update error:', dbError);
+        }
+      }
+
+      // If database not available, update in-memory
+      if (!updatedUser && req.app.locals.users) {
+        const userIndex = req.app.locals.users.findIndex(u => u.id === userId);
+        if (userIndex !== -1) {
+          req.app.locals.users[userIndex].avatar = avatarUrl;
+          req.app.locals.users[userIndex].updatedAt = new Date().toISOString();
+          updatedUser = {
+            id: req.app.locals.users[userIndex].id,
+            username: req.app.locals.users[userIndex].username,
+            avatar: req.app.locals.users[userIndex].avatar
+          };
+        }
+      }
+
+      if (!updatedUser) {
+        return res.status(404).json({
+          success: false,
+          message: 'User not found',
+          timestamp: new Date().toISOString()
+        });
+      }
 
       res.json({
         success: true,
         message: 'Avatar updated successfully',
         data: {
-          user: {
-            id: user.id,
-            username: user.username,
-            avatar: user.avatar,
-          },
+          user: updatedUser
         },
+        timestamp: new Date().toISOString()
       });
     } catch (error) {
-      logger.error('Update avatar controller error:', error);
-      next(error);
+      console.error('Update avatar controller error:', error);
+      
+      res.status(500).json({
+        success: false,
+        message: 'Failed to update avatar',
+        error: process.env.NODE_ENV === 'development' ? error.message : undefined,
+        timestamp: new Date().toISOString()
+      });
     }
   }
 
   async removeAvatar(req, res, next) {
     try {
-      const userId = req.user.id;
+      const userId = req.user.userId;
 
-      const user = await userService.removeAvatar(userId);
+      // Default avatar URL
+      const defaultAvatar = `https://ui-avatars.com/api/?name=${encodeURIComponent(req.user.username)}&background=random&color=fff`;
+
+      let updatedUser = null;
+      
+      // Try database update
+      if (req.app.locals.dbConnected && req.app.locals.models && req.app.locals.models.User) {
+        try {
+          const [affectedRows] = await req.app.locals.models.User.update(
+            { avatar: defaultAvatar },
+            { where: { id: userId } }
+          );
+          
+          if (affectedRows > 0) {
+            updatedUser = await req.app.locals.models.User.findByPk(userId, {
+              attributes: ['id', 'username', 'avatar']
+            });
+          }
+        } catch (dbError) {
+          console.error('Database update error:', dbError);
+        }
+      }
+
+      // If database not available, update in-memory
+      if (!updatedUser && req.app.locals.users) {
+        const userIndex = req.app.locals.users.findIndex(u => u.id === userId);
+        if (userIndex !== -1) {
+          req.app.locals.users[userIndex].avatar = defaultAvatar;
+          req.app.locals.users[userIndex].updatedAt = new Date().toISOString();
+          updatedUser = {
+            id: req.app.locals.users[userIndex].id,
+            username: req.app.locals.users[userIndex].username,
+            avatar: req.app.locals.users[userIndex].avatar
+          };
+        }
+      }
+
+      if (!updatedUser) {
+        return res.status(404).json({
+          success: false,
+          message: 'User not found',
+          timestamp: new Date().toISOString()
+        });
+      }
 
       res.json({
         success: true,
         message: 'Avatar removed successfully',
         data: {
-          user: {
-            id: user.id,
-            username: user.username,
-            avatar: user.avatar,
-          },
+          user: updatedUser
         },
+        timestamp: new Date().toISOString()
       });
     } catch (error) {
-      logger.error('Remove avatar controller error:', error);
-      next(error);
+      console.error('Remove avatar controller error:', error);
+      
+      res.status(500).json({
+        success: false,
+        message: 'Failed to remove avatar',
+        error: process.env.NODE_ENV === 'development' ? error.message : undefined,
+        timestamp: new Date().toISOString()
+      });
     }
   }
 
   async changePassword(req, res, next) {
     try {
-      const userId = req.user.id;
-      const { currentPassword, newPassword } = req.body;
+      const userId = req.user.userId;
+      const { currentPassword, newPassword, confirmPassword } = req.body;
 
       // Validate required fields
-      if (!currentPassword || !newPassword) {
-        throw new AppError('Current password and new password are required', 400);
+      if (!currentPassword || !newPassword || !confirmPassword) {
+        return res.status(400).json({
+          success: false,
+          message: 'Current password, new password, and confirmation are required',
+          timestamp: new Date().toISOString()
+        });
       }
 
       // Validate new password strength
       if (newPassword.length < 8) {
-        throw new AppError('New password must be at least 8 characters long', 400);
+        return res.status(400).json({
+          success: false,
+          message: 'New password must be at least 8 characters long',
+          timestamp: new Date().toISOString()
+        });
+      }
+
+      // Ensure new passwords match
+      if (newPassword !== confirmPassword) {
+        return res.status(400).json({
+          success: false,
+          message: 'New passwords do not match',
+          timestamp: new Date().toISOString()
+        });
       }
 
       // Ensure new password is different from current password
       if (currentPassword === newPassword) {
-        throw new AppError('New password must be different from current password', 400);
+        return res.status(400).json({
+          success: false,
+          message: 'New password must be different from current password',
+          timestamp: new Date().toISOString()
+        });
       }
 
-      await userService.changePassword(userId, { 
-        currentPassword, 
-        newPassword, 
-        confirmPassword: newPassword 
-      });
+      let user = null;
+      
+      // Get user first to verify current password
+      if (req.app.locals.dbConnected && req.app.locals.models && req.app.locals.models.User) {
+        try {
+          user = await req.app.locals.models.User.findByPk(userId);
+        } catch (dbError) {
+          console.error('Database fetch error:', dbError);
+        }
+      }
+
+      // If database not available, check in-memory
+      if (!user && req.app.locals.users) {
+        user = req.app.locals.users.find(u => u.id === userId);
+      }
+
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: 'User not found',
+          timestamp: new Date().toISOString()
+        });
+      }
+
+      // Verify current password
+      let validCurrentPassword = false;
+      if (user.validatePassword) {
+        validCurrentPassword = await user.validatePassword(currentPassword);
+      } else {
+        validCurrentPassword = await bcrypt.compare(currentPassword, user.password);
+      }
+
+      if (!validCurrentPassword) {
+        return res.status(401).json({
+          success: false,
+          message: 'Current password is incorrect',
+          timestamp: new Date().toISOString()
+        });
+      }
+
+      // Hash new password
+      const hashedPassword = await bcrypt.hash(newPassword, 10);
+
+      // Update password
+      if (req.app.locals.dbConnected && req.app.locals.models && req.app.locals.models.User) {
+        try {
+          await req.app.locals.models.User.update(
+            { password: hashedPassword },
+            { where: { id: userId } }
+          );
+        } catch (dbError) {
+          console.error('Database update error:', dbError);
+          throw new Error('Failed to update password in database');
+        }
+      } else if (req.app.locals.users) {
+        const userIndex = req.app.locals.users.findIndex(u => u.id === userId);
+        if (userIndex !== -1) {
+          req.app.locals.users[userIndex].password = hashedPassword;
+          req.app.locals.users[userIndex].updatedAt = new Date().toISOString();
+        }
+      }
 
       // Log password change for security auditing
-      logger.info(`Password changed for user: ${userId}`);
+      console.log(`Password changed for user: ${userId}`);
 
       res.json({
         success: true,
         message: 'Password changed successfully',
+        timestamp: new Date().toISOString()
       });
     } catch (error) {
-      logger.error('Change password controller error:', error);
+      console.error('Change password controller error:', error);
       
       // Handle specific error cases
       if (error.message.includes('Current password is incorrect')) {
-        return next(new AppError('Current password is incorrect', 401));
+        return res.status(401).json({
+          success: false,
+          message: 'Current password is incorrect',
+          timestamp: new Date().toISOString()
+        });
       }
       
-      next(error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to change password',
+        error: process.env.NODE_ENV === 'development' ? error.message : undefined,
+        timestamp: new Date().toISOString()
+      });
     }
   }
 
   async searchUsers(req, res, next) {
     try {
-      const userId = req.user.id;
+      const userId = req.user.userId;
       const { query, limit = 20 } = req.query;
 
       if (!query || query.length < 2) {
-        throw new AppError('Search query must be at least 2 characters', 400);
+        return res.status(400).json({
+          success: false,
+          message: 'Search query must be at least 2 characters',
+          timestamp: new Date().toISOString()
+        });
       }
 
-      const users = await userService.searchUsers(query, { 
-        currentUserId: userId, 
-        limit: parseInt(limit) 
-      });
+      let users = [];
+      
+      // Try database search
+      if (req.app.locals.dbConnected && req.app.locals.models && req.app.locals.models.User) {
+        try {
+          users = await req.app.locals.models.User.findAll({
+            where: {
+              [Op.or]: [
+                { username: { [Op.iLike]: `%${query}%` } },
+                { firstName: { [Op.iLike]: `%${query}%` } },
+                { lastName: { [Op.iLike]: `%${query}%` } },
+                { email: { [Op.iLike]: `%${query}%` } },
+              ],
+              id: { [Op.ne]: userId }, // Exclude current user
+              isActive: true
+            },
+            limit: parseInt(limit),
+            attributes: ['id', 'username', 'firstName', 'lastName', 'avatar', 'email', 'status', 'lastSeen', 'createdAt'],
+          });
+        } catch (dbError) {
+          console.error('Database search error:', dbError);
+        }
+      }
+
+      // If database not available, search in-memory
+      if ((!users || users.length === 0) && req.app.locals.users) {
+        users = req.app.locals.users
+          .filter(user => 
+            user.id !== userId && 
+            (user.isActive !== false) && (
+              user.username.toLowerCase().includes(query.toLowerCase()) ||
+              (user.firstName && user.firstName.toLowerCase().includes(query.toLowerCase())) ||
+              (user.lastName && user.lastName.toLowerCase().includes(query.toLowerCase())) ||
+              user.email.toLowerCase().includes(query.toLowerCase())
+            )
+          )
+          .slice(0, parseInt(limit))
+          .map(user => ({
+            id: user.id,
+            username: user.username,
+            firstName: user.firstName,
+            lastName: user.lastName,
+            avatar: user.avatar,
+            email: user.email,
+            status: user.status || 'offline',
+            lastSeen: user.lastSeen,
+            createdAt: user.createdAt
+          }));
+      }
+
+      // Format response
+      const formattedUsers = users.map(user => ({
+        id: user.id,
+        username: user.username,
+        displayName: `${user.firstName || ''} ${user.lastName || ''}`.trim() || user.username,
+        avatar: user.avatar,
+        email: user.email,
+        status: user.status || 'offline',
+        lastSeen: user.lastSeen,
+        isOnline: user.status === 'online',
+        createdAt: user.createdAt
+      }));
 
       res.json({
         success: true,
         data: {
-          users: users.users || [],
-          count: users.users ? users.users.length : 0,
-          pagination: users.pagination,
+          users: formattedUsers || [],
+          count: formattedUsers ? formattedUsers.length : 0,
         },
+        timestamp: new Date().toISOString()
       });
     } catch (error) {
-      logger.error('Search users controller error:', error);
-      next(error);
+      console.error('Search users controller error:', error);
+      
+      res.status(500).json({
+        success: false,
+        message: 'Search failed',
+        error: process.env.NODE_ENV === 'development' ? error.message : undefined,
+        timestamp: new Date().toISOString()
+      });
     }
   }
 
   async getUserStatus(req, res, next) {
     try {
-      const userId = req.params.userId || req.user.id;
+      const userId = req.params.userId || req.user.userId;
 
-      const status = await userService.getUserStatus(userId);
+      let user = null;
+      
+      // Try database first
+      if (req.app.locals.dbConnected && req.app.locals.models && req.app.locals.models.User) {
+        try {
+          user = await req.app.locals.models.User.findByPk(userId, {
+            attributes: ['id', 'status', 'lastSeen']
+          });
+        } catch (dbError) {
+          console.error('Database fetch error:', dbError);
+        }
+      }
+
+      // If database not available, check in-memory
+      if (!user && req.app.locals.users) {
+        const foundUser = req.app.locals.users.find(u => u.id === userId);
+        if (foundUser) {
+          user = {
+            id: foundUser.id,
+            status: foundUser.status || 'offline',
+            lastSeen: foundUser.lastSeen
+          };
+        }
+      }
+
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: 'User not found',
+          timestamp: new Date().toISOString()
+        });
+      }
 
       res.json({
         success: true,
         data: {
-          userId,
-          status,
+          userId: user.id,
+          status: user.status || 'offline',
+          lastSeen: user.lastSeen,
+          isOnline: user.status === 'online'
         },
+        timestamp: new Date().toISOString()
       });
     } catch (error) {
-      logger.error('Get user status controller error:', error);
-      next(error);
+      console.error('Get user status controller error:', error);
+      
+      res.status(500).json({
+        success: false,
+        message: 'Failed to get user status',
+        error: process.env.NODE_ENV === 'development' ? error.message : undefined,
+        timestamp: new Date().toISOString()
+      });
     }
   }
 
   async updateStatus(req, res, next) {
     try {
-      const userId = req.user.id;
+      const userId = req.user.userId;
       const { status } = req.body;
 
       if (!status || typeof status !== 'string') {
-        throw new AppError('Status is required and must be a string', 400);
+        return res.status(400).json({
+          success: false,
+          message: 'Status is required and must be a string',
+          timestamp: new Date().toISOString()
+        });
       }
 
-      // Validate status length
-      if (status.length > 100) {
-        throw new AppError('Status must be 100 characters or less', 400);
+      // Validate status is one of allowed values
+      const allowedStatuses = ['online', 'offline', 'away', 'busy', 'invisible'];
+      if (!allowedStatuses.includes(status)) {
+        return res.status(400).json({
+          success: false,
+          message: `Status must be one of: ${allowedStatuses.join(', ')}`,
+          timestamp: new Date().toISOString()
+        });
       }
 
-      const user = await userService.updateStatus(userId, status);
+      const updateData = {
+        status: status,
+        lastSeen: new Date()
+      };
+
+      let updatedUser = null;
+      
+      // Try database update
+      if (req.app.locals.dbConnected && req.app.locals.models && req.app.locals.models.User) {
+        try {
+          const [affectedRows] = await req.app.locals.models.User.update(updateData, {
+            where: { id: userId }
+          });
+          
+          if (affectedRows > 0) {
+            updatedUser = await req.app.locals.models.User.findByPk(userId, {
+              attributes: ['id', 'status', 'lastSeen']
+            });
+          }
+        } catch (dbError) {
+          console.error('Database update error:', dbError);
+        }
+      }
+
+      // If database not available, update in-memory
+      if (!updatedUser && req.app.locals.users) {
+        const userIndex = req.app.locals.users.findIndex(u => u.id === userId);
+        if (userIndex !== -1) {
+          req.app.locals.users[userIndex].status = status;
+          req.app.locals.users[userIndex].lastSeen = new Date();
+          updatedUser = {
+            id: req.app.locals.users[userIndex].id,
+            status: req.app.locals.users[userIndex].status,
+            lastSeen: req.app.locals.users[userIndex].lastSeen
+          };
+        }
+      }
+
+      if (!updatedUser) {
+        return res.status(404).json({
+          success: false,
+          message: 'User not found',
+          timestamp: new Date().toISOString()
+        });
+      }
 
       res.json({
         success: true,
         message: 'Status updated successfully',
         data: {
-          userId,
-          status: user.status,
-          lastSeen: user.lastSeen,
+          userId: updatedUser.id,
+          status: updatedUser.status,
+          lastSeen: updatedUser.lastSeen,
+          isOnline: updatedUser.status === 'online'
         },
+        timestamp: new Date().toISOString()
       });
     } catch (error) {
-      logger.error('Update status controller error:', error);
-      next(error);
+      console.error('Update status controller error:', error);
+      
+      res.status(500).json({
+        success: false,
+        message: 'Failed to update status',
+        error: process.env.NODE_ENV === 'development' ? error.message : undefined,
+        timestamp: new Date().toISOString()
+      });
     }
   }
 
   async getSettings(req, res, next) {
     try {
-      const userId = req.user.id;
+      const userId = req.user.userId;
 
-      const settings = await userService.getSettings(userId);
+      let user = null;
+      
+      // Try database first
+      if (req.app.locals.dbConnected && req.app.locals.models && req.app.locals.models.User) {
+        try {
+          user = await req.app.locals.models.User.findByPk(userId, {
+            attributes: ['id', 'settings']
+          });
+        } catch (dbError) {
+          console.error('Database fetch error:', dbError);
+        }
+      }
+
+      // If database not available, check in-memory
+      if (!user && req.app.locals.users) {
+        const foundUser = req.app.locals.users.find(u => u.id === userId);
+        if (foundUser) {
+          user = {
+            id: foundUser.id,
+            settings: foundUser.settings || {}
+          };
+        }
+      }
+
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: 'User not found',
+          timestamp: new Date().toISOString()
+        });
+      }
+
+      // Default settings if none exist
+      const defaultSettings = {
+        notifications: {
+          messages: true,
+          friendRequests: true,
+          mentions: true,
+          calls: true,
+        },
+        privacy: {
+          showOnline: true,
+          showLastSeen: true,
+          allowFriendRequests: true,
+          allowMessages: 'friends',
+        },
+        theme: 'light',
+        language: 'en',
+      };
+
+      const settings = user.settings || defaultSettings;
 
       res.json({
         success: true,
         data: {
-          settings,
+          settings
         },
+        timestamp: new Date().toISOString()
       });
     } catch (error) {
-      logger.error('Get settings controller error:', error);
-      next(error);
+      console.error('Get settings controller error:', error);
+      
+      res.status(500).json({
+        success: false,
+        message: 'Failed to get settings',
+        error: process.env.NODE_ENV === 'development' ? error.message : undefined,
+        timestamp: new Date().toISOString()
+      });
     }
   }
 
   async updateSettings(req, res, next) {
     try {
-      const userId = req.user.id;
+      const userId = req.user.userId;
       const { settings } = req.body;
 
       if (!settings || typeof settings !== 'object') {
-        throw new AppError('Settings object is required', 400);
+        return res.status(400).json({
+          success: false,
+          message: 'Settings object is required',
+          timestamp: new Date().toISOString()
+        });
       }
 
-      const updatedSettings = await userService.updateSettings(userId, settings);
+      // Validate settings structure
+      if (settings.theme && !['light', 'dark', 'auto'].includes(settings.theme)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Theme must be light, dark, or auto',
+          timestamp: new Date().toISOString()
+        });
+      }
+
+      if (settings.language && !['en', 'es', 'fr', 'de', 'it'].includes(settings.language)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Language must be en, es, fr, de, or it',
+          timestamp: new Date().toISOString()
+        });
+      }
+
+      let updatedUser = null;
+      
+      // Try database update
+      if (req.app.locals.dbConnected && req.app.locals.models && req.app.locals.models.User) {
+        try {
+          const [affectedRows] = await req.app.locals.models.User.update(
+            { settings: settings },
+            { where: { id: userId } }
+          );
+          
+          if (affectedRows > 0) {
+            updatedUser = await req.app.locals.models.User.findByPk(userId, {
+              attributes: ['id', 'settings']
+            });
+          }
+        } catch (dbError) {
+          console.error('Database update error:', dbError);
+        }
+      }
+
+      // If database not available, update in-memory
+      if (!updatedUser && req.app.locals.users) {
+        const userIndex = req.app.locals.users.findIndex(u => u.id === userId);
+        if (userIndex !== -1) {
+          req.app.locals.users[userIndex].settings = settings;
+          req.app.locals.users[userIndex].updatedAt = new Date().toISOString();
+          updatedUser = {
+            id: req.app.locals.users[userIndex].id,
+            settings: req.app.locals.users[userIndex].settings
+          };
+        }
+      }
+
+      if (!updatedUser) {
+        return res.status(404).json({
+          success: false,
+          message: 'User not found',
+          timestamp: new Date().toISOString()
+        });
+      }
 
       res.json({
         success: true,
         message: 'Settings updated successfully',
         data: {
-          settings: updatedSettings,
+          settings: updatedUser.settings
         },
+        timestamp: new Date().toISOString()
       });
     } catch (error) {
-      logger.error('Update settings controller error:', error);
-      next(error);
+      console.error('Update settings controller error:', error);
+      
+      res.status(500).json({
+        success: false,
+        message: 'Failed to update settings',
+        error: process.env.NODE_ENV === 'development' ? error.message : undefined,
+        timestamp: new Date().toISOString()
+      });
     }
   }
 
   async deactivateAccount(req, res, next) {
     try {
-      const userId = req.user.id;
+      const userId = req.user.userId;
       const { confirm } = req.body;
 
       if (!confirm) {
-        throw new AppError('Please confirm account deactivation', 400);
+        return res.status(400).json({
+          success: false,
+          message: 'Please confirm account deactivation',
+          timestamp: new Date().toISOString()
+        });
       }
 
       // Additional confirmation validation
-      if (confirm !== 'DELETE' && confirm !== 'YES') {
-        throw new AppError('Please type "DELETE" or "YES" to confirm account deactivation', 400);
+      if (confirm !== 'DELETE' && confirm !== 'YES' && confirm !== 'DEACTIVATE') {
+        return res.status(400).json({
+          success: false,
+          message: 'Please type "DELETE", "YES", or "DEACTIVATE" to confirm account deactivation',
+          timestamp: new Date().toISOString()
+        });
       }
 
-      await userService.deactivateAccount(userId);
+      // Try database deactivation
+      if (req.app.locals.dbConnected && req.app.locals.models && req.app.locals.models.User) {
+        try {
+          await req.app.locals.models.User.update(
+            { 
+              isActive: false,
+              status: 'offline'
+            },
+            { where: { id: userId } }
+          );
+        } catch (dbError) {
+          console.error('Database deactivation error:', dbError);
+          throw new Error('Failed to deactivate account in database');
+        }
+      }
+
+      // If database not available, update in-memory
+      if (req.app.locals.users) {
+        const userIndex = req.app.locals.users.findIndex(u => u.id === userId);
+        if (userIndex !== -1) {
+          req.app.locals.users[userIndex].isActive = false;
+          req.app.locals.users[userIndex].status = 'offline';
+          req.app.locals.users[userIndex].updatedAt = new Date().toISOString();
+        }
+      }
 
       // Log account deactivation for security auditing
-      logger.warn(`Account deactivated for user: ${userId}`);
+      console.log(`Account deactivated for user: ${userId}`);
 
       res.json({
         success: true,
         message: 'Account deactivated successfully',
+        timestamp: new Date().toISOString()
       });
     } catch (error) {
-      logger.error('Deactivate account controller error:', error);
-      next(error);
+      console.error('Deactivate account controller error:', error);
+      
+      res.status(500).json({
+        success: false,
+        message: 'Failed to deactivate account',
+        error: process.env.NODE_ENV === 'development' ? error.message : undefined,
+        timestamp: new Date().toISOString()
+      });
     }
   }
 
   async getUserById(req, res, next) {
     try {
       const userId = req.params.userId;
-      const currentUserId = req.user.id;
+      const currentUserId = req.user.userId;
 
       if (!userId) {
-        throw new AppError('User ID is required', 400);
+        return res.status(400).json({
+          success: false,
+          message: 'User ID is required',
+          timestamp: new Date().toISOString()
+        });
       }
 
-      // Only allow viewing public profiles or friends
-      const friendService = require('../services/friendService');
-      const areFriends = await friendService.areFriends(userId, currentUserId);
+      let user = null;
+      
+      // Try database first
+      if (req.app.locals.dbConnected && req.app.locals.models && req.app.locals.models.User) {
+        try {
+          user = await req.app.locals.models.User.findByPk(userId, {
+            attributes: ['id', 'username', 'email', 'avatar', 'firstName', 'lastName', 'bio', 'status', 'lastSeen', 'isActive', 'createdAt']
+          });
+        } catch (dbError) {
+          console.error('Database lookup error:', dbError);
+        }
+      }
 
-      if (userId !== currentUserId && !areFriends) {
-        // Return limited public information
-        const user = await userService.getUserProfile(userId);
+      // If database not available, check in-memory
+      if (!user && req.app.locals.users) {
+        const foundUser = req.app.locals.users.find(u => u.id === userId);
+        if (foundUser) {
+          user = {
+            id: foundUser.id,
+            username: foundUser.username,
+            email: foundUser.email,
+            avatar: foundUser.avatar,
+            firstName: foundUser.firstName,
+            lastName: foundUser.lastName,
+            bio: foundUser.bio,
+            status: foundUser.status || 'offline',
+            lastSeen: foundUser.lastSeen,
+            isActive: foundUser.isActive !== false,
+            createdAt: foundUser.createdAt
+          };
+        }
+      }
 
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: 'User not found',
+          timestamp: new Date().toISOString()
+        });
+      }
+
+      // Check if user is active
+      if (!user.isActive) {
+        return res.status(404).json({
+          success: false,
+          message: 'User account is deactivated',
+          timestamp: new Date().toISOString()
+        });
+      }
+
+      // Check if viewing own profile
+      const isSelf = userId === currentUserId;
+
+      // In a real app, you would check friendship status here
+      // For now, we'll return different data based on whether it's self or not
+      if (isSelf || req.user.role === 'admin') {
+        // Return full profile for self or admin
+        res.json({
+          success: true,
+          data: {
+            user: {
+              id: user.id,
+              username: user.username,
+              email: user.email,
+              avatar: user.avatar,
+              firstName: user.firstName,
+              lastName: user.lastName,
+              bio: user.bio,
+              status: user.status || 'offline',
+              lastSeen: user.lastSeen,
+              isOnline: user.status === 'online',
+              createdAt: user.createdAt,
+              isSelf: true
+            }
+          },
+          timestamp: new Date().toISOString()
+        });
+      } else {
+        // Return public profile for others
         const publicInfo = {
           id: user.id,
           username: user.username,
           avatar: user.avatar,
+          displayName: `${user.firstName || ''} ${user.lastName || ''}`.trim() || user.username,
           bio: user.bio,
-          status: user.status,
+          status: user.status || 'offline',
           lastSeen: user.lastSeen,
-          isOnline: user.isOnline,
+          isOnline: user.status === 'online',
           createdAt: user.createdAt,
+          isSelf: false
         };
 
-        return res.json({
+        res.json({
           success: true,
           data: {
             user: publicInfo,
-            isFriend: false,
+            isFriend: false, // Placeholder - implement friend check
           },
+          timestamp: new Date().toISOString()
+        });
+      }
+      
+    } catch (error) {
+      console.error('Get user by ID controller error:', error);
+      
+      if (error.message.includes('not found') || error.message.includes('User not found')) {
+        return res.status(404).json({
+          success: false,
+          message: 'User not found',
+          timestamp: new Date().toISOString()
+        });
+      }
+      
+      res.status(500).json({
+        success: false,
+        message: 'Failed to get user',
+        error: process.env.NODE_ENV === 'development' ? error.message : undefined,
+        timestamp: new Date().toISOString()
+      });
+    }
+  }
+
+  async getCurrentUserSimple(req, res) {
+    try {
+      if (!req.user) {
+        return res.status(401).json({
+          success: false,
+          message: 'Not authenticated',
+          timestamp: new Date().toISOString()
+        });
+      }
+      
+      let user = null;
+      
+      // Try database first
+      if (req.app.locals.dbConnected && req.app.locals.models && req.app.locals.models.User) {
+        try {
+          user = await req.app.locals.models.User.findByPk(req.user.userId, {
+            attributes: ['id', 'email', 'username', 'avatar', 'firstName', 'lastName', 'createdAt']
+          });
+        } catch (dbError) {
+          console.error('Database lookup error:', dbError);
+        }
+      }
+
+      // If database not available, check in-memory
+      if (!user && req.app.locals.users) {
+        const foundUser = req.app.locals.users.find(u => u.id === req.user.userId);
+        if (foundUser) {
+          user = {
+            id: foundUser.id,
+            email: foundUser.email,
+            username: foundUser.username,
+            avatar: foundUser.avatar,
+            firstName: foundUser.firstName,
+            lastName: foundUser.lastName,
+            createdAt: foundUser.createdAt
+          };
+        }
+      }
+
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: 'User not found',
+          timestamp: new Date().toISOString()
         });
       }
 
-      // Return full profile for self or friends
-      const user = await userService.getUserProfile(userId);
-
-      res.json({
+      return res.json({
         success: true,
-        data: {
-          user,
-          isFriend: areFriends,
+        user: {
+          id: user.id,
+          email: user.email,
+          username: user.username,
+          avatar: user.avatar,
+          firstName: user.firstName,
+          lastName: user.lastName,
+          displayName: `${user.firstName || ''} ${user.lastName || ''}`.trim() || user.username,
+          createdAt: user.createdAt
         },
+        timestamp: new Date().toISOString()
       });
+      
     } catch (error) {
-      logger.error('Get user by ID controller error:', error);
+      console.error('Get current user simple error:', error);
       
-      if (error.message.includes('not found') || error.message.includes('User not found')) {
-        return next(new AppError('User not found', 404));
-      }
-      
-      next(error);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to get user profile',
+        timestamp: new Date().toISOString()
+      });
     }
   }
 }
