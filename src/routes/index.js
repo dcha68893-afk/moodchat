@@ -10,6 +10,8 @@ const callRoutes = require('./calls');
 const moodRoutes = require('./moods');
 const mediaRoutes = require('./media');
 const notificationRoutes = require('./notifications');
+const testRoutes = require('./test');
+
 
 router.use('/auth', authRoutes);
 router.use('/users', userRoutes);
@@ -20,6 +22,7 @@ router.use('/calls', callRoutes);
 router.use('/moods', moodRoutes);
 router.use('/media', mediaRoutes);
 router.use('/notifications', notificationRoutes);
+router.use('/test', testRoutes);
 
 console.log('✅ Main API routes initialized');
 

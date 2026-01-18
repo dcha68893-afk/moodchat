@@ -1,911 +1,789 @@
-const mongoose = require('mongoose');
-const bcrypt = require('bcryptjs');
-const crypto = require('crypto');
-const jwt = require('jsonwebtoken');
 
-// Import models
-const User = require('../models/User');
-const Token = require('../models/Token');
-const Chat = require('../models/Chat');
-const Call = require('../models/Call');
+const { Op } = require('sequelize');
+const { User, Profile, Friend, Chat, Message, Status } = require('../models');
+const logger = require('../utils/logger');
 
-// Import utilities
-const { logger } = require('../middleware/errorHandler');
-const {
-  AppError,
-  ValidationError,
-  NotFoundError,
-  ConflictError,
-  AuthenticationError,
-} = require('../middleware/errorHandler');
-
-// Environment variables
-const JWT_SECRET = process.env.JWT_SECRET;
-const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
-const REFRESH_TOKEN_EXPIRY = parseInt(process.env.REFRESH_TOKEN_EXPIRY) || 30 * 24 * 60 * 60 * 1000;
-const BCRYPT_SALT_ROUNDS = parseInt(process.env.BCRYPT_SALT_ROUNDS) || 12;
-const PASSWORD_RESET_EXPIRY = parseInt(process.env.PASSWORD_RESET_EXPIRY) || 15 * 60 * 1000; // 15 minutes
-const MAX_LOGIN_ATTEMPTS = parseInt(process.env.MAX_LOGIN_ATTEMPTS) || 5;
-const LOCKOUT_DURATION = parseInt(process.env.LOCKOUT_DURATION) || 15 * 60 * 1000; // 15 minutes
-
-/**
- * User Service - Handles all user-related business logic
- * FIXED: This service should not interfere with registration/login handled by authService
- */
 class UserService {
-  /**
-   * Register a new user - FIXED: This should not be used, authService handles registration
-   */
-  static async registerUser(userData) {
-    throw new Error('Use authService.register() for user registration');
+  constructor() {
+    console.log('🔧 [UserService] Initialized');
   }
 
   /**
-   * Authenticate user - FIXED: This should not be used, authService handles authentication
+   * Create a new user
+   * Uses User model hooks for password hashing
    */
-  static async authenticateUser(credentials) {
-    throw new Error('Use authService.login() for user authentication');
-  }
-
-  /**
-   * Generate authentication tokens - FIXED: This should not be used, authService handles token generation
-   */
-  static async generateAuthTokens(userId) {
-    throw new Error('Use authService.generateTokens() for token generation');
-  }
-
-  /**
-   * Refresh access token - FIXED: This should not be used, authService handles token refresh
-   */
-  static async refreshAccessToken(refreshToken) {
-    throw new Error('Use authService.refreshToken() for token refresh');
-  }
-
-  /**
-   * Logout user - FIXED: This should not conflict with authService.logout()
-   */
-  static async logoutUser(userId, refreshToken = null) {
+  async createUser(userData) {
     try {
-      // Invalidate refresh token if provided - use authService for this
-      if (refreshToken) {
-        // This should be handled by authService, but we keep for compatibility
-        await Token.findOneAndDelete({
-          token: refreshToken,
-          type: 'refresh',
-        });
+      console.log("🔧 [UserService] Creating user with:", {
+        username: userData.username,
+        email: userData.email,
+        hasFirstName: !!userData.firstName,
+        hasLastName: !!userData.lastName
+      });
+
+      // Validate required fields
+      if (!userData.username || !userData.email || !userData.password) {
+        throw new Error('Username, email, and password are required');
       }
 
-      // Update user status
-      await User.findByIdAndUpdate(userId, {
-        online: false,
+      // Validate password is not empty
+      if (!userData.password || userData.password.trim() === '') {
+        throw new Error('Password cannot be empty');
+      }
+
+      // Check if user already exists
+      const existingUser = await this.findByUsernameOrEmail(
+        userData.username.trim(),
+        userData.email.toLowerCase().trim()
+      );
+
+      if (existingUser) {
+        const errorMsg = existingUser.email === userData.email.toLowerCase().trim()
+          ? 'Email already registered'
+          : 'Username already taken';
+        console.log("❌ [UserService] User exists:", errorMsg);
+        throw new Error(errorMsg);
+      }
+
+      // Create user using User model (password will be hashed by hooks)
+      const user = await User.create({
+        username: userData.username.trim(),
+        email: userData.email.toLowerCase().trim(),
+        password: userData.password,
+        firstName: userData.firstName || null,
+        lastName: userData.lastName || null,
+        isActive: true,
+        isVerified: process.env.NODE_ENV === 'development', // Auto-verify in dev
+        role: userData.role || 'user',
         status: 'offline',
-        statusLastChanged: new Date(),
+        settings: {
+          notifications: {
+            messages: true,
+            friendRequests: true,
+            mentions: true,
+            calls: true,
+          },
+          privacy: {
+            showOnline: true,
+            showLastSeen: true,
+            allowFriendRequests: true,
+            allowMessages: 'friends',
+          },
+          theme: 'dark',
+          language: 'en',
+        }
       });
 
-      return { success: true };
-    } catch (error) {
-      logger.error('Logout failed:', error);
-      throw error;
-    }
-  }
+      console.log("✅ [UserService] User created with ID:", user.id);
 
-  /**
-   * Logout from all devices - FIXED: This should not conflict with authService
-   */
-  static async logoutAllDevices(userId) {
-    try {
-      // Delete all refresh tokens for this user
-      await Token.deleteMany({
-        userId,
-        type: 'refresh',
-      });
-
-      // Update user status
-      await User.findByIdAndUpdate(userId, {
-        online: false,
-        status: 'offline',
-        statusLastChanged: new Date(),
-      });
-
-      return { success: true };
-    } catch (error) {
-      logger.error('Logout all devices failed:', error);
-      throw error;
-    }
-  }
-
-  /**
-   * Get user profile - FIXED: Ensure this doesn't re-validate passwords
-   */
-  static async getUserProfile(userId, requestingUserId = null) {
-    try {
-      // Build query based on who's requesting
-      let query = User.findById(userId);
-
-      if (userId === requestingUserId) {
-        // Self request - include all data except sensitive fields
-        query = query.select('-password -resetPasswordToken -resetPasswordExpires');
-      } else {
-        // Other user request - exclude sensitive data
-        query = query.select('username avatar displayName bio status online lastActive createdAt');
-      }
-
-      const user = await query
-        .populate('friends', 'username avatar online status lastActive')
-        .populate('friendRequests', 'username avatar');
-
-      if (!user) {
-        throw new NotFoundError('User not found');
-      }
-
-      // Add friendship status if requesting user is different
-      let friendshipStatus = 'none';
-      if (requestingUserId && userId !== requestingUserId) {
-        const requestingUser = await User.findById(requestingUserId);
-
-        if (requestingUser.friends.includes(user._id)) {
-          friendshipStatus = 'friends';
-        } else if (requestingUser.friendRequests.includes(user._id)) {
-          friendshipStatus = 'request_received';
-        } else if (user.friendRequests.includes(requestingUser._id)) {
-          friendshipStatus = 'request_sent';
+      // Try to create profile if profile data provided
+      if (userData.profile) {
+        try {
+          await Profile.create({
+            userId: user.id,
+            ...userData.profile,
+          });
+          console.log("✅ [UserService] Profile created");
+        } catch (profileError) {
+          console.log("⚠️ [UserService] Profile not created:", profileError.message);
+          // Continue without profile - it's optional
         }
       }
 
-      const userResponse = user.toObject();
-      userResponse.friendshipStatus = friendshipStatus;
-
-      return userResponse;
+      return user.toJSON();
     } catch (error) {
-      logger.error('Get user profile failed:', error);
+      console.error('❌ [UserService] Create user error:', error.message);
+      console.error('Error stack:', error.stack);
+
+      if (error.name === 'SequelizeValidationError') {
+        const messages = error.errors ? error.errors.map(err => err.message).join(', ') : error.message;
+        throw new Error(`Validation error: ${messages}`);
+      }
+
+      if (error.name === 'SequelizeUniqueConstraintError') {
+        throw new Error('Username or email already exists');
+      }
+
+      if (error.name === 'SequelizeDatabaseError') {
+        throw new Error('Database error occurred');
+      }
+
       throw error;
     }
   }
 
   /**
-   * Update user profile - FIXED: Don't re-validate passwords here
+   * Get user by ID with optional related data
    */
-  static async updateUserProfile(userId, updateData) {
+  async getUserById(userId, options = {}) {
     try {
-      const allowedUpdates = [
-        'username',
-        'email',
-        'avatar',
-        'bio',
-        'status',
-        'displayName',
-        'emailNotifications',
-        'pushNotifications',
-        'settings',
+      console.log("🔧 [UserService] Getting user by ID:", userId);
+
+      const include = [];
+
+      // Include profile if requested
+      if (options.includeProfile) {
+        include.push({ model: Profile, as: 'profile' });
+      }
+
+      // Include friends if requested
+      if (options.includeFriends) {
+        include.push({
+          model: User,
+          as: 'friends',
+          through: { attributes: ['status', 'createdAt'] },
+          attributes: ['id', 'username', 'firstName', 'lastName', 'avatar', 'status', 'lastSeen']
+        });
+      }
+
+      // Include friend requests if requested
+      if (options.includeFriendRequests) {
+        include.push({
+          model: User,
+          as: 'friendRequests',
+          through: {
+            where: { status: 'pending' },
+            attributes: ['id', 'createdAt']
+          },
+          attributes: ['id', 'username', 'firstName', 'lastName', 'avatar']
+        });
+      }
+
+      const user = await User.findByPk(userId, {
+        attributes: { exclude: ['password'] },
+        include: include.length > 0 ? include : undefined
+      });
+
+      if (!user) {
+        throw new Error('User not found');
+      }
+
+      // Add additional computed fields
+      const userData = user.toJSON();
+
+      if (options.includeStats) {
+        userData.stats = await this.getUserStats(userId);
+      }
+
+      if (options.includeOnlineStatus) {
+        userData.online = this.isUserOnline(userData.lastSeen);
+      }
+
+      console.log("✅ [UserService] Retrieved user:", user.id);
+      return userData;
+    } catch (error) {
+      console.error('❌ [UserService] Get user error:', error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Get user by email
+   */
+  async getUserByEmail(email, options = {}) {
+    try {
+      console.log("🔧 [UserService] Getting user by email:", email);
+
+      const user = await User.findOne({
+        where: { email: email.toLowerCase().trim() },
+        attributes: options.includePassword ? undefined : { exclude: ['password'] }
+      });
+
+      if (!user) {
+        throw new Error('User not found');
+      }
+
+      const userData = options.includePassword ? user : user.toJSON();
+
+      if (options.includeOnlineStatus) {
+        userData.online = this.isUserOnline(user.lastSeen);
+      }
+
+      console.log("✅ [UserService] Retrieved user by email:", user.id);
+      return userData;
+    } catch (error) {
+      console.error('❌ [UserService] Get user by email error:', error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Get user by username
+   */
+  async getUserByUsername(username, currentUserId = null) {
+    try {
+      console.log("🔧 [UserService] Getting user by username:", username);
+
+      const user = await User.findOne({
+        where: { username: username.trim() },
+        attributes: { exclude: ['password'] }
+      });
+
+      if (!user) {
+        throw new Error('User not found');
+      }
+
+      const userData = user.toJSON();
+
+      // Add friendship status if current user is provided
+      if (currentUserId) {
+        userData.friendship = await this.getFriendshipStatus(currentUserId, user.id);
+      }
+
+      // Add public stats
+      userData.stats = {
+        statuses: await Status.count({ where: { userId: user.id } }),
+        friends: await this.getFriendCount(user.id)
+      };
+
+      console.log("✅ [UserService] Retrieved user by username:", user.id);
+      return userData;
+    } catch (error) {
+      console.error('❌ [UserService] Get user by username error:', error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Find user by username or email
+   */
+  async findByUsernameOrEmail(username, email) {
+    try {
+      console.log("🔧 [UserService] Finding user by username or email:", { username, email });
+
+      if (!username && !email) {
+        return null;
+      }
+
+      const conditions = [];
+
+      if (username && username.trim()) {
+        conditions.push({ username: username.trim() });
+      }
+
+      if (email && email.trim()) {
+        conditions.push({ email: email.toLowerCase().trim() });
+      }
+
+      if (conditions.length === 0) {
+        return null;
+      }
+
+      const user = await User.findOne({
+        where: {
+          [Op.or]: conditions
+        }
+      });
+
+      if (user) {
+        console.log("✅ [UserService] Found user:", user.id);
+      } else {
+        console.log("🔍 [UserService] User not found");
+      }
+
+      return user;
+    } catch (error) {
+      console.error('❌ [UserService] Find by username or email error:', error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Update user profile
+   */
+  async updateUser(userId, updateData) {
+    try {
+      console.log("🔧 [UserService] Updating user:", userId);
+
+      // Get existing user
+      const user = await User.findByPk(userId);
+      if (!user) {
+        throw new Error('User not found');
+      }
+
+      // Validate update data
+      const allowedFields = [
+        'firstName', 'lastName', 'avatar', 'bio', 'phone',
+        'dateOfBirth', 'status', 'settings'
       ];
 
       // Filter only allowed fields
-      const filteredUpdates = {};
-      Object.keys(updateData).forEach(key => {
-        if (allowedUpdates.includes(key)) {
-          filteredUpdates[key] = updateData[key];
+      const filteredData = {};
+      for (const field of allowedFields) {
+        if (updateData[field] !== undefined) {
+          filteredData[field] = updateData[field];
         }
+      }
+
+      // Validate username if provided
+      if (updateData.username && updateData.username !== user.username) {
+        const existingUser = await User.findOne({
+          where: { username: updateData.username.trim() }
+        });
+
+        if (existingUser && existingUser.id !== userId) {
+          throw new Error('Username already taken');
+        }
+
+        if (updateData.username.length < 3 || updateData.username.length > 30) {
+          throw new Error('Username must be 3-30 characters');
+        }
+
+        const usernameRegex = /^[a-zA-Z0-9_]+$/;
+        if (!usernameRegex.test(updateData.username)) {
+          throw new Error('Username can only contain letters, numbers, and underscores');
+        }
+
+        filteredData.username = updateData.username.trim();
+      }
+
+      // Update user
+      await user.update(filteredData);
+
+      console.log("✅ [UserService] User updated:", userId);
+
+      // Return updated user without password
+      return await this.getUserById(userId, {
+        includeProfile: true,
+        includeStats: true
+      });
+    } catch (error) {
+      console.error('❌ [UserService] Update user error:', error.message);
+
+      if (error.name === 'SequelizeValidationError') {
+        const messages = error.errors ? error.errors.map(err => err.message).join(', ') : error.message;
+        throw new Error(`Validation error: ${messages}`);
+      }
+
+      throw error;
+    }
+  }
+
+  /**
+   * Delete user (soft delete by setting isActive to false)
+   */
+  async deleteUser(userId) {
+    try {
+      console.log("🔧 [UserService] Deleting user:", userId);
+
+      const user = await User.findByPk(userId);
+      if (!user) {
+        throw new Error('User not found');
+      }
+
+      // Soft delete by deactivating the user
+      await user.update({
+        isActive: false,
+        status: 'offline',
+        lastSeen: new Date()
       });
 
-      // Handle username/email uniqueness
-      if (filteredUpdates.username) {
-        filteredUpdates.username = filteredUpdates.username.toLowerCase();
-        const existingUser = await User.findOne({
-          username: filteredUpdates.username,
-          _id: { $ne: userId },
-        });
-        if (existingUser) {
-          throw new ConflictError('Username already taken');
-        }
-      }
-
-      if (filteredUpdates.email) {
-        filteredUpdates.email = filteredUpdates.email.toLowerCase();
-        const existingUser = await User.findOne({
-          email: filteredUpdates.email,
-          _id: { $ne: userId },
-        });
-        if (existingUser) {
-          throw new ConflictError('Email already taken');
-        }
-      }
-
-      // Update status timestamp if status is being updated
-      if (filteredUpdates.status) {
-        filteredUpdates.statusLastChanged = new Date();
-      }
-
-      const updatedUser = await User.findByIdAndUpdate(userId, filteredUpdates, {
-        new: true,
-        runValidators: true,
-      }).select('-password -resetPasswordToken -resetPasswordExpires -loginAttempts -lockedUntil');
-
-      if (!updatedUser) {
-        throw new NotFoundError('User not found');
-      }
-
-      return updatedUser;
+      console.log("✅ [UserService] User deactivated:", userId);
+      return { success: true, message: 'User deactivated successfully' };
     } catch (error) {
-      logger.error('Update user profile failed:', error);
+      console.error('❌ [UserService] Delete user error:', error.message);
       throw error;
     }
   }
 
   /**
-   * Change password - FIXED: This should use authService for password validation
+   * Update user settings
    */
-  static async changePassword(userId, passwordData) {
+  async updateUserSettings(userId, settings) {
     try {
-      const { currentPassword, newPassword, confirmPassword } = passwordData;
+      console.log("🔧 [UserService] Updating settings for user:", userId);
 
-      // Validate new passwords match
-      if (newPassword !== confirmPassword) {
-        throw new ValidationError('New passwords do not match');
-      }
-
-      // Get user with password
-      const user = await User.findById(userId).select('+password');
-
+      const user = await User.findByPk(userId);
       if (!user) {
-        throw new NotFoundError('User not found');
+        throw new Error('User not found');
       }
 
-      // Verify current password - FIXED: Use bcrypt.compare
-      const isPasswordValid = await bcrypt.compare(currentPassword, user.password);
-      if (!isPasswordValid) {
-        throw new AuthenticationError('Current password is incorrect');
-      }
-
-      // Hash new password
-      const salt = await bcrypt.genSalt(BCRYPT_SALT_ROUNDS);
-      const hashedPassword = await bcrypt.hash(newPassword, salt);
-
-      // Update password and reset login attempts
-      user.password = hashedPassword;
-      user.loginAttempts = 0;
-      user.lockedUntil = null;
-      await user.save();
-
-      // Invalidate all refresh tokens for security
-      await Token.deleteMany({ userId, type: 'refresh' });
-
-      return { success: true };
-    } catch (error) {
-      logger.error('Change password failed:', error);
-      throw error;
-    }
-  }
-
-  /**
-   * Initiate password reset - FIXED: This should not duplicate authService functionality
-   */
-  static async initiatePasswordReset(email) {
-    try {
-      const user = await User.findOne({ email: email.toLowerCase() });
-
-      if (!user) {
-        // Don't reveal that user doesn't exist
-        return { success: true };
-      }
-
-      // Generate reset token
-      const resetToken = crypto.randomBytes(32).toString('hex');
-      const resetTokenHash = crypto.createHash('sha256').update(resetToken).digest('hex');
-
-      // Save reset token to user
-      user.resetPasswordToken = resetTokenHash;
-      user.resetPasswordExpires = new Date(Date.now() + PASSWORD_RESET_EXPIRY);
-      await user.save();
-
-      // Return reset token (in production, send via email)
-      const resetUrl = `${process.env.CLIENT_URL}/reset-password/${resetToken}`;
-
-      return {
-        success: true,
-        resetToken: process.env.NODE_ENV === 'development' ? resetToken : undefined,
-        resetUrl: process.env.NODE_ENV === 'development' ? resetUrl : undefined,
-      };
-    } catch (error) {
-      logger.error('Initiate password reset failed:', error);
-      throw error;
-    }
-  }
-
-  /**
-   * Reset password with token - FIXED: This should not duplicate authService functionality
-   */
-  static async resetPasswordWithToken(token, newPassword, confirmPassword) {
-    try {
-      // Validate passwords match
-      if (newPassword !== confirmPassword) {
-        throw new ValidationError('Passwords do not match');
-      }
-
-      // Hash token to compare with stored hash
-      const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
-
-      const user = await User.findOne({
-        resetPasswordToken: tokenHash,
-        resetPasswordExpires: { $gt: new Date() },
-      });
-
-      if (!user) {
-        throw new ValidationError('Invalid or expired reset token');
-      }
-
-      // Hash new password
-      const salt = await bcrypt.genSalt(BCRYPT_SALT_ROUNDS);
-      const hashedPassword = await bcrypt.hash(newPassword, salt);
-
-      // Update user password and clear reset token
-      user.password = hashedPassword;
-      user.resetPasswordToken = undefined;
-      user.resetPasswordExpires = undefined;
-      user.loginAttempts = 0;
-      user.lockedUntil = null;
-      await user.save();
-
-      // Invalidate all refresh tokens for security
-      await Token.deleteMany({ userId: user._id, type: 'refresh' });
-
-      return { success: true };
-    } catch (error) {
-      logger.error('Reset password failed:', error);
-      throw error;
-    }
-  }
-
-  /**
-   * Search users - FIXED: This doesn't interfere with auth
-   */
-  static async searchUsers(query, options = {}) {
-    try {
-      const {
-        page = 1,
-        limit = 20,
-        excludeCurrentUser = true,
-        excludeFriends = false,
-        excludeBlocked = true,
-      } = options;
-
-      const skip = (page - 1) * limit;
-
-      // Build search query
-      const searchQuery = {
-        $or: [
-          { username: { $regex: query, $options: 'i' } },
-          { displayName: { $regex: query, $options: 'i' } },
-        ],
+      // Merge new settings with existing settings
+      const currentSettings = user.settings || {};
+      const updatedSettings = {
+        ...currentSettings,
+        ...settings
       };
 
-      // Exclude current user if specified
-      if (excludeCurrentUser && options.currentUserId) {
-        searchQuery._id = { $ne: options.currentUserId };
+      await user.update({ settings: updatedSettings });
+
+      console.log("✅ [UserService] Settings updated for user:", userId);
+      return updatedSettings;
+    } catch (error) {
+      console.error('❌ [UserService] Update settings error:', error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Search users by query
+   */
+  async searchUsers(query, currentUserId = null, limit = 20) {
+    try {
+      console.log("🔧 [UserService] Searching users with query:", query);
+
+      if (!query || query.trim().length < 2) {
+        return [];
       }
 
-      // If excluding friends, get current user's friends
-      if (excludeFriends && options.currentUserId) {
-        const currentUser = await User.findById(options.currentUserId);
-        if (currentUser && currentUser.friends.length > 0) {
-          searchQuery._id = {
-            ...searchQuery._id,
-            $nin: currentUser.friends,
-          };
-        }
-      }
+      const searchTerm = `%${query.trim()}%`;
 
-      // If excluding blocked users
-      if (excludeBlocked && options.currentUserId) {
-        const currentUser = await User.findById(options.currentUserId);
-        if (currentUser && currentUser.blockedUsers && currentUser.blockedUsers.length > 0) {
-          searchQuery._id = {
-            ...searchQuery._id,
-            $nin: [...(searchQuery._id?.$nin || []), ...currentUser.blockedUsers],
-          };
-        }
-
-        // Also exclude users who have blocked the current user
-        const usersWhoBlockedMe = await User.find({
-          blockedUsers: options.currentUserId,
-        }).select('_id');
-
-        if (usersWhoBlockedMe.length > 0) {
-          searchQuery._id = {
-            ...searchQuery._id,
-            $nin: [...(searchQuery._id?.$nin || []), ...usersWhoBlockedMe.map(u => u._id)],
-          };
-        }
-      }
-
-      // Execute search
-      const [users, total] = await Promise.all([
-        User.find(searchQuery)
-          .select('username avatar displayName online status lastActive bio')
-          .skip(skip)
-          .limit(limit)
-          .sort({ online: -1, username: 1 })
-          .lean(),
-        User.countDocuments(searchQuery),
-      ]);
-
-      // Add relationship status if current user provided
-      if (options.currentUserId) {
-        const currentUser = await User.findById(options.currentUserId);
-
-        const usersWithStatus = users.map(user => {
-          const relationship = {
-            isFriend: currentUser.friends.some(friendId => friendId.equals(user._id)),
-            hasSentRequest: currentUser.friendRequests.some(requestId =>
-              requestId.equals(user._id)
-            ),
-            hasReceivedRequest:
-              user.friendRequests?.some(requestId => requestId.equals(currentUser._id)) || false,
-            isBlocked:
-              currentUser.blockedUsers?.some(blockedId => blockedId.equals(user._id)) || false,
-          };
-
-          return {
-            ...user,
-            relationship,
-          };
-        });
-
-        return {
-          users: usersWithStatus,
-          pagination: {
-            total,
-            page,
-            limit,
-            pages: Math.ceil(total / limit),
-          },
-        };
-      }
-
-      return {
-        users,
-        pagination: {
-          total,
-          page,
-          limit,
-          pages: Math.ceil(total / limit),
+      const users = await User.findAll({
+        where: {
+          [Op.or]: [
+            { username: { [Op.iLike]: searchTerm } },
+            { firstName: { [Op.iLike]: searchTerm } },
+            { lastName: { [Op.iLike]: searchTerm } },
+            { email: { [Op.iLike]: searchTerm } }
+          ],
+          isActive: true
         },
-      };
-    } catch (error) {
-      logger.error('Search users failed:', error);
-      throw error;
-    }
-  }
+        attributes: ['id', 'username', 'firstName', 'lastName', 'avatar', 'bio', 'status', 'lastSeen'],
+        limit: limit
+      });
 
-  /**
-   * Get user suggestions (people you may know) - FIXED: This doesn't interfere with auth
-   */
-  static async getUserSuggestions(userId, limit = 10) {
-    try {
-      const user = await User.findById(userId).populate('friends');
+      const results = await Promise.all(
+        users.map(async (user) => {
+          const userData = user.toJSON();
 
-      // Get friends of friends who are not already friends
-      const friendIds = user.friends.map(friend => friend._id);
+          // Add friendship status if current user is provided
+          if (currentUserId && currentUserId !== user.id) {
+            userData.friendship = await this.getFriendshipStatus(currentUserId, user.id);
+          }
 
-      if (friendIds.length === 0) {
-        // If no friends, suggest popular users
-        const suggestions = await User.find({
-          _id: {
-            $ne: userId,
-            $nin: [...(user.blockedUsers || [])],
-          },
+          // Add online status
+          userData.online = this.isUserOnline(user.lastSeen);
+
+          return userData;
         })
-          .select('username avatar displayName online status bio')
-          .limit(limit)
-          .sort({ createdAt: -1 });
-
-        return suggestions;
-      }
-
-      const suggestions = await User.aggregate([
-        {
-          $match: {
-            _id: {
-              $ne: mongoose.Types.ObjectId(userId),
-              $nin: [...friendIds, ...(user.blockedUsers || [])],
-            },
-            friends: { $in: friendIds },
-          },
-        },
-        {
-          $addFields: {
-            mutualCount: {
-              $size: {
-                $setIntersection: ['$friends', friendIds],
-              },
-            },
-          },
-        },
-        {
-          $sort: {
-            mutualCount: -1,
-            online: -1,
-            createdAt: -1,
-          },
-        },
-        {
-          $limit: limit,
-        },
-        {
-          $project: {
-            username: 1,
-            avatar: 1,
-            displayName: 1,
-            online: 1,
-            status: 1,
-            bio: 1,
-            mutualCount: 1,
-          },
-        },
-      ]);
-
-      return suggestions;
-    } catch (error) {
-      logger.error('Get user suggestions failed:', error);
-      throw error;
-    }
-  }
-
-  /**
-   * Update user presence status - FIXED: This doesn't interfere with auth
-   */
-  static async updatePresenceStatus(userId, statusData) {
-    try {
-      const { status, statusText, statusEmoji, expiresIn } = statusData;
-
-      // Validate status
-      const validStatuses = ['online', 'away', 'busy', 'offline'];
-      if (status && !validStatuses.includes(status)) {
-        throw new ValidationError(`Status must be one of: ${validStatuses.join(', ')}`);
-      }
-
-      // Calculate expiration if provided
-      let statusExpiresAt = null;
-      if (expiresIn) {
-        const expiresInMinutes = parseInt(expiresIn);
-        if (isNaN(expiresInMinutes) || expiresInMinutes < 1 || expiresInMinutes > 1440) {
-          throw new ValidationError('Expires in must be between 1 and 1440 minutes');
-        }
-        statusExpiresAt = new Date(Date.now() + expiresInMinutes * 60000);
-      }
-
-      const updates = {
-        status: status || 'online',
-        statusText: statusText || '',
-        statusEmoji: statusEmoji || '',
-        statusExpiresAt,
-        statusLastChanged: new Date(),
-        lastActive: new Date(),
-      };
-
-      // Update online status based on presence
-      if (status === 'online' || status === 'away' || status === 'busy') {
-        updates.online = true;
-      } else if (status === 'offline') {
-        updates.online = false;
-      }
-
-      const updatedUser = await User.findByIdAndUpdate(userId, updates, { new: true }).select(
-        'username avatar displayName online status statusText statusEmoji statusExpiresAt lastActive'
       );
 
-      if (!updatedUser) {
-        throw new NotFoundError('User not found');
-      }
-
-      return updatedUser;
+      console.log("✅ [UserService] Found", results.length, "users");
+      return results;
     } catch (error) {
-      logger.error('Update presence status failed:', error);
+      console.error('❌ [UserService] Search users error:', error.message);
       throw error;
     }
   }
 
   /**
-   * Get user statistics - FIXED: This doesn't interfere with auth
+   * Get user's friends
    */
-  static async getUserStatistics(userId) {
+  async getUserFriends(userId, options = {}) {
     try {
-      const user = await User.findById(userId).populate('friends');
+      console.log("🔧 [UserService] Getting friends for user:", userId);
 
-      // Get call statistics for last 30 days
-      const thirtyDaysAgo = new Date();
-      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+      const user = await User.findByPk(userId, {
+        include: [{
+          model: User,
+          as: 'friends',
+          through: {
+            where: { status: 'accepted' },
+            attributes: ['createdAt']
+          },
+          attributes: ['id', 'username', 'firstName', 'lastName', 'avatar', 'bio', 'status', 'lastSeen']
+        }]
+      });
 
-      const callStats = await Call.aggregate([
-        {
-          $match: {
-            $or: [
-              { caller: mongoose.Types.ObjectId(userId) },
-              { participants: mongoose.Types.ObjectId(userId) },
-            ],
-            startedAt: { $gte: thirtyDaysAgo },
-          },
-        },
-        {
-          $group: {
-            _id: null,
-            totalCalls: { $sum: 1 },
-            completedCalls: {
-              $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] },
-            },
-            missedCalls: {
-              $sum: { $cond: [{ $eq: ['$status', 'missed'] }, 1, 0] },
-            },
-            totalDuration: { $sum: '$duration' },
-          },
-        },
-      ]);
+      if (!user) {
+        throw new Error('User not found');
+      }
 
-      // Get chat statistics
-      const chatStats = await Chat.aggregate([
-        {
-          $match: {
-            participants: mongoose.Types.ObjectId(userId),
-            isArchived: false,
-          },
-        },
-        {
-          $group: {
-            _id: '$chatType',
-            count: { $sum: 1 },
-          },
-        },
-      ]);
+      const friends = user.friends || [];
 
-      // Get message statistics for last 7 days
-      const sevenDaysAgo = new Date();
-      sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+      // Add online status to each friend
+      const friendsWithStatus = friends.map(friend => {
+        const friendData = friend.toJSON();
+        friendData.online = this.isUserOnline(friend.lastSeen);
+        friendData.friendshipDate = friend.Friend ? friend.Friend.createdAt : null;
+        return friendData;
+      });
 
-      const Message = require('../models/Message');
-      const messageStats = await Message.aggregate([
-        {
-          $match: {
-            sender: mongoose.Types.ObjectId(userId),
-            createdAt: { $gte: sevenDaysAgo },
-            isDeleted: false,
+      console.log("✅ [UserService] Retrieved", friendsWithStatus.length, "friends");
+      return friendsWithStatus;
+    } catch (error) {
+      console.error('❌ [UserService] Get friends error:', error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Get friend requests (pending)
+   */
+  async getFriendRequests(userId) {
+    try {
+      console.log("🔧 [UserService] Getting friend requests for user:", userId);
+
+      const user = await User.findByPk(userId, {
+        include: [{
+          model: User,
+          as: 'friendRequests',
+          through: {
+            where: { status: 'pending' },
+            attributes: ['id', 'createdAt']
           },
-        },
-        {
-          $group: {
-            _id: {
-              $dateToString: { format: '%Y-%m-%d', date: '$createdAt' },
-            },
-            count: { $sum: 1 },
-          },
-        },
-        {
-          $sort: { _id: 1 },
-        },
+          attributes: ['id', 'username', 'firstName', 'lastName', 'avatar', 'bio']
+        }]
+      });
+
+      if (!user) {
+        throw new Error('User not found');
+      }
+
+      const requests = user.friendRequests || [];
+      console.log("✅ [UserService] Retrieved", requests.length, "friend requests");
+      return requests;
+    } catch (error) {
+      console.error('❌ [UserService] Get friend requests error:', error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Get user statistics
+   */
+  async getUserStats(userId) {
+    try {
+      console.log("🔧 [UserService] Getting stats for user:", userId);
+
+      const [
+        friendCount,
+        statusCount,
+        chatCount,
+        unreadMessages
+      ] = await Promise.all([
+        this.getFriendCount(userId),
+        Status.count({ where: { userId } }),
+        Chat.count({ where: { userId } }),
+        Message.count({
+          where: {
+            receiverId: userId,
+            read: false
+          }
+        })
       ]);
 
       const stats = {
-        friends: {
-          total: user.friends.length,
-          online: user.friends.filter(f => f.online).length,
-        },
-        calls: callStats[0] || {
-          totalCalls: 0,
-          completedCalls: 0,
-          missedCalls: 0,
-          totalDuration: 0,
-        },
-        chats: {
-          direct: chatStats.find(c => c._id === 'direct')?.count || 0,
-          group: chatStats.find(c => c._id === 'group')?.count || 0,
-          total:
-            (chatStats.find(c => c._id === 'direct')?.count || 0) +
-            (chatStats.find(c => c._id === 'group')?.count || 0),
-        },
-        messages: {
-          totalLast7Days: messageStats.reduce((sum, day) => sum + day.count, 0),
-          dailyStats: messageStats,
-        },
-        account: {
-          createdAt: user.createdAt,
-          lastLogin: user.lastLogin,
-          lastActive: user.lastActive,
-        },
+        friends: friendCount,
+        statuses: statusCount,
+        chats: chatCount,
+        unreadMessages: unreadMessages,
+        online: this.isUserOnline(await this.getLastSeen(userId))
       };
 
+      console.log("✅ [UserService] Retrieved stats for user:", userId);
       return stats;
     } catch (error) {
-      logger.error('Get user statistics failed:', error);
+      console.error('❌ [UserService] Get stats error:', error.message);
       throw error;
     }
   }
 
   /**
-   * Deactivate user account - FIXED: This doesn't interfere with auth
+   * Update user's last seen timestamp
    */
-  static async deactivateAccount(userId, reason = 'user_request') {
+  async updateLastSeen(userId) {
     try {
-      const user = await User.findById(userId);
+      console.log("🔧 [UserService] Updating last seen for user:", userId);
 
+      const user = await User.findByPk(userId);
       if (!user) {
-        throw new NotFoundError('User not found');
+        throw new Error('User not found');
       }
 
-      // Mark user as deactivated
-      user.isActive = false;
-      user.deactivatedAt = new Date();
-      user.deactivationReason = reason;
-      user.online = false;
-      user.status = 'offline';
+      user.lastSeen = new Date();
       await user.save();
 
-      // Remove all active sessions
-      await Token.deleteMany({ userId, type: 'refresh' });
-
-      // Archive user's chats
-      await Chat.updateMany({ participants: userId }, { $set: { isArchived: true } });
-
-      // Notify friends (optional - could be done via WebSocket)
-      // ...
-
-      return { success: true };
+      console.log("✅ [UserService] Last seen updated:", userId);
+      return user.lastSeen;
     } catch (error) {
-      logger.error('Deactivate account failed:', error);
+      console.error('❌ [UserService] Update last seen error:', error.message);
       throw error;
     }
   }
 
   /**
-   * Reactivate user account - FIXED: This doesn't interfere with auth
+   * Get user's online friends
    */
-  static async reactivateAccount(userId) {
+  async getOnlineFriends(userId) {
     try {
-      const user = await User.findByIdAndUpdate(
-        userId,
-        {
-          isActive: true,
-          deactivatedAt: null,
-          deactivationReason: null,
-          online: true,
-          status: 'online',
-        },
-        { new: true }
-      );
+      console.log("🔧 [UserService] Getting online friends for user:", userId);
 
-      if (!user) {
-        throw new NotFoundError('User not found');
-      }
+      const friends = await this.getUserFriends(userId);
+      const onlineFriends = friends.filter(friend => this.isUserOnline(friend.lastSeen));
 
-      // Unarchive user's chats
-      await Chat.updateMany(
-        { participants: userId, archivedBy: userId },
-        {
-          $set: {
-            isArchived: false,
-            archivedBy: null,
-            archivedAt: null,
-          },
-        }
-      );
-
-      return { success: true, user };
+      console.log("✅ [UserService] Found", onlineFriends.length, "online friends");
+      return onlineFriends;
     } catch (error) {
-      logger.error('Reactivate account failed:', error);
+      console.error('❌ [UserService] Get online friends error:', error.message);
       throw error;
     }
   }
 
   /**
-   * Delete user account permanently - FIXED: This doesn't interfere with auth
+   * Get user's recent activity
    */
-  static async deleteAccount(userId, confirmPassword) {
+  async getUserActivity(userId, limit = 10) {
     try {
-      // Verify password
-      const user = await User.findById(userId).select('+password');
+      console.log("🔧 [UserService] Getting activity for user:", userId);
 
-      if (!user) {
-        throw new NotFoundError('User not found');
-      }
-
-      const isPasswordValid = await bcrypt.compare(confirmPassword, user.password);
-      if (!isPasswordValid) {
-        throw new AuthenticationError('Password is incorrect');
-      }
-
-      // Start deletion process (in production, you might want to schedule this)
-      // For now, we'll mark for deletion and clean up related data
-
-      // 1. Delete all tokens
-      await Token.deleteMany({ userId });
-
-      // 2. Remove user from all chats
-      await Chat.updateMany({ participants: userId }, { $pull: { participants: userId } });
-
-      // 3. Delete user's messages (soft delete)
-      const Message = require('../models/Message');
-      await Message.updateMany(
-        { sender: userId },
-        { $set: { isDeleted: true, deletedBy: 'system' } }
-      );
-
-      // 4. Remove user from friends lists
-      await User.updateMany({ friends: userId }, { $pull: { friends: userId } });
-
-      // 5. Remove from friend requests
-      await User.updateMany({ friendRequests: userId }, { $pull: { friendRequests: userId } });
-
-      // 6. Delete user calls
-      await Call.deleteMany({
-        $or: [{ caller: userId }, { participants: userId }],
+      const recentStatuses = await Status.findAll({
+        where: { userId },
+        order: [['createdAt', 'DESC']],
+        limit: limit,
+        include: [{
+          model: User,
+          as: 'user',
+          attributes: ['id', 'username', 'avatar']
+        }]
       });
 
-      // 7. Finally delete the user
-      await User.findByIdAndDelete(userId);
-
-      return { success: true };
-    } catch (error) {
-      logger.error('Delete account failed:', error);
-      throw error;
-    }
-  }
-
-  /**
-   * Validate user session - FIXED: This doesn't interfere with auth
-   */
-  static async validateSession(userId, sessionData = {}) {
-    try {
-      const user = await User.findById(userId).select('-password');
-
-      if (!user) {
-        throw new NotFoundError('User not found');
-      }
-
-      if (!user.isActive) {
-        throw new AuthenticationError('Account is deactivated');
-      }
-
-      // Check if session is valid (add more checks as needed)
-      const isValid = true;
-
-      return {
-        isValid,
-        user,
-        requiresReauth: false, // Add logic for reauthentication if needed
-      };
-    } catch (error) {
-      logger.error('Validate session failed:', error);
-      throw error;
-    }
-  }
-
-  /**
-   * Bulk update user statuses (for admin/background jobs) - FIXED: This doesn't interfere with auth
-   */
-  static async bulkUpdateUserStatuses(updates) {
-    try {
-      const operations = updates.map(update => ({
-        updateOne: {
-          filter: { _id: update.userId },
-          update: {
-            $set: {
-              status: update.status,
-              statusText: update.statusText || '',
-              statusEmoji: update.statusEmoji || '',
-              statusLastChanged: new Date(),
-              lastActive: new Date(),
-            },
-          },
+      const recentMessages = await Message.findAll({
+        where: {
+          [Op.or]: [
+            { senderId: userId },
+            { receiverId: userId }
+          ]
         },
-      }));
+        order: [['createdAt', 'DESC']],
+        limit: limit,
+        include: [
+          {
+            model: User,
+            as: 'sender',
+            attributes: ['id', 'username', 'avatar']
+          },
+          {
+            model: User,
+            as: 'receiver',
+            attributes: ['id', 'username', 'avatar']
+          }
+        ]
+      });
 
-      if (operations.length > 0) {
-        await User.bulkWrite(operations);
-      }
+      const activity = [
+        ...recentStatuses.map(status => ({
+          type: 'status',
+          data: status,
+          timestamp: status.createdAt
+        })),
+        ...recentMessages.map(message => ({
+          type: 'message',
+          data: message,
+          timestamp: message.createdAt
+        }))
+      ].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+        .slice(0, limit);
 
-      return { success: true, updated: operations.length };
+      console.log("✅ [UserService] Retrieved", activity.length, "activity items");
+      return activity;
     } catch (error) {
-      logger.error('Bulk update user statuses failed:', error);
+      console.error('❌ [UserService] Get activity error:', error.message);
       throw error;
     }
+  }
+
+  // ===== HELPER METHODS =====
+
+  /**
+   * Get friend count
+   */
+  async getFriendCount(userId) {
+    const count = await Friend.count({
+      where: {
+        [Op.or]: [
+          { userId: userId, status: 'accepted' },
+          { friendId: userId, status: 'accepted' }
+        ]
+      }
+    });
+    return count;
+  }
+
+  /**
+   * Get friendship status between two users
+   */
+  async getFriendshipStatus(userId1, userId2) {
+    if (userId1 === userId2) {
+      return { status: 'self' };
+    }
+
+    const friendship = await Friend.findOne({
+      where: {
+        [Op.or]: [
+          { userId: userId1, friendId: userId2 },
+          { userId: userId2, friendId: userId1 }
+        ]
+      }
+    });
+
+    if (!friendship) {
+      return { status: 'none' };
+    }
+
+    // Determine direction
+    const isRequester = friendship.userId === userId1;
+
+    return {
+      status: friendship.status,
+      isRequester: isRequester,
+      createdAt: friendship.createdAt
+    };
+  }
+
+  /**
+   * Get user's last seen timestamp
+   */
+  async getLastSeen(userId) {
+    const user = await User.findByPk(userId, {
+      attributes: ['lastSeen']
+    });
+    return user ? user.lastSeen : null;
+  }
+
+  /**
+   * Check if user is online (last seen within 5 minutes)
+   */
+  isUserOnline(lastSeen) {
+    if (!lastSeen) return false;
+
+    const now = new Date();
+    const lastSeenDate = new Date(lastSeen);
+    const minutesAgo = (now - lastSeenDate) / (1000 * 60);
+
+    return minutesAgo < 5; // Online if last seen within 5 minutes
+  }
+
+  /**
+   * Get user's full name
+   */
+  getUserFullName(user) {
+    if (user.firstName && user.lastName) {
+      return `${user.firstName} ${user.lastName}`;
+    }
+    return user.username;
+  }
+
+  /**
+   * Validate user update data
+   */
+  validateUpdateData(data) {
+    const errors = [];
+
+    if (data.username && (data.username.length < 3 || data.username.length > 30)) {
+      errors.push('Username must be 3-30 characters');
+    }
+
+    if (data.bio && data.bio.length > 500) {
+      errors.push('Bio cannot exceed 500 characters');
+    }
+
+    if (data.phone && !/^\+?[1-9]\d{1,14}$/.test(data.phone)) {
+      errors.push('Invalid phone number format');
+    }
+
+    return errors;
   }
 }
 
-module.exports = UserService;
+module.exports = new UserService();

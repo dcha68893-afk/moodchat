@@ -2,8 +2,8 @@ const express = require('express');
 const router = express.Router();
 const sequelize = require('sequelize');
 const crypto = require('crypto');
+const asyncHandler = require('express-async-handler');
 const {
-  asyncHandler,
   AuthenticationError,
   AuthorizationError,
   NotFoundError,

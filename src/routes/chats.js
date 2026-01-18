@@ -1,8 +1,8 @@
+const asyncHandler = require('express-async-handler');
 const express = require('express');
 const router = express.Router();
 const sequelize = require('sequelize');
 const {
-  asyncHandler,
   AuthenticationError,
   AuthorizationError,
   NotFoundError,
@@ -10,7 +10,7 @@ const {
   ConflictError,
 } = require('../middleware/errorHandler');
 const { authMiddleware } = require('../middleware/auth');
-const { apiRateLimiter, createMessageRateLimiter } = require('../middleware/rateLimiter');
+const { apiRateLimiter } = require('../middleware/rateLimiter');
 const { User, Chat, Message } = require('../models');
 
 router.use(authMiddleware);

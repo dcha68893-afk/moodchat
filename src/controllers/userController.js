@@ -71,7 +71,7 @@ class UserController {
         throw new AppError('Invalid email format', 400);
       }
 
-      if (updateData.username && !/^[a-zA-Z0-9_]+$/.test(updateData.username)) {
+      if (updateData.username && !/^[^<>]{3,30}$/.test(updateData.username)) {
         throw new AppError('Username can only contain letters, numbers, and underscores', 400);
       }
 

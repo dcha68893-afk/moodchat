@@ -1,0 +1,41 @@
+{
+  "development": {
+    "username": "postgres",
+    "password": "24845c1b4df84c17a0526806f7aa0482",
+    "database": "moodchat",
+    "host": "127.0.0.1",
+    "dialect": "postgres",
+    "port": 5432,
+    "logging": true,
+    "pool": {
+      "max": 10,
+      "min": 0,
+      "acquire": 30000,
+      "idle": 10000
+    }
+  },
+  "test": {
+    "username": "postgres",
+    "password": "24845c1b4df84c17a0526806f7aa0482",
+    "database": "moodchat_test",
+    "host": "127.0.0.1",
+    "dialect": "postgres",
+    "port": 5432,
+    "logging": false
+  },
+  "production": {
+    "username": "postgres",
+    "password": "24845c1b4df84c17a0526806f7aa0482",
+    "database": "moodchat",
+    "host": "127.0.0.1",
+    "dialect": "postgres",
+    "port": 5432,
+    "logging": false,
+    "pool": {
+      "max": 20,
+      "min": 5,
+      "acquire": 60000,
+      "idle": 30000
+    }
+  }
+}

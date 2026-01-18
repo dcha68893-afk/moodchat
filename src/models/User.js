@@ -1,3 +1,4 @@
+
 const bcrypt = require('bcryptjs');
 
 module.exports = (sequelize, DataTypes) => {
@@ -15,16 +16,6 @@ module.exports = (sequelize, DataTypes) => {
         unique: {
           name: 'username',
           msg: 'Username already exists'
-        },
-        validate: {
-          len: {
-            args: [3, 30],
-            msg: 'Username must be between 3 and 30 characters'
-          },
-          is: {
-            args: /^[a-zA-Z0-9_]+$/,
-            msg: 'Username can only contain letters, numbers, and underscores'
-          }
         },
       },
       email: {
@@ -48,12 +39,6 @@ module.exports = (sequelize, DataTypes) => {
       password: {
         type: DataTypes.STRING,
         allowNull: false,
-        validate: {
-          len: {
-            args: [8, 100],
-            msg: 'Password must be at least 8 characters long'
-          }
-        },
       },
       firstName: {
         type: DataTypes.STRING(50),
@@ -153,7 +138,7 @@ module.exports = (sequelize, DataTypes) => {
       timestamps: true,
       underscored: true,
       hooks: {
-        // Hash password before creating user - FIXED: Ensure it only hashes when password exists
+        // Hash password before creating user
         beforeCreate: async (user) => {
           if (user.password && user.password.length > 0) {
             try {
@@ -165,7 +150,7 @@ module.exports = (sequelize, DataTypes) => {
             throw new Error('Password is required');
           }
         },
-        // Hash password before updating if it changed - FIXED: Explicit error handling
+        // Hash password before updating if it changed
         beforeUpdate: async (user) => {
           if (user.changed('password')) {
             if (user.password && user.password.length > 0) {
@@ -178,15 +163,6 @@ module.exports = (sequelize, DataTypes) => {
               throw new Error('Password cannot be empty');
             }
           }
-        },
-        // FIXED: Add beforeSave hook to ensure validation errors are thrown properly
-        beforeSave: async (user) => {
-          // Ensure password is hashed if it's a new user or password was changed
-          if ((user.isNewRecord || user.changed('password')) && user.password) {
-            if (user.password.length < 8) {
-              throw new Error('Password must be at least 8 characters long');
-            }
-          }
         }
       },
     }
@@ -195,7 +171,7 @@ module.exports = (sequelize, DataTypes) => {
   // ===== INSTANCE METHODS =====
 
   /**
-   * Validate user password - FIXED: Explicit error handling
+   * Validate user password
    * @param {string} password - Plain text password to validate
    * @returns {Promise<boolean>} True if password matches
    */
@@ -251,7 +227,7 @@ module.exports = (sequelize, DataTypes) => {
   // ===== STATIC METHODS =====
 
   /**
-   * Find user by email - FIXED: Explicit error handling
+   * Find user by email
    * @param {string} email - Email address
    * @returns {Promise<User|null>} Found user or null
    */
@@ -272,7 +248,7 @@ module.exports = (sequelize, DataTypes) => {
   };
 
   /**
-   * Find user by username - FIXED: Explicit error handling
+   * Find user by username
    * @param {string} username - Username
    * @returns {Promise<User|null>} Found user or null
    */

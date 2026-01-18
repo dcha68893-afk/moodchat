@@ -1,29 +1,40 @@
+
 const authService = require('../services/authService');
 const { AppError } = require('../middleware/errorHandler');
 const logger = require('../utils/logger');
 const validator = require('validator');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
-const { User, Token, LoginAttempt } = require('../models'); // Import models
+const { User, Token, LoginAttempt } = require('../models');
 
-// In-memory store for login attempts (for simplicity)
-// In production, use Redis or database
+// In-memory store for login attempts
 const loginAttemptsStore = new Map();
 
 class AuthController {
   async register(req, res, next) {
     try {
-      console.log("AUTH BODY (Register):", { ...req.body, password: '[REDACTED]' });
+      console.log("📝 [AuthController] Registration request received");
+      console.log("Request body:", { 
+        username: req.body.username, 
+        email: req.body.email,
+        hasPassword: !!req.body.password 
+      });
       
-      const { username, email, password } = req.body;
-
-      logger.info(`Registration attempt for: ${email}`, { username });
+      const { username, email, password, firstName, lastName } = req.body;
 
       // Validate all required fields
       if (!email || !password || !username) {
         return res.status(400).json({
           success: false,
           message: 'Email, username, and password are required'
+        });
+      }
+
+      // Validate password is not empty
+      if (!password || password.trim() === '') {
+        return res.status(400).json({
+          success: false,
+          message: 'Password cannot be empty'
         });
       }
 
@@ -35,36 +46,18 @@ class AuthController {
         });
       }
 
-      // Validate username format
-      if (!/^[a-zA-Z0-9_]+$/.test(username)) {
-        return res.status(400).json({
-          success: false,
-          message: 'Username can only contain letters, numbers, and underscores'
-        });
-      }
+      console.log("🔧 [AuthController] Calling authService.register...");
 
-      // Validate password strength
-      if (password.length < 8) {
-        return res.status(400).json({
-          success: false,
-          message: 'Password must be at least 8 characters long'
-        });
-      }
-
-      // Call authService.register - FIXED: Use authService for registration logic
+      // Call authService.register
       const result = await authService.register({
         username: username.trim(),
         email: email.toLowerCase().trim(),
         password: password,
-        firstName: req.body.firstName,
-        lastName: req.body.lastName
+        firstName: firstName,
+        lastName: lastName
       });
 
-      // Log successful registration
-      logger.info(`User registered successfully: ${email}`, { 
-        userId: result.user.id,
-        username: result.user.username 
-      });
+      console.log("✅ [AuthController] Registration successful for user:", result.user.id);
 
       // Return JSON response with user and tokens
       return res.status(201).json({
@@ -76,11 +69,8 @@ class AuthController {
         }
       });
     } catch (error) {
-      logger.error('Registration controller error:', {
-        error: error.message,
-        stack: error.stack,
-        email: req.body.email
-      });
+      console.error('❌ [AuthController] Registration error:', error.message);
+      console.error('Error stack:', error.stack);
       
       // Handle specific error cases
       if (error.message.includes('already exists') || 
@@ -93,38 +83,42 @@ class AuthController {
       }
       
       // Handle validation errors
-      if (error.name === 'SequelizeValidationError' || 
-          error.name === 'ValidationError') {
-        const messages = error.errors ? error.errors.map(err => err.message) : [error.message];
+      if (error.message.includes('Validation error') || 
+          error.message.includes('Invalid email') ||
+          error.message.includes('Password cannot be empty')) {
         return res.status(400).json({
           success: false,
-          message: messages.join(', ')
+          message: error.message
         });
       }
       
       // Handle database errors
-      if (error.name === 'SequelizeDatabaseError' || 
+      if (error.message.includes('Database error') || 
+          error.name === 'SequelizeDatabaseError' || 
           error.name === 'SequelizeUniqueConstraintError') {
-        return res.status(400).json({
+        return res.status(500).json({
           success: false,
-          message: 'Database error occurred'
+          message: 'Database error occurred. Please try again.'
         });
       }
       
+      // Default internal server error
       return res.status(500).json({
         success: false,
-        message: 'Internal server error'
+        message: 'Internal server error: ' + error.message
       });
     }
   }
 
   async login(req, res, next) {
     try {
-      console.log("AUTH BODY (Login):", { ...req.body, password: '[REDACTED]' });
+      console.log("📝 [AuthController] Login request received");
+      console.log("Request body:", { 
+        identifier: req.body.identifier,
+        hasPassword: !!req.body.password 
+      });
       
       const { identifier, password } = req.body;
-
-      logger.info(`Login attempt for identifier: ${identifier}`);
 
       // Validate required fields
       if (!identifier || !password) {
@@ -134,98 +128,47 @@ class AuthController {
         });
       }
 
-      // ============================================================================
-      // PROGRESSIVE LOGIN ATTEMPT LIMITING
-      // ============================================================================
-      
-      // Generate a key for tracking attempts (email or username + IP)
+      // Rate limiting for login attempts
       const clientIp = req.ip || req.headers['x-forwarded-for'] || req.connection.remoteAddress;
       const attemptKey = `${identifier}_${clientIp}`;
       
-      // Check existing attempts
       let attempts = loginAttemptsStore.get(attemptKey) || { count: 0, lastAttempt: null };
-      
-      // Progressive delays: 20s, 40s, 60s
-      const delays = [20000, 40000, 60000];
-      const maxAttempts = 3;
+      const maxAttempts = 5;
       
       if (attempts.count >= maxAttempts) {
-        // After 3 attempts, block for 1 minute and suggest password recovery
-        const blockTime = 60000; // 1 minute
+        const blockTime = 15 * 60 * 1000; // 15 minutes
         const timeSinceLastAttempt = Date.now() - attempts.lastAttempt;
         
         if (timeSinceLastAttempt < blockTime) {
-          const remainingTime = Math.ceil((blockTime - timeSinceLastAttempt) / 1000);
+          const remainingTime = Math.ceil((blockTime - timeSinceLastAttempt) / 1000 / 60); // in minutes
           
           return res.status(429).json({
             success: false,
-            message: `Too many login attempts. Please wait ${remainingTime} seconds or use password recovery.`,
+            message: `Too many login attempts. Please wait ${remainingTime} minutes before trying again.`,
             blockTime: blockTime,
-            remainingTime: remainingTime,
-            suggestPasswordRecovery: true
+            remainingTime: remainingTime
           });
         } else {
           // Reset after block time expires
           attempts.count = 0;
         }
-      } else if (attempts.count > 0) {
-        // Apply progressive delay based on attempt count
-        const delayIndex = Math.min(attempts.count - 1, delays.length - 1);
-        const delayTime = delays[delayIndex];
-        const timeSinceLastAttempt = Date.now() - attempts.lastAttempt;
-        
-        if (timeSinceLastAttempt < delayTime) {
-          const remainingTime = Math.ceil((delayTime - timeSinceLastAttempt) / 1000);
-          
-          return res.status(429).json({
-            success: false,
-            message: `Please wait ${remainingTime} seconds before trying again.`,
-            blockTime: delayTime,
-            remainingTime: remainingTime,
-            attemptCount: attempts.count,
-            maxAttempts: maxAttempts
-          });
-        }
       }
-      
-      // Call authService.login - FIXED: Use authService for login logic
+
+      console.log("🔧 [AuthController] Calling authService.login...");
+
+      // Call authService.login (which now uses validatePassword internally)
       let result;
       if (validator.isEmail(identifier)) {
         result = await authService.login(identifier.toLowerCase().trim(), password);
       } else {
-        // For username login, we need to find the user first to get email
-        const user = await User.findOne({ 
-          where: { 
-            username: identifier.trim(),
-            isActive: true 
-          } 
-        });
-        
-        if (!user) {
-          // Record failed attempt
-          attempts.count++;
-          attempts.lastAttempt = Date.now();
-          loginAttemptsStore.set(attemptKey, attempts);
-          
-          return res.status(401).json({
-            success: false,
-            message: 'Invalid credentials',
-            attemptCount: attempts.count,
-            maxAttempts: maxAttempts
-          });
-        }
-        
-        result = await authService.login(user.email, password);
+        // For username login
+        result = await authService.login(identifier.trim(), password);
       }
 
-      // SUCCESSFUL LOGIN - Reset attempts for this identifier
+      // Reset attempts on successful login
       loginAttemptsStore.delete(attemptKey);
 
-      // Log successful login
-      logger.info(`User logged in successfully: ${result.user.email}`, { 
-        userId: result.user.id,
-        username: result.user.username 
-      });
+      console.log("✅ [AuthController] Login successful for user:", result.user.id);
 
       // Return JSON response with user and tokens
       return res.json({
@@ -237,18 +180,25 @@ class AuthController {
         }
       });
     } catch (error) {
-      logger.error('Login controller error:', {
-        error: error.message,
-        stack: error.stack,
-        identifier: req.body.identifier
-      });
+      console.error('❌ [AuthController] Login error:', error.message);
       
       // Handle specific error cases
       if (error.message.includes('Invalid credentials') || 
           error.message.includes('Account is deactivated')) {
+        
+        // Increment failed attempts
+        const clientIp = req.ip || req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+        const attemptKey = `${req.body.identifier}_${clientIp}`;
+        let attempts = loginAttemptsStore.get(attemptKey) || { count: 0, lastAttempt: null };
+        attempts.count++;
+        attempts.lastAttempt = Date.now();
+        loginAttemptsStore.set(attemptKey, attempts);
+        
         return res.status(401).json({
           success: false,
-          message: error.message
+          message: error.message,
+          attemptCount: attempts.count,
+          maxAttempts: 5
         });
       }
       
@@ -270,23 +220,6 @@ class AuthController {
         });
       }
 
-      // Validate refresh token format
-      if (typeof refreshToken !== 'string' || refreshToken.length < 10) {
-        return res.status(400).json({
-          success: false,
-          message: 'Invalid refresh token format'
-        });
-      }
-
-      // Check JWT_SECRET configuration
-      if (!process.env.JWT_SECRET || process.env.JWT_SECRET.trim() === '') {
-        logger.error('JWT_SECRET is missing or empty');
-        return res.status(500).json({
-          success: false,
-          message: 'Server configuration error'
-        });
-      }
-
       const result = await authService.refreshToken(refreshToken);
 
       res.json({
@@ -298,21 +231,12 @@ class AuthController {
         },
       });
     } catch (error) {
-      logger.error('Refresh token controller error:', error);
+      console.error('Refresh token controller error:', error);
       
-      // Handle invalid refresh token
       if (error.message.includes('invalid') || error.message.includes('expired')) {
         return res.status(401).json({
           success: false,
           message: "Invalid or expired refresh token"
-        });
-      }
-      
-      // Handle JWT signing errors
-      if (error.message.includes('secret') || error.message.includes('sign')) {
-        return res.status(500).json({
-          success: false,
-          message: 'Server configuration error'
         });
       }
       
@@ -328,7 +252,6 @@ class AuthController {
       const accessToken = req.headers.authorization?.split(' ')[1];
       const { refreshToken } = req.body;
 
-      // Validate tokens
       if (!accessToken && !refreshToken) {
         return res.status(400).json({
           success: false,
@@ -338,201 +261,15 @@ class AuthController {
 
       await authService.logout(accessToken, refreshToken);
 
-      // Log successful logout
-      logger.info('User logged out successfully', { userId: req.user?.id });
-
       res.json({
         success: true,
         message: 'Logged out successfully',
       });
     } catch (error) {
-      logger.error('Logout controller error:', error);
+      console.error('Logout controller error:', error);
       return res.status(500).json({
         success: false,
         message: 'Internal server error'
-      });
-    }
-  }
-
-  async verifyEmail(req, res, next) {
-    try {
-      const { token } = req.query;
-
-      if (!token) {
-        return res.status(400).json({
-          success: false,
-          message: 'Verification token is required'
-        });
-      }
-
-      // Validate token format
-      if (typeof token !== 'string' || token.length < 10) {
-        return res.status(400).json({
-          success: false,
-          message: 'Invalid verification token format'
-        });
-      }
-
-      const user = await authService.verifyEmail(token);
-
-      // Log successful verification
-      logger.info(`Email verified for user: ${user.email}`, { userId: user.id });
-
-      res.json({
-        success: true,
-        message: 'Email verified successfully',
-        data: {
-          user: user.toJSON(),
-        },
-      });
-    } catch (error) {
-      logger.error('Verify email controller error:', error);
-      
-      // Handle invalid or expired token
-      if (error.message.includes('invalid') || error.message.includes('expired')) {
-        return res.status(400).json({
-          success: false,
-          message: "Invalid or expired verification token"
-        });
-      }
-      
-      return res.status(500).json({
-        success: false,
-        message: 'Internal server error'
-      });
-    }
-  }
-
-  async requestPasswordReset(req, res, next) {
-    try {
-      const { email } = req.body;
-
-      if (!email) {
-        return res.status(400).json({
-          success: false,
-          message: 'Email is required'
-        });
-      }
-
-      // Validate email format
-      if (!validator.isEmail(email)) {
-        return res.status(400).json({
-          success: false,
-          message: 'Invalid email format'
-        });
-      }
-
-      await authService.requestPasswordReset(email);
-
-      // Log password reset request
-      logger.info(`Password reset requested for: ${email}`);
-
-      res.json({
-        success: true,
-        message: 'Password reset instructions sent to your email',
-      });
-    } catch (error) {
-      logger.error('Request password reset controller error:', error);
-      return res.status(500).json({
-        success: false,
-        message: 'Internal server error'
-      });
-    }
-  }
-
-  async resetPassword(req, res, next) {
-    try {
-      const { token, newPassword } = req.body;
-
-      if (!token || !newPassword) {
-        return res.status(400).json({
-          success: false,
-          message: 'Token and new password are required'
-        });
-      }
-
-      // Validate token format
-      if (typeof token !== 'string' || token.length < 10) {
-        return res.status(400).json({
-          success: false,
-          message: 'Invalid reset token format'
-        });
-      }
-
-      // Only require minimum length
-      if (newPassword.length < 8) {
-        return res.status(400).json({
-          success: false,
-          message: 'Password must be at least 8 characters long'
-        });
-      }
-
-      await authService.resetPassword(token, newPassword);
-
-      // Log successful password reset
-      logger.info('Password reset successful');
-
-      res.json({
-        success: true,
-        message: 'Password reset successful',
-      });
-    } catch (error) {
-      logger.error('Reset password controller error:', error);
-      
-      // Handle invalid or expired token
-      if (error.message.includes('invalid') || error.message.includes('expired')) {
-        return res.status(400).json({
-          success: false,
-          message: "Invalid or expired reset token"
-        });
-      }
-      
-      return res.status(500).json({
-        success: false,
-        message: 'Internal server error'
-      });
-    }
-  }
-
-  async validateToken(req, res, next) {
-    try {
-      const token = req.headers.authorization?.split(' ')[1];
-
-      if (!token) {
-        return res.status(400).json({
-          success: false,
-          message: 'Token is required'
-        });
-      }
-
-      // Check JWT_SECRET configuration
-      if (!process.env.JWT_SECRET || process.env.JWT_SECRET.trim() === '') {
-        logger.error('JWT_SECRET is missing or empty');
-        return res.status(500).json({
-          success: false,
-          data: {
-            valid: false,
-            error: 'Server configuration error'
-          }
-        });
-      }
-
-      const decoded = await authService.validateToken(token);
-
-      res.json({
-        success: true,
-        data: {
-          valid: true,
-          decoded,
-        },
-      });
-    } catch (error) {
-      res.status(401).json({
-        success: false,
-        data: {
-          valid: false,
-          error: error.message,
-        },
       });
     }
   }
@@ -548,7 +285,6 @@ class AuthController {
         });
       }
 
-      // Create sanitized user object with avatar
       const sanitizedUser = {
         id: user.id,
         username: user.username,
@@ -574,7 +310,7 @@ class AuthController {
         }
       });
     } catch (error) {
-      logger.error('Get current user controller error:', error);
+      console.error('Get current user controller error:', error);
       
       if (error.message.includes('Unauthorized') || error.message.includes('invalid token')) {
         return res.status(401).json({
@@ -590,12 +326,10 @@ class AuthController {
     }
   }
   
-  // ============================================================================
-  // HELPER METHOD: Clean up old login attempts (for memory management)
-  // ============================================================================
+  // Helper method to clean up old login attempts
   static cleanupOldAttempts() {
     const now = Date.now();
-    const oneHourAgo = now - 3600000; // 1 hour
+    const oneHourAgo = now - 3600000;
     
     for (const [key, attempt] of loginAttemptsStore.entries()) {
       if (attempt.lastAttempt < oneHourAgo) {
@@ -603,13 +337,13 @@ class AuthController {
       }
     }
     
-    logger.info(`Cleaned up old login attempts. Remaining: ${loginAttemptsStore.size}`);
+    console.log(`🧹 [AuthController] Cleaned up old login attempts. Remaining: ${loginAttemptsStore.size}`);
   }
 }
 
 // Start periodic cleanup of old login attempts
 setInterval(() => {
   AuthController.cleanupOldAttempts();
-}, 3600000); // Run every hour
+}, 3600000);
 
 module.exports = new AuthController();

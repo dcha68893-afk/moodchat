@@ -1,3 +1,4 @@
+
 const express = require('express');
 const router = express.Router();
 const authController = require('../controllers/authController');
@@ -6,23 +7,33 @@ const { authenticate } = require('../middleware/auth');
 const { authLimiter } = require('../middleware/rateLimiter');
 
 // Public routes
-router.post('/register', authLimiter, authValidation.register, authController.register);
-
-router.post('/login', authLimiter, authValidation.login, authController.login);
-
-router.post('/refresh-token', authLimiter, authValidation.refreshToken, authController.refreshToken);
-
+router.post('/register', authLimiter, authController.register);
+router.post('/login', authLimiter, authController.login);
+router.post('/refresh-token', authLimiter, authController.refreshToken);
 router.post('/logout', authenticate, authController.logout);
-
-router.get('/verify-email', authController.verifyEmail);
-
-router.post('/request-password-reset', authLimiter, authController.requestPasswordReset);
-
-router.post('/reset-password', authController.resetPassword);
-
-router.get('/validate-token', authController.validateToken);
-
-// Protected routes
 router.get('/me', authenticate, authController.getCurrentUser);
+
+// Health check endpoint
+router.get('/health', (req, res) => {
+  res.json({
+    success: true,
+    message: 'Auth service is healthy',
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Test endpoint (for development only)
+if (process.env.NODE_ENV === 'development') {
+  router.post('/test-register', (req, res) => {
+    console.log('🧪 Test registration endpoint called');
+    res.json({
+      success: true,
+      message: 'Test endpoint is working',
+      data: req.body
+    });
+  });
+}
+
+console.log('✅ Auth routes initialized');
 
 module.exports = router;
