@@ -11,11 +11,12 @@ const callRoutes = require('./calls');
 const moodRoutes = require('./moods');
 const mediaRoutes = require('./media');
 const notificationRoutes = require('./notifications');
+const statusRoutes = require('./status');
 const testRoutes = require('./test');
 
 // Import middleware
-const { authenticate, authorize } = require('../middlewares/auth');
-const { apiLimiter } = require('../middlewares/rateLimiter');
+const { authenticate } = require('../middleware/auth');
+const { apiLimiter } = require('../middleware/rateLimiter');
 
 // Apply global middleware to all routes
 router.use(apiLimiter);
@@ -30,6 +31,7 @@ router.use('/calls', authenticate, callRoutes);
 router.use('/moods', authenticate, moodRoutes);
 router.use('/media', authenticate, mediaRoutes);
 router.use('/notifications', authenticate, notificationRoutes);
+router.use('/status', authenticate, statusRoutes);
 
 // Test routes (development only)
 if (process.env.NODE_ENV === 'development') {
@@ -70,7 +72,8 @@ router.get('/', (req, res) => {
       calls: true,
       moods: true,
       media: true,
-      notifications: true
+      notifications: true,
+      status: true
     },
     endpoints: {
       health: 'GET /api/health',
@@ -125,6 +128,11 @@ router.get('/', (req, res) => {
         markRead: 'PUT /api/notifications/:id/read',
         markAllRead: 'PUT /api/notifications/read-all',
         delete: 'DELETE /api/notifications/:id'
+      },
+      status: {
+        get: 'GET /api/status/me',
+        update: 'PUT /api/status/me',
+        friends: 'GET /api/status/friends'
       }
     },
     statusCodes: {
@@ -223,6 +231,7 @@ console.log('✅ Main API routes initialized with:', {
   moods: '/api/moods',
   media: '/api/media',
   notifications: '/api/notifications',
+  status: '/api/status',
   health: '/api/health',
   docs: '/api/docs'
 });

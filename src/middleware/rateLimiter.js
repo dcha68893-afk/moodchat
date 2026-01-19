@@ -38,9 +38,8 @@ const authLimiter = rateLimit({
   },
   standardHeaders: true,
   legacyHeaders: false,
-  skipSuccessfulRequests: true, // Don't count successful requests
+  skipSuccessfulRequests: true,
   keyGenerator: (req) => {
-    // Use IP + endpoint for more granular rate limiting
     return `${req.ip}:${req.path}`;
   },
   handler: (req, res, next, options) => {
@@ -65,6 +64,9 @@ const apiLimiter = rateLimit({
     return req.ip;
   }
 });
+
+// ADDED: Alias for apiRateLimiter (commonly used in routes)
+const apiRateLimiter = apiLimiter;
 
 // Rate limiter for registration (more strict)
 const registerLimiter = rateLimit({
@@ -144,7 +146,6 @@ const dynamicLimiter = (options = {}) => {
     store: redisStore,
     windowMs: options.windowMs || 60 * 1000,
     max: (req) => {
-      // Different limits based on user role
       if (req.user && req.user.role === 'admin') {
         return options.adminMax || 1000;
       } else if (req.user && req.user.role === 'moderator') {
@@ -193,9 +194,11 @@ if (redisClient) {
   });
 }
 
+// Standardized named exports
 module.exports = {
   authLimiter,
   apiLimiter,
+  apiRateLimiter, // Added alias for backward compatibility
   registerLimiter,
   passwordResetLimiter,
   uploadLimiter,

@@ -131,7 +131,7 @@ router.get(
 
 router.get(
   '/:chatId',
-  apiRateLimiter,
+  apirateLimiter,
   asyncHandler(async (req, res) => {
     try {
       const { chatId } = req.params;
@@ -202,7 +202,7 @@ router.get(
 
 router.post(
   '/direct',
-  apiRateLimiter,
+  apirateLimiter,
   asyncHandler(async (req, res) => {
     try {
       const { userId } = req.body;
@@ -332,7 +332,7 @@ router.post(
 
 router.post(
   '/group',
-  apiRateLimiter,
+  apirateLimiter,
   asyncHandler(async (req, res) => {
     try {
       const { name, participantIds, description, avatar } = req.body;
@@ -438,7 +438,7 @@ router.post(
 
 router.patch(
   '/:chatId',
-  apiRateLimiter,
+  apirateLimiter,
   asyncHandler(async (req, res) => {
     try {
       const { chatId } = req.params;
