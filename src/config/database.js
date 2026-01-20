@@ -1,58 +1,65 @@
-const config = require('./index');
+require('dotenv').config();
 
 module.exports = {
   development: {
-    host: process.env.DB_HOST || config.database.host || '127.0.0.1',
-    port: process.env.DB_PORT || config.database.port || 5432,
-    username: process.env.DB_USER || config.database.user || config.database.username || 'postgres',
-    password: process.env.DB_PASSWORD || config.database.password || '24845c1b4df84c17a0526806f7aa0482',
-    database: process.env.DB_NAME || config.database.name || config.database.database || 'chat_app_dev',
-    dialect: process.env.DB_DIALECT || config.database.dialect || 'postgres',
-    logging: console.log,
-    pool: config.database.pool || {
-      max: 10,
-      min: 0,
-      acquire: 30000,
-      idle: 10000,
+    username: process.env.DB_USER || 'postgres',
+    password: process.env.DB_PASSWORD || '24845c1b4df84c17a0526806f7aa0482',
+    database: process.env.DB_NAME || 'moodchat',
+    host: process.env.DB_HOST || '127.0.0.1',
+    port: process.env.DB_PORT || 5432,
+    dialect: process.env.DB_DIALECT || 'postgres',
+    logging: process.env.NODE_ENV === 'development' ? console.log : false,
+    pool: {
+      max: parseInt(process.env.DB_POOL_MAX) || 10,
+      min: parseInt(process.env.DB_POOL_MIN) || 0,
+      acquire: parseInt(process.env.DB_POOL_ACQUIRE) || 30000,
+      idle: parseInt(process.env.DB_POOL_IDLE) || 10000,
     },
-    dialectOptions: config.database.dialectOptions || {},
+    dialectOptions: process.env.DB_SSL === 'true' ? {
+      ssl: {
+        require: true,
+        rejectUnauthorized: false
+      }
+    } : {}
   },
+  
   test: {
-    host: process.env.DB_HOST || config.database.host || '127.0.0.1',
-    port: process.env.DB_PORT || config.database.port || 5432,
-    username: process.env.DB_USER || config.database.user || config.database.username || 'postgres',
-    password: process.env.DB_PASSWORD || config.database.password || '24845c1b4df84c17a0526806f7aa0482',
-    database: process.env.DB_NAME || config.database.name || config.database.database || 'chat_app_test',
-    dialect: process.env.DB_DIALECT || config.database.dialect || 'postgres',
+    username: process.env.DB_USER || 'postgres',
+    password: process.env.DB_PASSWORD || '24845c1b4df84c17a0526806f7aa0482',
+    database: process.env.TEST_DB_NAME || 'moodchat_test',
+    host: process.env.DB_HOST || '127.0.0.1',
+    port: process.env.DB_PORT || 5432,
+    dialect: process.env.DB_DIALECT || 'postgres',
     logging: false,
-    pool: config.database.pool || {
-      max: 5,
-      min: 0,
-      acquire: 30000,
-      idle: 10000,
+    pool: {
+      max: parseInt(process.env.DB_POOL_MAX) || 10,
+      min: parseInt(process.env.DB_POOL_MIN) || 0,
+      acquire: parseInt(process.env.DB_POOL_ACQUIRE) || 30000,
+      idle: parseInt(process.env.DB_POOL_IDLE) || 10000,
     },
-    dialectOptions: config.database.dialectOptions || {},
+    dialectOptions: process.env.DB_SSL === 'true' ? {
+      ssl: {
+        require: true,
+        rejectUnauthorized: false
+      }
+    } : {}
   },
+  
   production: {
-    host: process.env.DB_HOST || config.database.host,
-    port: process.env.DB_PORT || config.database.port || 5432,
-    username: process.env.DB_USER || config.database.user || config.database.username || process.env.DB_USER,
-    password: process.env.DB_PASSWORD || config.database.password || process.env.DB_PASSWORD,
-    database: process.env.DB_NAME || config.database.name || config.database.database || process.env.DB_NAME,
-    dialect: process.env.DB_DIALECT || config.database.dialect || 'postgres',
+    use_env_variable: 'DATABASE_URL',
+    dialect: process.env.DB_DIALECT || 'postgres',
     logging: false,
-    pool: config.database.pool || {
-      max: 20,
-      min: 5,
-      acquire: 60000,
-      idle: 30000,
+    pool: {
+      max: parseInt(process.env.DB_POOL_MAX) || 10,
+      min: parseInt(process.env.DB_POOL_MIN) || 0,
+      acquire: parseInt(process.env.DB_POOL_ACQUIRE) || 30000,
+      idle: parseInt(process.env.DB_POOL_IDLE) || 10000,
     },
     dialectOptions: {
-      ...(config.database.dialectOptions || {}),
-      ssl: config.database.ssl || process.env.DB_SSL === 'true' ? {
+      ssl: {
         require: true,
-        rejectUnauthorized: false,
-      } : false,
-    },
-  },
+        rejectUnauthorized: false
+      }
+    }
+  }
 };

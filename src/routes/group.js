@@ -10,11 +10,11 @@ const {
   ValidationError,
   ConflictError,
 } = require('../middleware/errorHandler');
-const { authMiddleware } = require('../middleware/auth');
+const { authenticate } = require('../middleware/auth');
 const { apiRateLimiter } = require('../middleware/rateLimiter');
 const { User, Chat, Message, GroupInvite } = require('../models');
 
-router.use(authMiddleware);
+router.use(authenticate);
 
 console.log('✅ Group routes initialized');
 

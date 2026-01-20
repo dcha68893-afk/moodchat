@@ -1,5 +1,4 @@
 const { Op } = require('sequelize');
-const { DataTypes } = require('sequelize');
 
 module.exports = (sequelize, DataTypes) => {
   const Friend = sequelize.define(
@@ -125,6 +124,10 @@ module.exports = (sequelize, DataTypes) => {
   };
 
   Friend.getUserFriends = async function (userId, status = 'accepted') {
+    if (!this.sequelize.models.User) {
+      return [];
+    }
+
     const friendsAsRequester = await this.findAll({
       where: {
         requesterId: userId,
@@ -157,6 +160,10 @@ module.exports = (sequelize, DataTypes) => {
   };
 
   Friend.getPendingRequests = async function (userId) {
+    if (!this.sequelize.models.User) {
+      return [];
+    }
+
     return await this.findAll({
       where: {
         receiverId: userId,
@@ -174,6 +181,10 @@ module.exports = (sequelize, DataTypes) => {
   };
 
   Friend.getSentRequests = async function (userId) {
+    if (!this.sequelize.models.User) {
+      return [];
+    }
+
     return await this.findAll({
       where: {
         requesterId: userId,
@@ -188,6 +199,12 @@ module.exports = (sequelize, DataTypes) => {
       ],
       order: [['createdAt', 'DESC']],
     });
+  };
+
+  // Add association method
+  Friend.associate = function (models) {
+    Friend.belongsTo(models.User, { foreignKey: 'requesterId', as: 'requester' });
+    Friend.belongsTo(models.User, { foreignKey: 'receiverId', as: 'receiver' });
   };
 
   return Friend;

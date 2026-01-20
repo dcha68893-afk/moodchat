@@ -1,5 +1,4 @@
 const { Op } = require('sequelize');
-const { DataTypes } = require('sequelize');
 
 module.exports = (sequelize, DataTypes) => {
   const Chat = sequelize.define(
@@ -87,6 +86,10 @@ module.exports = (sequelize, DataTypes) => {
   };
 
   Chat.prototype.getParticipantIds = async function () {
+    if (!this.sequelize.models.ChatParticipant) {
+      return [];
+    }
+    
     const participants = await this.sequelize.models.ChatParticipant.findAll({
       where: { chatId: this.id },
       attributes: ['userId'],
@@ -96,6 +99,10 @@ module.exports = (sequelize, DataTypes) => {
 
   // Static methods
   Chat.getDirectChat = async function (userId1, userId2) {
+    if (!this.sequelize.models.ChatParticipant) {
+      return null;
+    }
+
     const chats = await this.findAll({
       where: {
         type: 'direct',
@@ -118,32 +125,53 @@ module.exports = (sequelize, DataTypes) => {
   };
 
   Chat.getUserChats = async function (userId) {
+    const include = [
+      {
+        model: this.sequelize.models.ChatParticipant,
+        where: { userId: userId },
+        required: true,
+        attributes: [],
+      }
+    ];
+
+    // Only include lastMessage if Message model exists
+    if (this.sequelize.models.Message) {
+      include.push({
+        model: this.sequelize.models.Message,
+        as: 'lastMessage',
+        attributes: ['id', 'content', 'type', 'createdAt'],
+        required: false,
+        include: this.sequelize.models.User ? [
+          {
+            model: this.sequelize.models.User,
+            as: 'sender',
+            attributes: ['id', 'username', 'avatar'],
+          },
+        ] : undefined,
+      });
+    }
+
     return await this.findAll({
-      include: [
-        {
-          model: this.sequelize.models.ChatParticipant,
-          where: { userId: userId },
-          required: true,
-          attributes: [],
-        },
-        {
-          model: this.sequelize.models.Message,
-          as: 'lastMessage',
-          attributes: ['id', 'content', 'type', 'createdAt'],
-          include: [
-            {
-              model: this.sequelize.models.User,
-              as: 'sender',
-              attributes: ['id', 'username', 'avatar'],
-            },
-          ],
-        },
-      ],
+      include: include,
       order: [
         ['lastMessageAt', 'DESC'],
         ['updatedAt', 'DESC'],
       ],
     });
+  };
+
+  // Add association method
+  Chat.associate = function (models) {
+    Chat.hasMany(models.Message, { foreignKey: 'chatId', as: 'messages' });
+    Chat.hasOne(models.Group, { foreignKey: 'chatId', as: 'group' });
+    Chat.hasMany(models.Call, { foreignKey: 'chatId', as: 'calls' });
+    Chat.hasMany(models.TypingIndicator, { foreignKey: 'chatId', as: 'typingIndicators' });
+    Chat.belongsToMany(models.User, {
+      through: models.ChatParticipant,
+      as: 'participants',
+      foreignKey: 'chatId',
+    });
+    Chat.belongsTo(models.Message, { foreignKey: 'lastMessageId', as: 'lastMessage' });
   };
 
   return Chat;

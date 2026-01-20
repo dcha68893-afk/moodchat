@@ -575,4 +575,14 @@ setInterval(() => {
   AuthController.cleanupOldAttempts();
 }, 3600000);
 
-module.exports = new AuthController();
+// Export all controller functions as named exports
+const authController = new AuthController();
+
+module.exports = {
+  register: authController.register.bind(authController),
+  login: authController.login.bind(authController),
+  logout: authController.logout.bind(authController),
+  refreshToken: authController.refreshToken.bind(authController),
+  getCurrentUser: authController.getCurrentUser.bind(authController),
+  getCurrentUserSimple: authController.getCurrentUser.bind(authController)
+};

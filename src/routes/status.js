@@ -8,11 +8,11 @@ const {
   NotFoundError,
   ValidationError,
 } = require('../middleware/errorHandler');
-const { authMiddleware } = require('../middleware/auth');
+const { authenticate } = require('../middleware/auth');
 const { apiRateLimiter } = require('../middleware/rateLimiter');
 const { User, Status } = require('../models');
 
-router.use(authMiddleware);
+router.use(authenticate);
 
 console.log('✅ Status routes initialized');
 

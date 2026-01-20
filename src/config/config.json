@@ -1,37 +1,50 @@
 {
   "development": {
-    "username": "process.env.DB_USER",
-    "password": "process.env.DB_PASSWORD",
-    "database": "process.env.DB_NAME",
-    "host": "process.env.DB_HOST",
-    "port": "process.env.DB_PORT",
+    "username": "postgres",
+    "password": "24845c1b4df84c17a0526806f7aa0482",
+    "database": "moodchat",
+    "host": "127.0.0.1",
+    "port": 5432,
     "dialect": "postgres",
-    "dialectOptions": {
-      "ssl": {
-        "require": "process.env.DB_SSL === 'true'",
-        "rejectUnauthorized": false
-      }
+    "logging": true,
+    "pool": {
+      "max": 10,
+      "min": 0,
+      "acquire": 30000,
+      "idle": 10000
     },
-    "logging": "process.env.DB_LOGGING === 'true'"
+    "dialectOptions": {
+      "ssl": false
+    }
   },
   "test": {
-    "username": "process.env.DB_USER",
-    "password": "process.env.DB_PASSWORD",
-    "database": "process.env.TEST_DB_NAME",
-    "host": "process.env.DB_HOST",
-    "port": "process.env.DB_PORT",
+    "username": "postgres",
+    "password": "24845c1b4df84c17a0526806f7aa0482",
+    "database": "moodchat_test",
+    "host": "127.0.0.1",
+    "port": 5432,
     "dialect": "postgres",
-    "dialectOptions": {
-      "ssl": {
-        "require": "process.env.DB_SSL === 'true'",
-        "rejectUnauthorized": false
-      }
+    "logging": false,
+    "pool": {
+      "max": 10,
+      "min": 0,
+      "acquire": 30000,
+      "idle": 10000
     },
-    "logging": "process.env.DB_LOGGING === 'true'"
+    "dialectOptions": {
+      "ssl": false
+    }
   },
   "production": {
     "use_env_variable": "DATABASE_URL",
     "dialect": "postgres",
+    "logging": false,
+    "pool": {
+      "max": 10,
+      "min": 0,
+      "acquire": 30000,
+      "idle": 10000
+    },
     "dialectOptions": {
       "ssl": {
         "require": true,

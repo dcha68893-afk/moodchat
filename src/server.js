@@ -12,7 +12,7 @@ const { Sequelize } = require('sequelize');
 const app = express();
 
 // ========== CONFIGURATION ==========
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 4000; // CHANGED FROM 3000 TO 4000
 const NODE_ENV = process.env.NODE_ENV || 'development';
 const JWT_SECRET = process.env.JWT_ACCESS_SECRET || process.env.JWT_SECRET || 'development-secret-key-change-in-production';
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
@@ -26,14 +26,10 @@ let models;
 // Function to initialize database connection
 async function initializeDatabase() {
   try {
-    // Direct Sequelize initialization using environment variables
-    sequelize = new Sequelize(
-      process.env.DB_NAME || 'moodchat',
-      process.env.DB_USER || 'postgres',
-      process.env.DB_PASSWORD || '24845c1b4df84c17a0526806f7aa0482',
-      {
-        host: process.env.DB_HOST || '127.0.0.1',
-        port: process.env.DB_PORT || 5432,
+    // Check for DATABASE_URL first (Render style)
+    if (process.env.DATABASE_URL) {
+      console.log('🔌 Using DATABASE_URL from environment...');
+      sequelize = new Sequelize(process.env.DATABASE_URL, {
         dialect: process.env.DB_DIALECT || 'postgres',
         logging: process.env.NODE_ENV === 'development' ? console.log : false,
         pool: {
@@ -42,14 +38,40 @@ async function initializeDatabase() {
           acquire: 30000,
           idle: 10000
         },
-        dialectOptions: NODE_ENV === 'production' && process.env.DB_SSL === 'true' ? {
+        dialectOptions: process.env.DB_SSL === 'true' ? {
           ssl: {
             require: true,
             rejectUnauthorized: false
           }
         } : {}
-      }
-    );
+      });
+    } else {
+      // Direct Sequelize initialization using environment variables (local)
+      console.log('🔌 Using individual DB environment variables...');
+      sequelize = new Sequelize(
+        process.env.DB_NAME || 'moodchat',
+        process.env.DB_USER || 'postgres',
+        process.env.DB_PASSWORD || '24845c1b4df84c17a0526806f7aa0482',
+        {
+          host: process.env.DB_HOST || '127.0.0.1',
+          port: process.env.DB_PORT || 5432,
+          dialect: process.env.DB_DIALECT || 'postgres',
+          logging: process.env.NODE_ENV === 'development' ? console.log : false,
+          pool: {
+            max: 10,
+            min: 0,
+            acquire: 30000,
+            idle: 10000
+          },
+          dialectOptions: NODE_ENV === 'production' && process.env.DB_SSL === 'true' ? {
+            ssl: {
+              require: true,
+              rejectUnauthorized: false
+            }
+          } : {}
+        }
+      );
+    }
     
     // Test database connection
     console.log('🔌 Testing database connection...');
@@ -57,26 +79,62 @@ async function initializeDatabase() {
     dbConnected = true;
     console.log('✅ Database connection established successfully.');
     
-    // Import models from the correct location
+    // ========== IMPORT MODELS FROM models/index.js AND ATTACH TO app.locals ==========
     try {
-      models = require('./models/index.js');
-      console.log('📦 Models loaded successfully from models/index.js');
+      // Import models from the correct location - assuming models/index.js exports a function
+      const modelsModule = require('./models/index.js');
+      
+      // Check if models/index.js exports a function or an object
+      if (typeof modelsModule === 'function') {
+        models = modelsModule(sequelize);
+      } else if (modelsModule && typeof modelsModule === 'object') {
+        // If it's an object, use it directly
+        models = modelsModule;
+      } else {
+        throw new Error('models/index.js does not export a valid function or object');
+      }
+      
+      // Attach models to app.locals for access in routes
+      app.locals.models = models;
+      console.log('📦 Models loaded successfully from models/index.js and attached to app.locals');
       
       // Log all models that were loaded
       const modelNames = Object.keys(models).filter(key => 
         key !== 'sequelize' && key !== 'Sequelize' && !key.startsWith('_')
       );
       console.log(`📦 Loaded ${modelNames.length} models:`, modelNames.join(', '));
+      
+      // Associate models if they have associate methods - WITH ERROR HANDLING
+      Object.keys(models).forEach(modelName => {
+        try {
+          if (models[modelName] && models[modelName].associate && typeof models[modelName].associate === 'function') {
+            console.log(`🔗 Associating model: ${modelName}`);
+            models[modelName].associate(models);
+          }
+        } catch (assocError) {
+          console.warn(`⚠️  Error associating model ${modelName}:`, assocError.message);
+          // Continue with other models even if one fails
+        }
+      });
+      
+      console.log('✅ Model associations completed');
+      
     } catch (modelError) {
-      console.warn('⚠️  Could not load models from models/index.js:', modelError.message);
+      console.error('❌ Failed to load models from models/index.js:', modelError.message);
+      console.error('Model error details:', modelError.stack);
       models = {};
+      app.locals.models = {};
     }
     
     // Sync models only if configured (use with caution in production)
     if (process.env.DB_SYNC === 'true' && NODE_ENV !== 'production') {
       console.log('🔄 Syncing database models...');
-      await sequelize.sync({ alter: true });
-      console.log('✅ Database models synced.');
+      try {
+        await sequelize.sync({ alter: true });
+        console.log('✅ Database models synced.');
+      } catch (syncError) {
+        console.error('❌ Database sync failed:', syncError.message);
+      }
     } else if (process.env.DB_SYNC === 'true' && NODE_ENV === 'production') {
       console.warn('⚠️  DB_SYNC=true is not recommended in production. Use migrations instead.');
     }
@@ -94,6 +152,9 @@ async function initializeDatabase() {
       stack: error.stack ? error.stack.split('\n')[0] : 'No stack trace'
     });
     
+    // Initialize empty models object in app.locals
+    app.locals.models = {};
+    
     // Fail in production if database is required
     if (NODE_ENV === 'production' && process.env.DB_REQUIRED === 'true') {
       console.error('💀 CRITICAL: Cannot start without database connection in production');
@@ -103,13 +164,6 @@ async function initializeDatabase() {
     return false;
   }
 }
-
-// Initialize database connection
-initializeDatabase().then(success => {
-  dbConnected = success;
-}).catch(err => {
-  console.error('❌ Unexpected error during database initialization:', err);
-});
 
 // ========== ESSENTIAL MIDDLEWARE ==========
 // Disable Helmet's CSP for API server
@@ -155,6 +209,7 @@ if (NODE_ENV === 'development') {
         'http://127.0.0.1:5500',
         'http://localhost:5000',
         'http://localhost:8080',
+        'http://localhost:4000',
         'https://fronted-hm86.onrender.com',
         FRONTEND_URL
       ].filter(Boolean);
@@ -231,6 +286,8 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 // ========== MOUNT ALL EXISTING API ROUTES - FIXED ==========
 // CRITICAL FIX: Mount routes from routes directory under /api prefix
+// ========== MOUNT ALL EXISTING API ROUTES - FIXED ==========
+// CRITICAL FIX: Mount routes from routes directory under /api prefix
 const mountedRoutes = [];
 const routesPath = path.join(__dirname, 'routes');
 
@@ -268,60 +325,63 @@ function mountRoutes() {
             basePath = '/api';
           }
           
-          // Check if the route file exports a router
-          if (routeModule && typeof routeModule === 'function') {
-            // Mount the router
+          // Special handling for auth.js (if it exports a router directly)
+          if (file === 'auth.js' && routeModule && typeof routeModule === 'object' && typeof routeModule.use === 'function') {
             app.use(basePath, routeModule);
             mountedRoutes.push(`${basePath}/*`);
-            console.log(`✅ Mounted ${file} at ${basePath}`);
-          } else if (routeModule && routeModule.router && typeof routeModule.router === 'function') {
-            // Some routes export { router }
-            app.use(basePath, routeModule.router);
-            mountedRoutes.push(`${basePath}/*`);
             console.log(`✅ Mounted ${file} (router export) at ${basePath}`);
+            return;
+          }
+          
+          // Check if the route file exports a router directly
+          if (routeModule && typeof routeModule === 'function') {
+            // Try calling it with app if needed
+            let router;
+            try {
+              router = routeModule(app);
+              if (router && typeof router === 'function') {
+                app.use(basePath, router);
+                mountedRoutes.push(`${basePath}/*`);
+                console.log(`✅ Mounted ${file} (function with app) at ${basePath}`);
+              } else {
+                app.use(basePath, routeModule);
+                mountedRoutes.push(`${basePath}/*`);
+                console.log(`✅ Mounted ${file} (function as router) at ${basePath}`);
+              }
+            } catch (error) {
+              // If calling fails, try using as router directly
+              app.use(basePath, routeModule);
+              mountedRoutes.push(`${basePath}/*`);
+              console.log(`✅ Mounted ${file} (direct router) at ${basePath}`);
+            }
+          } else if (routeModule && typeof routeModule === 'object') {
+            if (typeof routeModule.use === 'function') {
+              // It's already a router
+              app.use(basePath, routeModule);
+              mountedRoutes.push(`${basePath}/*`);
+              console.log(`✅ Mounted ${file} (router object) at ${basePath}`);
+            } else if (routeModule.default && typeof routeModule.default === 'function') {
+              // Handle default export
+              const router = routeModule.default();
+              app.use(basePath, router);
+              mountedRoutes.push(`${basePath}/*`);
+              console.log(`✅ Mounted ${file} (default export) at ${basePath}`);
+            } else {
+              console.warn(`⚠️  Route file ${file} exports an object but not a router`);
+            }
           } else {
             console.warn(`⚠️  Route file ${file} does not export a valid router`);
           }
         } catch (error) {
           console.error(`❌ Failed to mount route ${file}:`, error.message);
-          console.error('Error details:', error.stack ? error.stack.split('\n')[0] : 'No stack trace');
+          console.error('Error details:', error);
         }
       });
     }
   } else {
-    console.warn(`⚠️  Routes directory not found at: ${routesPath}. Creating it...`);
-    
-    // Create routes directory if it doesn't exist
-    try {
-      fs.mkdirSync(routesPath, { recursive: true });
-      console.log(`✅ Created routes directory at: ${routesPath}`);
-      
-      // Create a sample route file
-      const sampleRoute = `
-const express = require('express');
-const router = express.Router();
-
-router.get('/', (req, res) => {
-  res.json({ 
-    message: 'Sample API route is working',
-    timestamp: new Date().toISOString()
-  });
-});
-
-module.exports = router;
-      `;
-      
-      fs.writeFileSync(path.join(routesPath, 'sample.js'), sampleRoute.trim());
-      console.log(`✅ Created sample route at: ${routesPath}/sample.js`);
-    } catch (error) {
-      console.error(`❌ Failed to create routes directory:`, error.message);
-    }
+    console.warn(`⚠️  Routes directory not found at: ${routesPath}`);
   }
 }
-
-// Mount routes
-mountRoutes();
-
 // ========== IN-MEMORY STORAGE (FOR BACKWARD COMPATIBILITY) ==========
 let users = [];
 let messages = [];
@@ -370,7 +430,8 @@ app.get('/health', (req, res) => {
     timestamp: new Date().toISOString(),
     uptime: Math.floor(process.uptime()),
     cors: 'enabled',
-    allowedOrigins: NODE_ENV === 'development' ? 'ALL (*)' : 'restricted'
+    allowedOrigins: NODE_ENV === 'development' ? 'ALL (*)' : 'restricted',
+    database: dbConnected ? 'connected' : 'disconnected'
   });
 });
 
@@ -480,10 +541,10 @@ app.post('/api/register', async (req, res) => {
       });
     }
     
-    // Use database if available
-    if (dbConnected && sequelize && models && models.User) {
+    // Use database if available - NOW USING app.locals.models
+    if (dbConnected && sequelize && app.locals.models && app.locals.models.User) {
       try {
-        const User = models.User;
+        const User = app.locals.models.User;
         // Check if user already exists in database
         const existingUser = await User.findOne({ where: { email } });
         if (existingUser) {
@@ -604,10 +665,10 @@ app.post('/api/login', async (req, res) => {
   try {
     const { email, password } = req.body;
     
-    // Use database if available
-    if (dbConnected && sequelize && models && models.User) {
+    // Use database if available - NOW USING app.locals.models
+    if (dbConnected && sequelize && app.locals.models && app.locals.models.User) {
       try {
-        const User = models.User;
+        const User = app.locals.models.User;
         
         let user;
         // Try email first, then username
@@ -885,10 +946,10 @@ app.post('/api/auth/login', async (req, res) => {
 
 app.get('/api/auth/me', authenticateToken, (req, res) => {
   try {
-    // Try database first
-    if (dbConnected && sequelize && models && models.User) {
+    // Try database first - NOW USING app.locals.models
+    if (dbConnected && sequelize && app.locals.models && app.locals.models.User) {
       try {
-        const User = models.User;
+        const User = app.locals.models.User;
         User.findByPk(req.user.userId)
           .then(user => {
             if (!user) {
@@ -1337,7 +1398,17 @@ app.use((err, req, res, next) => {
 });
 
 // ========== START SERVER ==========
-const startServer = () => {
+const startServer = async () => {
+  console.log('🚀 Starting MoodChat Backend Server...');
+  console.log(`📁 Environment: ${NODE_ENV}`);
+  console.log(`🌐 Port: ${PORT}`);
+  
+  // Initialize database first
+  await initializeDatabase();
+  
+  // Mount routes after database is initialized
+  mountRoutes();
+  
   const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`┌──────────────────────────────────────────────────────────┐`);
     console.log(`│                                                          │`);
@@ -1431,8 +1502,11 @@ const startServer = () => {
 
 // Start the server
 if (require.main === module) {
-  startServer();
+  startServer().catch(error => {
+    console.error('❌ Failed to start server:', error);
+    process.exit(1);
+  });
 }
 
-module.exports = app;
-module.exports = { app, sequelize };
+
+module.exports = { app, sequelize, startServer };

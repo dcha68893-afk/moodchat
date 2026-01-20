@@ -9,11 +9,11 @@ const {
   ValidationError,
   ConflictError,
 } = require('../middleware/errorHandler');
-const { authMiddleware } = require('../middleware/auth');
+const { authenticate } = require('../middleware/auth');
 const { apiRateLimiter } = require('../middleware/rateLimiter');
 const { User, Chat, Message, Friend } = require('../models');
 
-router.use(authMiddleware);
+router.use(authenticate);
 
 console.log('✅ Friends routes initialized');
 

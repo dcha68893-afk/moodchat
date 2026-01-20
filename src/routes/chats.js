@@ -9,11 +9,11 @@ const {
   ValidationError,
   ConflictError,
 } = require('../middleware/errorHandler');
-const { authMiddleware } = require('../middleware/auth');
+const { authenticate } = require('../middleware/auth');
 const { apiRateLimiter } = require('../middleware/rateLimiter');
 const { User, Chat, Message } = require('../models');
 
-router.use(authMiddleware);
+router.use(authenticate);
 
 console.log('✅ Chats routes initialized');
 
@@ -131,7 +131,7 @@ router.get(
 
 router.get(
   '/:chatId',
-  apirateLimiter,
+  apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
       const { chatId } = req.params;
@@ -202,7 +202,7 @@ router.get(
 
 router.post(
   '/direct',
-  apirateLimiter,
+  apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
       const { userId } = req.body;
@@ -332,7 +332,7 @@ router.post(
 
 router.post(
   '/group',
-  apirateLimiter,
+  apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
       const { name, participantIds, description, avatar } = req.body;
@@ -438,7 +438,7 @@ router.post(
 
 router.patch(
   '/:chatId',
-  apirateLimiter,
+  apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
       const { chatId } = req.params;

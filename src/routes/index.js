@@ -1,3 +1,4 @@
+// src/routes/index.js - FIXED VERSION
 const express = require('express');
 const router = express.Router();
 
@@ -16,10 +17,10 @@ const testRoutes = require('./test');
 
 // Import middleware
 const { authenticate } = require('../middleware/auth');
-const { apiLimiter } = require('../middleware/rateLimiter');
+const { apiRateLimiter } = require('../middleware/rateLimiter');
 
 // Apply global middleware to all routes
-router.use(apiLimiter);
+router.use(apiRateLimiter);
 
 // Mount routes with their respective paths
 router.use('/auth', authRoutes);
@@ -221,19 +222,6 @@ router.use((err, req, res, next) => {
   });
 });
 
-console.log('✅ Main API routes initialized with:', {
-  auth: '/api/auth',
-  users: '/api/users',
-  friends: '/api/friends',
-  chats: '/api/chats',
-  messages: '/api/messages',
-  calls: '/api/calls',
-  moods: '/api/moods',
-  media: '/api/media',
-  notifications: '/api/notifications',
-  status: '/api/status',
-  health: '/api/health',
-  docs: '/api/docs'
-});
+console.log('✅ Main API routes initialized with proper router');
 
 module.exports = router;

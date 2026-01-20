@@ -12,8 +12,8 @@ const {
   ValidationError,
   ConflictError,
 } = require('../middleware/errorHandler');
-const { authMiddleware } = require('../middleware/auth');
-const { apiRateLimiter, createMessageRateLimiter } = require('../middleware/rateLimiter');
+const { authenticate } = require('../middleware/auth');
+const { apiRateLimiter } = require('../middleware/rateLimiter');
 const { User, Chat, Message, Reaction } = require('../models');
 
 const MAX_FILE_SIZE = parseInt(process.env.MAX_FILE_SIZE) || 10 * 1024 * 1024;
@@ -57,7 +57,12 @@ const upload = multer({
   },
 });
 
-router.use(authMiddleware);
+// Define createMessageRateLimiter if not imported
+const createMessageRateLimiter = () => {
+  return apiRateLimiter; // Use the existing rate limiter for now
+};
+
+router.use(authenticate);
 
 console.log('✅ Messages routes initialized');
 

@@ -1,6 +1,4 @@
 const { Op } = require('sequelize');
-const { DataTypes } = require('sequelize');
-// Remove: const sequelize = require('./index');
 
 module.exports = (sequelize, DataTypes) => {
   const Call = sequelize.define(
@@ -201,10 +199,7 @@ module.exports = (sequelize, DataTypes) => {
     return await this.save();
   };
 
-  // Static methods - IMPORTANT: These need to be defined AFTER associations are set up
-  // We'll remove the static methods that reference other models here
-  // and define them later in the index.js file or after associations
-
+  // Static methods - FIXED: Using sequelize.models check
   Call.getActiveCalls = async function (chatId = null) {
     const where = {
       status: ['initiated', 'ringing', 'in-progress'],
@@ -214,19 +209,27 @@ module.exports = (sequelize, DataTypes) => {
       where.chatId = chatId;
     }
 
+    // Check if models are available
+    const include = [];
+    
+    if (this.sequelize.models.Chat) {
+      include.push({
+        model: this.sequelize.models.Chat,
+        attributes: ['id', 'name', 'type'],
+      });
+    }
+    
+    if (this.sequelize.models.User) {
+      include.push({
+        model: this.sequelize.models.User,
+        as: 'initiator',
+        attributes: ['id', 'username', 'avatar'],
+      });
+    }
+
     return await this.findAll({
       where: where,
-      include: [
-        {
-          model: this.sequelize.models.Chat,
-          attributes: ['id', 'name', 'type'],
-        },
-        {
-          model: this.sequelize.models.User,
-          as: 'initiator',
-          attributes: ['id', 'username', 'avatar'],
-        },
-      ],
+      include: include.length > 0 ? include : undefined,
     });
   };
 
@@ -243,19 +246,27 @@ module.exports = (sequelize, DataTypes) => {
       where.type = options.type;
     }
 
+    // Check if models are available
+    const include = [];
+    
+    if (this.sequelize.models.Chat) {
+      include.push({
+        model: this.sequelize.models.Chat,
+        attributes: ['id', 'name', 'type'],
+      });
+    }
+    
+    if (this.sequelize.models.User) {
+      include.push({
+        model: this.sequelize.models.User,
+        as: 'initiator',
+        attributes: ['id', 'username', 'avatar'],
+      });
+    }
+
     return await this.findAll({
       where: where,
-      include: [
-        {
-          model: this.sequelize.models.Chat,
-          attributes: ['id', 'name', 'type'],
-        },
-        {
-          model: this.sequelize.models.User,
-          as: 'initiator',
-          attributes: ['id', 'username', 'avatar'],
-        },
-      ],
+      include: include.length > 0 ? include : undefined,
       order: [['createdAt', 'DESC']],
       limit: options.limit || 50,
       offset: options.offset || 0,
@@ -269,6 +280,12 @@ module.exports = (sequelize, DataTypes) => {
         status: ['initiated', 'ringing', 'in-progress'],
       },
     });
+  };
+
+  // Add association method that will be called from models/index.js
+  Call.associate = function (models) {
+    Call.belongsTo(models.Chat, { foreignKey: 'chatId', as: 'chat' });
+    Call.belongsTo(models.User, { foreignKey: 'initiatorId', as: 'initiator' });
   };
 
   return Call;

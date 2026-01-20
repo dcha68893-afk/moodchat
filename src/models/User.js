@@ -373,7 +373,7 @@ module.exports = (sequelize, DataTypes) => {
       throw new Error('Identifier is required');
     }
     try {
-      const { Op } = this.sequelize.Sequelize;
+      const Op = this.sequelize.Sequelize.Op;
       return await this.findOne({
         where: {
           [Op.or]: [
@@ -401,7 +401,7 @@ module.exports = (sequelize, DataTypes) => {
     }
     
     try {
-      const { Op } = this.sequelize.Sequelize;
+      const Op = this.sequelize.Sequelize.Op;
       
       return await this.findAll({
         where: {
@@ -480,32 +480,19 @@ module.exports = (sequelize, DataTypes) => {
   };
 
   // ===== ASSOCIATIONS =====
+  // IMPORTANT: All associations are defined in models/index.js to avoid conflicts
+  // This function should remain empty or contain only associations not defined elsewhere
   User.associate = function(models) {
-    // User has many Tokens
-    User.hasMany(models.Token, {
-      foreignKey: 'userId',
-      as: 'tokens',
-      onDelete: 'CASCADE'
-    });
+    // All associations moved to models/index.js to prevent duplicate alias errors
     
-    // User has many Messages (if Message model exists)
-    if (models.Message) {
-      User.hasMany(models.Message, {
-        foreignKey: 'userId',
-        as: 'messages',
-        onDelete: 'CASCADE'
-      });
-    }
-    
-    // User has many Rooms (if Room model exists)
-    if (models.Room) {
-      User.belongsToMany(models.Room, {
-        through: 'user_rooms',
-        foreignKey: 'userId',
-        as: 'rooms',
-        onDelete: 'CASCADE'
-      });
-    }
+    // If you need to keep some associations here that aren't in index.js,
+    // ensure the alias names don't conflict with those in index.js
+    // Example of a safe association (if not in index.js):
+    // User.hasMany(models.SomeModel, {
+    //   foreignKey: 'userId',
+    //   as: 'someModelAlias', // Must be unique across all associations
+    //   onDelete: 'CASCADE'
+    // });
   };
 
   return User;

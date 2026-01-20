@@ -1,24 +1,86 @@
+// models/index.js (FIXED ASSOCIATIONS)
 const { Sequelize } = require('sequelize');
 const config = require('../config');
-const databaseConfig = require('../config/database');
 
-// Database configuration
+// Database configuration - using config from the corrected config/index.js
 const env = config.nodeEnv || 'development';
-const dbConfig = databaseConfig[env];
 
-// Initialize Sequelize instance FIRST
-const sequelize = new Sequelize(dbConfig.name, dbConfig.user, dbConfig.password, {
-  host: dbConfig.host,
-  port: dbConfig.port,
-  dialect: dbConfig.dialect,
-  logging: dbConfig.logging,
-  pool: dbConfig.pool,
-  define: {
-    timestamps: true,
-    underscored: true,
-    paranoid: false,
-  },
-});
+// Get database configuration based on environment
+const getDbConfig = () => {
+  // If DATABASE_URL is provided (Render, Heroku), use it
+  if (config.database.url) {
+    console.log(`[Database] Using DATABASE_URL for ${env} environment`);
+    return {
+      url: config.database.url,
+      dialect: 'postgres',
+      logging: config.database.logging,
+      pool: config.database.pool,
+      dialectOptions: config.database.ssl ? {
+        ssl: {
+          require: true,
+          rejectUnauthorized: false,
+        },
+      } : {},
+    };
+  }
+  
+  // Otherwise use individual connection parameters
+  console.log(`[Database] Using individual config for ${env} environment`);
+  return {
+    host: config.database.host,
+    port: config.database.port,
+    database: config.database.name,
+    username: config.database.user,
+    password: config.database.password,
+    dialect: config.database.dialect,
+    logging: config.database.logging,
+    pool: config.database.pool,
+    dialectOptions: config.database.ssl ? {
+      ssl: {
+        require: true,
+        rejectUnauthorized: false,
+      },
+    } : {},
+  };
+};
+
+const dbConfig = getDbConfig();
+
+// Initialize Sequelize instance
+const sequelize = dbConfig.url
+  ? new Sequelize(dbConfig.url, {
+      dialect: dbConfig.dialect,
+      logging: dbConfig.logging,
+      pool: dbConfig.pool,
+      dialectOptions: dbConfig.dialectOptions,
+      define: {
+        timestamps: true,
+        underscored: true,
+        paranoid: false,
+      },
+    })
+  : new Sequelize(dbConfig.database, dbConfig.username, dbConfig.password, {
+      host: dbConfig.host,
+      port: dbConfig.port,
+      dialect: dbConfig.dialect,
+      logging: dbConfig.logging,
+      pool: dbConfig.pool,
+      dialectOptions: dbConfig.dialectOptions,
+      define: {
+        timestamps: true,
+        underscored: true,
+        paranoid: false,
+      },
+    });
+
+// Test database connection
+sequelize.authenticate()
+  .then(() => {
+    console.log(`[Database] Connection to ${dbConfig.database || 'database'} (${env}) has been established successfully.`);
+  })
+  .catch(err => {
+    console.error(`[Database] Unable to connect to the database (${env}):`, err.message);
+  });
 
 // Import models using factory pattern with explicit sequelize instance
 const User = require('./User')(sequelize, Sequelize.DataTypes);
@@ -154,12 +216,12 @@ const SharedMood = sequelize.define(
 // ===== DEFINE ASSOCIATIONS =====
 
 // User ↔ Token: One-to-Many (A user can have multiple tokens)
-Token.belongsTo(User, { foreignKey: 'userId', as: 'user' });
-User.hasMany(Token, { foreignKey: 'userId', as: 'tokens' });
+Token.belongsTo(User, { foreignKey: 'userId', as: 'tokenUser' }); // CHANGED alias from 'user' to 'tokenUser'
+User.hasMany(Token, { foreignKey: 'userId', as: 'userTokens' });
 
 // User ↔ Profile: One-to-One (A user has one profile)
-User.hasOne(Profile, { foreignKey: 'userId', as: 'profile' });
-Profile.belongsTo(User, { foreignKey: 'userId', as: 'user' });
+User.hasOne(Profile, { foreignKey: 'userId', as: 'userProfile' }); // CHANGED alias from 'profile' to 'userProfile'
+Profile.belongsTo(User, { foreignKey: 'userId', as: 'profileUser' }); // CHANGED alias from 'user' to 'profileUser'
 
 // User ↔ Friend: Many-to-Many through Friend table (Friendship relationships)
 User.belongsToMany(User, {
@@ -174,90 +236,90 @@ User.belongsToMany(User, {
   foreignKey: 'receiverId',
   otherKey: 'requesterId',
 });
-Friend.belongsTo(User, { foreignKey: 'requesterId', as: 'requester' });
-Friend.belongsTo(User, { foreignKey: 'receiverId', as: 'receiver' });
+Friend.belongsTo(User, { foreignKey: 'requesterId', as: 'friendRequester' }); // CHANGED alias from 'requester' to 'friendRequester'
+Friend.belongsTo(User, { foreignKey: 'receiverId', as: 'friendReceiver' }); // CHANGED alias from 'receiver' to 'friendReceiver'
 
 // User ↔ Chat: Many-to-Many through ChatParticipant (Chat membership)
 User.belongsToMany(Chat, {
   through: ChatParticipant,
-  as: 'chats',
+  as: 'userChats', // CHANGED alias from 'chats' to 'userChats'
   foreignKey: 'userId',
 });
 Chat.belongsToMany(User, {
   through: ChatParticipant,
-  as: 'participants',
+  as: 'chatParticipants',
   foreignKey: 'chatId',
 });
-ChatParticipant.belongsTo(User, { foreignKey: 'userId' });
-ChatParticipant.belongsTo(Chat, { foreignKey: 'chatId' });
+ChatParticipant.belongsTo(User, { foreignKey: 'userId', as: 'participantUser' });
+ChatParticipant.belongsTo(Chat, { foreignKey: 'chatId', as: 'participantChat' });
 
 // Chat ↔ Group: One-to-One (A chat can have group info)
-Chat.hasOne(Group, { foreignKey: 'chatId', as: 'group' });
-Group.belongsTo(Chat, { foreignKey: 'chatId', as: 'chat' });
+Chat.hasOne(Group, { foreignKey: 'chatId', as: 'chatGroup' }); // CHANGED alias from 'group' to 'chatGroup'
+Group.belongsTo(Chat, { foreignKey: 'chatId', as: 'groupChat' }); // CHANGED alias from 'chat' to 'groupChat'
 
 // Chat ↔ Message: One-to-Many (A chat can have many messages)
-Chat.hasMany(Message, { foreignKey: 'chatId', as: 'messages' });
-Message.belongsTo(Chat, { foreignKey: 'chatId', as: 'chat' });
+Chat.hasMany(Message, { foreignKey: 'chatId', as: 'chatMessages' }); // CHANGED alias from 'messages' to 'chatMessages'
+Message.belongsTo(Chat, { foreignKey: 'chatId', as: 'messageChat' }); // CHANGED alias from 'chat' to 'messageChat'
 
 // User ↔ Message: One-to-Many (A user can send many messages)
 User.hasMany(Message, { foreignKey: 'senderId', as: 'sentMessages' });
-Message.belongsTo(User, { foreignKey: 'senderId', as: 'sender' });
+Message.belongsTo(User, { foreignKey: 'senderId', as: 'messageSender' }); // CHANGED alias from 'sender' to 'messageSender'
 
 // Message ↔ Message: Self-referential for replies (A message can reply to another)
-Message.belongsTo(Message, { foreignKey: 'replyToId', as: 'replyTo' });
-Message.hasMany(Message, { foreignKey: 'replyToId', as: 'replies' });
+Message.belongsTo(Message, { foreignKey: 'replyToId', as: 'parentMessage' }); // CHANGED alias from 'replyTo' to 'parentMessage'
+Message.hasMany(Message, { foreignKey: 'replyToId', as: 'messageReplies' }); // CHANGED alias from 'replies' to 'messageReplies'
 
 // Message ↔ ReadReceipt: One-to-Many (A message can have many read receipts)
-Message.hasMany(ReadReceipt, { foreignKey: 'messageId', as: 'readReceipts' });
-ReadReceipt.belongsTo(Message, { foreignKey: 'messageId', as: 'message' });
+Message.hasMany(ReadReceipt, { foreignKey: 'messageId', as: 'messageReadReceipts' }); // CHANGED alias from 'readReceipts' to 'messageReadReceipts'
+ReadReceipt.belongsTo(Message, { foreignKey: 'messageId', as: 'readReceiptMessage' }); // CHANGED alias from 'message' to 'readReceiptMessage'
 
 // User ↔ ReadReceipt: One-to-Many (A user can have many read receipts)
-User.hasMany(ReadReceipt, { foreignKey: 'userId', as: 'readReceipts' });
-ReadReceipt.belongsTo(User, { foreignKey: 'userId', as: 'user' });
+User.hasMany(ReadReceipt, { foreignKey: 'userId', as: 'userReadReceipts' }); // CHANGED alias from 'readReceipts' to 'userReadReceipts'
+ReadReceipt.belongsTo(User, { foreignKey: 'userId', as: 'readReceiptUser' }); // CHANGED alias from 'user' to 'readReceiptUser'
 
 // Chat ↔ TypingIndicator: One-to-Many (A chat can have many typing indicators)
-Chat.hasMany(TypingIndicator, { foreignKey: 'chatId', as: 'typingIndicators' });
-TypingIndicator.belongsTo(Chat, { foreignKey: 'chatId', as: 'chat' });
+Chat.hasMany(TypingIndicator, { foreignKey: 'chatId', as: 'chatTypingIndicators' }); // CHANGED alias from 'typingIndicators' to 'chatTypingIndicators'
+TypingIndicator.belongsTo(Chat, { foreignKey: 'chatId', as: 'typingIndicatorChat' }); // CHANGED alias from 'chat' to 'typingIndicatorChat'
 
 // User ↔ TypingIndicator: One-to-Many (A user can have many typing indicators)
-User.hasMany(TypingIndicator, { foreignKey: 'userId', as: 'typingIndicators' });
-TypingIndicator.belongsTo(User, { foreignKey: 'userId', as: 'user' });
+User.hasMany(TypingIndicator, { foreignKey: 'userId', as: 'userTypingIndicators' }); // CHANGED alias from 'typingIndicators' to 'userTypingIndicators'
+TypingIndicator.belongsTo(User, { foreignKey: 'userId', as: 'typingIndicatorUser' }); // CHANGED alias from 'user' to 'typingIndicatorUser'
 
 // Chat ↔ Call: One-to-Many (A chat can have many calls)
-Chat.hasMany(Call, { foreignKey: 'chatId', as: 'calls' });
-Call.belongsTo(Chat, { foreignKey: 'chatId', as: 'chat' });
+Chat.hasMany(Call, { foreignKey: 'chatId', as: 'chatCalls' }); // CHANGED alias from 'calls' to 'chatCalls'
+Call.belongsTo(Chat, { foreignKey: 'chatId', as: 'callChat' }); // CHANGED alias from 'chat' to 'callChat'
 
 // User ↔ Call: One-to-Many (A user can initiate many calls)
 User.hasMany(Call, { foreignKey: 'initiatorId', as: 'initiatedCalls' });
-Call.belongsTo(User, { foreignKey: 'initiatorId', as: 'initiator' });
+Call.belongsTo(User, { foreignKey: 'initiatorId', as: 'callInitiator' }); // CHANGED alias from 'initiator' to 'callInitiator'
 
 // User ↔ Mood: One-to-Many (A user can have many moods)
-User.hasMany(Mood, { foreignKey: 'userId', as: 'moods' });
-Mood.belongsTo(User, { foreignKey: 'userId', as: 'user' });
+User.hasMany(Mood, { foreignKey: 'userId', as: 'userMoods' }); // CHANGED alias from 'moods' to 'userMoods'
+Mood.belongsTo(User, { foreignKey: 'userId', as: 'moodUser' }); // CHANGED alias from 'user' to 'moodUser'
 
 // Mood ↔ SharedMood: One-to-Many (A mood can be shared with many users)
 Mood.hasMany(SharedMood, { foreignKey: 'moodId', as: 'sharedMoods' });
-SharedMood.belongsTo(Mood, { foreignKey: 'moodId', as: 'mood' });
+SharedMood.belongsTo(Mood, { foreignKey: 'moodId', as: 'sharedMood' }); // CHANGED alias from 'mood' to 'sharedMood'
 
 // User ↔ SharedMood: One-to-Many (A user can share many moods)
 User.hasMany(SharedMood, { foreignKey: 'userId', as: 'sharedMoods' });
-SharedMood.belongsTo(User, { foreignKey: 'userId', as: 'user' });
+SharedMood.belongsTo(User, { foreignKey: 'userId', as: 'sharedMoodUser' }); // CHANGED alias from 'user' to 'sharedMoodUser'
 
 // User ↔ SharedMood: One-to-Many (A user can receive many shared moods)
 User.hasMany(SharedMood, { foreignKey: 'sharedWithId', as: 'receivedMoods' });
 SharedMood.belongsTo(User, { foreignKey: 'sharedWithId', as: 'sharedWithUser' });
 
 // User ↔ Media: One-to-Many (A user can upload many media files)
-User.hasMany(Media, { foreignKey: 'userId', as: 'media' });
-Media.belongsTo(User, { foreignKey: 'userId', as: 'user' });
+User.hasMany(Media, { foreignKey: 'userId', as: 'userMedia' }); // CHANGED alias from 'media' to 'userMedia'
+Media.belongsTo(User, { foreignKey: 'userId', as: 'mediaUser' }); // CHANGED alias from 'user' to 'mediaUser'
 
 // Message ↔ Media: One-to-One (A message can have one media attachment)
-Message.hasOne(Media, { foreignKey: 'messageId', as: 'media' });
-Media.belongsTo(Message, { foreignKey: 'messageId', as: 'message' });
+Message.hasOne(Media, { foreignKey: 'messageId', as: 'messageMedia' }); // CHANGED alias from 'media' to 'messageMedia'
+Media.belongsTo(Message, { foreignKey: 'messageId', as: 'mediaMessage' }); // CHANGED alias from 'message' to 'mediaMessage'
 
 // User ↔ Notification: One-to-Many (A user can have many notifications)
-User.hasMany(Notification, { foreignKey: 'userId', as: 'notifications' });
-Notification.belongsTo(User, { foreignKey: 'userId', as: 'user' });
+User.hasMany(Notification, { foreignKey: 'userId', as: 'userNotifications' }); // CHANGED alias from 'notifications' to 'userNotifications'
+Notification.belongsTo(User, { foreignKey: 'userId', as: 'notificationUser' }); // CHANGED alias from 'user' to 'notificationUser'
 
 // ===== EXPORT ALL MODELS AND SEQUELIZE INSTANCE =====
 module.exports = {
