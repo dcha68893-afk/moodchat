@@ -10,6 +10,7 @@
   },
   "scripts": {
     "start": "node src/server.js",
+    "start:render": "npm run db:migrate:render && npm run prod",
     "dev": "cross-env NODE_ENV=development nodemon src/server.js",
     "dev:debug": "cross-env NODE_ENV=development nodemon --inspect src/server.js",
     "prod": "cross-env NODE_ENV=production node src/server.js",
@@ -22,6 +23,7 @@
     "format": "prettier --write \"src/**/*.js\"",
     "format:check": "prettier --check \"src/**/*.js\"",
     "db:migrate": "sequelize-cli db:migrate",
+    "db:migrate:render": "sequelize-cli db:migrate --env production",  
     "db:migrate:undo": "sequelize-cli db:migrate:undo",
     "db:migrate:undo:all": "sequelize-cli db:migrate:undo:all",
     "db:migrate:status": "sequelize-cli db:migrate:status",
@@ -234,4 +236,5 @@
   "directories": {
     "test": "tests"
   }
+
 }
