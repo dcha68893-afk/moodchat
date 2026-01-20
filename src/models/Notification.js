@@ -223,7 +223,7 @@ module.exports = (sequelize, DataTypes) => {
 
   // Associations defined in models/index.js
   Notification.associate = function(models) {
-    // All associations moved to models/index.js
+    // All associations are defined in models/index.js
   };
 
   return Notification;

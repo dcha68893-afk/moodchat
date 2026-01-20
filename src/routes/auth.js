@@ -4,7 +4,6 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const asyncHandler = require('express-async-handler');
 const router = express.Router();
-const { Users, Tokens } = require('../models'); // CHANGED: 'User' → 'Users', 'Token' → 'Tokens'
 const config = require('../config/index');
 
 console.log('✅ Auth routes initialized');
@@ -105,17 +104,18 @@ router.post(
         throw new ValidationError('Invalid email format');
       }
 
-      // Check if models are available
+      // Check if models are available from app.locals
       const models = req.app.locals.models;
-      if (!models || !models.Users) { // CHANGED: 'User' → 'Users'
+      if (!models || !models.User) {
         throw new Error('Database models not available');
       }
 
-      const UserModel = models.Users; // CHANGED: 'User' → 'Users'
+      const UserModel = models.User;
+      const { Op } = models.sequelize.Sequelize;
 
       const existingUser = await UserModel.findOne({
         where: {
-          [require('sequelize').Op.or]: [
+          [Op.or]: [
             { username: username.toLowerCase() },
             { email: email.toLowerCase() }
           ]
@@ -156,8 +156,8 @@ router.post(
       );
 
       // Create token record if Token model exists
-      if (models.Tokens) { // CHANGED: 'Token' → 'Tokens'
-        await models.Tokens.create({ // CHANGED: 'Token' → 'Tokens'
+      if (models.Token) {
+        await models.Token.create({
           userId: user.id,
           token: refreshToken,
           type: 'refresh',
@@ -215,17 +215,18 @@ router.post(
         throw new ValidationError('Identifier and password are required');
       }
 
-      // Check if models are available
+      // Check if models are available from app.locals
       const models = req.app.locals.models;
-      if (!models || !models.Users) { // CHANGED: 'User' → 'Users'
+      if (!models || !models.User) {
         throw new Error('Database models not available');
       }
 
-      const UserModel = models.Users; // CHANGED: 'User' → 'Users'
+      const UserModel = models.User;
+      const { Op } = models.sequelize.Sequelize;
 
       const user = await UserModel.findOne({
         where: {
-          [require('sequelize').Op.or]: [
+          [Op.or]: [
             { email: identifier.toLowerCase() },
             { username: identifier.toLowerCase() }
           ]
@@ -255,8 +256,8 @@ router.post(
       );
 
       // Create token record if Token model exists
-      if (models.Tokens) { // CHANGED: 'Token' → 'Tokens'
-        await models.Tokens.create({ // CHANGED: 'Token' → 'Tokens'
+      if (models.Token) {
+        await models.Token.create({
           userId: user.id,
           token: refreshToken,
           type: 'refresh',
@@ -319,19 +320,20 @@ router.post(
         throw new AuthenticationError('Refresh token required');
       }
 
-      // Check if models are available
+      // Check if models are available from app.locals
       const models = req.app.locals.models;
-      if (!models || !models.Tokens) { // CHANGED: 'Token' → 'Tokens'
+      if (!models || !models.Token) {
         throw new Error('Token model not available');
       }
 
-      const TokenModel = models.Tokens; // CHANGED: 'Token' → 'Tokens'
+      const TokenModel = models.Token;
+      const { Op } = models.sequelize.Sequelize;
 
       const tokenRecord = await TokenModel.findOne({
         where: {
           token: refreshToken,
           type: 'refresh',
-          expiresAt: { [require('sequelize').Op.gt]: new Date() }
+          expiresAt: { [Op.gt]: new Date() }
         }
       });
 
@@ -341,7 +343,7 @@ router.post(
 
       const decoded = jwt.verify(refreshToken, config.jwt.secret || 'default-secret');
       
-      const UserModel = models.Users; // CHANGED: 'User' → 'Users'
+      const UserModel = models.User;
       const user = await UserModel.findByPk(decoded.id);
 
       if (!user) {
@@ -398,17 +400,17 @@ router.post(
     try {
       const { refreshToken } = req.cookies || req.body;
 
-      // Check if models are available
+      // Check if models are available from app.locals
       const models = req.app.locals.models;
-      if (refreshToken && models && models.Tokens) { // CHANGED: 'Token' → 'Tokens'
-        await models.Tokens.destroy({ // CHANGED: 'Token' → 'Tokens'
+      if (refreshToken && models && models.Token) {
+        await models.Token.destroy({
           where: { token: refreshToken, type: 'refresh' }
         });
       }
 
       // Update user status
-      if (models && models.Users && req.user) { // CHANGED: 'User' → 'Users'
-        const user = await models.Users.findByPk(req.user.id); // CHANGED: 'User' → 'Users'
+      if (models && models.User && req.user) {
+        const user = await models.User.findByPk(req.user.id);
         if (user) {
           await user.update({
             status: 'offline',
@@ -439,13 +441,13 @@ router.get(
   apiLimiter,
   asyncHandler(async (req, res) => {
     try {
-      // Check if models are available
+      // Check if models are available from app.locals
       const models = req.app.locals.models;
-      if (!models || !models.Users) { // CHANGED: 'User' → 'Users'
+      if (!models || !models.User) {
         throw new Error('Database models not available');
       }
 
-      const UserModel = models.Users; // CHANGED: 'User' → 'Users'
+      const UserModel = models.User;
 
       const user = await UserModel.findByPk(req.user.id, {
         attributes: { 

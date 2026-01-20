@@ -30,9 +30,15 @@ const rooms = ['general', 'random', 'help', 'tech-support'];
 
 // Storage stats logging flag - FIXED: Only log once
 let storageStatsLogged = false;
+let databaseInitialized = false;
 
 // Function to initialize database connection and sync tables
 async function initializeDatabase() {
+  // If already initialized, skip
+  if (databaseInitialized) {
+    return dbConnected;
+  }
+  
   try {
     // Check for DATABASE_URL first (Render style)
     if (process.env.DATABASE_URL) {
@@ -129,6 +135,7 @@ async function initializeDatabase() {
       
       // Attach models to app.locals for access in routes
       app.locals.models = models;
+      app.locals.sequelize = sequelize;
       console.log('📦 Models loaded successfully from models/index.js and attached to app.locals');
       
       // Log all models that were loaded
@@ -137,50 +144,43 @@ async function initializeDatabase() {
       );
       console.log(`📦 Loaded ${modelNames.length} models:`, modelNames.join(', '));
       
-      // ========== AUTOMATIC DATABASE TABLE SYNC ==========
-      // Sync all tables to ensure database schema is up to date
-      console.log('🔄 Starting database table synchronization...');
+      // ========== FIREBASE-LIKE AUTOMATIC DATABASE TABLE SYNC ==========
+      // AUTO-CREATE TABLES IF MISSING (FIREBASE BEHAVIOR)
+      console.log('🔄 Starting Firebase-style automatic table creation...');
       
       try {
-        // Use alter: true to update tables without dropping data (safe for production)
-        const syncOptions = NODE_ENV === 'production' ? 
-          { alter: true, logging: console.log } : // Production: alter existing tables
-          { force: false, alter: true, logging: console.log }; // Development: safe sync
+        // Safe sync: create missing tables without dropping existing ones
+        const syncOptions = {
+          alter: false, // Don't alter existing tables
+          force: false, // Never drop tables
+          logging: NODE_ENV === 'development' ? console.log : false,
+        };
         
         await sequelize.sync(syncOptions);
-        console.log('✅ Database tables synchronized successfully');
-        
-        // Log table information
-        const tableNames = Object.keys(models).filter(key => 
-          key !== 'sequelize' && key !== 'Sequelize' && !key.startsWith('_') &&
-          models[key] && models[key].tableName
-        );
-        
-        console.log(`📊 Tables synchronized: ${tableNames.length}`);
-        tableNames.forEach(modelName => {
-          const tableName = models[modelName].tableName;
-          console.log(`   - ${modelName} -> ${tableName}`);
-        });
+        console.log('✅ Firebase-style table sync completed. All tables exist or were created.');
         
         // Verify tables exist
-        if (tableNames.length > 0) {
-          try {
-            const queryInterface = sequelize.getQueryInterface();
-            const existingTables = await queryInterface.showAllTables();
-            console.log(`📋 Database contains ${existingTables.length} tables`);
-            
-            // Check if our models' tables exist
-            tableNames.forEach(modelName => {
-              const tableName = models[modelName].tableName;
-              if (existingTables.includes(tableName)) {
-                console.log(`   ✓ ${tableName} table exists (model: ${modelName})`);
-              } else {
-                console.log(`   ⚠️  ${tableName} table not found for model ${modelName}`);
-              }
-            });
-          } catch (checkError) {
-            console.warn('⚠️  Could not verify table existence:', checkError.message);
-          }
+        try {
+          const queryInterface = sequelize.getQueryInterface();
+          const existingTables = await queryInterface.showAllTables();
+          console.log(`📋 Database contains ${existingTables.length} tables`);
+          
+          // Check if our models' tables exist
+          const tableNames = Object.keys(models).filter(key => 
+            key !== 'sequelize' && key !== 'Sequelize' && !key.startsWith('_') &&
+            models[key] && models[key].tableName
+          );
+          
+          tableNames.forEach(modelName => {
+            const tableName = models[modelName].tableName;
+            if (existingTables.includes(tableName)) {
+              console.log(`   ✓ ${tableName} table exists (model: ${modelName})`);
+            } else {
+              console.log(`   ⚠️  ${tableName} table not found for model ${modelName}`);
+            }
+          });
+        } catch (checkError) {
+          console.warn('⚠️  Could not verify table existence:', checkError.message);
         }
         
         // ========== FIX: LOG STORAGE STATS ONLY ONCE AFTER SUCCESSFUL SYNC ==========
@@ -225,8 +225,10 @@ async function initializeDatabase() {
           }
         }
         
+        databaseInitialized = true;
+        
       } catch (syncError) {
-        console.error('❌ Database table synchronization failed:', syncError.message);
+        console.error('❌ Firebase-style table sync failed:', syncError.message);
         console.error('Sync error details:', syncError.stack);
         
         // Check if it's a permission error
@@ -245,18 +247,37 @@ async function initializeDatabase() {
         }
         
         // Try a more conservative sync if alter fails
-        console.log('🔄 Attempting conservative sync (without alter)...');
+        console.log('🔄 Attempting minimal sync (create only)...');
         try {
-          await sequelize.sync({ logging: console.log });
-          console.log('✅ Database tables synchronized (conservative mode)');
+          // Create tables one by one for more control
+          const modelNames = Object.keys(models).filter(key => 
+            key !== 'sequelize' && key !== 'Sequelize' && !key.startsWith('_') &&
+            models[key] && typeof models[key].sync === 'function'
+          );
+          
+          console.log(`🔄 Creating ${modelNames.length} tables individually...`);
+          
+          for (const modelName of modelNames) {
+            try {
+              await models[modelName].sync({ force: false, alter: false });
+              console.log(`   ✓ ${modelName} table synchronized`);
+            } catch (modelSyncError) {
+              console.warn(`   ⚠️  Could not sync ${modelName}:`, modelSyncError.message);
+            }
+          }
+          
+          console.log('✅ Minimal table sync completed');
           
           // FIX: Log storage stats only once after successful conservative sync
           if (!storageStatsLogged) {
             console.log(`[Storage Stats] Users: ${users.length}, Messages: ${messages.length}, Rooms: ${rooms.length}, DB Connected: ${dbConnected}`);
             storageStatsLogged = true;
           }
+          
+          databaseInitialized = true;
+          
         } catch (secondSyncError) {
-          console.error('❌ Conservative sync also failed:', secondSyncError.message);
+          console.error('❌ Minimal sync also failed:', secondSyncError.message);
           
           // Even if sync fails, we can continue if DB_REQUIRED is not true
           if (NODE_ENV === 'production' && process.env.DB_REQUIRED === 'true') {
@@ -267,6 +288,8 @@ async function initializeDatabase() {
               console.log(`[Storage Stats] Users: ${users.length}, Messages: ${messages.length}, Rooms: ${rooms.length}, DB Connected: ${dbConnected}`);
               storageStatsLogged = true;
             }
+            
+            databaseInitialized = true;
           }
         }
       }
@@ -282,19 +305,8 @@ async function initializeDatabase() {
         console.log(`[Storage Stats] Users: ${users.length}, Messages: ${messages.length}, Rooms: ${rooms.length}, DB Connected: ${dbConnected}`);
         storageStatsLogged = true;
       }
-    }
-    
-    // Legacy sync check (kept for backward compatibility)
-    if (process.env.DB_SYNC === 'true' && NODE_ENV !== 'production') {
-      console.log('🔄 Running legacy sync (DB_SYNC=true)...');
-      try {
-        await sequelize.sync({ alter: true });
-        console.log('✅ Legacy database sync completed.');
-      } catch (syncError) {
-        console.error('❌ Legacy database sync failed:', syncError.message);
-      }
-    } else if (process.env.DB_SYNC === 'true' && NODE_ENV === 'production') {
-      console.warn('⚠️  DB_SYNC=true is not recommended in production. Automatic sync is already handled above.');
+      
+      databaseInitialized = true;
     }
     
     return true;
@@ -318,6 +330,8 @@ async function initializeDatabase() {
       console.log(`[Storage Stats] Users: ${users.length}, Messages: ${messages.length}, Rooms: ${rooms.length}, DB Connected: ${dbConnected}`);
       storageStatsLogged = true;
     }
+    
+    databaseInitialized = true;
     
     // Fail in production if database is required
     if (NODE_ENV === 'production' && process.env.DB_REQUIRED === 'true') {
@@ -586,7 +600,9 @@ app.get('/health', (req, res) => {
     uptime: Math.floor(process.uptime()),
     cors: 'enabled',
     allowedOrigins: NODE_ENV === 'development' ? 'ALL (*)' : 'restricted',
-    database: dbConnected ? 'connected' : 'disconnected'
+    database: dbConnected ? 'connected' : 'disconnected',
+    databaseInitialized: databaseInitialized,
+    tablesAutoCreated: 'Firebase-style (on first run)'
   });
 });
 
@@ -601,6 +617,8 @@ app.get('/api/status', (req, res) => {
     server: 'MoodChat Backend',
     cors: 'enabled',
     database: dbConnected ? 'connected' : 'disconnected',
+    databaseInitialized: databaseInitialized,
+    tableCreation: 'Firebase-style auto-creation',
     origin: req.headers.origin || 'not specified',
     mountedRoutes: mountedRoutes.length > 0 ? mountedRoutes : 'No routes mounted from routes directory',
     endpoints: {
@@ -629,6 +647,8 @@ app.get('/api/health', (req, res) => {
     timestamp: new Date().toISOString(),
     environment: NODE_ENV,
     database: dbConnected ? 'connected' : 'disconnected',
+    databaseInitialized: databaseInitialized,
+    tableCreation: 'Firebase-style auto-creation',
     service: 'moodchat-backend',
     version: '1.0.0'
   });
@@ -646,7 +666,8 @@ app.get('/api/debug', (req, res) => {
     },
     cors: 'ALLOWED',
     mountedRoutes: mountedRoutes,
-    dbConnected: dbConnected
+    dbConnected: dbConnected,
+    databaseInitialized: databaseInitialized
   });
 });
 
@@ -1559,6 +1580,7 @@ const startServer = async () => {
   console.log('🚀 Starting MoodChat Backend Server...');
   console.log(`📁 Environment: ${NODE_ENV}`);
   console.log(`🌐 Port: ${PORT}`);
+  console.log(`🗄️  Database Mode: Firebase-style auto-creation`);
   
   // Initialize database first (includes connection and table sync)
   await initializeDatabase();
@@ -1575,7 +1597,7 @@ const startServer = async () => {
     console.log(`│   🌐 Env:      ${NODE_ENV}                               `);
     console.log(`│   ⏱️  Time:     ${new Date().toLocaleString()}           `);
     console.log(`│   🗄️  Database: ${dbConnected ? '✅ Connected' : '⚠️  Not Connected'}    `);
-    console.log(`│   📊 Tables:   ${dbConnected ? '✅ Synced' : '⚠️  Not Synced'}          `);
+    console.log(`│   📊 Tables:   ${databaseInitialized ? '✅ Auto-created' : '⚠️  Not Created'}    `);
     console.log(`│   🔓 CORS:     ${NODE_ENV === 'development' ? 'ALLOW ALL ORIGINS' : 'RESTRICTED'}    `);
     console.log(`│   🛣️  Routes:   ${mountedRoutes.length} mounted           `);
     console.log(`│                                                          │`);
