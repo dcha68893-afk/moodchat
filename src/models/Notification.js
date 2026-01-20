@@ -92,6 +92,7 @@ module.exports = (sequelize, DataTypes) => {
       tableName: 'notifications',
       timestamps: true,
       underscored: true,
+      freezeTableName: true,
       indexes: [
         {
           fields: ['user_id'],
@@ -218,6 +219,11 @@ module.exports = (sequelize, DataTypes) => {
         isArchived: true,
       },
     });
+  };
+
+  // Associations defined in models/index.js
+  Notification.associate = function(models) {
+    // All associations moved to models/index.js
   };
 
   return Notification;

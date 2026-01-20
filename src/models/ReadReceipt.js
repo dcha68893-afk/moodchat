@@ -44,6 +44,7 @@ module.exports = (sequelize, DataTypes) => {
       tableName: 'read_receipts',
       timestamps: true,
       underscored: true,
+      freezeTableName: true,
       indexes: [
         {
           fields: ['message_id', 'user_id'],
@@ -123,6 +124,11 @@ module.exports = (sequelize, DataTypes) => {
     });
 
     return results;
+  };
+
+  // Associations defined in models/index.js
+  ReadReceipt.associate = function(models) {
+    // All associations moved to models/index.js
   };
 
   return ReadReceipt;

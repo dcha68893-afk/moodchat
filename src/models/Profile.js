@@ -1,8 +1,6 @@
 const { Op } = require('sequelize');
 const { DataTypes } = require('sequelize');
-// Remove this line: const sequelize = require('./index');
 
-// Change Profile from sequelize.define to a function that takes sequelize and DataTypes
 module.exports = (sequelize, DataTypes) => {
   const Profile = sequelize.define(
     'Profile',
@@ -87,6 +85,7 @@ module.exports = (sequelize, DataTypes) => {
       tableName: 'profiles',
       timestamps: true,
       underscored: true,
+      freezeTableName: true,
       indexes: [
         {
           fields: ['user_id'],
@@ -118,6 +117,11 @@ module.exports = (sequelize, DataTypes) => {
     });
 
     return result;
+  };
+
+  // Associations defined in models/index.js
+  Profile.associate = function(models) {
+    // All associations moved to models/index.js
   };
 
   return Profile;

@@ -111,6 +111,7 @@ module.exports = (sequelize, DataTypes) => {
       tableName: 'media',
       timestamps: true,
       underscored: true,
+      freezeTableName: true,
       indexes: [
         {
           fields: ['user_id'],
@@ -224,6 +225,11 @@ module.exports = (sequelize, DataTypes) => {
       byType: stats,
       total: total || { totalCount: 0, totalSize: 0 },
     };
+  };
+
+  // Associations defined in models/index.js
+  Media.associate = function(models) {
+    // All associations moved to models/index.js
   };
 
   return Media;

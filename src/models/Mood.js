@@ -99,6 +99,7 @@ module.exports = (sequelize, DataTypes) => {
       tableName: 'moods',
       timestamps: true,
       underscored: true,
+      freezeTableName: true,
       indexes: [
         {
           fields: ['user_id'],
@@ -234,6 +235,11 @@ module.exports = (sequelize, DataTypes) => {
       ],
       order: [['createdAt', 'DESC']],
     });
+  };
+
+  // Associations defined in models/index.js
+  Mood.associate = function(models) {
+    // All associations moved to models/index.js
   };
 
   return Mood;

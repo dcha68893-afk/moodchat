@@ -1,7 +1,7 @@
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const validator = require('validator');
-const { User, Token } = require('../models');
+const { Users, Tokens } = require('../models'); // CHANGED: 'User' → 'Users', 'Token' → 'Tokens'
 const { Op } = require('sequelize');
 
 const JWT_SECRET = process.env.JWT_ACCESS_SECRET || process.env.JWT_SECRET || 'development-secret-key-change-in-production';
@@ -10,7 +10,7 @@ const JWT_SECRET = process.env.JWT_ACCESS_SECRET || process.env.JWT_SECRET || 'd
 const loginAttemptsStore = new Map();
 
 class AuthController {
-  async register(req, res) {
+  async register(req, res, next) {
     try {
       console.log("📝 [AuthController] Registration request received");
       console.log("Request body:", { 
@@ -52,9 +52,9 @@ class AuthController {
 
       // Check if user already exists in database
       let existingUser = null;
-      if (req.app.locals.models && req.app.locals.models.User) {
+      if (req.app.locals.models && req.app.locals.models.Users) { // CHANGED: 'User' → 'Users'
         try {
-          existingUser = await req.app.locals.models.User.findOne({
+          existingUser = await req.app.locals.models.Users.findOne({ // CHANGED: 'User' → 'Users'
             where: {
               [Op.or]: [
                 { email: email.toLowerCase().trim() },
@@ -64,6 +64,7 @@ class AuthController {
           });
         } catch (dbError) {
           console.error('Database check error:', dbError);
+          return next(dbError);
         }
       }
 
@@ -83,7 +84,7 @@ class AuthController {
         });
       }
 
-      // Hash password
+      // Hash password with bcrypt
       const hashedPassword = await bcrypt.hash(password, 10);
 
       // Create avatar URL
@@ -92,20 +93,23 @@ class AuthController {
       let user;
       
       // Try to save to database first
-      if (req.app.locals.models && req.app.locals.models.User) {
+      if (req.app.locals.models && req.app.locals.models.Users) { // CHANGED: 'User' → 'Users'
         try {
-          user = await req.app.locals.models.User.create({
+          user = await req.app.locals.models.Users.create({ // CHANGED: 'User' → 'Users'
             email: email.toLowerCase().trim(),
             username: username.trim(),
             password: hashedPassword,
             avatar: avatar,
             firstName: firstName || null,
-            lastName: lastName || null
+            lastName: lastName || null,
+            status: 'online', // ADDED: Missing field
+            isActive: true,   // ADDED: Missing field
+            isVerified: false // ADDED: Missing field
           });
           console.log("✅ User saved to database");
         } catch (dbError) {
           console.error('Database save error:', dbError);
-          // Fall through to in-memory
+          return next(dbError);
         }
       }
 
@@ -119,6 +123,9 @@ class AuthController {
           avatar: avatar,
           firstName: firstName || null,
           lastName: lastName || null,
+          status: 'online', // ADDED
+          isActive: true,   // ADDED
+          isVerified: false, // ADDED
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString()
         };
@@ -127,40 +134,34 @@ class AuthController {
       }
 
       if (!user) {
-        throw new Error('Failed to create user in any storage');
+        const error = new Error('Failed to create user in any storage');
+        return next(error);
       }
 
-      // Generate JWT token
-      const token = jwt.sign(
-        { 
-          userId: user.id, 
-          email: user.email, 
-          username: user.username 
-        },
-        JWT_SECRET,
-        { expiresIn: '24h' }
-      );
+      // Generate JWT token using the assumed generateToken function
+      const token = this.generateToken(user);
 
       // Save token to database if available
-      if (req.app.locals.models && req.app.locals.models.Token) {
+      if (req.app.locals.models && req.app.locals.models.Tokens) { // CHANGED: 'Token' → 'Tokens'
         try {
-          await req.app.locals.models.Token.create({
+          await req.app.locals.models.Tokens.create({ // CHANGED: 'Token' → 'Tokens'
             userId: user.id,
             token: token,
-            tokenType: 'access',
+            type: 'access', // CHANGED: 'tokenType' → 'type'
             expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000)
           });
         } catch (tokenError) {
           console.error('Token save error:', tokenError);
+          // Don't fail registration if token save fails
         }
       }
 
       console.log("✅ [AuthController] Registration successful for user:", user.id);
 
-      // Return response
+      // Return response as per example structure
       return res.status(201).json({
         success: true,
-        message: 'Registration successful',
+        message: 'User registered successfully',
         token: token,
         user: {
           id: user.id,
@@ -169,6 +170,9 @@ class AuthController {
           avatar: user.avatar,
           firstName: user.firstName,
           lastName: user.lastName,
+          status: user.status, // ADDED
+          isActive: user.isActive, // ADDED
+          isVerified: user.isVerified, // ADDED
           createdAt: user.createdAt || new Date().toISOString()
         },
         timestamp: new Date().toISOString()
@@ -177,39 +181,11 @@ class AuthController {
     } catch (error) {
       console.error('❌ [AuthController] Registration error:', error.message);
       console.error('Error stack:', error.stack);
-      
-      // Handle specific error cases
-      if (error.message.includes('already exists') || 
-          error.message.includes('already taken') || 
-          error.message.includes('already registered')) {
-        return res.status(409).json({
-          success: false,
-          message: error.message,
-          timestamp: new Date().toISOString()
-        });
-      }
-      
-      // Handle validation errors
-      if (error.message.includes('Validation error') || 
-          error.message.includes('Invalid email') ||
-          error.message.includes('Password cannot be empty')) {
-        return res.status(400).json({
-          success: false,
-          message: error.message,
-          timestamp: new Date().toISOString()
-        });
-      }
-      
-      // Default internal server error
-      return res.status(500).json({
-        success: false,
-        message: 'Registration failed: ' + error.message,
-        timestamp: new Date().toISOString()
-      });
+      return next(error);
     }
   }
 
-  async login(req, res) {
+  async login(req, res, next) {
     try {
       console.log("📝 [AuthController] Login request received");
       console.log("Request body:", { 
@@ -260,19 +236,20 @@ class AuthController {
       let user = null;
       
       // Try database first
-      if (req.app.locals.models && req.app.locals.models.User) {
+      if (req.app.locals.models && req.app.locals.models.Users) { // CHANGED: 'User' → 'Users'
         try {
           if (validator.isEmail(identifier)) {
-            user = await req.app.locals.models.User.findOne({ 
+            user = await req.app.locals.models.Users.findOne({ // CHANGED: 'User' → 'Users'
               where: { email: identifier.toLowerCase().trim() } 
             });
           } else {
-            user = await req.app.locals.models.User.findOne({ 
+            user = await req.app.locals.models.Users.findOne({ // CHANGED: 'User' → 'Users'
               where: { username: identifier.trim() } 
             });
           }
         } catch (dbError) {
           console.error('Database lookup error:', dbError);
+          return next(dbError);
         }
       }
 
@@ -300,7 +277,7 @@ class AuthController {
         });
       }
 
-      // Check password
+      // Check password using bcrypt compare
       const validPassword = await bcrypt.compare(password, user.password);
       
       if (!validPassword) {
@@ -321,34 +298,27 @@ class AuthController {
       // Reset attempts on successful login
       loginAttemptsStore.delete(attemptKey);
 
-      // Generate JWT token
-      const token = jwt.sign(
-        { 
-          userId: user.id, 
-          email: user.email, 
-          username: user.username 
-        },
-        JWT_SECRET,
-        { expiresIn: '24h' }
-      );
+      // Generate JWT token using the assumed generateToken function
+      const token = this.generateToken(user);
 
       // Save token to database if available
-      if (req.app.locals.models && req.app.locals.models.Token) {
+      if (req.app.locals.models && req.app.locals.models.Tokens) { // CHANGED: 'Token' → 'Tokens'
         try {
-          await req.app.locals.models.Token.create({
+          await req.app.locals.models.Tokens.create({ // CHANGED: 'Token' → 'Tokens'
             userId: user.id,
             token: token,
-            tokenType: 'access',
+            type: 'access', // CHANGED: 'tokenType' → 'type'
             expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000)
           });
         } catch (tokenError) {
           console.error('Token save error:', tokenError);
+          // Don't fail login if token save fails
         }
       }
 
       console.log("✅ [AuthController] Login successful for user:", user.id);
 
-      // Return response
+      // Return response as per example structure
       return res.json({
         success: true,
         message: 'Login successful',
@@ -360,6 +330,9 @@ class AuthController {
           avatar: user.avatar,
           firstName: user.firstName,
           lastName: user.lastName,
+          status: user.status, // ADDED
+          isActive: user.isActive, // ADDED
+          isVerified: user.isVerified, // ADDED
           createdAt: user.createdAt || new Date().toISOString()
         },
         timestamp: new Date().toISOString()
@@ -367,22 +340,30 @@ class AuthController {
       
     } catch (error) {
       console.error('❌ [AuthController] Login error:', error.message);
-      
-      return res.status(500).json({
-        success: false,
-        message: 'Login failed: ' + error.message,
-        timestamp: new Date().toISOString()
-      });
+      return next(error);
     }
   }
 
-  async logout(req, res) {
+  // Helper method to generate JWT token (assumed to exist)
+  generateToken(user) {
+    return jwt.sign(
+      { 
+        userId: user.id, 
+        email: user.email, 
+        username: user.username 
+      },
+      JWT_SECRET,
+      { expiresIn: '24h' }
+    );
+  }
+
+  async logout(req, res, next) {
     try {
       const token = req.headers.authorization?.split(' ')[1];
       
-      if (token && req.app.locals.models && req.app.locals.models.Token) {
+      if (token && req.app.locals.models && req.app.locals.models.Tokens) { // CHANGED: 'Token' → 'Tokens'
         // Revoke token in database
-        await req.app.locals.models.Token.update(
+        await req.app.locals.models.Tokens.update( // CHANGED: 'Token' → 'Tokens'
           { isRevoked: true },
           { where: { token: token } }
         );
@@ -396,16 +377,11 @@ class AuthController {
       
     } catch (error) {
       console.error('Logout error:', error);
-      
-      return res.status(500).json({
-        success: false,
-        message: 'Logout failed',
-        timestamp: new Date().toISOString()
-      });
+      return next(error);
     }
   }
 
-  async refreshToken(req, res) {
+  async refreshToken(req, res, next) {
     try {
       const { refreshToken } = req.body;
       
@@ -418,7 +394,7 @@ class AuthController {
       }
       
       // Check if Token model is available
-      if (!req.app.locals.models || !req.app.locals.models.Token) {
+      if (!req.app.locals.models || !req.app.locals.models.Tokens) { // CHANGED: 'Token' → 'Tokens'
         return res.status(501).json({
           success: false,
           message: 'Token refresh not implemented',
@@ -427,15 +403,15 @@ class AuthController {
       }
       
       // Find and validate refresh token
-      const tokenRecord = await req.app.locals.models.Token.findOne({
+      const tokenRecord = await req.app.locals.models.Tokens.findOne({ // CHANGED: 'Token' → 'Tokens'
         where: {
           token: refreshToken,
-          tokenType: 'refresh',
+          type: 'refresh', // CHANGED: 'tokenType' → 'type'
           isRevoked: false,
           expiresAt: { [Op.gt]: new Date() }
         },
         include: [{ 
-          model: req.app.locals.models.User, 
+          model: req.app.locals.models.Users, // CHANGED: 'User' → 'Users'
           attributes: ['id', 'email', 'username'] 
         }]
       });
@@ -449,21 +425,13 @@ class AuthController {
       }
       
       // Generate new access token
-      const accessToken = jwt.sign(
-        { 
-          userId: tokenRecord.User.id, 
-          email: tokenRecord.User.email, 
-          username: tokenRecord.User.username 
-        },
-        JWT_SECRET,
-        { expiresIn: '15m' }
-      );
+      const accessToken = this.generateToken(tokenRecord.User);
       
       // Create new token record
-      await req.app.locals.models.Token.create({
+      await req.app.locals.models.Tokens.create({ // CHANGED: 'Token' → 'Tokens'
         userId: tokenRecord.User.id,
         token: accessToken,
-        tokenType: 'access',
+        type: 'access', // CHANGED: 'tokenType' → 'type'
         expiresAt: new Date(Date.now() + 15 * 60 * 1000) // 15 minutes
       });
       
@@ -481,16 +449,11 @@ class AuthController {
       
     } catch (error) {
       console.error('Refresh token error:', error);
-      
-      return res.status(500).json({
-        success: false,
-        message: 'Token refresh failed',
-        timestamp: new Date().toISOString()
-      });
+      return next(error);
     }
   }
 
-  async getCurrentUser(req, res) {
+  async getCurrentUser(req, res, next) {
     try {
       if (!req.user) {
         return res.status(401).json({
@@ -503,13 +466,14 @@ class AuthController {
       let user = null;
       
       // Try database first
-      if (req.app.locals.models && req.app.locals.models.User) {
+      if (req.app.locals.models && req.app.locals.models.Users) { // CHANGED: 'User' → 'Users'
         try {
-          user = await req.app.locals.models.User.findByPk(req.user.userId, {
-            attributes: ['id', 'email', 'username', 'avatar', 'firstName', 'lastName', 'createdAt']
+          user = await req.app.locals.models.Users.findByPk(req.user.userId, { // CHANGED: 'User' → 'Users'
+            attributes: ['id', 'email', 'username', 'avatar', 'firstName', 'lastName', 'status', 'isActive', 'isVerified', 'lastSeen', 'createdAt']
           });
         } catch (dbError) {
           console.error('Database lookup error:', dbError);
+          return next(dbError);
         }
       }
 
@@ -534,6 +498,10 @@ class AuthController {
         firstName: user.firstName || null,
         lastName: user.lastName || null,
         avatar: user.avatar || null,
+        status: user.status || 'offline',
+        isActive: user.isActive !== undefined ? user.isActive : true,
+        isVerified: user.isVerified !== undefined ? user.isVerified : false,
+        lastSeen: user.lastSeen || null,
         displayName: `${user.firstName || ''} ${user.lastName || ''}`.trim() || user.username,
         createdAt: user.createdAt || new Date().toISOString()
       };
@@ -546,12 +514,7 @@ class AuthController {
       
     } catch (error) {
       console.error('Get current user error:', error);
-      
-      return res.status(500).json({
-        success: false,
-        message: 'Failed to get user profile',
-        timestamp: new Date().toISOString()
-      });
+      return next(error);
     }
   }
   

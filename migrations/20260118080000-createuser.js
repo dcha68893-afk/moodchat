@@ -24,6 +24,37 @@ module.exports = {
         type: Sequelize.STRING,
         allowNull: false
       },
+      firstName: {
+        type: Sequelize.STRING,
+        allowNull: true
+      },
+      lastName: {
+        type: Sequelize.STRING,
+        allowNull: true
+      },
+      avatar: {
+        type: Sequelize.STRING,
+        allowNull: true
+      },
+      status: {
+        type: Sequelize.STRING,
+        defaultValue: 'offline',
+        allowNull: false
+      },
+      isActive: {
+        type: Sequelize.BOOLEAN,
+        defaultValue: true,
+        allowNull: false
+      },
+      isVerified: {
+        type: Sequelize.BOOLEAN,
+        defaultValue: false,
+        allowNull: false
+      },
+      lastSeen: {
+        type: Sequelize.DATE,
+        allowNull: true
+      },
       createdAt: {
         type: Sequelize.DATE,
         allowNull: false,

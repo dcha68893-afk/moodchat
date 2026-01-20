@@ -113,6 +113,7 @@ module.exports = (sequelize, DataTypes) => {
       tableName: 'calls',
       timestamps: true,
       underscored: true,
+      freezeTableName: true,
       indexes: [
         {
           fields: ['call_id'],
@@ -284,8 +285,7 @@ module.exports = (sequelize, DataTypes) => {
 
   // Add association method that will be called from models/index.js
   Call.associate = function (models) {
-    Call.belongsTo(models.Chat, { foreignKey: 'chatId', as: 'chat' });
-    Call.belongsTo(models.User, { foreignKey: 'initiatorId', as: 'initiator' });
+    // All associations moved to models/index.js
   };
 
   return Call;

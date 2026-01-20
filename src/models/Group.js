@@ -79,6 +79,7 @@ module.exports = (sequelize, DataTypes) => {
       tableName: 'groups',
       timestamps: true,
       underscored: true,
+      freezeTableName: true,
       indexes: [
         {
           fields: ['chat_id'],
@@ -142,6 +143,11 @@ module.exports = (sequelize, DataTypes) => {
       offset: options.offset || 0,
       order: [['createdAt', 'DESC']],
     });
+  };
+
+  // Associations defined in models/index.js
+  Group.associate = function(models) {
+    // All associations moved to models/index.js
   };
 
   return Group;

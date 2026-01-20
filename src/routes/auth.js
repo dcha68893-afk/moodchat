@@ -1,10 +1,10 @@
-// src/routes/auth.js - UPDATED WITH CORRECT IMPORTS
+// src/routes/auth.js - COMPLETE FIXED VERSION
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const asyncHandler = require('express-async-handler');
 const router = express.Router();
-const { User, Token } = require('../models');
+const { Users, Tokens } = require('../models'); // CHANGED: 'User' → 'Users', 'Token' → 'Tokens'
 const config = require('../config/index');
 
 console.log('✅ Auth routes initialized');
@@ -28,9 +28,7 @@ try {
   // Import rate limiter middleware
   const rateLimiterMiddleware = require('../middleware/rateLimiter');
   if (rateLimiterMiddleware) {
-    // Note: rateLimiter.js exports authLimiter, not authRateLimiter
     authLimiter = rateLimiterMiddleware.authLimiter || ((req, res, next) => next());
-    // apiRateLimiter is an alias for apiLimiter
     apiLimiter = rateLimiterMiddleware.apiRateLimiter || rateLimiterMiddleware.apiLimiter || ((req, res, next) => next());
   }
 } catch (error) {
@@ -85,7 +83,7 @@ router.get('/health', (req, res) => {
 // Register endpoint - FIXED: Using authLimiter (not authRateLimiter)
 router.post(
   '/register',
-  authLimiter, // Changed from authRateLimiter to authLimiter
+  authLimiter,
   asyncHandler(async (req, res) => {
     try {
       const { username, email, password, firstName, lastName, avatar } = req.body;
@@ -109,11 +107,11 @@ router.post(
 
       // Check if models are available
       const models = req.app.locals.models;
-      if (!models || !models.User) {
+      if (!models || !models.Users) { // CHANGED: 'User' → 'Users'
         throw new Error('Database models not available');
       }
 
-      const UserModel = models.User;
+      const UserModel = models.Users; // CHANGED: 'User' → 'Users'
 
       const existingUser = await UserModel.findOne({
         where: {
@@ -158,8 +156,8 @@ router.post(
       );
 
       // Create token record if Token model exists
-      if (models.Token) {
-        await models.Token.create({
+      if (models.Tokens) { // CHANGED: 'Token' → 'Tokens'
+        await models.Tokens.create({ // CHANGED: 'Token' → 'Tokens'
           userId: user.id,
           token: refreshToken,
           type: 'refresh',
@@ -208,7 +206,7 @@ router.post(
 // Login endpoint - FIXED: Using authLimiter (not authRateLimiter)
 router.post(
   '/login',
-  authLimiter, // Changed from authRateLimiter to authLimiter
+  authLimiter,
   asyncHandler(async (req, res) => {
     try {
       const { identifier, password } = req.body;
@@ -219,11 +217,11 @@ router.post(
 
       // Check if models are available
       const models = req.app.locals.models;
-      if (!models || !models.User) {
+      if (!models || !models.Users) { // CHANGED: 'User' → 'Users'
         throw new Error('Database models not available');
       }
 
-      const UserModel = models.User;
+      const UserModel = models.Users; // CHANGED: 'User' → 'Users'
 
       const user = await UserModel.findOne({
         where: {
@@ -257,8 +255,8 @@ router.post(
       );
 
       // Create token record if Token model exists
-      if (models.Token) {
-        await models.Token.create({
+      if (models.Tokens) { // CHANGED: 'Token' → 'Tokens'
+        await models.Tokens.create({ // CHANGED: 'Token' → 'Tokens'
           userId: user.id,
           token: refreshToken,
           type: 'refresh',
@@ -323,11 +321,11 @@ router.post(
 
       // Check if models are available
       const models = req.app.locals.models;
-      if (!models || !models.Token) {
+      if (!models || !models.Tokens) { // CHANGED: 'Token' → 'Tokens'
         throw new Error('Token model not available');
       }
 
-      const TokenModel = models.Token;
+      const TokenModel = models.Tokens; // CHANGED: 'Token' → 'Tokens'
 
       const tokenRecord = await TokenModel.findOne({
         where: {
@@ -343,7 +341,7 @@ router.post(
 
       const decoded = jwt.verify(refreshToken, config.jwt.secret || 'default-secret');
       
-      const UserModel = models.User;
+      const UserModel = models.Users; // CHANGED: 'User' → 'Users'
       const user = await UserModel.findByPk(decoded.id);
 
       if (!user) {
@@ -402,15 +400,15 @@ router.post(
 
       // Check if models are available
       const models = req.app.locals.models;
-      if (refreshToken && models && models.Token) {
-        await models.Token.destroy({
+      if (refreshToken && models && models.Tokens) { // CHANGED: 'Token' → 'Tokens'
+        await models.Tokens.destroy({ // CHANGED: 'Token' → 'Tokens'
           where: { token: refreshToken, type: 'refresh' }
         });
       }
 
       // Update user status
-      if (models && models.User && req.user) {
-        const user = await models.User.findByPk(req.user.id);
+      if (models && models.Users && req.user) { // CHANGED: 'User' → 'Users'
+        const user = await models.Users.findByPk(req.user.id); // CHANGED: 'User' → 'Users'
         if (user) {
           await user.update({
             status: 'offline',
@@ -438,16 +436,16 @@ router.post(
 router.get(
   '/me',
   authenticate,
-  apiLimiter, // Changed from apiRateLimiter to apiLimiter
+  apiLimiter,
   asyncHandler(async (req, res) => {
     try {
       // Check if models are available
       const models = req.app.locals.models;
-      if (!models || !models.User) {
+      if (!models || !models.Users) { // CHANGED: 'User' → 'Users'
         throw new Error('Database models not available');
       }
 
-      const UserModel = models.User;
+      const UserModel = models.Users; // CHANGED: 'User' → 'Users'
 
       const user = await UserModel.findByPk(req.user.id, {
         attributes: { 

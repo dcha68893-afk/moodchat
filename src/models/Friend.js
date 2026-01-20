@@ -69,6 +69,7 @@ module.exports = (sequelize, DataTypes) => {
       tableName: 'friends',
       timestamps: true,
       underscored: true,
+      freezeTableName: true,
       indexes: [
         {
           fields: ['requester_id', 'receiver_id'],
@@ -203,8 +204,7 @@ module.exports = (sequelize, DataTypes) => {
 
   // Add association method
   Friend.associate = function (models) {
-    Friend.belongsTo(models.User, { foreignKey: 'requesterId', as: 'requester' });
-    Friend.belongsTo(models.User, { foreignKey: 'receiverId', as: 'receiver' });
+    // All associations moved to models/index.js
   };
 
   return Friend;

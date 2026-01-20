@@ -200,6 +200,7 @@ module.exports = (sequelize, DataTypes) => {
       tableName: 'users',
       timestamps: true,
       underscored: true,
+      freezeTableName: true,
       hooks: {
         // Hash password before creating user
         beforeCreate: async (user) => {
@@ -239,11 +240,6 @@ module.exports = (sequelize, DataTypes) => {
 
   // ===== INSTANCE METHODS =====
 
-  /**
-   * Validate user password
-   * @param {string} password - Plain text password to validate
-   * @returns {Promise<boolean>} True if password matches
-   */
   User.prototype.validatePassword = async function (password) {
     if (!password || !this.password) {
       return false;
@@ -256,10 +252,6 @@ module.exports = (sequelize, DataTypes) => {
     }
   };
 
-  /**
-   * Convert user instance to JSON, removing sensitive data
-   * @returns {Object} User object without password and updatedAt
-   */
   User.prototype.toJSON = function () {
     const values = Object.assign({}, this.get());
     
@@ -269,10 +261,6 @@ module.exports = (sequelize, DataTypes) => {
     return values;
   };
 
-  /**
-   * Get public profile data (safe for public viewing)
-   * @returns {Object} Public user profile
-   */
   User.prototype.getPublicProfile = function () {
     const { id, username, firstName, lastName, avatar, bio, status, lastSeen } = this;
     return { 
@@ -289,10 +277,6 @@ module.exports = (sequelize, DataTypes) => {
     };
   };
 
-  /**
-   * Update user's last seen timestamp
-   * @returns {Promise<User>} Updated user instance
-   */
   User.prototype.updateLastSeen = async function () {
     try {
       this.lastSeen = new Date();
@@ -303,11 +287,6 @@ module.exports = (sequelize, DataTypes) => {
     }
   };
 
-  /**
-   * Update user status
-   * @param {string} status - New status
-   * @returns {Promise<User>} Updated user instance
-   */
   User.prototype.updateStatus = async function (status) {
     try {
       this.status = status;
@@ -321,11 +300,6 @@ module.exports = (sequelize, DataTypes) => {
 
   // ===== STATIC METHODS =====
 
-  /**
-   * Find user by email
-   * @param {string} email - Email address
-   * @returns {Promise<User|null>} Found user or null
-   */
   User.findByEmail = async function (email) {
     if (!email) {
       throw new Error('Email is required');
@@ -342,11 +316,6 @@ module.exports = (sequelize, DataTypes) => {
     }
   };
 
-  /**
-   * Find user by username
-   * @param {string} username - Username
-   * @returns {Promise<User|null>} Found user or null
-   */
   User.findByUsername = async function (username) {
     if (!username) {
       throw new Error('Username is required');
@@ -363,11 +332,6 @@ module.exports = (sequelize, DataTypes) => {
     }
   };
 
-  /**
-   * Find active user by email or username
-   * @param {string} identifier - Email or username
-   * @returns {Promise<User|null>} Found user or null
-   */
   User.findActiveByIdentifier = async function (identifier) {
     if (!identifier) {
       throw new Error('Identifier is required');
@@ -389,12 +353,6 @@ module.exports = (sequelize, DataTypes) => {
     }
   };
 
-  /**
-   * Search users by username, name, or email
-   * @param {string} query - Search query
-   * @param {number} limit - Maximum results (default: 20)
-   * @returns {Promise<Array<User>>} Array of matching users
-   */
   User.search = async function (query, limit = 20) {
     if (!query || query.length < 2) {
       throw new Error('Search query must be at least 2 characters');
@@ -423,11 +381,6 @@ module.exports = (sequelize, DataTypes) => {
     }
   };
 
-  /**
-   * Get all active users
-   * @param {number} limit - Maximum results (default: 100)
-   * @returns {Promise<Array<User>>} Array of active users
-   */
   User.getAllActive = async function (limit = 100) {
     try {
       return await this.findAll({
@@ -444,12 +397,6 @@ module.exports = (sequelize, DataTypes) => {
     }
   };
 
-  /**
-   * Update multiple users' status
-   * @param {Array<number>} userIds - Array of user IDs
-   * @param {string} status - New status
-   * @returns {Promise<number>} Number of updated rows
-   */
   User.bulkUpdateStatus = async function (userIds, status) {
     if (!Array.isArray(userIds) || userIds.length === 0) {
       throw new Error('User IDs array is required');
@@ -480,19 +427,9 @@ module.exports = (sequelize, DataTypes) => {
   };
 
   // ===== ASSOCIATIONS =====
-  // IMPORTANT: All associations are defined in models/index.js to avoid conflicts
-  // This function should remain empty or contain only associations not defined elsewhere
+  // Note: All associations are defined in models/index.js to avoid conflicts
   User.associate = function(models) {
-    // All associations moved to models/index.js to prevent duplicate alias errors
-    
-    // If you need to keep some associations here that aren't in index.js,
-    // ensure the alias names don't conflict with those in index.js
-    // Example of a safe association (if not in index.js):
-    // User.hasMany(models.SomeModel, {
-    //   foreignKey: 'userId',
-    //   as: 'someModelAlias', // Must be unique across all associations
-    //   onDelete: 'CASCADE'
-    // });
+    // All associations moved to models/index.js
   };
 
   return User;

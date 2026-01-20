@@ -97,6 +97,7 @@ module.exports = (sequelize, DataTypes) => {
       tableName: 'messages',
       timestamps: true,
       underscored: true,
+      freezeTableName: true,
       indexes: [
         {
           fields: ['chat_id'],
@@ -225,6 +226,11 @@ module.exports = (sequelize, DataTypes) => {
       order: [['createdAt', 'DESC']],
       limit: 100,
     });
+  };
+
+  // Associations defined in models/index.js
+  Message.associate = function(models) {
+    // All associations moved to models/index.js
   };
 
   return Message;

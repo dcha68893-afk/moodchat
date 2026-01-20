@@ -51,6 +51,7 @@ module.exports = (sequelize, DataTypes) => {
       tableName: 'typing_indicators',
       timestamps: true,
       underscored: true,
+      freezeTableName: true,
       indexes: [
         {
           fields: ['chat_id', 'user_id'],
@@ -144,6 +145,11 @@ module.exports = (sequelize, DataTypes) => {
       ],
       order: [['lastUpdatedAt', 'DESC']],
     });
+  };
+
+  // Associations defined in models/index.js
+  TypingIndicator.associate = function(models) {
+    // All associations moved to models/index.js
   };
 
   return TypingIndicator;

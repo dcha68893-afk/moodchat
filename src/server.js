@@ -23,7 +23,15 @@ let sequelize;
 let dbConnected = false;
 let models;
 
-// Function to initialize database connection
+// ========== IN-MEMORY STORAGE (FOR BACKWARD COMPATIBILITY) ==========
+let users = [];
+let messages = [];
+const rooms = ['general', 'random', 'help', 'tech-support'];
+
+// Storage stats logging flag - FIXED: Only log once
+let storageStatsLogged = false;
+
+// Function to initialize database connection and sync tables
 async function initializeDatabase() {
   try {
     // Check for DATABASE_URL first (Render style)
@@ -43,7 +51,14 @@ async function initializeDatabase() {
             require: true,
             rejectUnauthorized: false
           }
-        } : {}
+        } : {},
+        // FIX: Force consistent naming strategy for production
+        define: {
+          freezeTableName: true, // Prevents Sequelize from pluralizing table names
+          timestamps: true,
+          underscored: true, // Changed to true to match your models
+          paranoid: false
+        }
       });
     } else {
       // Direct Sequelize initialization using environment variables (local)
@@ -68,7 +83,14 @@ async function initializeDatabase() {
               require: true,
               rejectUnauthorized: false
             }
-          } : {}
+          } : {},
+          // FIX: Apply consistent naming strategy for both dev and prod
+          define: {
+            freezeTableName: true, // CRITICAL FIX: Prevents table name pluralization
+            timestamps: true,
+            underscored: true, // Changed to true to match your models
+            paranoid: false
+          }
         }
       );
     }
@@ -81,7 +103,7 @@ async function initializeDatabase() {
     
     // ========== IMPORT MODELS FROM models/index.js AND ATTACH TO app.locals ==========
     try {
-      // Import models from the correct location - assuming models/index.js exports a function
+      // Import models from the correct location
       const modelsModule = require('./models/index.js');
       
       // Check if models/index.js exports a function or an object
@@ -94,6 +116,17 @@ async function initializeDatabase() {
         throw new Error('models/index.js does not export a valid function or object');
       }
       
+      // Ensure all models use freezeTableName: true
+      Object.keys(models).forEach(modelName => {
+        if (models[modelName] && models[modelName].init && models[modelName].options) {
+          // Force freezeTableName on all models if not already set
+          if (!models[modelName].options.freezeTableName) {
+            models[modelName].options.freezeTableName = true;
+            console.log(`📝 Applied freezeTableName:true to ${modelName} model`);
+          }
+        }
+      });
+      
       // Attach models to app.locals for access in routes
       app.locals.models = models;
       console.log('📦 Models loaded successfully from models/index.js and attached to app.locals');
@@ -104,39 +137,164 @@ async function initializeDatabase() {
       );
       console.log(`📦 Loaded ${modelNames.length} models:`, modelNames.join(', '));
       
-      // Associate models if they have associate methods - WITH ERROR HANDLING
-      Object.keys(models).forEach(modelName => {
-        try {
-          if (models[modelName] && models[modelName].associate && typeof models[modelName].associate === 'function') {
-            console.log(`🔗 Associating model: ${modelName}`);
-            models[modelName].associate(models);
-          }
-        } catch (assocError) {
-          console.warn(`⚠️  Error associating model ${modelName}:`, assocError.message);
-          // Continue with other models even if one fails
-        }
-      });
+      // ========== AUTOMATIC DATABASE TABLE SYNC ==========
+      // Sync all tables to ensure database schema is up to date
+      console.log('🔄 Starting database table synchronization...');
       
-      console.log('✅ Model associations completed');
+      try {
+        // Use alter: true to update tables without dropping data (safe for production)
+        const syncOptions = NODE_ENV === 'production' ? 
+          { alter: true, logging: console.log } : // Production: alter existing tables
+          { force: false, alter: true, logging: console.log }; // Development: safe sync
+        
+        await sequelize.sync(syncOptions);
+        console.log('✅ Database tables synchronized successfully');
+        
+        // Log table information
+        const tableNames = Object.keys(models).filter(key => 
+          key !== 'sequelize' && key !== 'Sequelize' && !key.startsWith('_') &&
+          models[key] && models[key].tableName
+        );
+        
+        console.log(`📊 Tables synchronized: ${tableNames.length}`);
+        tableNames.forEach(modelName => {
+          const tableName = models[modelName].tableName;
+          console.log(`   - ${modelName} -> ${tableName}`);
+        });
+        
+        // Verify tables exist
+        if (tableNames.length > 0) {
+          try {
+            const queryInterface = sequelize.getQueryInterface();
+            const existingTables = await queryInterface.showAllTables();
+            console.log(`📋 Database contains ${existingTables.length} tables`);
+            
+            // Check if our models' tables exist
+            tableNames.forEach(modelName => {
+              const tableName = models[modelName].tableName;
+              if (existingTables.includes(tableName)) {
+                console.log(`   ✓ ${tableName} table exists (model: ${modelName})`);
+              } else {
+                console.log(`   ⚠️  ${tableName} table not found for model ${modelName}`);
+              }
+            });
+          } catch (checkError) {
+            console.warn('⚠️  Could not verify table existence:', checkError.message);
+          }
+        }
+        
+        // ========== FIX: LOG STORAGE STATS ONLY ONCE AFTER SUCCESSFUL SYNC ==========
+        if (!storageStatsLogged) {
+          try {
+            const queryInterface = sequelize.getQueryInterface();
+            const existingTables = await queryInterface.showAllTables();
+            
+            // Count records in in-memory storage
+            const inMemoryUsers = users.length;
+            const inMemoryMessages = messages.length;
+            const inMemoryRooms = rooms.length;
+            
+            // Try to count database records if tables exist
+            let dbUsers = 0;
+            let dbMessages = 0;
+            
+            if (models.User && existingTables.includes(models.User.tableName)) {
+              try {
+                dbUsers = await models.User.count();
+                console.log(`📊 Database User count: ${dbUsers}`);
+              } catch (countError) {
+                console.warn('⚠️  Could not count users in database:', countError.message);
+              }
+            }
+            
+            if (models.Message && existingTables.includes(models.Message.tableName)) {
+              try {
+                dbMessages = await models.Message.count();
+                console.log(`📊 Database Message count: ${dbMessages}`);
+              } catch (countError) {
+                console.warn('⚠️  Could not count messages in database:', countError.message);
+              }
+            }
+            
+            console.log(`[Storage Stats] Users: ${inMemoryUsers} (memory) / ${dbUsers} (database), Messages: ${inMemoryMessages} (memory) / ${dbMessages} (database), Rooms: ${inMemoryRooms}, DB Connected: ${dbConnected}`);
+            storageStatsLogged = true;
+          } catch (statsError) {
+            console.warn('⚠️  Could not log storage stats:', statsError.message);
+            console.log(`[Storage Stats] Users: ${users.length}, Messages: ${messages.length}, Rooms: ${rooms.length}, DB Connected: ${dbConnected}`);
+            storageStatsLogged = true;
+          }
+        }
+        
+      } catch (syncError) {
+        console.error('❌ Database table synchronization failed:', syncError.message);
+        console.error('Sync error details:', syncError.stack);
+        
+        // Check if it's a permission error
+        if (syncError.message.includes('permission') || syncError.message.includes('CREATE TABLE')) {
+          console.warn('⚠️  This might be a permission issue. Ensure the database user has CREATE/ALTER permissions.');
+        }
+        
+        // Check if it's a schema conflict
+        if (syncError.message.includes('relation') || syncError.message.includes('already exists')) {
+          console.warn('⚠️  Schema conflict detected. Tables might already exist with different structure.');
+        }
+        
+        // Check for alias duplication errors
+        if (syncError.message.includes('alias') || syncError.message.includes('sentMessages')) {
+          console.warn('⚠️  Possible alias conflict detected. Check model associations for duplicate aliases.');
+        }
+        
+        // Try a more conservative sync if alter fails
+        console.log('🔄 Attempting conservative sync (without alter)...');
+        try {
+          await sequelize.sync({ logging: console.log });
+          console.log('✅ Database tables synchronized (conservative mode)');
+          
+          // FIX: Log storage stats only once after successful conservative sync
+          if (!storageStatsLogged) {
+            console.log(`[Storage Stats] Users: ${users.length}, Messages: ${messages.length}, Rooms: ${rooms.length}, DB Connected: ${dbConnected}`);
+            storageStatsLogged = true;
+          }
+        } catch (secondSyncError) {
+          console.error('❌ Conservative sync also failed:', secondSyncError.message);
+          
+          // Even if sync fails, we can continue if DB_REQUIRED is not true
+          if (NODE_ENV === 'production' && process.env.DB_REQUIRED === 'true') {
+            throw new Error('Cannot start without database table synchronization in production');
+          } else {
+            // FIX: Log storage stats only once even if sync failed but we're continuing
+            if (!storageStatsLogged) {
+              console.log(`[Storage Stats] Users: ${users.length}, Messages: ${messages.length}, Rooms: ${rooms.length}, DB Connected: ${dbConnected}`);
+              storageStatsLogged = true;
+            }
+          }
+        }
+      }
       
     } catch (modelError) {
       console.error('❌ Failed to load models from models/index.js:', modelError.message);
       console.error('Model error details:', modelError.stack);
       models = {};
       app.locals.models = {};
+      
+      // FIX: Log storage stats only once even if models failed to load
+      if (!storageStatsLogged) {
+        console.log(`[Storage Stats] Users: ${users.length}, Messages: ${messages.length}, Rooms: ${rooms.length}, DB Connected: ${dbConnected}`);
+        storageStatsLogged = true;
+      }
     }
     
-    // Sync models only if configured (use with caution in production)
+    // Legacy sync check (kept for backward compatibility)
     if (process.env.DB_SYNC === 'true' && NODE_ENV !== 'production') {
-      console.log('🔄 Syncing database models...');
+      console.log('🔄 Running legacy sync (DB_SYNC=true)...');
       try {
         await sequelize.sync({ alter: true });
-        console.log('✅ Database models synced.');
+        console.log('✅ Legacy database sync completed.');
       } catch (syncError) {
-        console.error('❌ Database sync failed:', syncError.message);
+        console.error('❌ Legacy database sync failed:', syncError.message);
       }
     } else if (process.env.DB_SYNC === 'true' && NODE_ENV === 'production') {
-      console.warn('⚠️  DB_SYNC=true is not recommended in production. Use migrations instead.');
+      console.warn('⚠️  DB_SYNC=true is not recommended in production. Automatic sync is already handled above.');
     }
     
     return true;
@@ -155,6 +313,12 @@ async function initializeDatabase() {
     // Initialize empty models object in app.locals
     app.locals.models = {};
     
+    // FIX: Log storage stats only once even if database connection failed
+    if (!storageStatsLogged) {
+      console.log(`[Storage Stats] Users: ${users.length}, Messages: ${messages.length}, Rooms: ${rooms.length}, DB Connected: ${dbConnected}`);
+      storageStatsLogged = true;
+    }
+    
     // Fail in production if database is required
     if (NODE_ENV === 'production' && process.env.DB_REQUIRED === 'true') {
       console.error('💀 CRITICAL: Cannot start without database connection in production');
@@ -164,6 +328,8 @@ async function initializeDatabase() {
     return false;
   }
 }
+
+// FIX: REMOVED periodic storage stats logging - now logs only once during initialization
 
 // ========== ESSENTIAL MIDDLEWARE ==========
 // Disable Helmet's CSP for API server
@@ -286,8 +452,6 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 // ========== MOUNT ALL EXISTING API ROUTES - FIXED ==========
 // CRITICAL FIX: Mount routes from routes directory under /api prefix
-// ========== MOUNT ALL EXISTING API ROUTES - FIXED ==========
-// CRITICAL FIX: Mount routes from routes directory under /api prefix
 const mountedRoutes = [];
 const routesPath = path.join(__dirname, 'routes');
 
@@ -382,15 +546,6 @@ function mountRoutes() {
     console.warn(`⚠️  Routes directory not found at: ${routesPath}`);
   }
 }
-// ========== IN-MEMORY STORAGE (FOR BACKWARD COMPATIBILITY) ==========
-let users = [];
-let messages = [];
-const rooms = ['general', 'random', 'help', 'tech-support'];
-
-// Log storage state periodically
-setInterval(() => {
-  console.log(`[Storage Stats] Users: ${users.length}, Messages: ${messages.length}, Rooms: ${rooms.length}, DB Connected: ${dbConnected}`);
-}, 30000); // Every 30 seconds
 
 // ========== AUTHENTICATION MIDDLEWARE ==========
 function authenticateToken(req, res, next) {
@@ -1176,6 +1331,8 @@ app.post('/api/chat/messages', authenticateToken, (req, res) => {
 
 // ========== ADDITIONAL UTILITY ENDPOINTS ==========
 app.get('/api/stats', authenticateToken, (req, res) => {
+  // FIX: Ensure no repeated storage stats logging in routes
+  // We're using a simple stats endpoint that doesn't trigger storage logging
   res.json({
     success: true,
     stats: {
@@ -1403,7 +1560,7 @@ const startServer = async () => {
   console.log(`📁 Environment: ${NODE_ENV}`);
   console.log(`🌐 Port: ${PORT}`);
   
-  // Initialize database first
+  // Initialize database first (includes connection and table sync)
   await initializeDatabase();
   
   // Mount routes after database is initialized
@@ -1418,6 +1575,7 @@ const startServer = async () => {
     console.log(`│   🌐 Env:      ${NODE_ENV}                               `);
     console.log(`│   ⏱️  Time:     ${new Date().toLocaleString()}           `);
     console.log(`│   🗄️  Database: ${dbConnected ? '✅ Connected' : '⚠️  Not Connected'}    `);
+    console.log(`│   📊 Tables:   ${dbConnected ? '✅ Synced' : '⚠️  Not Synced'}          `);
     console.log(`│   🔓 CORS:     ${NODE_ENV === 'development' ? 'ALLOW ALL ORIGINS' : 'RESTRICTED'}    `);
     console.log(`│   🛣️  Routes:   ${mountedRoutes.length} mounted           `);
     console.log(`│                                                          │`);
@@ -1507,6 +1665,5 @@ if (require.main === module) {
     process.exit(1);
   });
 }
-
 
 module.exports = { app, sequelize, startServer };

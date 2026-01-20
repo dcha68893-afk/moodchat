@@ -1,3 +1,4 @@
+
 const { Op } = require('sequelize');
 const bcrypt = require('bcryptjs');
 
@@ -41,6 +42,7 @@ class UserController {
             status: user.status || 'offline',
             lastSeen: user.lastSeen,
             createdAt: user.createdAt
+            // Note: password is NOT included
           }));
       }
 
@@ -71,17 +73,7 @@ class UserController {
       });
     } catch (error) {
       console.error('Get all users controller error:', error);
-      
-      // Return 500 error with descriptive JSON if DB fetch fails
-      res.status(500).json({
-        success: false,
-        error: {
-          code: 'DATABASE_ERROR',
-          message: 'Failed to fetch users from database',
-          details: process.env.NODE_ENV === 'development' ? error.message : undefined
-        },
-        timestamp: new Date().toISOString()
-      });
+      return next(error);
     }
   }
 
@@ -95,10 +87,11 @@ class UserController {
       if (req.app.locals.dbConnected && req.app.locals.models && req.app.locals.models.User) {
         try {
           user = await req.app.locals.models.User.findByPk(userId, {
-            attributes: { exclude: ['password'] }
+            attributes: { exclude: ['password'] } // Explicitly exclude password
           });
         } catch (dbError) {
           console.error('Database fetch error:', dbError);
+          return next(dbError);
         }
       }
 
@@ -107,7 +100,7 @@ class UserController {
         const foundUser = req.app.locals.users.find(u => u.id === userId);
         if (foundUser) {
           user = { ...foundUser };
-          delete user.password;
+          delete user.password; // Remove password from in-memory user
         }
       }
 
@@ -140,19 +133,14 @@ class UserController {
             settings: user.settings || {},
             createdAt: user.createdAt,
             updatedAt: user.updatedAt
+            // Note: password is NOT included
           }
         },
         timestamp: new Date().toISOString()
       });
     } catch (error) {
       console.error('Get profile controller error:', error);
-      
-      res.status(500).json({
-        success: false,
-        message: 'Failed to get profile',
-        error: process.env.NODE_ENV === 'development' ? error.message : undefined,
-        timestamp: new Date().toISOString()
-      });
+      return next(error);
     }
   }
 
@@ -199,7 +187,7 @@ class UserController {
           
           if (affectedRows > 0) {
             updatedUser = await req.app.locals.models.User.findByPk(userId, {
-              attributes: { exclude: ['password'] }
+              attributes: { exclude: ['password'] } // Explicitly exclude password
             });
           }
         } catch (dbError) {
@@ -212,6 +200,7 @@ class UserController {
               timestamp: new Date().toISOString()
             });
           }
+          return next(dbError);
         }
       }
 
@@ -225,7 +214,7 @@ class UserController {
             updatedAt: new Date().toISOString()
           };
           updatedUser = { ...req.app.locals.users[userIndex] };
-          delete updatedUser.password;
+          delete updatedUser.password; // Remove password from response
         }
       }
 
@@ -258,6 +247,7 @@ class UserController {
             settings: updatedUser.settings,
             createdAt: updatedUser.createdAt,
             updatedAt: updatedUser.updatedAt
+            // Note: password is NOT included
           }
         },
         timestamp: new Date().toISOString()
@@ -275,12 +265,7 @@ class UserController {
         });
       }
       
-      res.status(500).json({
-        success: false,
-        message: 'Failed to update profile',
-        error: process.env.NODE_ENV === 'development' ? error.message : undefined,
-        timestamp: new Date().toISOString()
-      });
+      return next(error);
     }
   }
 
@@ -332,11 +317,12 @@ class UserController {
           
           if (affectedRows > 0) {
             updatedUser = await req.app.locals.models.User.findByPk(userId, {
-              attributes: ['id', 'username', 'avatar']
+              attributes: ['id', 'username', 'avatar'] // Password not requested
             });
           }
         } catch (dbError) {
           console.error('Database update error:', dbError);
+          return next(dbError);
         }
       }
 
@@ -350,6 +336,7 @@ class UserController {
             id: req.app.locals.users[userIndex].id,
             username: req.app.locals.users[userIndex].username,
             avatar: req.app.locals.users[userIndex].avatar
+            // Note: password is NOT included
           };
         }
       }
@@ -372,13 +359,7 @@ class UserController {
       });
     } catch (error) {
       console.error('Update avatar controller error:', error);
-      
-      res.status(500).json({
-        success: false,
-        message: 'Failed to update avatar',
-        error: process.env.NODE_ENV === 'development' ? error.message : undefined,
-        timestamp: new Date().toISOString()
-      });
+      return next(error);
     }
   }
 
@@ -401,11 +382,12 @@ class UserController {
           
           if (affectedRows > 0) {
             updatedUser = await req.app.locals.models.User.findByPk(userId, {
-              attributes: ['id', 'username', 'avatar']
+              attributes: ['id', 'username', 'avatar'] // Password not requested
             });
           }
         } catch (dbError) {
           console.error('Database update error:', dbError);
+          return next(dbError);
         }
       }
 
@@ -419,6 +401,7 @@ class UserController {
             id: req.app.locals.users[userIndex].id,
             username: req.app.locals.users[userIndex].username,
             avatar: req.app.locals.users[userIndex].avatar
+            // Note: password is NOT included
           };
         }
       }
@@ -441,13 +424,7 @@ class UserController {
       });
     } catch (error) {
       console.error('Remove avatar controller error:', error);
-      
-      res.status(500).json({
-        success: false,
-        message: 'Failed to remove avatar',
-        error: process.env.NODE_ENV === 'development' ? error.message : undefined,
-        timestamp: new Date().toISOString()
-      });
+      return next(error);
     }
   }
 
@@ -500,6 +477,7 @@ class UserController {
           user = await req.app.locals.models.User.findByPk(userId);
         } catch (dbError) {
           console.error('Database fetch error:', dbError);
+          return next(dbError);
         }
       }
 
@@ -544,7 +522,7 @@ class UserController {
           );
         } catch (dbError) {
           console.error('Database update error:', dbError);
-          throw new Error('Failed to update password in database');
+          return next(dbError);
         }
       } else if (req.app.locals.users) {
         const userIndex = req.app.locals.users.findIndex(u => u.id === userId);
@@ -574,12 +552,7 @@ class UserController {
         });
       }
       
-      res.status(500).json({
-        success: false,
-        message: 'Failed to change password',
-        error: process.env.NODE_ENV === 'development' ? error.message : undefined,
-        timestamp: new Date().toISOString()
-      });
+      return next(error);
     }
   }
 
@@ -614,9 +587,11 @@ class UserController {
             },
             limit: parseInt(limit),
             attributes: ['id', 'username', 'firstName', 'lastName', 'avatar', 'email', 'status', 'lastSeen', 'createdAt'],
+            // Note: password is NOT included in attributes
           });
         } catch (dbError) {
           console.error('Database search error:', dbError);
+          return next(dbError);
         }
       }
 
@@ -643,6 +618,7 @@ class UserController {
             status: user.status || 'offline',
             lastSeen: user.lastSeen,
             createdAt: user.createdAt
+            // Note: password is NOT included
           }));
       }
 
@@ -669,13 +645,7 @@ class UserController {
       });
     } catch (error) {
       console.error('Search users controller error:', error);
-      
-      res.status(500).json({
-        success: false,
-        message: 'Search failed',
-        error: process.env.NODE_ENV === 'development' ? error.message : undefined,
-        timestamp: new Date().toISOString()
-      });
+      return next(error);
     }
   }
 
@@ -689,10 +659,11 @@ class UserController {
       if (req.app.locals.dbConnected && req.app.locals.models && req.app.locals.models.User) {
         try {
           user = await req.app.locals.models.User.findByPk(userId, {
-            attributes: ['id', 'status', 'lastSeen']
+            attributes: ['id', 'status', 'lastSeen'] // Password not requested
           });
         } catch (dbError) {
           console.error('Database fetch error:', dbError);
+          return next(dbError);
         }
       }
 
@@ -728,13 +699,7 @@ class UserController {
       });
     } catch (error) {
       console.error('Get user status controller error:', error);
-      
-      res.status(500).json({
-        success: false,
-        message: 'Failed to get user status',
-        error: process.env.NODE_ENV === 'development' ? error.message : undefined,
-        timestamp: new Date().toISOString()
-      });
+      return next(error);
     }
   }
 
@@ -777,11 +742,12 @@ class UserController {
           
           if (affectedRows > 0) {
             updatedUser = await req.app.locals.models.User.findByPk(userId, {
-              attributes: ['id', 'status', 'lastSeen']
+              attributes: ['id', 'status', 'lastSeen'] // Password not requested
             });
           }
         } catch (dbError) {
           console.error('Database update error:', dbError);
+          return next(dbError);
         }
       }
 
@@ -820,13 +786,7 @@ class UserController {
       });
     } catch (error) {
       console.error('Update status controller error:', error);
-      
-      res.status(500).json({
-        success: false,
-        message: 'Failed to update status',
-        error: process.env.NODE_ENV === 'development' ? error.message : undefined,
-        timestamp: new Date().toISOString()
-      });
+      return next(error);
     }
   }
 
@@ -840,10 +800,11 @@ class UserController {
       if (req.app.locals.dbConnected && req.app.locals.models && req.app.locals.models.User) {
         try {
           user = await req.app.locals.models.User.findByPk(userId, {
-            attributes: ['id', 'settings']
+            attributes: ['id', 'settings'] // Password not requested
           });
         } catch (dbError) {
           console.error('Database fetch error:', dbError);
+          return next(dbError);
         }
       }
 
@@ -895,13 +856,7 @@ class UserController {
       });
     } catch (error) {
       console.error('Get settings controller error:', error);
-      
-      res.status(500).json({
-        success: false,
-        message: 'Failed to get settings',
-        error: process.env.NODE_ENV === 'development' ? error.message : undefined,
-        timestamp: new Date().toISOString()
-      });
+      return next(error);
     }
   }
 
@@ -947,11 +902,12 @@ class UserController {
           
           if (affectedRows > 0) {
             updatedUser = await req.app.locals.models.User.findByPk(userId, {
-              attributes: ['id', 'settings']
+              attributes: ['id', 'settings'] // Password not requested
             });
           }
         } catch (dbError) {
           console.error('Database update error:', dbError);
+          return next(dbError);
         }
       }
 
@@ -986,13 +942,7 @@ class UserController {
       });
     } catch (error) {
       console.error('Update settings controller error:', error);
-      
-      res.status(500).json({
-        success: false,
-        message: 'Failed to update settings',
-        error: process.env.NODE_ENV === 'development' ? error.message : undefined,
-        timestamp: new Date().toISOString()
-      });
+      return next(error);
     }
   }
 
@@ -1030,7 +980,7 @@ class UserController {
           );
         } catch (dbError) {
           console.error('Database deactivation error:', dbError);
-          throw new Error('Failed to deactivate account in database');
+          return next(dbError);
         }
       }
 
@@ -1054,13 +1004,7 @@ class UserController {
       });
     } catch (error) {
       console.error('Deactivate account controller error:', error);
-      
-      res.status(500).json({
-        success: false,
-        message: 'Failed to deactivate account',
-        error: process.env.NODE_ENV === 'development' ? error.message : undefined,
-        timestamp: new Date().toISOString()
-      });
+      return next(error);
     }
   }
 
@@ -1084,9 +1028,11 @@ class UserController {
         try {
           user = await req.app.locals.models.User.findByPk(userId, {
             attributes: ['id', 'username', 'email', 'avatar', 'firstName', 'lastName', 'bio', 'status', 'lastSeen', 'isActive', 'createdAt']
+            // Note: password is NOT included
           });
         } catch (dbError) {
           console.error('Database lookup error:', dbError);
+          return next(dbError);
         }
       }
 
@@ -1106,6 +1052,7 @@ class UserController {
             lastSeen: foundUser.lastSeen,
             isActive: foundUser.isActive !== false,
             createdAt: foundUser.createdAt
+            // Note: password is NOT included
           };
         }
       }
@@ -1190,16 +1137,11 @@ class UserController {
         });
       }
       
-      res.status(500).json({
-        success: false,
-        message: 'Failed to get user',
-        error: process.env.NODE_ENV === 'development' ? error.message : undefined,
-        timestamp: new Date().toISOString()
-      });
+      return next(error);
     }
   }
 
-  async getCurrentUserSimple(req, res) {
+  async getCurrentUserSimple(req, res, next) {
     try {
       if (!req.user) {
         return res.status(401).json({
@@ -1216,9 +1158,11 @@ class UserController {
         try {
           user = await req.app.locals.models.User.findByPk(req.user.userId, {
             attributes: ['id', 'email', 'username', 'avatar', 'firstName', 'lastName', 'createdAt']
+            // Note: password is NOT included
           });
         } catch (dbError) {
           console.error('Database lookup error:', dbError);
+          return next(dbError);
         }
       }
 
@@ -1234,6 +1178,7 @@ class UserController {
             firstName: foundUser.firstName,
             lastName: foundUser.lastName,
             createdAt: foundUser.createdAt
+            // Note: password is NOT included
           };
         }
       }
@@ -1263,12 +1208,7 @@ class UserController {
       
     } catch (error) {
       console.error('Get current user simple error:', error);
-      
-      return res.status(500).json({
-        success: false,
-        message: 'Failed to get user profile',
-        timestamp: new Date().toISOString()
-      });
+      return next(error);
     }
   }
 }

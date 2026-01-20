@@ -98,6 +98,7 @@ module.exports = (sequelize, DataTypes) => {
       tableName: 'tokens',
       timestamps: true,
       underscored: true,
+      freezeTableName: true,
       indexes: [
         {
           fields: ['user_id'],
@@ -150,55 +151,29 @@ module.exports = (sequelize, DataTypes) => {
 
   // ===== ASSOCIATIONS =====
   Token.associate = function(models) {
-    Token.belongsTo(models.User, {
-      foreignKey: 'userId',
-      as: 'user',
-      onDelete: 'CASCADE'
-    });
+    // All associations moved to models/index.js
   };
 
   // ===== INSTANCE METHODS =====
 
-  /**
-   * Check if the token is expired
-   * @returns {boolean} True if token is expired
-   */
   Token.prototype.isExpired = function () {
     return this.expiresAt < new Date();
   };
 
-  /**
-   * Check if the token is valid (not revoked and not expired)
-   * @returns {boolean} True if token is valid
-   */
   Token.prototype.isValid = function () {
     return !this.isRevoked && !this.isExpired();
   };
 
-  /**
-   * Revoke the token
-   * @returns {Promise<Token>} Updated token instance
-   */
   Token.prototype.revoke = async function () {
     this.isRevoked = true;
     return await this.save();
   };
 
-  /**
-   * Extend the token's expiration time
-   * @param {number} additionalTimeMs - Additional time in milliseconds
-   * @returns {Promise<Token>} Updated token instance
-   */
   Token.prototype.extend = async function (additionalTimeMs) {
     this.expiresAt = new Date(this.expiresAt.getTime() + additionalTimeMs);
     return await this.save();
   };
 
-  /**
-   * Update device information
-   * @param {Object} deviceInfo - Device information object
-   * @returns {Promise<Token>} Updated token instance
-   */
   Token.prototype.updateDeviceInfo = async function (deviceInfo) {
     this.deviceInfo = { ...this.deviceInfo, ...deviceInfo };
     return await this.save();
@@ -206,12 +181,6 @@ module.exports = (sequelize, DataTypes) => {
 
   // ===== STATIC METHODS =====
 
-  /**
-   * Find token by token string
-   * @param {string} tokenString - The token string
-   * @param {boolean} includeUser - Whether to include user data
-   * @returns {Promise<Token|null>} Found token or null
-   */
   Token.findByToken = async function (tokenString, includeUser = false) {
     if (!tokenString) {
       throw new Error('Token string is required');
@@ -233,12 +202,6 @@ module.exports = (sequelize, DataTypes) => {
     return await this.findOne(options);
   };
 
-  /**
-   * Find all valid tokens for a user
-   * @param {number} userId - User ID
-   * @param {string|null} tokenType - Optional token type filter
-   * @returns {Promise<Array<Token>>} Array of valid tokens
-   */
   Token.findValidByUserId = async function (userId, tokenType = null) {
     if (!userId) {
       throw new Error('User ID is required');
@@ -261,12 +224,6 @@ module.exports = (sequelize, DataTypes) => {
     });
   };
 
-  /**
-   * Revoke all tokens for a user except optionally one token
-   * @param {number} userId - User ID
-   * @param {string|null} exceptToken - Token to exclude from revocation
-   * @returns {Promise<number>} Number of revoked tokens
-   */
   Token.revokeAllUserTokens = async function (userId, exceptToken = null) {
     if (!userId) {
       throw new Error('User ID is required');
@@ -286,11 +243,6 @@ module.exports = (sequelize, DataTypes) => {
     return affectedRows;
   };
 
-  /**
-   * Revoke a specific token
-   * @param {string} tokenString - Token string to revoke
-   * @returns {Promise<number>} Number of revoked tokens (0 or 1)
-   */
   Token.revokeToken = async function (tokenString) {
     if (!tokenString) {
       throw new Error('Token string is required');
@@ -303,10 +255,6 @@ module.exports = (sequelize, DataTypes) => {
     return affectedRows;
   };
 
-  /**
-   * Clean up expired tokens from database
-   * @returns {Promise<number>} Number of deleted tokens
-   */
   Token.cleanupExpiredTokens = async function () {
     const { Op } = this.sequelize.Sequelize;
     return await this.destroy({
@@ -316,21 +264,10 @@ module.exports = (sequelize, DataTypes) => {
     });
   };
 
-  /**
-   * Generate a random token string
-   * @param {number} length - Length of token in bytes (default: 64)
-   * @returns {string} Random token string
-   */
   Token.generateRandomToken = function (length = 64) {
     return crypto.randomBytes(length).toString('hex');
   };
 
-  /**
-   * Create access and refresh tokens for a user
-   * @param {number} userId - User ID
-   * @param {Object} options - Options including userAgent, ipAddress, deviceInfo
-   * @returns {Promise<{accessToken: Token, refreshToken: Token}>} Created tokens
-   */
   Token.createTokenPair = async function (userId, options = {}) {
     if (!userId) {
       throw new Error('User ID is required');
@@ -364,11 +301,6 @@ module.exports = (sequelize, DataTypes) => {
     };
   };
 
-  /**
-   * Verify and return valid token with user
-   * @param {string} tokenString - Token string
-   * @returns {Promise<Token|null>} Valid token with user or null
-   */
   Token.verify = async function (tokenString) {
     if (!tokenString) {
       return null;

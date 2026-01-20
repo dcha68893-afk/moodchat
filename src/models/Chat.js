@@ -67,6 +67,7 @@ module.exports = (sequelize, DataTypes) => {
       tableName: 'chats',
       timestamps: true,
       underscored: true,
+      freezeTableName: true,
       indexes: [
         {
           fields: ['type'],
@@ -162,16 +163,7 @@ module.exports = (sequelize, DataTypes) => {
 
   // Add association method
   Chat.associate = function (models) {
-    Chat.hasMany(models.Message, { foreignKey: 'chatId', as: 'messages' });
-    Chat.hasOne(models.Group, { foreignKey: 'chatId', as: 'group' });
-    Chat.hasMany(models.Call, { foreignKey: 'chatId', as: 'calls' });
-    Chat.hasMany(models.TypingIndicator, { foreignKey: 'chatId', as: 'typingIndicators' });
-    Chat.belongsToMany(models.User, {
-      through: models.ChatParticipant,
-      as: 'participants',
-      foreignKey: 'chatId',
-    });
-    Chat.belongsTo(models.Message, { foreignKey: 'lastMessageId', as: 'lastMessage' });
+    // All associations moved to models/index.js
   };
 
   return Chat;
