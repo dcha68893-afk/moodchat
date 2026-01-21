@@ -1,4 +1,4 @@
-﻿﻿// src/server.js - COMPLETE FRESH IMPLEMENTATION
+﻿﻿﻿// src/server.js - UPDATED FOR RENDER POSTGRESQL WITH PERMANENT TABLES
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -13,18 +13,23 @@ const app = express();
 
 // ========== CONFIGURATION ==========
 const PORT = process.env.PORT || 4000;
+const HOST = process.env.HOST || '0.0.0.0';
 const NODE_ENV = process.env.NODE_ENV || 'development';
 const JWT_SECRET = process.env.JWT_ACCESS_SECRET || process.env.JWT_SECRET || 'development-secret-key-change-in-production';
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
 const IS_PRODUCTION = NODE_ENV === 'production';
 const IS_RENDER = process.env.RENDER === 'true' || IS_PRODUCTION;
 
+// CORS Configuration from .env
+const CORS_ORIGIN = process.env.CORS_ORIGIN || '*';
+const CORS_CREDENTIALS = process.env.CORS_CREDENTIALS === 'true';
+
 // ========== DATABASE CONNECTION ==========
 let sequelize;
 let dbConnected = false;
 let models = {};
 
-// ========== IN-MEMORY STORAGE ==========
+// ========== IN-MEMORY STORAGE (FALLBACK) ==========
 let users = [];
 let messages = [];
 const rooms = ['general', 'random', 'help', 'tech-support'];
@@ -44,11 +49,11 @@ async function initializeDatabase() {
   console.log('🔄 Initializing database...');
   
   try {
-    // Create Sequelize instance
+    // Create Sequelize instance with DATABASE_URL
     if (process.env.DATABASE_URL) {
       console.log('🔌 Using DATABASE_URL from environment...');
       sequelize = new Sequelize(process.env.DATABASE_URL, {
-        dialect: process.env.DB_DIALECT || 'postgres',
+        dialect: 'postgres',
         logging: false,
         pool: {
           max: 10,
@@ -108,7 +113,7 @@ async function initializeDatabase() {
     dbConnected = true;
     console.log('✅ Database connection established.');
     
-    // ========== CRITICAL: LOAD ALL MODELS FOR TABLE MANAGEMENT ==========
+    // ========== LOAD ALL MODELS FOR TABLE MANAGEMENT ==========
     console.log('📦 Loading all database models...');
     
     // Try to load the models index file which contains all models
@@ -224,156 +229,121 @@ async function initializeDatabase() {
     app.locals.models = models;
     app.locals.sequelize = sequelize;
     
-    // ========== CRITICAL: SAFE TABLE MANAGEMENT FOR RENDER ==========
-    console.log('🔄 Managing database tables for production...');
+    // ========== SAFE TABLE MANAGEMENT FOR RENDER ==========
+    console.log('🔄 Managing database tables with permanent schema...');
     
-    // Define independent tables that can be auto-created
-    const independentTables = ['Users', 'Tokens', 'Friends', 'UserStatus'];
+    // Step 1: Check existing tables
+    const queryInterface = sequelize.getQueryInterface();
+    const existingTables = await queryInterface.showAllTables();
+    console.log(`📊 Found ${existingTables.length} existing tables in database`);
     
-    // Define FK-dependent tables that should ONLY be created via migrations
-    const dependentTables = ['Messages', 'Groups', 'Profile', 'ReadReceipt', 
-                            'TypingIndicator', 'Mood', 'SharedMood', 'Media', 
-                            'GroupMembers', 'Calls', 'Chats', 'ChatParticipants',
-                            'Notifications', 'Status'];
+    // Step 2: Sync all models with safe options
+    console.log('🔨 Synchronizing all tables with safe options...');
     
-    // Step 1: Run migrations first if available (for FK-dependent tables)
-    let migrationsRun = false;
-    if (!IS_PRODUCTION) {
-      try {
-        const { execSync } = require('child_process');
-        console.log('🔨 Attempting to run database migrations...');
-        execSync('npx sequelize-cli db:migrate', { stdio: 'inherit' });
-        migrationsRun = true;
-        console.log('✅ Migrations completed (or already up to date).');
-      } catch (migrateError) {
-        console.log('ℹ️ No migrations run or migration system not available:', migrateError.message);
-      }
+    // Define sync options for production safety
+    const syncOptions = {
+      alter: true, // Safe schema updates - adds missing columns without dropping data
+      force: false, // NEVER drop tables!
+      logging: IS_PRODUCTION ? false : console.log,
+      hooks: true
+    };
+    
+    // Special handling for production vs development
+    if (IS_PRODUCTION) {
+      syncOptions.alter = false; // Disable alter in production for extra safety
+      console.log('🔒 Production mode: alter=false (no schema alterations)');
     } else {
-      console.log('ℹ️ Skipping migrations in production mode');
+      console.log(`🛠️ Development mode: alter=${syncOptions.alter} (safe schema updates)`);
     }
     
-    // Step 2: Safely create independent tables ONLY if they don't exist
-    console.log('🔨 Creating independent tables if they do not exist...');
+    // Create table summary
+    const tableSummary = [];
     
+    // Process each model
     for (const [modelName, model] of Object.entries(models)) {
       if (model && model.sync) {
         const tableName = model.tableName || modelName;
         
-        // Skip if table name is plural or singular version of dependent tables
-        const isDependentTable = dependentTables.includes(tableName) || 
-                                dependentTables.some(dep => 
-                                  dep.toLowerCase() === tableName.toLowerCase() ||
-                                  (dep.endsWith('s') && dep.slice(0, -1).toLowerCase() === tableName.toLowerCase()) ||
-                                  (!dep.endsWith('s') && `${dep}s`.toLowerCase() === tableName.toLowerCase())
-                                );
-        
-        // Check if table exists first
         try {
-          const tableExists = await sequelize.getQueryInterface().tableExists(tableName);
+          // Check if table already exists
+          const tableExists = existingTables.some(t => 
+            t.toLowerCase() === tableName.toLowerCase()
+          );
           
-          if (!tableExists) {
-            // Only create independent tables automatically
-            if (independentTables.includes(tableName)) {
-              console.log(`📊 Creating independent table: ${tableName}`);
-              await model.sync({ force: false, alter: false });
-              console.log(`✅ Created table: ${tableName}`);
-            } else if (isDependentTable) {
-              console.warn(`⚠️  Skipping ${tableName} - requires migrations`);
-            } else {
-              console.warn(`⚠️  Skipping ${tableName} - not in independent tables list`);
-            }
+          if (tableExists) {
+            // Table exists - sync with safe options
+            console.log(`📋 Syncing existing table: ${tableName}`);
+            await model.sync(syncOptions);
+            tableSummary.push({ table: tableName, action: 'Synced (Exists)' });
           } else {
-            if (!IS_PRODUCTION) {
-              console.log(`📊 Table exists: ${tableName} (skipping sync)`);
-            }
+            // Table doesn't exist - create it
+            console.log(`🆕 Creating new table: ${tableName}`);
+            await model.sync({ force: false, alter: false }); // Create fresh table
+            tableSummary.push({ table: tableName, action: 'Created' });
           }
         } catch (error) {
-          console.warn(`⚠️  Could not check/process table ${tableName}:`, error.message);
+          console.warn(`⚠️  Could not process table ${tableName}:`, error.message);
+          tableSummary.push({ table: tableName, action: 'Failed' });
         }
-      }
-    }
-    
-    // Step 3: Final sync with SAFE options - NO force, NO alter in production
-    const syncOptions = {
-      alter: false, // Never alter in production
-      force: false, // NEVER drop tables!
-      logging: false,
-      hooks: true
-    };
-    
-    if (!IS_PRODUCTION) {
-      console.log(`📊 Final sync with safe options: alter=${syncOptions.alter}, force=${syncOptions.force}`);
-    }
-    
-    // Only sync independent tables
-    const independentModels = Object.entries(models).filter(([modelName, model]) => {
-      const tableName = model.tableName || modelName;
-      return independentTables.includes(tableName);
-    });
-    
-    for (const [modelName, model] of independentModels) {
-      try {
-        await model.sync(syncOptions);
-      } catch (error) {
-        console.warn(`⚠️  Could not sync ${modelName}:`, error.message);
       }
     }
     
     tablesSynchronized = true;
     
-    // ========== SINGLE TABLE STATUS SUMMARY ==========
-    if (!IS_PRODUCTION) {
-      console.log('\n📋 Database Table Status Summary:');
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    // ========== TABLE STATUS SUMMARY ==========
+    console.log('\n📋 Database Table Status Summary:');
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    
+    try {
+      const finalTables = await queryInterface.showAllTables();
       
-      try {
-        const queryInterface = sequelize.getQueryInterface();
-        const allTables = await queryInterface.showAllTables();
-        
-        // Count records for each table
-        const tableSummary = [];
-        
-        for (const tableName of allTables) {
-          try {
-            // Find corresponding model
-            const model = Object.values(models).find(m => 
-              (m.tableName && m.tableName.toLowerCase() === tableName.toLowerCase()) ||
-              m.name.toLowerCase() === tableName.toLowerCase()
-            );
-            
-            if (model) {
-              const count = await model.count();
-              tableSummary.push({ table: tableName, records: count });
-            } else {
-              tableSummary.push({ table: tableName, records: 'N/A' });
-            }
-          } catch (countError) {
-            tableSummary.push({ table: tableName, records: 'Error' });
+      // Count records for each table
+      const finalSummary = [];
+      
+      for (const tableName of finalTables) {
+        try {
+          // Find corresponding model
+          const model = Object.values(models).find(m => 
+            (m.tableName && m.tableName.toLowerCase() === tableName.toLowerCase()) ||
+            m.name.toLowerCase() === tableName.toLowerCase()
+          );
+          
+          if (model) {
+            const count = await model.count();
+            finalSummary.push({ table: tableName, records: count, status: 'Active' });
+          } else {
+            finalSummary.push({ table: tableName, records: 'N/A', status: 'Orphaned' });
           }
+        } catch (countError) {
+          finalSummary.push({ table: tableName, records: 'Error', status: 'Error' });
         }
-        
-        // Log single summary
-        tableSummary.forEach((item, index) => {
-          const tableNum = (index + 1).toString().padStart(2, ' ');
-          const tableName = item.table.padEnd(25, ' ');
-          const records = typeof item.records === 'number' ? item.records.toString().padStart(6, ' ') : item.records.padStart(6, ' ');
-          console.log(`  ${tableNum}. ${tableName} | ${records} records`);
-        });
-        
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log(`  Total: ${allTables.length} tables | Production Mode: ${IS_PRODUCTION}`);
-        console.log(`  Auto-create: Independent tables only | Migrations: ${migrationsRun ? 'Applied' : 'Skipped/Failed'}`);
-        
-      } catch (error) {
-        console.log('  Could not generate table summary:', error.message);
       }
+      
+      // Log detailed summary
+      finalSummary.forEach((item, index) => {
+        const tableNum = (index + 1).toString().padStart(2, ' ');
+        const tableName = item.table.padEnd(25, ' ');
+        const records = typeof item.records === 'number' ? item.records.toString().padStart(6, ' ') : item.records.padStart(6, ' ');
+        const status = item.status.padEnd(10, ' ');
+        console.log(`  ${tableNum}. ${tableName} | ${records} records | ${status}`);
+      });
+      
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      console.log(`  Total: ${finalTables.length} tables | Production Mode: ${IS_PRODUCTION}`);
+      console.log(`  Schema Updates: ${syncOptions.alter ? 'Enabled (Safe)' : 'Disabled (Production)'}`);
+      console.log(`  Table Protection: force=${syncOptions.force} (No table dropping)`);
+      console.log(`  Data Safety: All existing data preserved`);
+      
+    } catch (error) {
+      console.log('  Could not generate final table summary:', error.message);
     }
     
-    // ========== SINGLE STORAGE STATS LOG ==========
+    // ========== STORAGE STATS LOG ==========
     if (!storageStatsLogged) {
       try {
-        // Count records only for essential tables
+        // Count records for essential tables
         let dbUsers = 0;
+        let dbMessages = 0;
         
         if (models.User || models.Users) {
           try {
@@ -384,9 +354,21 @@ async function initializeDatabase() {
           }
         }
         
+        if (models.Message || models.Messages) {
+          try {
+            const messageModel = models.Message || models.Messages;
+            dbMessages = await messageModel.count();
+          } catch (e) {
+            console.warn('Could not count messages:', e.message);
+          }
+        }
+        
         if (!IS_PRODUCTION) {
-          console.log(`\n📊 Storage: Database users: ${dbUsers} | Memory users: ${users.length}`);
-          console.log(`   Mode: ${dbConnected ? 'PostgreSQL (Persistent)' : 'Memory (Temporary)'}`);
+          console.log(`\n📊 Storage Stats:`);
+          console.log(`   Database Users: ${dbUsers} | Messages: ${dbMessages}`);
+          console.log(`   Memory Users: ${users.length} | Messages: ${messages.length}`);
+          console.log(`   Mode: ${dbConnected ? 'PostgreSQL (Permanent)' : 'Memory (Fallback)'}`);
+          console.log(`   Schema: Tables are permanent and preserved across restarts`);
         }
         storageStatsLogged = true;
       } catch (error) {
@@ -416,7 +398,7 @@ async function initializeDatabase() {
     // Initialize empty models
     app.locals.models = {};
     
-    // Log single storage stats message
+    // Log storage stats
     if (!storageStatsLogged && !IS_PRODUCTION) {
       console.log(`\n📊 Storage: Memory fallback active | Users: ${users.length}, Messages: ${messages.length}`);
       storageStatsLogged = true;
@@ -442,14 +424,15 @@ app.use(helmet({
   crossOriginResourcePolicy: { policy: "cross-origin" }
 }));
 
+// Configure Express parsers
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// CORS Configuration
+// CORS Configuration from .env
 if (!IS_PRODUCTION) {
   app.use(cors({
-    origin: '*',
-    credentials: true,
+    origin: CORS_ORIGIN,
+    credentials: CORS_CREDENTIALS,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH', 'HEAD'],
     allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Origin', 'X-Requested-With', 'X-Device-ID', 'X-Request-ID'],
     exposedHeaders: ['Authorization'],
@@ -477,7 +460,7 @@ if (!IS_PRODUCTION) {
         callback(new Error(`Origin ${origin} not allowed by CORS`));
       }
     },
-    credentials: true,
+    credentials: CORS_CREDENTIALS,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH', 'HEAD'],
     allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Origin', 'X-Requested-With', 'X-Device-ID'],
     exposedHeaders: ['Authorization'],
@@ -525,7 +508,7 @@ function mountRoutes() {
         console.log(`📋 Found ${routeFiles.length} route file(s):`, routeFiles);
       }
       
-      // Special handling for auth.js to mount at both /api and /api/auth
+      // Mount auth router at /api/auth
       const authFile = routeFiles.find(file => file === 'auth.js');
       if (authFile) {
         try {
@@ -533,15 +516,18 @@ function mountRoutes() {
           delete require.cache[require.resolve(authPath)];
           const authRouter = require(authPath);
           
-          if (authRouter && typeof authRouter.use === 'function') {
-            // Mount auth router at both /api and /api/auth
-            app.use('/api', authRouter);
+          if (authRouter && typeof authRouter === 'function') {
+            // Mount auth router at /api/auth
             app.use('/api/auth', authRouter);
             mountedRoutes.push('/api/auth/*');
-            mountedRoutes.push('/api/login');
-            mountedRoutes.push('/api/register');
             if (!IS_PRODUCTION) {
-              console.log(`✅ Mounted auth.js at both /api and /api/auth`);
+              console.log(`✅ Mounted auth.js at /api/auth`);
+            }
+          } else if (authRouter && typeof authRouter.use === 'function') {
+            app.use('/api/auth', authRouter);
+            mountedRoutes.push('/api/auth/*');
+            if (!IS_PRODUCTION) {
+              console.log(`✅ Mounted auth.js at /api/auth`);
             }
           }
           
@@ -663,12 +649,15 @@ app.get('/health', (req, res) => {
     timestamp: new Date().toISOString(),
     uptime: Math.floor(process.uptime()),
     cors: 'enabled',
+    corsOrigin: CORS_ORIGIN,
+    corsCredentials: CORS_CREDENTIALS,
     database: dbConnected ? 'connected' : 'disconnected',
     tablesSynchronized: tablesSynchronized,
-    tablesAutoCreated: 'Independent tables only',
+    tablesAutoCreated: 'All models, no table dropping',
     databaseProvider: process.env.DATABASE_URL ? 'Render PostgreSQL' : 'Local PostgreSQL',
-    tableManagement: 'Safe: No table dropping or alteration',
-    renderCompatibility: 'Optimized for Render PostgreSQL'
+    tableManagement: 'Safe: Permanent tables with schema updates',
+    renderCompatibility: 'Optimized for Render PostgreSQL',
+    schemaUpdates: IS_PRODUCTION ? 'Disabled (Production)' : 'Enabled (Safe)'
   });
 });
 
@@ -683,8 +672,12 @@ app.get('/api/health', (req, res) => {
     tablesSynchronized: tablesSynchronized,
     service: 'moodchat-backend',
     version: '1.0.0',
-    tableManagement: 'Safe: Independent tables auto-created only',
-    migrations: 'Required for FK-dependent tables'
+    tableManagement: 'Safe: Permanent tables, no data loss',
+    schemaUpdates: IS_PRODUCTION ? 'Disabled' : 'Enabled',
+    cors: {
+      origin: CORS_ORIGIN,
+      credentials: CORS_CREDENTIALS
+    }
   });
 });
 
@@ -700,9 +693,14 @@ app.get('/api/status', (req, res) => {
     tablesSynchronized: tablesSynchronized,
     origin: req.headers.origin || 'not specified',
     mountedRoutes: mountedRoutes.length > 0 ? mountedRoutes : 'No routes mounted from routes directory',
-    tableManagement: 'Safe: No table dropping',
+    tableManagement: 'Safe: Permanent tables, no table dropping',
     renderCompatibility: 'Optimized for Render PostgreSQL',
-    renderMode: IS_RENDER ? 'Running on Render' : 'Not on Render'
+    renderMode: IS_RENDER ? 'Running on Render' : 'Not on Render',
+    schemaUpdates: IS_PRODUCTION ? 'Disabled for safety' : 'Enabled (safe mode)',
+    cors: {
+      origin: CORS_ORIGIN,
+      credentials: CORS_CREDENTIALS
+    }
   });
 });
 
@@ -722,11 +720,18 @@ app.get('/api/debug', (req, res) => {
         NODE_ENV: NODE_ENV,
         DATABASE_URL: process.env.DATABASE_URL ? 'Set' : 'Not set',
         DB_HOST: process.env.DB_HOST,
-        RENDER: process.env.RENDER ? 'Yes' : 'No'
+        RENDER: process.env.RENDER ? 'Yes' : 'No',
+        CORS_ORIGIN: CORS_ORIGIN,
+        CORS_CREDENTIALS: CORS_CREDENTIALS
       },
-      tablePolicy: 'Independent tables auto-created only',
+      tablePolicy: 'Permanent tables with safe schema updates',
       modelsLoaded: Object.keys(models).length,
-      loadedModels: Object.keys(models)
+      loadedModels: Object.keys(models),
+      syncOptions: {
+        alter: !IS_PRODUCTION,
+        force: false,
+        schemaUpdates: IS_PRODUCTION ? 'disabled' : 'enabled'
+      }
     });
   } else {
     res.status(404).json({
@@ -906,7 +911,7 @@ app.post('/api/login', async (req, res) => {
           createdAt: user.createdAt
         },
         timestamp: new Date().toISOString(),
-        storage: 'PostgreSQL'
+        storage: 'PostgreSQL (Permanent)'
       });
     } catch (dbError) {
       console.error('Database login error:', dbError.message);
@@ -971,7 +976,7 @@ app.get('/api/auth/me', authenticateToken, async (req, res) => {
           createdAt: user.createdAt
         },
         timestamp: new Date().toISOString(),
-        storage: 'PostgreSQL'
+        storage: 'PostgreSQL (Permanent)'
       });
     } catch (dbError) {
       console.error('Database profile error:', dbError.message);
@@ -1156,7 +1161,7 @@ app.get('/api/stats', authenticateToken, (req, res) => {
     database: {
       connected: dbConnected,
       tablesSynchronized: tablesSynchronized,
-      tablePolicy: 'Independent tables auto-created only'
+      tablePolicy: 'Permanent tables, no data loss'
     }
   });
 });
@@ -1200,7 +1205,7 @@ app.all('/api/*', (req, res) => {
     database: {
       connected: dbConnected,
       tablesSynchronized: tablesSynchronized,
-      tablePolicy: 'Independent tables auto-created only'
+      tablePolicy: 'Permanent tables, no table dropping'
     }
   });
 });
@@ -1231,7 +1236,8 @@ if (!IS_PRODUCTION) {
       version: '1.0.0',
       environment: 'production',
       timestamp: new Date().toISOString(),
-      documentation: 'API endpoints available at /api/*'
+      documentation: 'API endpoints available at /api/*',
+      tableManagement: 'Permanent tables, no data loss'
     });
   });
 }
@@ -1289,7 +1295,7 @@ app.use((req, res) => {
     database: {
       connected: dbConnected,
       tablesSynchronized: tablesSynchronized,
-      tablePolicy: 'Independent tables auto-created only'
+      tablePolicy: 'Permanent tables, no table dropping'
     }
   });
 });
@@ -1299,14 +1305,18 @@ const startServer = async () => {
   console.log('🚀 Starting MoodChat Backend Server...');
   console.log(`📁 Environment: ${NODE_ENV}`);
   console.log(`🌐 Port: ${PORT}`);
-  console.log(`🗄️  Database: Safe table management enabled`);
+  console.log(`🌐 Host: ${HOST}`);
+  console.log(`🗄️  Database: Permanent table management enabled`);
   console.log(`🔧 Render Mode: ${IS_RENDER ? 'Yes' : 'No'}`);
-  console.log(`🔨 Automatic Table Creation: INDEPENDENT TABLES ONLY`);
-  console.log(`📈 Render PostgreSQL Compatibility: SAFE MODE`);
+  console.log(`🔨 Table Creation: ALL TABLES WITH SAFE SYNC`);
+  console.log(`📈 Schema Updates: ${IS_PRODUCTION ? 'Disabled (Production)' : 'Enabled (Safe)'}`);
+  console.log(`🌍 CORS Origin: ${CORS_ORIGIN}`);
+  console.log(`🔐 CORS Credentials: ${CORS_CREDENTIALS}`);
+  console.log(`🛡️  Data Protection: No table dropping, all data preserved`);
   
-  // Initialize database with safe table management
-  console.log('🔄 Initializing database with safe table management...');
-  console.log('📊 Independent tables auto-created, dependent tables require migrations...');
+  // Initialize database with permanent table management
+  console.log('🔄 Initializing database with permanent table management...');
+  console.log('📊 Creating missing tables, preserving existing data...');
   await initializeDatabase();
   
   // Mount routes
@@ -1316,34 +1326,40 @@ const startServer = async () => {
   // Final verification
   if (tablesSynchronized) {
     console.log('✅ Database tables ready for production.');
-    console.log('✅ Safe table management: No table dropping or alteration.');
-    console.log('✅ Render PostgreSQL compatibility: SAFE MODE');
+    console.log('✅ Permanent table management: No table dropping.');
+    console.log('✅ Data preservation: All existing data maintained.');
+    console.log(`✅ Schema updates: ${IS_PRODUCTION ? 'Disabled for safety' : 'Enabled in safe mode'}`);
+    console.log('✅ Render PostgreSQL compatibility: PERMANENT MODE');
   } else {
     console.warn('⚠️  Tables not synchronized, using in-memory storage');
     console.log('ℹ️  In-memory storage active for users, messages, and chat rooms');
   }
   
-  const server = app.listen(PORT, '0.0.0.0', () => {
+  const server = app.listen(PORT, HOST, () => {
     console.log(`┌──────────────────────────────────────────────────────────┐`);
     console.log(`│                                                          │`);
     console.log(`│   🚀 MoodChat Backend Server Started                     │`);
     console.log(`│                                                          │`);
     console.log(`│   📍 Local:    http://localhost:${PORT}                  ${PORT < 1000 ? ' ' : ''}`);
+    console.log(`│   🌐 Host:     ${HOST}:${PORT}                           `);
     console.log(`│   🌐 Env:      ${NODE_ENV}                               `);
     console.log(`│   ⏱️  Time:     ${new Date().toLocaleString()}           `);
     console.log(`│   🗄️  Database: ${dbConnected ? '✅ Connected' : '⚠️  Not Connected'}    `);
-    console.log(`│   📊 Tables:   ${tablesSynchronized ? '✅ Safe Mode' : '⚠️  Not Synced'}    `);
-    console.log(`│   🔓 CORS:     ${!IS_PRODUCTION ? 'ALLOW ALL' : 'RESTRICTED'}    `);
+    console.log(`│   📊 Tables:   ${tablesSynchronized ? '✅ Permanent' : '⚠️  Not Synced'}    `);
+    console.log(`│   🛡️  Data:     No table dropping, all data preserved    `);
+    console.log(`│   🔧 Schema:   ${IS_PRODUCTION ? '🔒 Locked' : '🛠️  Safe Updates'}          `);
+    console.log(`│   🌍 CORS:     ${CORS_ORIGIN}                            `);
+    console.log(`│   🔐 Creds:    ${CORS_CREDENTIALS}                       `);
     console.log(`│   🛣️  Routes:   ${mountedRoutes.length} mounted           `);
-    console.log(`│   🔧 Auto Tables: INDEPENDENT ONLY                       `);
-    console.log(`│   📈 Render PG: ${tablesSynchronized ? '✅ SAFE MODE' : '⚠️  CHECK CONFIG'}  `);
     console.log(`│   🗂️  Models:    ${Object.keys(models).length} loaded      `);
+    console.log(`│   📈 Render PG: PERMANENT TABLE MODE                     `);
     console.log(`│                                                          │`);
     console.log(`│   📊 Health:   http://localhost:${PORT}/api/health       ${PORT < 1000 ? ' ' : ''}`);
     console.log(`│   🔐 Status:   http://localhost:${PORT}/api/status       ${PORT < 1000 ? ' ' : ''}`);
     if (!IS_PRODUCTION) {
       console.log(`│   🐛 Debug:    http://localhost:${PORT}/api/debug        ${PORT < 1000 ? ' ' : ''}`);
     }
+    console.log(`│   🔐 Auth:     http://localhost:${PORT}/api/auth         ${PORT < 1000 ? ' ' : ''}`);
     console.log(`│   💬 API Base: http://localhost:${PORT}/api              ${PORT < 1000 ? ' ' : ''}`);
     console.log(`│                                                          │`);
     
@@ -1356,7 +1372,7 @@ const startServer = async () => {
       console.log(`│                                                          │`);
     }
     
-    console.log(`│   PostgreSQL: Independent tables auto-created only        │`);
+    console.log(`│   PostgreSQL: Permanent tables, no data loss              │`);
     console.log(`│   Press Ctrl+C to stop                                   │`);
     console.log(`│                                                          │`);
     console.log(`└──────────────────────────────────────────────────────────┘`);

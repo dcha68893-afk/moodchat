@@ -1,12 +1,28 @@
-// src/routes/auth.js - COMPLETE FIXED VERSION
+// src/routes/auth.js - UPDATED FOR RENDER POSTGRESQL
+require('dotenv').config();
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const asyncHandler = require('express-async-handler');
 const router = express.Router();
-const config = require('../config/index');
 
 console.log('✅ Auth routes initialized');
+
+// JWT configuration from .env
+const JWT_SECRET = process.env.JWT_ACCESS_SECRET || process.env.JWT_SECRET || 'default-secret';
+const JWT_ACCESS_EXPIRES_IN = process.env.JWT_ACCESS_EXPIRES_IN || '15m';
+const JWT_REFRESH_EXPIRES_IN = process.env.JWT_REFRESH_EXPIRES_IN || '7d';
+
+// Password validation from .env
+const PASSWORD_MIN_LENGTH = parseInt(process.env.PASSWORD_MIN_LENGTH) || 6;
+const PASSWORD_REQUIRE_UPPERCASE = process.env.PASSWORD_REQUIRE_UPPERCASE === 'true';
+const PASSWORD_REQUIRE_LOWERCASE = process.env.PASSWORD_REQUIRE_LOWERCASE === 'true';
+const PASSWORD_REQUIRE_NUMBERS = process.env.PASSWORD_REQUIRE_NUMBERS === 'true';
+const PASSWORD_REQUIRE_SYMBOLS = process.env.PASSWORD_REQUIRE_SYMBOLS === 'true';
+
+// Environment
+const NODE_ENV = process.env.NODE_ENV || 'development';
+const IS_PRODUCTION = NODE_ENV === 'production';
 
 // IMPORT MIDDLEWARE WITH CORRECT NAMES
 let authenticate, apiLimiter, authLimiter;
@@ -70,6 +86,33 @@ try {
   }
 }
 
+// Password validation helper function
+function validatePassword(password) {
+  const errors = [];
+  
+  if (password.length < PASSWORD_MIN_LENGTH) {
+    errors.push(`Password must be at least ${PASSWORD_MIN_LENGTH} characters`);
+  }
+  
+  if (PASSWORD_REQUIRE_UPPERCASE && !/[A-Z]/.test(password)) {
+    errors.push('Password must contain at least one uppercase letter');
+  }
+  
+  if (PASSWORD_REQUIRE_LOWERCASE && !/[a-z]/.test(password)) {
+    errors.push('Password must contain at least one lowercase letter');
+  }
+  
+  if (PASSWORD_REQUIRE_NUMBERS && !/\d/.test(password)) {
+    errors.push('Password must contain at least one number');
+  }
+  
+  if (PASSWORD_REQUIRE_SYMBOLS && !/[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]/.test(password)) {
+    errors.push('Password must contain at least one special character');
+  }
+  
+  return errors;
+}
+
 // Health endpoint
 router.get('/health', (req, res) => {
   res.status(200).json({
@@ -95,8 +138,10 @@ router.post(
         throw new ValidationError('Username must be between 3 and 30 characters');
       }
 
-      if (password.length < 6) {
-        throw new ValidationError('Password must be at least 6 characters');
+      // Validate password using .env rules
+      const passwordErrors = validatePassword(password);
+      if (passwordErrors.length > 0) {
+        throw new ValidationError(passwordErrors.join(', '));
       }
 
       const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -130,14 +175,17 @@ router.post(
         }
       }
 
-      // Create user - password will be hashed by User model hooks
+      // Hash password
+      const hashedPassword = await bcrypt.hash(password, 10);
+
+      // Create user
       const user = await UserModel.create({
         username: username.toLowerCase(),
         email: email.toLowerCase(),
-        password: password, // Will be hashed by beforeCreate hook
+        password: hashedPassword,
         firstName: firstName || null,
         lastName: lastName || null,
-        avatar: avatar || null,
+        avatar: avatar || `https://ui-avatars.com/api/?name=${encodeURIComponent(username)}&background=random&color=fff`,
         status: 'offline',
         isActive: true,
         isVerified: false,
@@ -145,14 +193,14 @@ router.post(
 
       const accessToken = jwt.sign(
         { id: user.id, username: user.username, email: user.email },
-        config.jwt.secret || 'default-secret',
-        { expiresIn: config.jwt.accessExpiresIn || '15m' }
+        JWT_SECRET,
+        { expiresIn: JWT_ACCESS_EXPIRES_IN }
       );
 
       const refreshToken = jwt.sign(
         { id: user.id },
-        config.jwt.secret || 'default-secret',
-        { expiresIn: config.jwt.refreshExpiresIn || '7d' }
+        JWT_SECRET,
+        { expiresIn: JWT_REFRESH_EXPIRES_IN }
       );
 
       // Create token record if Token model exists
@@ -179,7 +227,7 @@ router.post(
 
       res.cookie('refreshToken', refreshToken, {
         httpOnly: true,
-        secure: config.nodeEnv === 'production',
+        secure: IS_PRODUCTION,
         sameSite: 'strict',
         maxAge: 7 * 24 * 60 * 60 * 1000,
       });
@@ -237,22 +285,22 @@ router.post(
         throw new AuthenticationError('Invalid credentials');
       }
 
-      // Validate password using User model method
-      const isValidPassword = await user.validatePassword(password);
+      // Validate password
+      const isValidPassword = await bcrypt.compare(password, user.password);
       if (!isValidPassword) {
         throw new AuthenticationError('Invalid credentials');
       }
 
       const accessToken = jwt.sign(
         { id: user.id, username: user.username, email: user.email },
-        config.jwt.secret || 'default-secret',
-        { expiresIn: config.jwt.accessExpiresIn || '15m' }
+        JWT_SECRET,
+        { expiresIn: JWT_ACCESS_EXPIRES_IN }
       );
 
       const refreshToken = jwt.sign(
         { id: user.id },
-        config.jwt.secret || 'default-secret',
-        { expiresIn: config.jwt.refreshExpiresIn || '7d' }
+        JWT_SECRET,
+        { expiresIn: JWT_REFRESH_EXPIRES_IN }
       );
 
       // Create token record if Token model exists
@@ -285,7 +333,7 @@ router.post(
 
       res.cookie('refreshToken', refreshToken, {
         httpOnly: true,
-        secure: config.nodeEnv === 'production',
+        secure: IS_PRODUCTION,
         sameSite: 'strict',
         maxAge: 7 * 24 * 60 * 60 * 1000,
       });
@@ -341,7 +389,7 @@ router.post(
         throw new AuthenticationError('Invalid or expired refresh token');
       }
 
-      const decoded = jwt.verify(refreshToken, config.jwt.secret || 'default-secret');
+      const decoded = jwt.verify(refreshToken, JWT_SECRET);
       
       const UserModel = models.User;
       const user = await UserModel.findByPk(decoded.id);
@@ -352,14 +400,14 @@ router.post(
 
       const newAccessToken = jwt.sign(
         { id: user.id, username: user.username, email: user.email },
-        config.jwt.secret || 'default-secret',
-        { expiresIn: config.jwt.accessExpiresIn || '15m' }
+        JWT_SECRET,
+        { expiresIn: JWT_ACCESS_EXPIRES_IN }
       );
 
       const newRefreshToken = jwt.sign(
         { id: user.id },
-        config.jwt.secret || 'default-secret',
-        { expiresIn: config.jwt.refreshExpiresIn || '7d' }
+        JWT_SECRET,
+        { expiresIn: JWT_REFRESH_EXPIRES_IN }
       );
 
       await tokenRecord.update({
@@ -369,7 +417,7 @@ router.post(
 
       res.cookie('refreshToken', newRefreshToken, {
         httpOnly: true,
-        secure: config.nodeEnv === 'production',
+        secure: IS_PRODUCTION,
         sameSite: 'strict',
         maxAge: 7 * 24 * 60 * 60 * 1000,
       });
@@ -472,5 +520,34 @@ router.get(
     }
   })
 );
+
+// Test database connection endpoint
+router.get('/test-db', asyncHandler(async (req, res) => {
+  try {
+    const models = req.app.locals.models;
+    if (!models) {
+      throw new Error('Models not available');
+    }
+    
+    // Test User model
+    const userCount = await models.User.count();
+    
+    res.status(200).json({
+      status: 'success',
+      message: 'Database connection test successful',
+      data: {
+        userCount,
+        database: 'PostgreSQL (Render)',
+        timestamp: new Date().toISOString()
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: 'Database connection test failed',
+      error: error.message
+    });
+  }
+}));
 
 module.exports = router;
