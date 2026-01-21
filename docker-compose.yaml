@@ -50,11 +50,11 @@ services:
         condition: service_healthy
     environment:
       # Database
-      DATABASE_URL: postgresql://${POSTGRES_USER:-moodchat_user}:${POSTGRES_PASSWORD:-change_this_secure_password}@postgres:5432/${POSTGRES_DB:-moodchat}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-deni}:${POSTGRES_PASSWORD:-change_this_secure_password}@postgres:5432/${POSTGRES_DB:-denismoo}
       DB_HOST: postgres
       DB_PORT: 5432
-      DB_NAME: ${POSTGRES_DB:-moodchat}
-      DB_USER: ${POSTGRES_USER:-moodchat_user}
+      DB_NAME: ${POSTGRES_DB:-denismoo}
+      DB_USER: ${POSTGRES_USER:-denismoo_user}
       DB_PASSWORD: ${POSTGRES_PASSWORD:-change_this_secure_password}
       
       # Redis

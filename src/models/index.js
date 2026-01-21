@@ -33,9 +33,9 @@ const getDbConfig = () => {
   return {
     host: process.env.DB_HOST || '127.0.0.1',
     port: process.env.DB_PORT || 5432,
-    database: process.env.DB_NAME || 'moodchat',
+    database: process.env.DB_NAME || 'denismoo',
     username: process.env.DB_USER || 'postgres',
-    password: process.env.DB_PASSWORD || '24845c1b4df84c17a0526806f7aa0482',
+    password: process.env.DB_PASSWORD || 'a8UIFwP8552hGbYI9x7O3Dp7gs3vb6TV',
     dialect: process.env.DB_DIALECT || 'postgres',
     logging: process.env.NODE_ENV === 'development' ? console.log : false,
     pool: {

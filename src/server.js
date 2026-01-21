@@ -72,9 +72,9 @@ async function initializeDatabase() {
     } else {
       console.log('🔌 Using individual DB environment variables...');
       sequelize = new Sequelize(
-        process.env.DB_NAME || 'moodchat',
+        process.env.DB_NAME || 'denismoo',
         process.env.DB_USER || 'postgres',
-        process.env.DB_PASSWORD || '24845c1b4df84c17a0526806f7aa0482',
+        process.env.DB_PASSWORD || 'a8UIFwP8552hGbYI9x7O3Dp7gs3vb6TV',
         {
           host: process.env.DB_HOST || '127.0.0.1',
           port: process.env.DB_PORT || 5432,
@@ -464,7 +464,7 @@ if (!IS_PRODUCTION) {
     'http://localhost:5000',
     'http://localhost:8080',
     'http://localhost:4000',
-    'https://fronted-hm86.onrender.com',
+    'https://moodfronted.com',
     FRONTEND_URL
   ].filter(Boolean);
   
