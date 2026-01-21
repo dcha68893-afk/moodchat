@@ -106,8 +106,8 @@ async function initializeDatabase() {
     dbConnected = true;
     console.log('✅ Database connection established.');
     
-    // ========== CRITICAL: LOAD ALL MODELS FOR AUTOMATIC TABLE CREATION ==========
-    console.log('📦 Loading all database models for automatic table creation...');
+    // ========== CRITICAL: LOAD ALL MODELS FOR TABLE MANAGEMENT ==========
+    console.log('📦 Loading all database models...');
     
     // Try to load the models index file which contains all models
     try {
@@ -222,111 +222,136 @@ async function initializeDatabase() {
     app.locals.models = models;
     app.locals.sequelize = sequelize;
     
-    // ========== CRITICAL: SYNC ALL TABLES FOR RENDER ==========
-    console.log('🔄 Synchronizing database tables for production...');
-    console.log('📊 This will automatically create missing PostgreSQL tables on Render...');
+    // ========== CRITICAL: SAFE TABLE MANAGEMENT FOR RENDER ==========
+    console.log('🔄 Managing database tables for production...');
     
-    // Define sync options based on environment
+    // Define independent tables that can be auto-created
+    const independentTables = ['Users', 'Tokens', 'Friends', 'UserStatus'];
+    
+    // Define FK-dependent tables that should ONLY be created via migrations
+    const dependentTables = ['Messages', 'Groups', 'Profile', 'ReadReceipt', 
+                            'TypingIndicator', 'Mood', 'SharedMood', 'Media'];
+    
+    // Step 1: Run migrations first if available (for FK-dependent tables)
+    let migrationsRun = false;
+    try {
+      const { execSync } = require('child_process');
+      console.log('🔨 Attempting to run database migrations...');
+      execSync('npx sequelize-cli db:migrate', { stdio: 'inherit' });
+      migrationsRun = true;
+      console.log('✅ Migrations completed (or already up to date).');
+    } catch (migrateError) {
+      console.log('ℹ️ No migrations run or migration system not available:', migrateError.message);
+    }
+    
+    // Step 2: Safely create independent tables ONLY if they don't exist
+    console.log('🔨 Creating independent tables if they do not exist...');
+    
+    for (const [modelName, model] of Object.entries(models)) {
+      if (model && model.sync) {
+        const tableName = model.tableName || modelName;
+        
+        // Check if table exists first
+        try {
+          const tableExists = await sequelize.getQueryInterface().tableExists(tableName);
+          
+          if (!tableExists) {
+            // Only create independent tables automatically
+            if (independentTables.includes(tableName)) {
+              console.log(`📊 Creating independent table: ${tableName}`);
+              await model.sync({ force: false, alter: false });
+              console.log(`✅ Created table: ${tableName}`);
+            } else if (!migrationsRun && dependentTables.includes(tableName)) {
+              console.warn(`⚠️  Skipping ${tableName} - requires migrations`);
+            }
+          } else {
+            // Table exists - do NOT alter it
+            console.log(`📊 Table exists: ${tableName} (skipping sync)`);
+          }
+        } catch (error) {
+          console.warn(`⚠️  Could not check/process table ${tableName}:`, error.message);
+        }
+      }
+    }
+    
+    // Step 3: Final sync with SAFE options - NO force, NO alter in production
     const syncOptions = {
-      alter: NODE_ENV === 'development', // Safe in development
-      force: false, // NEVER in production - this would drop tables!
+      alter: false, // Never alter in production
+      force: false, // NEVER drop tables!
       logging: NODE_ENV === 'development' ? console.log : false,
       hooks: true
     };
     
-    console.log(`📊 Sync options: alter=${syncOptions.alter}, force=${syncOptions.force}, NODE_ENV=${NODE_ENV}`);
-    
-    // ========== AUTOMATIC TABLE CREATION ==========
-    // This ensures tables are created if they don't exist
-    console.log('🔨 Creating tables if they do not exist...');
-    
-    // First, sync all models individually to ensure they exist
-    for (const [modelName, model] of Object.entries(models)) {
-      if (model && model.sync) {
-        try {
-          console.log(`🔨 Ensuring ${modelName} table exists...`);
-          await model.sync({ force: false, alter: NODE_ENV === 'development' });
-          console.log(`✅ ${modelName} table ensured.`);
-        } catch (error) {
-          console.error(`❌ Failed to sync ${modelName}:`, error.message);
-        }
-      }
-    }
-    
-    // Then perform global synchronization
+    console.log(`📊 Final sync with safe options: alter=${syncOptions.alter}, force=${syncOptions.force}`);
     await sequelize.sync(syncOptions);
     
     tablesSynchronized = true;
-    console.log('✅ Database tables ensured for production.');
-    console.log('✅ Tables are automatically created if missing on Render.');
     
-    // ========== VERIFY TABLE CREATION ==========
+    // ========== SINGLE TABLE STATUS SUMMARY ==========
+    console.log('\n📋 Database Table Status Summary:');
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    
     try {
       const queryInterface = sequelize.getQueryInterface();
       const allTables = await queryInterface.showAllTables();
-      console.log(`📋 Total tables in database: ${allTables.length}`);
       
-      // Log table names
-      allTables.forEach((table, index) => {
-        console.log(`   ${index + 1}. ${table}`);
+      // Count records for each table
+      const tableSummary = [];
+      
+      for (const tableName of allTables) {
+        try {
+          // Find corresponding model
+          const model = Object.values(models).find(m => 
+            (m.tableName && m.tableName.toLowerCase() === tableName.toLowerCase()) ||
+            m.name.toLowerCase() === tableName.toLowerCase()
+          );
+          
+          if (model) {
+            const count = await model.count();
+            tableSummary.push({ table: tableName, records: count });
+          } else {
+            tableSummary.push({ table: tableName, records: 'N/A' });
+          }
+        } catch (countError) {
+          tableSummary.push({ table: tableName, records: 'Error' });
+        }
+      }
+      
+      // Log single summary
+      tableSummary.forEach((item, index) => {
+        const tableNum = (index + 1).toString().padStart(2, ' ');
+        const tableName = item.table.padEnd(25, ' ');
+        const records = typeof item.records === 'number' ? item.records.toString().padStart(6, ' ') : item.records.padStart(6, ' ');
+        console.log(`  ${tableNum}. ${tableName} | ${records} records`);
       });
       
-      // Check for specific tables
-      const requiredTables = ['Users', 'Messages', 'Friends', 'Groups', 'Status', 'GroupMembers', 'Calls'];
-      const missingTables = requiredTables.filter(table => 
-        !allTables.map(t => t.toLowerCase()).includes(table.toLowerCase())
-      );
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      console.log(`  Total: ${allTables.length} tables | Production Mode: ${NODE_ENV === 'production'}`);
+      console.log(`  Auto-create: Independent tables only | Migrations: ${migrationsRun ? 'Applied' : 'Skipped/Failed'}`);
       
-      if (missingTables.length > 0) {
-        console.warn(`⚠️  Missing tables: ${missingTables.join(', ')}`);
-        console.log('🔄 Attempting to create missing tables using migrations...');
-        
-        // Try to run migrations if available
-        try {
-          const { execSync } = require('child_process');
-          console.log('🔨 Running database migrations...');
-          execSync('npx sequelize-cli db:migrate', { stdio: 'inherit' });
-          console.log('✅ Migrations completed.');
-        } catch (migrateError) {
-          console.warn('⚠️ Could not run migrations:', migrateError.message);
-        }
-      } else {
-        console.log('✅ All required tables are present.');
-      }
     } catch (error) {
-      console.warn('⚠️ Could not list tables:', error.message);
+      console.log('  Could not generate table summary:', error.message);
     }
     
-    // ========== INITIAL DATA CHECK ==========
-    // Log initial storage stats ONCE
+    // ========== SINGLE STORAGE STATS LOG ==========
     if (!storageStatsLogged) {
       try {
-        // Count records in database
+        // Count records only for essential tables
         let dbUsers = 0;
-        let dbMessages = 0;
         
         if (models.User) {
           try {
             dbUsers = await models.User.count();
-            console.log(`👤 Database users count: ${dbUsers}`);
           } catch (e) {
             console.warn('Could not count users:', e.message);
           }
         }
         
-        if (models.Message) {
-          try {
-            dbMessages = await models.Message.count();
-            console.log(`💬 Database messages count: ${dbMessages}`);
-          } catch (e) {
-            console.warn('Could not count messages:', e.message);
-          }
-        }
-        
-        console.log(`📊 [Storage Stats] Users: ${users.length} (memory) / ${dbUsers} (database), Messages: ${messages.length} (memory) / ${dbMessages} (database), Rooms: ${rooms.length}, DB Connected: ${dbConnected}`);
+        console.log(`\n📊 Storage: Database users: ${dbUsers} | Memory users: ${users.length}`);
+        console.log(`   Mode: ${dbConnected ? 'PostgreSQL (Persistent)' : 'Memory (Temporary)'}`);
         storageStatsLogged = true;
       } catch (error) {
-        console.log(`📊 [Storage Stats] Users: ${users.length}, Messages: ${messages.length}, Rooms: ${rooms.length}, DB Connected: ${dbConnected}`);
+        console.log(`\n📊 Storage: Using memory fallback`);
         storageStatsLogged = true;
       }
     }
@@ -348,9 +373,9 @@ async function initializeDatabase() {
     // Initialize empty models
     app.locals.models = {};
     
-    // Log storage stats ONCE
+    // Log single storage stats message
     if (!storageStatsLogged) {
-      console.log(`📊 [Storage Stats] Users: ${users.length}, Messages: ${messages.length}, Rooms: ${rooms.length}, DB Connected: ${dbConnected}`);
+      console.log(`\n📊 Storage: Memory fallback active | Users: ${users.length}, Messages: ${messages.length}`);
       storageStatsLogged = true;
     }
     
@@ -449,6 +474,32 @@ function mountRoutes() {
     } else {
       console.log(`📋 Found ${routeFiles.length} route file(s):`, routeFiles);
       
+      // Special handling for auth.js to mount at both /api and /api/auth
+      const authFile = routeFiles.find(file => file === 'auth.js');
+      if (authFile) {
+        try {
+          const authPath = path.join(routesPath, authFile);
+          delete require.cache[require.resolve(authPath)];
+          const authRouter = require(authPath);
+          
+          if (authRouter && typeof authRouter.use === 'function') {
+            // Mount auth router at both /api and /api/auth
+            app.use('/api', authRouter);
+            app.use('/api/auth', authRouter);
+            mountedRoutes.push('/api/auth/*');
+            mountedRoutes.push('/api/login');
+            mountedRoutes.push('/api/register');
+            console.log(`✅ Mounted auth.js at both /api and /api/auth`);
+          }
+          
+          // Remove auth.js from routeFiles to avoid duplicate mounting
+          routeFiles.splice(routeFiles.indexOf(authFile), 1);
+        } catch (error) {
+          console.error(`❌ Failed to mount auth.js:`, error.message);
+        }
+      }
+      
+      // Mount all other routes normally
       routeFiles.forEach(file => {
         try {
           const routeName = file.replace('.js', '');
@@ -547,9 +598,9 @@ app.get('/health', (req, res) => {
     cors: 'enabled',
     database: dbConnected ? 'connected' : 'disconnected',
     tablesSynchronized: tablesSynchronized,
-    tablesAutoCreated: 'Sequelize sync on startup',
+    tablesAutoCreated: 'Independent tables only',
     databaseProvider: process.env.DATABASE_URL ? 'Render PostgreSQL' : 'Local PostgreSQL',
-    automaticTables: 'ENABLED - tables created if missing',
+    tableManagement: 'Safe: No table dropping or alteration',
     renderCompatibility: 'Optimized for Render PostgreSQL'
   });
 });
@@ -565,9 +616,8 @@ app.get('/api/health', (req, res) => {
     tablesSynchronized: tablesSynchronized,
     service: 'moodchat-backend',
     version: '1.0.0',
-    databaseSync: 'automatic table creation enabled',
-    automaticTables: 'ENABLED',
-    tablesCreated: tablesSynchronized ? 'All tables created' : 'Tables not synchronized'
+    tableManagement: 'Safe: Independent tables auto-created only',
+    migrations: 'Required for FK-dependent tables'
   });
 });
 
@@ -583,7 +633,7 @@ app.get('/api/status', (req, res) => {
     tablesSynchronized: tablesSynchronized,
     origin: req.headers.origin || 'not specified',
     mountedRoutes: mountedRoutes.length > 0 ? mountedRoutes : 'No routes mounted from routes directory',
-    automaticTables: 'Enabled - tables created if missing',
+    tableManagement: 'Safe: No table dropping',
     renderCompatibility: 'Optimized for Render PostgreSQL',
     renderMode: process.env.RENDER ? 'Running on Render' : 'Not on Render'
   });
@@ -606,7 +656,7 @@ app.get('/api/debug', (req, res) => {
       DB_HOST: process.env.DB_HOST,
       RENDER: process.env.RENDER ? 'Yes' : 'No'
     },
-    automaticTables: 'ENABLED',
+    tablePolicy: 'Independent tables auto-created only',
     modelsLoaded: Object.keys(models).length,
     loadedModels: Object.keys(models)
   });
@@ -625,103 +675,68 @@ app.post('/api/register', async (req, res) => {
       });
     }
     
-    // Use database if available
-    if (dbConnected && tablesSynchronized && models.User) {
-      try {
-        const existingUser = await models.User.findOne({ where: { email } });
-        if (existingUser) {
-          return res.status(400).json({
-            success: false,
-            message: 'User already exists',
-            timestamp: new Date().toISOString()
-          });
-        }
-        
-        const hashedPassword = await bcrypt.hash(password, 10);
-        
-        const user = await models.User.create({
-          email,
-          username,
-          password: hashedPassword,
-          avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(username)}&background=random&color=fff`
-        });
-        
-        const token = jwt.sign(
-          { 
-            userId: user.id, 
-            email: user.email, 
-            username: user.username 
-          },
-          JWT_SECRET,
-          { expiresIn: '24h' }
-        );
-        
-        return res.status(201).json({
-          success: true,
-          message: 'User registered successfully in database',
-          token,
-          user: {
-            id: user.id,
-            email: user.email,
-            username: user.username,
-            avatar: user.avatar,
-            createdAt: user.createdAt
-          },
-          timestamp: new Date().toISOString(),
-          storage: 'database'
-        });
-      } catch (dbError) {
-        console.error('Database registration error:', dbError.message);
-        // Fall through to in-memory
-      }
-    }
-    
-    // In-memory fallback
-    const existingUser = users.find(u => u.email === email);
-    if (existingUser) {
-      return res.status(400).json({
+    // REQUIRE database connection for production
+    if (!dbConnected) {
+      return res.status(503).json({
         success: false,
-        message: 'User already exists',
+        message: 'Database not available. Registration requires PostgreSQL connection.',
         timestamp: new Date().toISOString()
       });
     }
     
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const user = {
-      id: Date.now().toString(),
-      email,
-      username,
-      password: hashedPassword,
-      createdAt: new Date().toISOString(),
-      avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(username)}&background=random&color=fff`
-    };
-    
-    users.push(user);
-    
-    const token = jwt.sign(
-      { 
-        userId: user.id, 
-        email: user.email, 
-        username: user.username 
-      },
-      JWT_SECRET,
-      { expiresIn: '24h' }
-    );
-    
-    res.status(201).json({
-      success: true,
-      message: 'User registered successfully in memory',
-      token,
-      user: {
-        id: user.id,
-        email: user.email,
-        username: user.username,
-        avatar: user.avatar,
-        createdAt: user.createdAt
-      },
-      timestamp: new Date().toISOString(),
-      storage: 'memory'
-    });
+    // Use database only - no in-memory fallback
+    try {
+      const existingUser = await models.User.findOne({ where: { email } });
+      if (existingUser) {
+        return res.status(400).json({
+          success: false,
+          message: 'User already exists',
+          timestamp: new Date().toISOString()
+        });
+      }
+      
+      const hashedPassword = await bcrypt.hash(password, 10);
+      
+      const user = await models.User.create({
+        email,
+        username,
+        password: hashedPassword,
+        avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(username)}&background=random&color=fff`
+      });
+      
+      const token = jwt.sign(
+        { 
+          userId: user.id, 
+          email: user.email, 
+          username: user.username 
+        },
+        JWT_SECRET,
+        { expiresIn: '24h' }
+      );
+      
+      return res.status(201).json({
+        success: true,
+        message: 'User registered successfully',
+        token,
+        user: {
+          id: user.id,
+          email: user.email,
+          username: user.username,
+          avatar: user.avatar,
+          createdAt: user.createdAt
+        },
+        timestamp: new Date().toISOString(),
+        storage: 'PostgreSQL (Permanent)'
+      });
+    } catch (dbError) {
+      console.error('Database registration error:', dbError.message);
+      return res.status(500).json({
+        success: false,
+        message: 'Registration failed - database error',
+        error: NODE_ENV === 'development' ? dbError.message : undefined,
+        timestamp: new Date().toISOString()
+      });
+    }
     
   } catch (error) {
     console.error('Register error:', error);
@@ -738,114 +753,75 @@ app.post('/api/login', async (req, res) => {
   try {
     const { email, password } = req.body;
     
-    // Use database if available
-    if (dbConnected && tablesSynchronized && models.User) {
-      try {
-        let user;
-        if (email.includes('@')) {
-          user = await models.User.findOne({ where: { email } });
-        } else {
-          user = await models.User.findOne({ where: { username: email } });
-        }
-        
-        if (!user) {
-          return res.status(401).json({
-            success: false,
-            message: 'Invalid credentials',
-            timestamp: new Date().toISOString()
-          });
-        }
-        
-        const validPassword = await bcrypt.compare(password, user.password);
-        
-        if (!validPassword) {
-          return res.status(401).json({
-            success: false,
-            message: 'Invalid credentials',
-            timestamp: new Date().toISOString()
-          });
-        }
-        
-        const token = jwt.sign(
-          { 
-            userId: user.id, 
-            email: user.email, 
-            username: user.username 
-          },
-          JWT_SECRET,
-          { expiresIn: '24h' }
-        );
-        
-        return res.json({
-          success: true,
-          message: 'Login successful (database)',
-          token,
-          user: {
-            id: user.id,
-            email: user.email,
-            username: user.username,
-            avatar: user.avatar,
-            createdAt: user.createdAt
-          },
-          timestamp: new Date().toISOString(),
-          storage: 'database'
-        });
-      } catch (dbError) {
-        console.error('Database login error:', dbError.message);
-        // Fall through to in-memory
+    // REQUIRE database connection for production
+    if (!dbConnected) {
+      return res.status(503).json({
+        success: false,
+        message: 'Database not available. Please try again later.',
+        timestamp: new Date().toISOString()
+      });
+    }
+    
+    // Use database only
+    try {
+      let user;
+      if (email.includes('@')) {
+        user = await models.User.findOne({ where: { email } });
+      } else {
+        user = await models.User.findOne({ where: { username: email } });
       }
-    }
-    
-    // In-memory fallback
-    let user;
-    if (email.includes('@')) {
-      user = users.find(u => u.email === email);
-    } else {
-      user = users.find(u => u.username === email);
-    }
-    
-    if (!user) {
-      return res.status(401).json({
+      
+      if (!user) {
+        return res.status(401).json({
+          success: false,
+          message: 'Invalid credentials',
+          timestamp: new Date().toISOString()
+        });
+      }
+      
+      const validPassword = await bcrypt.compare(password, user.password);
+      
+      if (!validPassword) {
+        return res.status(401).json({
+          success: false,
+          message: 'Invalid credentials',
+          timestamp: new Date().toISOString()
+        });
+      }
+      
+      const token = jwt.sign(
+        { 
+          userId: user.id, 
+          email: user.email, 
+          username: user.username 
+        },
+        JWT_SECRET,
+        { expiresIn: '24h' }
+      );
+      
+      return res.json({
+        success: true,
+        message: 'Login successful',
+        token,
+        user: {
+          id: user.id,
+          email: user.email,
+          username: user.username,
+          avatar: user.avatar,
+          createdAt: user.createdAt
+        },
+        timestamp: new Date().toISOString(),
+        storage: 'PostgreSQL'
+      });
+    } catch (dbError) {
+      console.error('Database login error:', dbError.message);
+      return res.status(500).json({
         success: false,
-        message: 'Invalid credentials',
+        message: 'Login failed - database error',
+        error: NODE_ENV === 'development' ? dbError.message : undefined,
         timestamp: new Date().toISOString()
       });
     }
-    
-    const validPassword = await bcrypt.compare(password, user.password);
-    
-    if (!validPassword) {
-      return res.status(401).json({
-        success: false,
-        message: 'Invalid credentials',
-        timestamp: new Date().toISOString()
-      });
-    }
-    
-    const token = jwt.sign(
-      { 
-        userId: user.id, 
-        email: user.email, 
-        username: user.username 
-      },
-      JWT_SECRET,
-      { expiresIn: '24h' }
-    );
-    
-    res.json({
-      success: true,
-      message: 'Login successful (memory)',
-      token,
-      user: {
-        id: user.id,
-        email: user.email,
-        username: user.username,
-        avatar: user.avatar,
-        createdAt: user.createdAt
-      },
-      timestamp: new Date().toISOString(),
-      storage: 'memory'
-    });
     
   } catch (error) {
     console.error('Login error:', error);
@@ -860,59 +836,47 @@ app.post('/api/login', async (req, res) => {
 
 app.get('/api/auth/me', authenticateToken, async (req, res) => {
   try {
-    // Try database first
-    if (dbConnected && tablesSynchronized && models.User) {
-      try {
-        const user = await models.User.findByPk(req.user.userId);
-        if (!user) {
-          return res.status(404).json({
-            success: false,
-            message: 'User not found in database',
-            timestamp: new Date().toISOString()
-          });
-        }
-        
-        return res.json({
-          success: true,
-          user: {
-            id: user.id,
-            email: user.email,
-            username: user.username,
-            avatar: user.avatar,
-            createdAt: user.createdAt
-          },
-          timestamp: new Date().toISOString(),
-          storage: 'database'
-        });
-      } catch (dbError) {
-        console.error('Database profile error:', dbError.message);
-        // Fall through
-      }
-    }
-    
-    // In-memory fallback
-    const user = users.find(u => u.id === req.user.userId);
-    
-    if (!user) {
-      return res.status(404).json({
+    // REQUIRE database connection
+    if (!dbConnected) {
+      return res.status(503).json({
         success: false,
-        message: 'User not found',
+        message: 'Database not available',
         timestamp: new Date().toISOString()
       });
     }
     
-    res.json({
-      success: true,
-      user: {
-        id: user.id,
-        email: user.email,
-        username: user.username,
-        avatar: user.avatar,
-        createdAt: user.createdAt
-      },
-      timestamp: new Date().toISOString(),
-      storage: 'memory'
-    });
+    // Use database only
+    try {
+      const user = await models.User.findByPk(req.user.userId);
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: 'User not found',
+          timestamp: new Date().toISOString()
+        });
+      }
+      
+      return res.json({
+        success: true,
+        user: {
+          id: user.id,
+          email: user.email,
+          username: user.username,
+          avatar: user.avatar,
+          createdAt: user.createdAt
+        },
+        timestamp: new Date().toISOString(),
+        storage: 'PostgreSQL'
+      });
+    } catch (dbError) {
+      console.error('Database profile error:', dbError.message);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to get profile - database error',
+        error: NODE_ENV === 'development' ? dbError.message : undefined,
+        timestamp: new Date().toISOString()
+      });
+    }
     
   } catch (error) {
     console.error('Profile error:', error);
@@ -1086,7 +1050,7 @@ app.get('/api/stats', authenticateToken, (req, res) => {
     database: {
       connected: dbConnected,
       tablesSynchronized: tablesSynchronized,
-      automaticTables: 'ENABLED'
+      tablePolicy: 'Independent tables auto-created only'
     }
   });
 });
@@ -1128,7 +1092,7 @@ app.all('/api/*', (req, res) => {
     database: {
       connected: dbConnected,
       tablesSynchronized: tablesSynchronized,
-      automaticTables: 'ENABLED'
+      tablePolicy: 'Independent tables auto-created only'
     }
   });
 });
@@ -1139,11 +1103,11 @@ app.get('/', (req, res) => {
 });
 
 app.get('/login', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'login.html'));
+  res.sendFile(path.join(__dirname, 'public', 'index.html.html'));
 });
 
 app.get('/register', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'register.html'));
+  res.sendFile(path.join(__dirname, 'public', 'index.html.html'));
 });
 
 app.get('/chat', (req, res) => {
@@ -1203,7 +1167,7 @@ app.use((req, res) => {
     database: {
       connected: dbConnected,
       tablesSynchronized: tablesSynchronized,
-      automaticTables: 'ENABLED'
+      tablePolicy: 'Independent tables auto-created only'
     }
   });
 });
@@ -1213,14 +1177,14 @@ const startServer = async () => {
   console.log('🚀 Starting MoodChat Backend Server...');
   console.log(`📁 Environment: ${NODE_ENV}`);
   console.log(`🌐 Port: ${PORT}`);
-  console.log(`🗄️  Database: Automatic table synchronization enabled`);
+  console.log(`🗄️  Database: Safe table management enabled`);
   console.log(`🔧 Render Mode: ${process.env.RENDER ? 'Yes' : 'No'}`);
-  console.log(`🔨 Automatic Table Creation: ENABLED`);
-  console.log(`📈 Render PostgreSQL Compatibility: OPTIMIZED`);
+  console.log(`🔨 Automatic Table Creation: INDEPENDENT TABLES ONLY`);
+  console.log(`📈 Render PostgreSQL Compatibility: SAFE MODE`);
   
-  // Initialize database and sync tables - CRITICAL FOR RENDER
-  console.log('🔄 Initializing database and ensuring tables...');
-  console.log('📊 This will automatically create missing PostgreSQL tables on Render...');
+  // Initialize database with safe table management
+  console.log('🔄 Initializing database with safe table management...');
+  console.log('📊 Independent tables auto-created, dependent tables require migrations...');
   await initializeDatabase();
   
   // Mount routes
@@ -1229,9 +1193,9 @@ const startServer = async () => {
   
   // Final verification
   if (tablesSynchronized) {
-    console.log('✅ Database tables ensured for production.');
-    console.log('✅ Tables are automatically created if missing on Render.');
-    console.log('✅ Render PostgreSQL compatibility: OPTIMIZED');
+    console.log('✅ Database tables ready for production.');
+    console.log('✅ Safe table management: No table dropping or alteration.');
+    console.log('✅ Render PostgreSQL compatibility: SAFE MODE');
   } else {
     console.warn('⚠️  Tables not synchronized, using in-memory storage');
     console.log('ℹ️  In-memory storage active for users, messages, and chat rooms');
@@ -1246,11 +1210,11 @@ const startServer = async () => {
     console.log(`│   🌐 Env:      ${NODE_ENV}                               `);
     console.log(`│   ⏱️  Time:     ${new Date().toLocaleString()}           `);
     console.log(`│   🗄️  Database: ${dbConnected ? '✅ Connected' : '⚠️  Not Connected'}    `);
-    console.log(`│   📊 Tables:   ${tablesSynchronized ? '✅ Synchronized' : '⚠️  Not Synced'}    `);
+    console.log(`│   📊 Tables:   ${tablesSynchronized ? '✅ Safe Mode' : '⚠️  Not Synced'}    `);
     console.log(`│   🔓 CORS:     ${NODE_ENV === 'development' ? 'ALLOW ALL' : 'RESTRICTED'}    `);
     console.log(`│   🛣️  Routes:   ${mountedRoutes.length} mounted           `);
-    console.log(`│   🔧 Auto Tables: ${tablesSynchronized ? '✅ ENABLED' : '❌ DISABLED'}      `);
-    console.log(`│   📈 Render PG: ${tablesSynchronized ? '✅ OPTIMIZED' : '⚠️  CHECK CONFIG'}  `);
+    console.log(`│   🔧 Auto Tables: INDEPENDENT ONLY                       `);
+    console.log(`│   📈 Render PG: ${tablesSynchronized ? '✅ SAFE MODE' : '⚠️  CHECK CONFIG'}  `);
     console.log(`│   🗂️  Models:    ${Object.keys(models).length} loaded      `);
     console.log(`│                                                          │`);
     console.log(`│   📊 Health:   http://localhost:${PORT}/api/health       ${PORT < 1000 ? ' ' : ''}`);
@@ -1264,7 +1228,7 @@ const startServer = async () => {
     console.log(`│   • Register:  http://localhost:${PORT}/register         ${PORT < 1000 ? ' ' : ''}`);
     console.log(`│   • Chat:      http://localhost:${PORT}/chat             ${PORT < 1000 ? ' ' : ''}`);
     console.log(`│                                                          │`);
-    console.log(`│   PostgreSQL tables automatically created on Render       │`);
+    console.log(`│   PostgreSQL: Independent tables auto-created only        │`);
     console.log(`│   Press Ctrl+C to stop                                   │`);
     console.log(`│                                                          │`);
     console.log(`└──────────────────────────────────────────────────────────┘`);
