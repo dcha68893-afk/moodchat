@@ -15,7 +15,7 @@ module.exports = {
         type: Sequelize.INTEGER,
         allowNull: false,
         references: {
-          model: 'chatpages',  // Foreign key to Chats table
+          model: 'ChatPages',  // Foreign key to Chats table
           key: 'id'
         },
         onUpdate: 'CASCADE',
@@ -25,7 +25,7 @@ module.exports = {
         type: Sequelize.INTEGER,
         allowNull: false,
         references: {
-          model: 'users',  // Foreign key to Users table
+          model: 'Users',  // Foreign key to Users table
           key: 'id'
         },
         onUpdate: 'CASCADE',

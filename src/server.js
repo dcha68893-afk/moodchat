@@ -16,6 +16,8 @@ const PORT = process.env.PORT || 4000;
 const NODE_ENV = process.env.NODE_ENV || 'development';
 const JWT_SECRET = process.env.JWT_ACCESS_SECRET || process.env.JWT_SECRET || 'development-secret-key-change-in-production';
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
+const IS_PRODUCTION = NODE_ENV === 'production';
+const IS_RENDER = process.env.RENDER === 'true' || IS_PRODUCTION;
 
 // ========== DATABASE CONNECTION ==========
 let sequelize;
@@ -47,14 +49,14 @@ async function initializeDatabase() {
       console.log('🔌 Using DATABASE_URL from environment...');
       sequelize = new Sequelize(process.env.DATABASE_URL, {
         dialect: process.env.DB_DIALECT || 'postgres',
-        logging: process.env.NODE_ENV === 'development' ? console.log : false,
+        logging: false,
         pool: {
           max: 10,
           min: 0,
           acquire: 30000,
           idle: 10000
         },
-        dialectOptions: process.env.DB_SSL === 'true' ? {
+        dialectOptions: IS_PRODUCTION ? {
           ssl: {
             require: true,
             rejectUnauthorized: false
@@ -77,14 +79,14 @@ async function initializeDatabase() {
           host: process.env.DB_HOST || '127.0.0.1',
           port: process.env.DB_PORT || 5432,
           dialect: process.env.DB_DIALECT || 'postgres',
-          logging: process.env.NODE_ENV === 'development' ? console.log : false,
+          logging: IS_PRODUCTION ? false : console.log,
           pool: {
             max: 10,
             min: 0,
             acquire: 30000,
             idle: 10000
           },
-          dialectOptions: NODE_ENV === 'production' && process.env.DB_SSL === 'true' ? {
+          dialectOptions: IS_PRODUCTION && process.env.DB_SSL === 'true' ? {
             ssl: {
               require: true,
               rejectUnauthorized: false
@@ -230,18 +232,24 @@ async function initializeDatabase() {
     
     // Define FK-dependent tables that should ONLY be created via migrations
     const dependentTables = ['Messages', 'Groups', 'Profile', 'ReadReceipt', 
-                            'TypingIndicator', 'Mood', 'SharedMood', 'Media'];
+                            'TypingIndicator', 'Mood', 'SharedMood', 'Media', 
+                            'GroupMembers', 'Calls', 'Chats', 'ChatParticipants',
+                            'Notifications', 'Status'];
     
     // Step 1: Run migrations first if available (for FK-dependent tables)
     let migrationsRun = false;
-    try {
-      const { execSync } = require('child_process');
-      console.log('🔨 Attempting to run database migrations...');
-      execSync('npx sequelize-cli db:migrate', { stdio: 'inherit' });
-      migrationsRun = true;
-      console.log('✅ Migrations completed (or already up to date).');
-    } catch (migrateError) {
-      console.log('ℹ️ No migrations run or migration system not available:', migrateError.message);
+    if (!IS_PRODUCTION) {
+      try {
+        const { execSync } = require('child_process');
+        console.log('🔨 Attempting to run database migrations...');
+        execSync('npx sequelize-cli db:migrate', { stdio: 'inherit' });
+        migrationsRun = true;
+        console.log('✅ Migrations completed (or already up to date).');
+      } catch (migrateError) {
+        console.log('ℹ️ No migrations run or migration system not available:', migrateError.message);
+      }
+    } else {
+      console.log('ℹ️ Skipping migrations in production mode');
     }
     
     // Step 2: Safely create independent tables ONLY if they don't exist
@@ -250,6 +258,14 @@ async function initializeDatabase() {
     for (const [modelName, model] of Object.entries(models)) {
       if (model && model.sync) {
         const tableName = model.tableName || modelName;
+        
+        // Skip if table name is plural or singular version of dependent tables
+        const isDependentTable = dependentTables.includes(tableName) || 
+                                dependentTables.some(dep => 
+                                  dep.toLowerCase() === tableName.toLowerCase() ||
+                                  (dep.endsWith('s') && dep.slice(0, -1).toLowerCase() === tableName.toLowerCase()) ||
+                                  (!dep.endsWith('s') && `${dep}s`.toLowerCase() === tableName.toLowerCase())
+                                );
         
         // Check if table exists first
         try {
@@ -261,12 +277,15 @@ async function initializeDatabase() {
               console.log(`📊 Creating independent table: ${tableName}`);
               await model.sync({ force: false, alter: false });
               console.log(`✅ Created table: ${tableName}`);
-            } else if (!migrationsRun && dependentTables.includes(tableName)) {
+            } else if (isDependentTable) {
               console.warn(`⚠️  Skipping ${tableName} - requires migrations`);
+            } else {
+              console.warn(`⚠️  Skipping ${tableName} - not in independent tables list`);
             }
           } else {
-            // Table exists - do NOT alter it
-            console.log(`📊 Table exists: ${tableName} (skipping sync)`);
+            if (!IS_PRODUCTION) {
+              console.log(`📊 Table exists: ${tableName} (skipping sync)`);
+            }
           }
         } catch (error) {
           console.warn(`⚠️  Could not check/process table ${tableName}:`, error.message);
@@ -278,59 +297,76 @@ async function initializeDatabase() {
     const syncOptions = {
       alter: false, // Never alter in production
       force: false, // NEVER drop tables!
-      logging: NODE_ENV === 'development' ? console.log : false,
+      logging: false,
       hooks: true
     };
     
-    console.log(`📊 Final sync with safe options: alter=${syncOptions.alter}, force=${syncOptions.force}`);
-    await sequelize.sync(syncOptions);
+    if (!IS_PRODUCTION) {
+      console.log(`📊 Final sync with safe options: alter=${syncOptions.alter}, force=${syncOptions.force}`);
+    }
+    
+    // Only sync independent tables
+    const independentModels = Object.entries(models).filter(([modelName, model]) => {
+      const tableName = model.tableName || modelName;
+      return independentTables.includes(tableName);
+    });
+    
+    for (const [modelName, model] of independentModels) {
+      try {
+        await model.sync(syncOptions);
+      } catch (error) {
+        console.warn(`⚠️  Could not sync ${modelName}:`, error.message);
+      }
+    }
     
     tablesSynchronized = true;
     
     // ========== SINGLE TABLE STATUS SUMMARY ==========
-    console.log('\n📋 Database Table Status Summary:');
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    
-    try {
-      const queryInterface = sequelize.getQueryInterface();
-      const allTables = await queryInterface.showAllTables();
-      
-      // Count records for each table
-      const tableSummary = [];
-      
-      for (const tableName of allTables) {
-        try {
-          // Find corresponding model
-          const model = Object.values(models).find(m => 
-            (m.tableName && m.tableName.toLowerCase() === tableName.toLowerCase()) ||
-            m.name.toLowerCase() === tableName.toLowerCase()
-          );
-          
-          if (model) {
-            const count = await model.count();
-            tableSummary.push({ table: tableName, records: count });
-          } else {
-            tableSummary.push({ table: tableName, records: 'N/A' });
-          }
-        } catch (countError) {
-          tableSummary.push({ table: tableName, records: 'Error' });
-        }
-      }
-      
-      // Log single summary
-      tableSummary.forEach((item, index) => {
-        const tableNum = (index + 1).toString().padStart(2, ' ');
-        const tableName = item.table.padEnd(25, ' ');
-        const records = typeof item.records === 'number' ? item.records.toString().padStart(6, ' ') : item.records.padStart(6, ' ');
-        console.log(`  ${tableNum}. ${tableName} | ${records} records`);
-      });
-      
+    if (!IS_PRODUCTION) {
+      console.log('\n📋 Database Table Status Summary:');
       console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.log(`  Total: ${allTables.length} tables | Production Mode: ${NODE_ENV === 'production'}`);
-      console.log(`  Auto-create: Independent tables only | Migrations: ${migrationsRun ? 'Applied' : 'Skipped/Failed'}`);
       
-    } catch (error) {
-      console.log('  Could not generate table summary:', error.message);
+      try {
+        const queryInterface = sequelize.getQueryInterface();
+        const allTables = await queryInterface.showAllTables();
+        
+        // Count records for each table
+        const tableSummary = [];
+        
+        for (const tableName of allTables) {
+          try {
+            // Find corresponding model
+            const model = Object.values(models).find(m => 
+              (m.tableName && m.tableName.toLowerCase() === tableName.toLowerCase()) ||
+              m.name.toLowerCase() === tableName.toLowerCase()
+            );
+            
+            if (model) {
+              const count = await model.count();
+              tableSummary.push({ table: tableName, records: count });
+            } else {
+              tableSummary.push({ table: tableName, records: 'N/A' });
+            }
+          } catch (countError) {
+            tableSummary.push({ table: tableName, records: 'Error' });
+          }
+        }
+        
+        // Log single summary
+        tableSummary.forEach((item, index) => {
+          const tableNum = (index + 1).toString().padStart(2, ' ');
+          const tableName = item.table.padEnd(25, ' ');
+          const records = typeof item.records === 'number' ? item.records.toString().padStart(6, ' ') : item.records.padStart(6, ' ');
+          console.log(`  ${tableNum}. ${tableName} | ${records} records`);
+        });
+        
+        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        console.log(`  Total: ${allTables.length} tables | Production Mode: ${IS_PRODUCTION}`);
+        console.log(`  Auto-create: Independent tables only | Migrations: ${migrationsRun ? 'Applied' : 'Skipped/Failed'}`);
+        
+      } catch (error) {
+        console.log('  Could not generate table summary:', error.message);
+      }
     }
     
     // ========== SINGLE STORAGE STATS LOG ==========
@@ -339,19 +375,24 @@ async function initializeDatabase() {
         // Count records only for essential tables
         let dbUsers = 0;
         
-        if (models.User) {
+        if (models.User || models.Users) {
           try {
-            dbUsers = await models.User.count();
+            const userModel = models.User || models.Users;
+            dbUsers = await userModel.count();
           } catch (e) {
             console.warn('Could not count users:', e.message);
           }
         }
         
-        console.log(`\n📊 Storage: Database users: ${dbUsers} | Memory users: ${users.length}`);
-        console.log(`   Mode: ${dbConnected ? 'PostgreSQL (Persistent)' : 'Memory (Temporary)'}`);
+        if (!IS_PRODUCTION) {
+          console.log(`\n📊 Storage: Database users: ${dbUsers} | Memory users: ${users.length}`);
+          console.log(`   Mode: ${dbConnected ? 'PostgreSQL (Persistent)' : 'Memory (Temporary)'}`);
+        }
         storageStatsLogged = true;
       } catch (error) {
-        console.log(`\n📊 Storage: Using memory fallback`);
+        if (!IS_PRODUCTION) {
+          console.log(`\n📊 Storage: Using memory fallback`);
+        }
         storageStatsLogged = true;
       }
     }
@@ -363,18 +404,20 @@ async function initializeDatabase() {
     console.error('❌ Database initialization failed:', error.message);
     
     // Log error details
-    console.error('Error details:', {
-      name: error.name,
-      message: error.message,
-      code: error.code || 'N/A',
-      stack: NODE_ENV === 'development' ? error.stack : undefined
-    });
+    if (!IS_PRODUCTION) {
+      console.error('Error details:', {
+        name: error.name,
+        message: error.message,
+        code: error.code || 'N/A',
+        stack: error.stack
+      });
+    }
     
     // Initialize empty models
     app.locals.models = {};
     
     // Log single storage stats message
-    if (!storageStatsLogged) {
+    if (!storageStatsLogged && !IS_PRODUCTION) {
       console.log(`\n📊 Storage: Memory fallback active | Users: ${users.length}, Messages: ${messages.length}`);
       storageStatsLogged = true;
     }
@@ -383,7 +426,7 @@ async function initializeDatabase() {
     tablesSynchronized = false;
     
     // Only exit in production if DB is required
-    if (NODE_ENV === 'production' && process.env.DB_REQUIRED === 'true') {
+    if (IS_PRODUCTION && process.env.DB_REQUIRED === 'true') {
       console.error('💀 CRITICAL: Cannot start without database in production');
       process.exit(1);
     }
@@ -403,7 +446,7 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // CORS Configuration
-if (NODE_ENV === 'development') {
+if (!IS_PRODUCTION) {
   app.use(cors({
     origin: '*',
     credentials: true,
@@ -444,35 +487,43 @@ if (NODE_ENV === 'development') {
 }
 
 // Request logger
-app.use((req, res, next) => {
-  const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] ${req.method} ${req.path} - Origin: ${req.headers.origin || 'no-origin'}`);
-  
-  if (req.path.startsWith('/api/auth/')) {
-    console.log(`[AUTH LOG] ${req.method} ${req.path} - Body:`, req.body ? JSON.stringify(req.body) : 'No body');
-  }
-  
-  next();
-});
+if (!IS_PRODUCTION) {
+  app.use((req, res, next) => {
+    const timestamp = new Date().toISOString();
+    console.log(`[${timestamp}] ${req.method} ${req.path} - Origin: ${req.headers.origin || 'no-origin'}`);
+    
+    if (req.path.startsWith('/api/auth/')) {
+      console.log(`[AUTH LOG] ${req.method} ${req.path} - Body:`, req.body ? JSON.stringify(req.body) : 'No body');
+    }
+    
+    next();
+  });
+}
 
-// Static files
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
-app.use('/assets', express.static(path.join(__dirname, 'public/assets')));
-app.use(express.static(path.join(__dirname, 'public')));
+// Static files - ONLY in development
+if (!IS_PRODUCTION) {
+  app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+  app.use('/assets', express.static(path.join(__dirname, 'public/assets')));
+  app.use(express.static(path.join(__dirname, 'public')));
+}
 
 // ========== ROUTE MOUNTING ==========
 function mountRoutes() {
   const routesPath = path.join(__dirname, 'routes');
   
   if (fs.existsSync(routesPath)) {
-    console.log(`📁 Routes directory found at: ${routesPath}`);
+    if (!IS_PRODUCTION) {
+      console.log(`📁 Routes directory found at: ${routesPath}`);
+    }
     
     const routeFiles = fs.readdirSync(routesPath).filter(file => file.endsWith('.js'));
     
-    if (routeFiles.length === 0) {
+    if (routeFiles.length === 0 && !IS_PRODUCTION) {
       console.warn('⚠️  No route files found in routes directory');
     } else {
-      console.log(`📋 Found ${routeFiles.length} route file(s):`, routeFiles);
+      if (!IS_PRODUCTION) {
+        console.log(`📋 Found ${routeFiles.length} route file(s):`, routeFiles);
+      }
       
       // Special handling for auth.js to mount at both /api and /api/auth
       const authFile = routeFiles.find(file => file === 'auth.js');
@@ -489,7 +540,9 @@ function mountRoutes() {
             mountedRoutes.push('/api/auth/*');
             mountedRoutes.push('/api/login');
             mountedRoutes.push('/api/register');
-            console.log(`✅ Mounted auth.js at both /api and /api/auth`);
+            if (!IS_PRODUCTION) {
+              console.log(`✅ Mounted auth.js at both /api and /api/auth`);
+            }
           }
           
           // Remove auth.js from routeFiles to avoid duplicate mounting
@@ -516,7 +569,9 @@ function mountRoutes() {
           if (file === 'auth.js' && routeModule && typeof routeModule === 'object' && typeof routeModule.use === 'function') {
             app.use(basePath, routeModule);
             mountedRoutes.push(`${basePath}/*`);
-            console.log(`✅ Mounted ${file} at ${basePath}`);
+            if (!IS_PRODUCTION) {
+              console.log(`✅ Mounted ${file} at ${basePath}`);
+            }
             return;
           }
           
@@ -526,27 +581,37 @@ function mountRoutes() {
               if (router && typeof router === 'function') {
                 app.use(basePath, router);
                 mountedRoutes.push(`${basePath}/*`);
-                console.log(`✅ Mounted ${file} at ${basePath}`);
+                if (!IS_PRODUCTION) {
+                  console.log(`✅ Mounted ${file} at ${basePath}`);
+                }
               } else {
                 app.use(basePath, routeModule);
                 mountedRoutes.push(`${basePath}/*`);
-                console.log(`✅ Mounted ${file} at ${basePath}`);
+                if (!IS_PRODUCTION) {
+                  console.log(`✅ Mounted ${file} at ${basePath}`);
+                }
               }
             } catch (error) {
               app.use(basePath, routeModule);
               mountedRoutes.push(`${basePath}/*`);
-              console.log(`✅ Mounted ${file} at ${basePath}`);
+              if (!IS_PRODUCTION) {
+                console.log(`✅ Mounted ${file} at ${basePath}`);
+              }
             }
           } else if (routeModule && typeof routeModule === 'object') {
             if (typeof routeModule.use === 'function') {
               app.use(basePath, routeModule);
               mountedRoutes.push(`${basePath}/*`);
-              console.log(`✅ Mounted ${file} at ${basePath}`);
+              if (!IS_PRODUCTION) {
+                console.log(`✅ Mounted ${file} at ${basePath}`);
+              }
             } else if (routeModule.default && typeof routeModule.default === 'function') {
               const router = routeModule.default();
               app.use(basePath, router);
               mountedRoutes.push(`${basePath}/*`);
-              console.log(`✅ Mounted ${file} at ${basePath}`);
+              if (!IS_PRODUCTION) {
+                console.log(`✅ Mounted ${file} at ${basePath}`);
+              }
             }
           }
         } catch (error) {
@@ -554,7 +619,7 @@ function mountRoutes() {
         }
       });
     }
-  } else {
+  } else if (!IS_PRODUCTION) {
     console.warn(`⚠️  Routes directory not found at: ${routesPath}`);
   }
 }
@@ -574,7 +639,9 @@ function authenticateToken(req, res, next) {
   
   jwt.verify(token, JWT_SECRET, (err, user) => {
     if (err) {
-      console.log('JWT Verification Error:', err.message);
+      if (!IS_PRODUCTION) {
+        console.log('JWT Verification Error:', err.message);
+      }
       return res.status(403).json({ 
         success: false, 
         message: 'Invalid or expired token',
@@ -635,31 +702,39 @@ app.get('/api/status', (req, res) => {
     mountedRoutes: mountedRoutes.length > 0 ? mountedRoutes : 'No routes mounted from routes directory',
     tableManagement: 'Safe: No table dropping',
     renderCompatibility: 'Optimized for Render PostgreSQL',
-    renderMode: process.env.RENDER ? 'Running on Render' : 'Not on Render'
+    renderMode: IS_RENDER ? 'Running on Render' : 'Not on Render'
   });
 });
 
 app.get('/api/debug', (req, res) => {
-  res.json({
-    success: true,
-    timestamp: new Date().toISOString(),
-    headers: {
-      origin: req.headers.origin,
-      'user-agent': req.headers['user-agent']
-    },
-    dbConnected: dbConnected,
-    tablesSynchronized: tablesSynchronized,
-    databaseInitialized: databaseInitialized,
-    env: {
-      NODE_ENV: NODE_ENV,
-      DATABASE_URL: process.env.DATABASE_URL ? 'Set' : 'Not set',
-      DB_HOST: process.env.DB_HOST,
-      RENDER: process.env.RENDER ? 'Yes' : 'No'
-    },
-    tablePolicy: 'Independent tables auto-created only',
-    modelsLoaded: Object.keys(models).length,
-    loadedModels: Object.keys(models)
-  });
+  if (!IS_PRODUCTION) {
+    res.json({
+      success: true,
+      timestamp: new Date().toISOString(),
+      headers: {
+        origin: req.headers.origin,
+        'user-agent': req.headers['user-agent']
+      },
+      dbConnected: dbConnected,
+      tablesSynchronized: tablesSynchronized,
+      databaseInitialized: databaseInitialized,
+      env: {
+        NODE_ENV: NODE_ENV,
+        DATABASE_URL: process.env.DATABASE_URL ? 'Set' : 'Not set',
+        DB_HOST: process.env.DB_HOST,
+        RENDER: process.env.RENDER ? 'Yes' : 'No'
+      },
+      tablePolicy: 'Independent tables auto-created only',
+      modelsLoaded: Object.keys(models).length,
+      loadedModels: Object.keys(models)
+    });
+  } else {
+    res.status(404).json({
+      success: false,
+      message: 'Debug endpoint not available in production',
+      timestamp: new Date().toISOString()
+    });
+  }
 });
 
 // ========== AUTH ROUTES ==========
@@ -686,7 +761,17 @@ app.post('/api/register', async (req, res) => {
     
     // Use database only - no in-memory fallback
     try {
-      const existingUser = await models.User.findOne({ where: { email } });
+      // Find the correct User model (could be User or Users)
+      const UserModel = models.User || models.Users;
+      if (!UserModel) {
+        return res.status(500).json({
+          success: false,
+          message: 'User model not available',
+          timestamp: new Date().toISOString()
+        });
+      }
+      
+      const existingUser = await UserModel.findOne({ where: { email } });
       if (existingUser) {
         return res.status(400).json({
           success: false,
@@ -697,7 +782,7 @@ app.post('/api/register', async (req, res) => {
       
       const hashedPassword = await bcrypt.hash(password, 10);
       
-      const user = await models.User.create({
+      const user = await UserModel.create({
         email,
         username,
         password: hashedPassword,
@@ -733,7 +818,7 @@ app.post('/api/register', async (req, res) => {
       return res.status(500).json({
         success: false,
         message: 'Registration failed - database error',
-        error: NODE_ENV === 'development' ? dbError.message : undefined,
+        error: !IS_PRODUCTION ? dbError.message : undefined,
         timestamp: new Date().toISOString()
       });
     }
@@ -743,7 +828,7 @@ app.post('/api/register', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Registration failed',
-      error: NODE_ENV === 'development' ? error.message : undefined,
+      error: !IS_PRODUCTION ? error.message : undefined,
       timestamp: new Date().toISOString()
     });
   }
@@ -764,11 +849,21 @@ app.post('/api/login', async (req, res) => {
     
     // Use database only
     try {
+      // Find the correct User model
+      const UserModel = models.User || models.Users;
+      if (!UserModel) {
+        return res.status(500).json({
+          success: false,
+          message: 'User model not available',
+          timestamp: new Date().toISOString()
+        });
+      }
+      
       let user;
       if (email.includes('@')) {
-        user = await models.User.findOne({ where: { email } });
+        user = await UserModel.findOne({ where: { email } });
       } else {
-        user = await models.User.findOne({ where: { username: email } });
+        user = await UserModel.findOne({ where: { username: email } });
       }
       
       if (!user) {
@@ -818,7 +913,7 @@ app.post('/api/login', async (req, res) => {
       return res.status(500).json({
         success: false,
         message: 'Login failed - database error',
-        error: NODE_ENV === 'development' ? dbError.message : undefined,
+        error: !IS_PRODUCTION ? dbError.message : undefined,
         timestamp: new Date().toISOString()
       });
     }
@@ -828,7 +923,7 @@ app.post('/api/login', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Login failed',
-      error: NODE_ENV === 'development' ? error.message : undefined,
+      error: !IS_PRODUCTION ? error.message : undefined,
       timestamp: new Date().toISOString()
     });
   }
@@ -847,7 +942,17 @@ app.get('/api/auth/me', authenticateToken, async (req, res) => {
     
     // Use database only
     try {
-      const user = await models.User.findByPk(req.user.userId);
+      // Find the correct User model
+      const UserModel = models.User || models.Users;
+      if (!UserModel) {
+        return res.status(500).json({
+          success: false,
+          message: 'User model not available',
+          timestamp: new Date().toISOString()
+        });
+      }
+      
+      const user = await UserModel.findByPk(req.user.userId);
       if (!user) {
         return res.status(404).json({
           success: false,
@@ -873,7 +978,7 @@ app.get('/api/auth/me', authenticateToken, async (req, res) => {
       return res.status(500).json({
         success: false,
         message: 'Failed to get profile - database error',
-        error: NODE_ENV === 'development' ? dbError.message : undefined,
+        error: !IS_PRODUCTION ? dbError.message : undefined,
         timestamp: new Date().toISOString()
       });
     }
@@ -883,7 +988,7 @@ app.get('/api/auth/me', authenticateToken, async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Failed to get profile',
-      error: NODE_ENV === 'development' ? error.message : undefined,
+      error: !IS_PRODUCTION ? error.message : undefined,
       timestamp: new Date().toISOString()
     });
   }
@@ -919,7 +1024,7 @@ app.get('/api/chat/rooms', authenticateToken, (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Failed to fetch rooms',
-      error: NODE_ENV === 'development' ? error.message : undefined,
+      error: !IS_PRODUCTION ? error.message : undefined,
       timestamp: new Date().toISOString()
     });
   }
@@ -955,7 +1060,7 @@ app.get('/api/chat/messages/:room', authenticateToken, (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Failed to fetch messages',
-      error: NODE_ENV === 'development' ? error.message : undefined,
+      error: !IS_PRODUCTION ? error.message : undefined,
       timestamp: new Date().toISOString()
     });
   }
@@ -997,9 +1102,10 @@ app.post('/api/chat/messages', authenticateToken, (req, res) => {
     messages.push(message);
     
     // Also save to database if available
-    if (dbConnected && tablesSynchronized && models.Message) {
+    if (dbConnected && tablesSynchronized && (models.Message || models.Messages)) {
       try {
-        models.Message.create({
+        const MessageModel = models.Message || models.Messages;
+        MessageModel.create({
           room,
           content,
           sender_id: user.id,
@@ -1026,7 +1132,7 @@ app.post('/api/chat/messages', authenticateToken, (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Failed to send message',
-      error: NODE_ENV === 'development' ? error.message : undefined,
+      error: !IS_PRODUCTION ? error.message : undefined,
       timestamp: new Date().toISOString()
     });
   }
@@ -1071,7 +1177,9 @@ app.post('/api/test-json', (req, res) => {
 
 // ========== API CATCH-ALL ==========
 app.all('/api/*', (req, res) => {
-  console.warn(`⚠️  Unhandled API route: ${req.method} ${req.path}`);
+  if (!IS_PRODUCTION) {
+    console.warn(`⚠️  Unhandled API route: ${req.method} ${req.path}`);
+  }
   res.status(404).json({
     success: false,
     message: `API endpoint ${req.method} ${req.path} not found`,
@@ -1098,21 +1206,35 @@ app.all('/api/*', (req, res) => {
 });
 
 // ========== STATIC PAGES ==========
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
+if (!IS_PRODUCTION) {
+  app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  });
 
-app.get('/login', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html.html'));
-});
+  app.get('/login', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'index.html.html'));
+  });
 
-app.get('/register', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html.html'));
-});
+  app.get('/register', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'index.html.html'));
+  });
 
-app.get('/chat', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'chat.html'));
-});
+  app.get('/chat', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'chat.html'));
+  });
+} else {
+  // In production, return API status for root route
+  app.get('/', (req, res) => {
+    res.json({
+      status: 'API running',
+      service: 'MoodChat Backend API',
+      version: '1.0.0',
+      environment: 'production',
+      timestamp: new Date().toISOString(),
+      documentation: 'API endpoints available at /api/*'
+    });
+  });
+}
 
 // ========== ERROR HANDLING ==========
 app.use((err, req, res, next) => {
@@ -1149,7 +1271,7 @@ app.use((err, req, res, next) => {
   res.status(err.status || 500).json({
     success: false,
     message: 'Internal server error',
-    error: NODE_ENV === 'development' ? err.message : undefined,
+    error: !IS_PRODUCTION ? err.message : undefined,
     timestamp: new Date().toISOString(),
     database: {
       connected: dbConnected,
@@ -1172,13 +1294,13 @@ app.use((req, res) => {
   });
 });
 
-// ========== START SERVERs ==========
+// ========== START SERVER ==========
 const startServer = async () => {
   console.log('🚀 Starting MoodChat Backend Server...');
   console.log(`📁 Environment: ${NODE_ENV}`);
   console.log(`🌐 Port: ${PORT}`);
   console.log(`🗄️  Database: Safe table management enabled`);
-  console.log(`🔧 Render Mode: ${process.env.RENDER ? 'Yes' : 'No'}`);
+  console.log(`🔧 Render Mode: ${IS_RENDER ? 'Yes' : 'No'}`);
   console.log(`🔨 Automatic Table Creation: INDEPENDENT TABLES ONLY`);
   console.log(`📈 Render PostgreSQL Compatibility: SAFE MODE`);
   
@@ -1211,7 +1333,7 @@ const startServer = async () => {
     console.log(`│   ⏱️  Time:     ${new Date().toLocaleString()}           `);
     console.log(`│   🗄️  Database: ${dbConnected ? '✅ Connected' : '⚠️  Not Connected'}    `);
     console.log(`│   📊 Tables:   ${tablesSynchronized ? '✅ Safe Mode' : '⚠️  Not Synced'}    `);
-    console.log(`│   🔓 CORS:     ${NODE_ENV === 'development' ? 'ALLOW ALL' : 'RESTRICTED'}    `);
+    console.log(`│   🔓 CORS:     ${!IS_PRODUCTION ? 'ALLOW ALL' : 'RESTRICTED'}    `);
     console.log(`│   🛣️  Routes:   ${mountedRoutes.length} mounted           `);
     console.log(`│   🔧 Auto Tables: INDEPENDENT ONLY                       `);
     console.log(`│   📈 Render PG: ${tablesSynchronized ? '✅ SAFE MODE' : '⚠️  CHECK CONFIG'}  `);
@@ -1219,15 +1341,21 @@ const startServer = async () => {
     console.log(`│                                                          │`);
     console.log(`│   📊 Health:   http://localhost:${PORT}/api/health       ${PORT < 1000 ? ' ' : ''}`);
     console.log(`│   🔐 Status:   http://localhost:${PORT}/api/status       ${PORT < 1000 ? ' ' : ''}`);
-    console.log(`│   🐛 Debug:    http://localhost:${PORT}/api/debug        ${PORT < 1000 ? ' ' : ''}`);
+    if (!IS_PRODUCTION) {
+      console.log(`│   🐛 Debug:    http://localhost:${PORT}/api/debug        ${PORT < 1000 ? ' ' : ''}`);
+    }
     console.log(`│   💬 API Base: http://localhost:${PORT}/api              ${PORT < 1000 ? ' ' : ''}`);
     console.log(`│                                                          │`);
-    console.log(`│   📄 Pages:                                               │`);
-    console.log(`│   • Home:      http://localhost:${PORT}/                 ${PORT < 1000 ? ' ' : ''}`);
-    console.log(`│   • Login:     http://localhost:${PORT}/login            ${PORT < 1000 ? ' ' : ''}`);
-    console.log(`│   • Register:  http://localhost:${PORT}/register         ${PORT < 1000 ? ' ' : ''}`);
-    console.log(`│   • Chat:      http://localhost:${PORT}/chat             ${PORT < 1000 ? ' ' : ''}`);
-    console.log(`│                                                          │`);
+    
+    if (!IS_PRODUCTION) {
+      console.log(`│   📄 Pages:                                               │`);
+      console.log(`│   • Home:      http://localhost:${PORT}/                 ${PORT < 1000 ? ' ' : ''}`);
+      console.log(`│   • Login:     http://localhost:${PORT}/login            ${PORT < 1000 ? ' ' : ''}`);
+      console.log(`│   • Register:  http://localhost:${PORT}/register         ${PORT < 1000 ? ' ' : ''}`);
+      console.log(`│   • Chat:      http://localhost:${PORT}/chat             ${PORT < 1000 ? ' ' : ''}`);
+      console.log(`│                                                          │`);
+    }
+    
     console.log(`│   PostgreSQL: Independent tables auto-created only        │`);
     console.log(`│   Press Ctrl+C to stop                                   │`);
     console.log(`│                                                          │`);
@@ -1262,7 +1390,7 @@ const startServer = async () => {
 
   process.on('uncaughtException', (error) => {
     console.error('🚨 Uncaught Exception:', error);
-    if (NODE_ENV === 'production') {
+    if (IS_PRODUCTION) {
       shutdown('UNCAUGHT_EXCEPTION');
     }
   });
