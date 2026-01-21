@@ -1172,7 +1172,7 @@ app.use((req, res) => {
   });
 });
 
-// ========== START SERVER ==========
+// ========== START SERVERs ==========
 const startServer = async () => {
   console.log('🚀 Starting MoodChat Backend Server...');
   console.log(`📁 Environment: ${NODE_ENV}`);
