@@ -464,7 +464,7 @@ if (!IS_PRODUCTION) {
     'http://localhost:5000',
     'http://localhost:8080',
     'http://localhost:4000',
-    'https://moodfronted.com',
+    'https://moodfronted.onrender.com',
     FRONTEND_URL
   ].filter(Boolean);
   

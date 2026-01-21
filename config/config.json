@@ -2,7 +2,7 @@
   "development": {
     "username": "postgres",
     "password": "a8UIFwP8552hGbYI9x7O3Dp7gs3vb6TV",
-    "database": "denismoo",
+    "database": "denismoo_db",
     "host": "127.0.0.1",
     "dialect": "postgres",
     "port": 5432,
@@ -26,7 +26,7 @@
   "production": {
     "username": "postgres",
     "password": "a8UIFwP8552hGbYI9x7O3Dp7gs3vb6TV",
-    "database": "denismoo",
+    "database": "denismoo_db",
     "host": "127.0.0.1",
     "dialect": "postgres",
     "port": 5432,
