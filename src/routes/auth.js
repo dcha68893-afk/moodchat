@@ -113,7 +113,7 @@ function validatePassword(password) {
   return errors;
 }
 
-// Health endpoint
+// Health endpoint - RELATIVE PATH: /health (becomes /api/auth/health when mounted)
 router.get('/health', (req, res) => {
   res.status(200).json({
     status: 'success',
@@ -122,242 +122,216 @@ router.get('/health', (req, res) => {
   });
 });
 
-// Register endpoint - FIXED: Using authLimiter (not authRateLimiter)
+// Register endpoint - RELATIVE PATH: /register (becomes /api/auth/register when mounted)
 router.post(
   '/register',
   authLimiter,
   asyncHandler(async (req, res) => {
     try {
-      const { username, email, password, firstName, lastName, avatar } = req.body;
+      const { username, email, password } = req.body;
 
-      if (!username || !email || !password) {
-        throw new ValidationError('Username, email and password are required');
-      }
-
-      if (username.length < 3 || username.length > 30) {
-        throw new ValidationError('Username must be between 3 and 30 characters');
-      }
-
-      // Validate password using .env rules
-      const passwordErrors = validatePassword(password);
-      if (passwordErrors.length > 0) {
-        throw new ValidationError(passwordErrors.join(', '));
-      }
-
-      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-      if (!emailRegex.test(email)) {
-        throw new ValidationError('Invalid email format');
-      }
-
-      // Check if models are available from app.locals
-      const models = req.app.locals.models;
-      if (!models || !models.User) {
-        throw new Error('Database models not available');
-      }
-
-      const UserModel = models.User;
-      const { Op } = models.sequelize.Sequelize;
-
-      const existingUser = await UserModel.findOne({
-        where: {
-          [Op.or]: [
-            { username: username.toLowerCase() },
-            { email: email.toLowerCase() }
-          ]
-        }
-      });
-
-      if (existingUser) {
-        if (existingUser.username === username.toLowerCase()) {
-          throw new ConflictError('Username already taken');
-        } else {
-          throw new ConflictError('Email already registered');
-        }
-      }
-
-      // Hash password
-      const hashedPassword = await bcrypt.hash(password, 10);
-
-      // Create user
-      const user = await UserModel.create({
-        username: username.toLowerCase(),
-        email: email.toLowerCase(),
-        password: hashedPassword,
-        firstName: firstName || null,
-        lastName: lastName || null,
-        avatar: avatar || `https://ui-avatars.com/api/?name=${encodeURIComponent(username)}&background=random&color=fff`,
-        status: 'offline',
-        isActive: true,
-        isVerified: false,
-      });
-
-      const accessToken = jwt.sign(
-        { id: user.id, username: user.username, email: user.email },
-        JWT_SECRET,
-        { expiresIn: JWT_ACCESS_EXPIRES_IN }
-      );
-
-      const refreshToken = jwt.sign(
-        { id: user.id },
-        JWT_SECRET,
-        { expiresIn: JWT_REFRESH_EXPIRES_IN }
-      );
-
-      // Create token record if Token model exists
-      if (models.Token) {
-        await models.Token.create({
-          userId: user.id,
-          token: refreshToken,
-          type: 'refresh',
-          expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+      // 1. Validate required fields
+      if (!email || !username || !password) {
+        return res.status(400).json({
+          success: false,
+          message: 'Email, username, and password are required',
+          timestamp: new Date().toISOString()
         });
       }
 
-      const userResponse = {
-        id: user.id,
-        username: user.username,
-        email: user.email,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        avatar: user.avatar,
-        status: user.status,
-        lastSeen: user.lastSeen,
-        createdAt: user.createdAt,
-      };
+      // 2. Check database connection
+      const models = req.app.locals.models;
+      const dbConnected = req.app.locals.dbConnected || false;
+      
+      if (!dbConnected) {
+        return res.status(503).json({
+          success: false,
+          message: 'Database not available. Registration requires PostgreSQL connection.',
+          timestamp: new Date().toISOString()
+        });
+      }
 
-      res.cookie('refreshToken', refreshToken, {
-        httpOnly: true,
-        secure: IS_PRODUCTION,
-        sameSite: 'strict',
-        maxAge: 7 * 24 * 60 * 60 * 1000,
+      // 3. Get User model
+      const UserModel = models.User || models.Users;
+      if (!UserModel) {
+        return res.status(500).json({
+          success: false,
+          message: 'User model not available',
+          timestamp: new Date().toISOString()
+        });
+      }
+
+      // 4. Check if user exists
+      const existingUser = await UserModel.findOne({ 
+        where: { email: email.toLowerCase() } 
+      });
+      
+      if (existingUser) {
+        return res.status(400).json({
+          success: false,
+          message: 'User already exists',
+          timestamp: new Date().toISOString()
+        });
+      }
+
+      // 5. Hash password
+      const hashedPassword = await bcrypt.hash(password, 10);
+
+      // 6. Create user
+      const user = await UserModel.create({
+        email: email.toLowerCase(),
+        username: username,
+        password: hashedPassword,
+        avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(username)}&background=random&color=fff`
       });
 
-      res.status(201).json({
-        status: 'success',
-        message: 'User registered successfully',
-        data: {
-          user: userResponse,
-          accessToken,
-          refreshToken,
+      // 7. Generate JWT token
+      const token = jwt.sign(
+        { 
+          userId: user.id, 
+          email: user.email, 
+          username: user.username 
         },
+        JWT_SECRET,
+        { expiresIn: '24h' }
+      );
+
+      // 8. Return success response
+      return res.status(201).json({
+        success: true,
+        message: 'User registered successfully',
+        token,
+        user: {
+          id: user.id,
+          email: user.email,
+          username: user.username,
+          avatar: user.avatar,
+          createdAt: user.createdAt
+        },
+        timestamp: new Date().toISOString(),
+        storage: 'PostgreSQL (Permanent)'
       });
-    } catch (error) {
-      console.error('Error registering user:', error);
-      res.status(error.statusCode || 500).json({
-        status: 'error',
-        message: error.message || 'Failed to register user'
+      
+    } catch (dbError) {
+      console.error('Database registration error:', dbError.message);
+      return res.status(500).json({
+        success: false,
+        message: 'Registration failed - database error',
+        error: !IS_PRODUCTION ? dbError.message : undefined,
+        timestamp: new Date().toISOString()
       });
     }
   })
 );
 
-// Login endpoint - FIXED: Using authLimiter (not authRateLimiter)
+// Login endpoint - RELATIVE PATH: /login (becomes /api/auth/login when mounted)
 router.post(
   '/login',
   authLimiter,
   asyncHandler(async (req, res) => {
     try {
-      const { identifier, password } = req.body;
+      const { email, password } = req.body;
 
-      if (!identifier || !password) {
-        throw new ValidationError('Identifier and password are required');
-      }
-
-      // Check if models are available from app.locals
-      const models = req.app.locals.models;
-      if (!models || !models.User) {
-        throw new Error('Database models not available');
-      }
-
-      const UserModel = models.User;
-      const { Op } = models.sequelize.Sequelize;
-
-      const user = await UserModel.findOne({
-        where: {
-          [Op.or]: [
-            { email: identifier.toLowerCase() },
-            { username: identifier.toLowerCase() }
-          ]
-        }
-      });
-
-      if (!user) {
-        throw new AuthenticationError('Invalid credentials');
-      }
-
-      // Validate password
-      const isValidPassword = await bcrypt.compare(password, user.password);
-      if (!isValidPassword) {
-        throw new AuthenticationError('Invalid credentials');
-      }
-
-      const accessToken = jwt.sign(
-        { id: user.id, username: user.username, email: user.email },
-        JWT_SECRET,
-        { expiresIn: JWT_ACCESS_EXPIRES_IN }
-      );
-
-      const refreshToken = jwt.sign(
-        { id: user.id },
-        JWT_SECRET,
-        { expiresIn: JWT_REFRESH_EXPIRES_IN }
-      );
-
-      // Create token record if Token model exists
-      if (models.Token) {
-        await models.Token.create({
-          userId: user.id,
-          token: refreshToken,
-          type: 'refresh',
-          expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+      // 1. Validate required fields
+      if (!email || !password) {
+        return res.status(400).json({
+          success: false,
+          message: 'Email and password are required',
+          timestamp: new Date().toISOString()
         });
       }
 
-      // Update user status
-      await user.update({
-        status: 'online',
-        lastSeen: new Date(),
-      });
+      // 2. Check database connection
+      const models = req.app.locals.models;
+      const dbConnected = req.app.locals.dbConnected || false;
+      
+      if (!dbConnected) {
+        return res.status(503).json({
+          success: false,
+          message: 'Database not available. Please try again later.',
+          timestamp: new Date().toISOString()
+        });
+      }
 
-      const userResponse = {
-        id: user.id,
-        username: user.username,
-        email: user.email,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        avatar: user.avatar,
-        status: user.status,
-        lastSeen: user.lastSeen,
-        createdAt: user.createdAt,
-      };
+      // 3. Get User model
+      const UserModel = models.User || models.Users;
+      if (!UserModel) {
+        return res.status(500).json({
+          success: false,
+          message: 'User model not available',
+          timestamp: new Date().toISOString()
+        });
+      }
 
-      res.cookie('refreshToken', refreshToken, {
-        httpOnly: true,
-        secure: IS_PRODUCTION,
-        sameSite: 'strict',
-        maxAge: 7 * 24 * 60 * 60 * 1000,
-      });
+      // 4. Find user by email or username
+      let user;
+      if (email.includes('@')) {
+        user = await UserModel.findOne({ where: { email: email.toLowerCase() } });
+      } else {
+        user = await UserModel.findOne({ where: { username: email } });
+      }
 
-      res.status(200).json({
-        status: 'success',
-        message: 'Login successful',
-        data: {
-          user: userResponse,
-          accessToken,
-          refreshToken,
+      // 5. If user not found
+      if (!user) {
+        return res.status(401).json({
+          success: false,
+          message: 'Invalid credentials',
+          timestamp: new Date().toISOString()
+        });
+      }
+
+      // 6. Compare passwords
+      const validPassword = await bcrypt.compare(password, user.password);
+      
+      // 7. If password is invalid
+      if (!validPassword) {
+        return res.status(401).json({
+          success: false,
+          message: 'Invalid credentials',
+          timestamp: new Date().toISOString()
+        });
+      }
+
+      // 8. Generate JWT token
+      const token = jwt.sign(
+        { 
+          userId: user.id, 
+          email: user.email, 
+          username: user.username 
         },
+        JWT_SECRET,
+        { expiresIn: '24h' }
+      );
+
+      // 9. Return success response
+      return res.json({
+        success: true,
+        message: 'Login successful',
+        token,
+        user: {
+          id: user.id,
+          email: user.email,
+          username: user.username,
+          avatar: user.avatar,
+          createdAt: user.createdAt
+        },
+        timestamp: new Date().toISOString(),
+        storage: 'PostgreSQL (Permanent)'
       });
-    } catch (error) {
-      console.error('Error logging in:', error);
-      res.status(error.statusCode || 500).json({
-        status: 'error',
-        message: error.message || 'Failed to login'
+      
+    } catch (dbError) {
+      console.error('Database login error:', dbError.message);
+      return res.status(500).json({
+        success: false,
+        message: 'Login failed - database error',
+        error: !IS_PRODUCTION ? dbError.message : undefined,
+        timestamp: new Date().toISOString()
       });
     }
   })
 );
 
-// Refresh token endpoint
+// Refresh token endpoint - RELATIVE PATH: /refresh-token
 router.post(
   '/refresh-token',
   asyncHandler(async (req, res) => {
@@ -440,7 +414,7 @@ router.post(
   })
 );
 
-// Logout endpoint
+// Logout endpoint - RELATIVE PATH: /logout
 router.post(
   '/logout',
   authenticate,
@@ -482,7 +456,7 @@ router.post(
   })
 );
 
-// Profile endpoint - FIXED: Using apiLimiter (not apiRateLimiter)
+// Profile endpoint - RELATIVE PATH: /me
 router.get(
   '/me',
   authenticate,
@@ -492,7 +466,11 @@ router.get(
       // Check if models are available from app.locals
       const models = req.app.locals.models;
       if (!models || !models.User) {
-        throw new Error('Database models not available');
+        return res.status(500).json({
+          success: false,
+          message: 'User model not available',
+          timestamp: new Date().toISOString()
+        });
       }
 
       const UserModel = models.User;
@@ -504,7 +482,11 @@ router.get(
       });
 
       if (!user) {
-        throw new AuthenticationError('User not found');
+        return res.status(401).json({
+          success: false,
+          message: 'User not found',
+          timestamp: new Date().toISOString()
+        });
       }
 
       res.status(200).json({
@@ -513,15 +495,15 @@ router.get(
       });
     } catch (error) {
       console.error('Error fetching user profile:', error);
-      res.status(error.statusCode || 500).json({
+      res.status(500).json({
         status: 'error',
-        message: error.message || 'Failed to fetch user profile'
+        message: 'Failed to fetch user profile'
       });
     }
   })
 );
 
-// Test database connection endpoint
+// Test database connection endpoint - RELATIVE PATH: /test-db
 router.get('/test-db', asyncHandler(async (req, res) => {
   try {
     const models = req.app.locals.models;
@@ -550,4 +532,5 @@ router.get('/test-db', asyncHandler(async (req, res) => {
   }
 }));
 
+// Export the router
 module.exports = router;

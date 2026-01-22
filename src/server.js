@@ -1,4 +1,4 @@
-﻿﻿﻿// src/server.js - UPDATED FOR RENDER POSTGRESQL WITH PERMANENT TABLES
+﻿﻿// src/server.js - UPDATED FOR RENDER POSTGRESQL WITH PERMANENT TABLES
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -185,7 +185,19 @@ async function initializeDatabase() {
         }
       }, {
         tableName: 'Users',
-        timestamps: true
+        timestamps: true,
+        hooks: {
+          beforeCreate: async (user) => {
+            if (user.password) {
+              user.password = await bcrypt.hash(user.password, 10);
+            }
+          },
+          beforeUpdate: async (user) => {
+            if (user.changed('password')) {
+              user.password = await bcrypt.hash(user.password, 10);
+            }
+          }
+        }
       });
       
       // Define basic Message model
@@ -228,6 +240,7 @@ async function initializeDatabase() {
     // Attach models to app.locals
     app.locals.models = models;
     app.locals.sequelize = sequelize;
+    app.locals.dbConnected = dbConnected;
     
     // ========== SAFE TABLE MANAGEMENT FOR RENDER ==========
     console.log('🔄 Managing database tables with permanent schema...');
@@ -397,6 +410,7 @@ async function initializeDatabase() {
     
     // Initialize empty models
     app.locals.models = {};
+    app.locals.dbConnected = false;
     
     // Log storage stats
     if (!storageStatsLogged && !IS_PRODUCTION) {
@@ -490,123 +504,56 @@ if (!IS_PRODUCTION) {
   app.use(express.static(path.join(__dirname, 'public')));
 }
 
-// ========== ROUTE MOUNTING ==========
-function mountRoutes() {
-  const routesPath = path.join(__dirname, 'routes');
-  
-  if (fs.existsSync(routesPath)) {
-    if (!IS_PRODUCTION) {
-      console.log(`📁 Routes directory found at: ${routesPath}`);
-    }
-    
-    const routeFiles = fs.readdirSync(routesPath).filter(file => file.endsWith('.js'));
-    
-    if (routeFiles.length === 0 && !IS_PRODUCTION) {
-      console.warn('⚠️  No route files found in routes directory');
+// ========== MOUNT MAIN API ROUTER ==========
+function mountApiRouter() {
+  try {
+    const apiRoutesPath = path.join(__dirname, 'routes', 'index.js');
+    if (fs.existsSync(apiRoutesPath)) {
+      console.log('📡 Loading main API router...');
+      delete require.cache[require.resolve(apiRoutesPath)];
+      const apiRouter = require(apiRoutesPath);
+      
+      if (apiRouter && typeof apiRouter === 'function') {
+        // Mount the main API router at /api
+        app.use('/api', apiRouter);
+        mountedRoutes.push('/api/*');
+        console.log('✅ Mounted main API router at /api');
+        
+        // Import and mount auth router through the main router
+        // The auth router will be mounted at /api/auth via the main router
+        console.log('✅ Auth routes will be available at /api/auth/*');
+      } else {
+        console.warn('⚠️  Main API router not a valid Express router');
+        // Fallback: mount auth router directly if main router fails
+        mountAuthRouterDirectly();
+      }
     } else {
-      if (!IS_PRODUCTION) {
-        console.log(`📋 Found ${routeFiles.length} route file(s):`, routeFiles);
-      }
-      
-      // Mount auth router at /api/auth
-      const authFile = routeFiles.find(file => file === 'auth.js');
-      if (authFile) {
-        try {
-          const authPath = path.join(routesPath, authFile);
-          delete require.cache[require.resolve(authPath)];
-          const authRouter = require(authPath);
-          
-          if (authRouter && typeof authRouter === 'function') {
-            // Mount auth router at /api/auth
-            app.use('/api/auth', authRouter);
-            mountedRoutes.push('/api/auth/*');
-            if (!IS_PRODUCTION) {
-              console.log(`✅ Mounted auth.js at /api/auth`);
-            }
-          } else if (authRouter && typeof authRouter.use === 'function') {
-            app.use('/api/auth', authRouter);
-            mountedRoutes.push('/api/auth/*');
-            if (!IS_PRODUCTION) {
-              console.log(`✅ Mounted auth.js at /api/auth`);
-            }
-          }
-          
-          // Remove auth.js from routeFiles to avoid duplicate mounting
-          routeFiles.splice(routeFiles.indexOf(authFile), 1);
-        } catch (error) {
-          console.error(`❌ Failed to mount auth.js:`, error.message);
-        }
-      }
-      
-      // Mount all other routes normally
-      routeFiles.forEach(file => {
-        try {
-          const routeName = file.replace('.js', '');
-          const routePath = path.join(routesPath, file);
-          
-          delete require.cache[require.resolve(routePath)];
-          const routeModule = require(routePath);
-          
-          let basePath = `/api/${routeName}`;
-          if (file === 'index.js') {
-            basePath = '/api';
-          }
-          
-          if (file === 'auth.js' && routeModule && typeof routeModule === 'object' && typeof routeModule.use === 'function') {
-            app.use(basePath, routeModule);
-            mountedRoutes.push(`${basePath}/*`);
-            if (!IS_PRODUCTION) {
-              console.log(`✅ Mounted ${file} at ${basePath}`);
-            }
-            return;
-          }
-          
-          if (routeModule && typeof routeModule === 'function') {
-            try {
-              const router = routeModule(app);
-              if (router && typeof router === 'function') {
-                app.use(basePath, router);
-                mountedRoutes.push(`${basePath}/*`);
-                if (!IS_PRODUCTION) {
-                  console.log(`✅ Mounted ${file} at ${basePath}`);
-                }
-              } else {
-                app.use(basePath, routeModule);
-                mountedRoutes.push(`${basePath}/*`);
-                if (!IS_PRODUCTION) {
-                  console.log(`✅ Mounted ${file} at ${basePath}`);
-                }
-              }
-            } catch (error) {
-              app.use(basePath, routeModule);
-              mountedRoutes.push(`${basePath}/*`);
-              if (!IS_PRODUCTION) {
-                console.log(`✅ Mounted ${file} at ${basePath}`);
-              }
-            }
-          } else if (routeModule && typeof routeModule === 'object') {
-            if (typeof routeModule.use === 'function') {
-              app.use(basePath, routeModule);
-              mountedRoutes.push(`${basePath}/*`);
-              if (!IS_PRODUCTION) {
-                console.log(`✅ Mounted ${file} at ${basePath}`);
-              }
-            } else if (routeModule.default && typeof routeModule.default === 'function') {
-              const router = routeModule.default();
-              app.use(basePath, router);
-              mountedRoutes.push(`${basePath}/*`);
-              if (!IS_PRODUCTION) {
-                console.log(`✅ Mounted ${file} at ${basePath}`);
-              }
-            }
-          }
-        } catch (error) {
-          console.error(`❌ Failed to mount route ${file}:`, error.message);
-        }
-      });
+      console.warn('⚠️  Main API router not found, mounting auth router directly...');
+      mountAuthRouterDirectly();
     }
-  } else if (!IS_PRODUCTION) {
-    console.warn(`⚠️  Routes directory not found at: ${routesPath}`);
+  } catch (error) {
+    console.error('❌ Failed to mount main API router:', error.message);
+    mountAuthRouterDirectly();
+  }
+}
+
+// Fallback function to mount auth router directly if main router fails
+function mountAuthRouterDirectly() {
+  try {
+    const authRoutesPath = path.join(__dirname, 'routes', 'auth.js');
+    if (fs.existsSync(authRoutesPath)) {
+      console.log('🔄 Falling back to direct auth router mount...');
+      delete require.cache[require.resolve(authRoutesPath)];
+      const authRouter = require(authRoutesPath);
+      
+      if (authRouter && typeof authRouter === 'function') {
+        app.use('/api/auth', authRouter);
+        mountedRoutes.push('/api/auth/*');
+        console.log('✅ Mounted auth router directly at /api/auth');
+      }
+    }
+  } catch (error) {
+    console.error('❌ Failed to mount auth router directly:', error.message);
   }
 }
 
@@ -639,7 +586,7 @@ function authenticateToken(req, res, next) {
   });
 }
 
-// ========== HEALTH ENDPOINTS ==========
+// ========== HEALTH ENDPOINTS (BEFORE API ROUTES) ==========
 app.get('/health', (req, res) => {
   res.setHeader('Cache-Control', 'no-cache');
   res.json({ 
@@ -742,7 +689,8 @@ app.get('/api/debug', (req, res) => {
   }
 });
 
-// ========== AUTH ROUTES ==========
+// ========== LEGACY AUTH ROUTES (PRESERVE FOR COMPATIBILITY) ==========
+// These routes will continue to work alongside /api/auth/*
 app.post('/api/register', async (req, res) => {
   try {
     const { email, password, username } = req.body;
@@ -842,6 +790,14 @@ app.post('/api/register', async (req, res) => {
 app.post('/api/login', async (req, res) => {
   try {
     const { email, password } = req.body;
+    
+    if (!email || !password) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email and password are required',
+        timestamp: new Date().toISOString()
+      });
+    }
     
     // REQUIRE database connection for production
     if (!dbConnected) {
@@ -1180,36 +1136,6 @@ app.post('/api/test-json', (req, res) => {
   });
 });
 
-// ========== API CATCH-ALL ==========
-app.all('/api/*', (req, res) => {
-  if (!IS_PRODUCTION) {
-    console.warn(`⚠️  Unhandled API route: ${req.method} ${req.path}`);
-  }
-  res.status(404).json({
-    success: false,
-    message: `API endpoint ${req.method} ${req.path} not found`,
-    timestamp: new Date().toISOString(),
-    availableEndpoints: [
-      '/api/health',
-      '/api/status',
-      '/api/debug',
-      '/api/register',
-      '/api/login',
-      '/api/auth/me',
-      '/api/chat/rooms',
-      '/api/chat/messages/:room',
-      '/api/chat/messages',
-      '/api/stats',
-      '/api/test-json'
-    ],
-    database: {
-      connected: dbConnected,
-      tablesSynchronized: tablesSynchronized,
-      tablePolicy: 'Permanent tables, no table dropping'
-    }
-  });
-});
-
 // ========== STATIC PAGES ==========
 if (!IS_PRODUCTION) {
   app.get('/', (req, res) => {
@@ -1217,11 +1143,11 @@ if (!IS_PRODUCTION) {
   });
 
   app.get('/login', (req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'index.html.html'));
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
   });
 
   app.get('/register', (req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'index.html.html'));
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
   });
 
   app.get('/chat', (req, res) => {
@@ -1319,9 +1245,9 @@ const startServer = async () => {
   console.log('📊 Creating missing tables, preserving existing data...');
   await initializeDatabase();
   
-  // Mount routes
-  console.log('📡 Mounting routes...');
-  mountRoutes();
+  // Mount main API router (includes auth routes)
+  console.log('📡 Mounting main API router...');
+  mountApiRouter();
   
   // Final verification
   if (tablesSynchronized) {

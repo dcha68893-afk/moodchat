@@ -22,8 +22,10 @@ const { apiRateLimiter } = require('../middleware/rateLimiter');
 // Apply global middleware to all routes
 router.use(apiRateLimiter);
 
-// Mount routes with their respective paths
+// Mount auth routes WITHOUT authentication middleware (login/register don't need auth)
 router.use('/auth', authRoutes);
+
+// Mount all other routes WITH authentication middleware
 router.use('/users', authenticate, userRoutes);
 router.use('/friends', authenticate, friendRoutes);
 router.use('/chats', authenticate, chatRoutes);
@@ -195,7 +197,7 @@ router.get('/docs', (req, res) => {
   });
 });
 
-// 404 handler for API routes that don't exist
+// 404 handler for API routes that don't exist (MUST BE LAST)
 router.use('*', (req, res) => {
   res.status(404).json({
     success: false,
@@ -223,5 +225,6 @@ router.use((err, req, res, next) => {
 });
 
 console.log('✅ Main API routes initialized with proper router');
+console.log('✅ Auth routes mounted at /auth (no authentication required for login/register)');
 
 module.exports = router;

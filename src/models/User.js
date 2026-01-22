@@ -1,3 +1,4 @@
+// models/User.js
 const bcrypt = require('bcryptjs');
 
 module.exports = (sequelize, DataTypes) => {
@@ -73,6 +74,11 @@ module.exports = (sequelize, DataTypes) => {
           }
         }
       },
+      avatar: {
+        type: DataTypes.STRING,
+        allowNull: true,
+        defaultValue: 'https://ui-avatars.com/api/?name=User&background=random&color=fff'
+      },
       firstName: {
         type: DataTypes.STRING(50),
         allowNull: true,
@@ -92,11 +98,6 @@ module.exports = (sequelize, DataTypes) => {
             msg: 'Last name cannot exceed 50 characters'
           }
         }
-      },
-      avatar: {
-        type: DataTypes.STRING,
-        allowNull: true,
-        defaultValue: null
       },
       bio: {
         type: DataTypes.TEXT,
@@ -195,9 +196,17 @@ module.exports = (sequelize, DataTypes) => {
           }
         }
       },
+      createdAt: {
+        type: DataTypes.DATE,
+        defaultValue: DataTypes.NOW
+      },
+      updatedAt: {
+        type: DataTypes.DATE,
+        defaultValue: DataTypes.NOW
+      }
     },
     {
-      tableName: 'users',
+      tableName: 'Users',
       timestamps: true,
       underscored: true,
       freezeTableName: true,
@@ -206,7 +215,7 @@ module.exports = (sequelize, DataTypes) => {
         beforeCreate: async (user) => {
           if (user.password && user.password.length > 0) {
             try {
-              user.password = await bcrypt.hash(user.password, 12);
+              user.password = await bcrypt.hash(user.password, 10);
             } catch (error) {
               throw new Error(`Password hashing failed: ${error.message}`);
             }
@@ -219,7 +228,7 @@ module.exports = (sequelize, DataTypes) => {
           if (user.changed('password')) {
             if (user.password && user.password.length > 0) {
               try {
-                user.password = await bcrypt.hash(user.password, 12);
+                user.password = await bcrypt.hash(user.password, 10);
               } catch (error) {
                 throw new Error(`Password hashing failed: ${error.message}`);
               }
@@ -230,7 +239,7 @@ module.exports = (sequelize, DataTypes) => {
         },
         // Set default avatar if not provided
         beforeCreate: async (user) => {
-          if (!user.avatar) {
+          if (!user.avatar || user.avatar === 'https://ui-avatars.com/api/?name=User&background=random&color=fff') {
             user.avatar = `https://ui-avatars.com/api/?name=${encodeURIComponent(user.username)}&background=random&color=fff`;
           }
         }
