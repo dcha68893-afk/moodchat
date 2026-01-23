@@ -1,5 +1,5 @@
+// --- MODEL: Media.js ---
 const { Op } = require('sequelize');
-const { DataTypes } = require('sequelize');
 
 module.exports = (sequelize, DataTypes) => {
   const Media = sequelize.define(
@@ -14,7 +14,7 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.INTEGER,
         allowNull: false,
         references: {
-          model: 'users',
+          model: 'Users',
           key: 'id',
         },
       },
@@ -22,7 +22,7 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.INTEGER,
         allowNull: true,
         references: {
-          model: 'messages',
+          model: 'Message',
           key: 'id',
         },
       },
@@ -106,6 +106,16 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.DATE,
         allowNull: true,
       },
+      createdAt: {
+        type: DataTypes.DATE,
+        allowNull: false,
+        defaultValue: DataTypes.NOW,
+      },
+      updatedAt: {
+        type: DataTypes.DATE,
+        allowNull: false,
+        defaultValue: DataTypes.NOW,
+      },
     },
     {
       tableName: 'media',
@@ -114,19 +124,19 @@ module.exports = (sequelize, DataTypes) => {
       freezeTableName: true,
       indexes: [
         {
-          fields: ['user_id'],
+          fields: ['userId'],
         },
         {
-          fields: ['message_id'],
+          fields: ['messageId'],
         },
         {
           fields: ['type'],
         },
         {
-          fields: ['created_at'],
+          fields: ['createdAt'],
         },
         {
-          fields: ['storage_provider'],
+          fields: ['storageProvider'],
         },
       ],
     }
@@ -179,7 +189,7 @@ module.exports = (sequelize, DataTypes) => {
     return await this.findAll({
       include: [
         {
-          model: this.sequelize.models.Message,
+          model: this.sequelize.models.Messages,
           where: {
             chatId: chatId,
             isDeleted: false,

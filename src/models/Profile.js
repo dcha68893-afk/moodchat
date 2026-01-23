@@ -1,5 +1,5 @@
+// --- MODEL: Profile.js ---
 const { Op } = require('sequelize');
-const { DataTypes } = require('sequelize');
 
 module.exports = (sequelize, DataTypes) => {
   const Profile = sequelize.define(
@@ -15,7 +15,7 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: false,
         unique: true,
         references: {
-          model: 'users',
+          model: 'Users',
           key: 'id',
         },
       },
@@ -80,6 +80,16 @@ module.exports = (sequelize, DataTypes) => {
         },
         allowNull: false,
       },
+      createdAt: {
+        type: DataTypes.DATE,
+        allowNull: false,
+        defaultValue: DataTypes.NOW,
+      },
+      updatedAt: {
+        type: DataTypes.DATE,
+        allowNull: false,
+        defaultValue: DataTypes.NOW,
+      },
     },
     {
       tableName: 'profiles',
@@ -88,7 +98,7 @@ module.exports = (sequelize, DataTypes) => {
       freezeTableName: true,
       indexes: [
         {
-          fields: ['user_id'],
+          fields: ['userId'],
         },
       ],
     }

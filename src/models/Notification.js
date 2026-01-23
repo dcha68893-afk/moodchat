@@ -1,5 +1,5 @@
+// --- MODEL: Notification.js ---
 const { Op } = require('sequelize');
-const { DataTypes } = require('sequelize');
 
 module.exports = (sequelize, DataTypes) => {
   const Notification = sequelize.define(
@@ -14,7 +14,7 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.INTEGER,
         allowNull: false,
         references: {
-          model: 'users',
+          model: 'Users',
           key: 'id',
         },
       },
@@ -87,6 +87,16 @@ module.exports = (sequelize, DataTypes) => {
         defaultValue: {},
         allowNull: false,
       },
+      createdAt: {
+        type: DataTypes.DATE,
+        allowNull: false,
+        defaultValue: DataTypes.NOW,
+      },
+      updatedAt: {
+        type: DataTypes.DATE,
+        allowNull: false,
+        defaultValue: DataTypes.NOW,
+      },
     },
     {
       tableName: 'notifications',
@@ -95,19 +105,19 @@ module.exports = (sequelize, DataTypes) => {
       freezeTableName: true,
       indexes: [
         {
-          fields: ['user_id'],
+          fields: ['userId'],
         },
         {
           fields: ['type'],
         },
         {
-          fields: ['is_read'],
+          fields: ['isRead'],
         },
         {
-          fields: ['created_at'],
+          fields: ['createdAt'],
         },
         {
-          fields: ['user_id', 'is_read'],
+          fields: ['userId', 'isRead'],
         },
       ],
     }

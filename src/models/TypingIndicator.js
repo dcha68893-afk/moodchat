@@ -1,5 +1,5 @@
+// --- MODEL: TypingIndicator.js ---
 const { Op } = require('sequelize');
-const { DataTypes } = require('sequelize');
 
 module.exports = (sequelize, DataTypes) => {
   const TypingIndicator = sequelize.define(
@@ -14,7 +14,7 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.INTEGER,
         allowNull: false,
         references: {
-          model: 'chats',
+          model: 'Chats',
           key: 'id',
         },
       },
@@ -22,7 +22,7 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.INTEGER,
         allowNull: false,
         references: {
-          model: 'users',
+          model: 'Users',
           key: 'id',
         },
       },
@@ -46,6 +46,16 @@ module.exports = (sequelize, DataTypes) => {
         defaultValue: {},
         allowNull: false,
       },
+      createdAt: {
+        type: DataTypes.DATE,
+        allowNull: false,
+        defaultValue: DataTypes.NOW,
+      },
+      updatedAt: {
+        type: DataTypes.DATE,
+        allowNull: false,
+        defaultValue: DataTypes.NOW,
+      },
     },
     {
       tableName: 'typing_indicators',
@@ -54,17 +64,17 @@ module.exports = (sequelize, DataTypes) => {
       freezeTableName: true,
       indexes: [
         {
-          fields: ['chat_id', 'user_id'],
+          fields: ['chatId', 'userId'],
           unique: true,
         },
         {
-          fields: ['chat_id'],
+          fields: ['chatId'],
         },
         {
-          fields: ['user_id'],
+          fields: ['userId'],
         },
         {
-          fields: ['is_active'],
+          fields: ['isActive'],
         },
       ],
     }
@@ -139,7 +149,7 @@ module.exports = (sequelize, DataTypes) => {
       },
       include: [
         {
-          model: this.sequelize.models.User,
+          model: this.sequelize.models.Users,
           attributes: ['id', 'username', 'avatar'],
         },
       ],

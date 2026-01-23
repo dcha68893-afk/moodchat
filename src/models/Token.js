@@ -1,3 +1,4 @@
+// --- MODEL: Token.js ---
 const crypto = require('crypto');
 
 module.exports = (sequelize, DataTypes) => {
@@ -13,7 +14,7 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.INTEGER,
         allowNull: false,
         references: {
-          model: 'users',
+          model: 'Users',
           key: 'id',
         },
         validate: {
@@ -93,6 +94,16 @@ module.exports = (sequelize, DataTypes) => {
         defaultValue: [],
         allowNull: false,
       },
+      createdAt: {
+        type: DataTypes.DATE,
+        allowNull: false,
+        defaultValue: DataTypes.NOW,
+      },
+      updatedAt: {
+        type: DataTypes.DATE,
+        allowNull: false,
+        defaultValue: DataTypes.NOW,
+      },
     },
     {
       tableName: 'tokens',
@@ -101,26 +112,26 @@ module.exports = (sequelize, DataTypes) => {
       freezeTableName: true,
       indexes: [
         {
-          fields: ['user_id'],
+          fields: ['userId'],
         },
         {
           fields: ['token'],
           unique: true
         },
         {
-          fields: ['token_type'],
+          fields: ['tokenType'],
         },
         {
-          fields: ['expires_at'],
+          fields: ['expiresAt'],
         },
         {
-          fields: ['is_revoked'],
+          fields: ['isRevoked'],
         },
         {
-          fields: ['user_id', 'token_type'],
+          fields: ['userId', 'tokenType'],
         },
         {
-          fields: ['created_at'],
+          fields: ['createdAt'],
         }
       ],
       hooks: {
@@ -193,7 +204,7 @@ module.exports = (sequelize, DataTypes) => {
     if (includeUser) {
       options.include = [
         {
-          model: this.sequelize.models.User,
+          model: this.sequelize.models.Users,
           attributes: ['id', 'username', 'email', 'isActive', 'isVerified'],
         },
       ];

@@ -1,8 +1,9 @@
+// --- MODEL: Calls.js ---
 const { Op } = require('sequelize');
 
 module.exports = (sequelize, DataTypes) => {
-  const Call = sequelize.define(
-    'Call',
+  const Calls = sequelize.define(
+    'Calls',
     {
       id: {
         type: DataTypes.INTEGER,
@@ -18,15 +19,31 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.INTEGER,
         allowNull: false,
         references: {
-          model: 'chats',
+          model: 'Chats',
           key: 'id',
         },
       },
-      initiatorId: {
+      callerId: {
         type: DataTypes.INTEGER,
-        allowNull: false,
+        allowNull: true,
         references: {
-          model: 'users',
+          model: 'Users',
+          key: 'id',
+        },
+      },
+      receiverId: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+        references: {
+          model: 'Users',
+          key: 'id',
+        },
+      },
+      groupId: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+        references: {
+          model: 'Group',
           key: 'id',
         },
       },
@@ -108,30 +125,46 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.STRING(200),
         allowNull: true,
       },
+      createdAt: {
+        type: DataTypes.DATE,
+        allowNull: false,
+        defaultValue: DataTypes.NOW,
+      },
+      updatedAt: {
+        type: DataTypes.DATE,
+        allowNull: false,
+        defaultValue: DataTypes.NOW,
+      }
     },
     {
-      tableName: 'calls',
+      tableName: 'Calls',
       timestamps: true,
-      underscored: true,
+      underscored: false,
       freezeTableName: true,
       indexes: [
         {
-          fields: ['call_id'],
+          fields: ['callId'],
         },
         {
-          fields: ['chat_id'],
+          fields: ['chatId'],
         },
         {
-          fields: ['initiator_id'],
+          fields: ['callerId'],
+        },
+        {
+          fields: ['receiverId'],
+        },
+        {
+          fields: ['groupId'],
         },
         {
           fields: ['status'],
         },
         {
-          fields: ['started_at'],
+          fields: ['startedAt'],
         },
         {
-          fields: ['created_at'],
+          fields: ['createdAt'],
         },
       ],
       hooks: {
@@ -146,13 +179,13 @@ module.exports = (sequelize, DataTypes) => {
   );
 
   // Instance methods
-  Call.prototype.start = async function () {
+  Calls.prototype.start = async function () {
     this.status = 'in-progress';
     this.startedAt = new Date();
     return await this.save();
   };
 
-  Call.prototype.end = async function () {
+  Calls.prototype.end = async function () {
     this.status = 'completed';
     this.endedAt = new Date();
 
@@ -163,7 +196,7 @@ module.exports = (sequelize, DataTypes) => {
     return await this.save();
   };
 
-  Call.prototype.fail = async function (reason) {
+  Calls.prototype.fail = async function (reason) {
     this.status = 'failed';
     this.endedAt = new Date();
     this.errorReason = reason;
@@ -175,7 +208,7 @@ module.exports = (sequelize, DataTypes) => {
     return await this.save();
   };
 
-  Call.prototype.addParticipant = async function (userId) {
+  Calls.prototype.addParticipant = async function (userId) {
     if (!this.participants.includes(userId)) {
       this.participants = [...this.participants, userId];
     }
@@ -187,7 +220,7 @@ module.exports = (sequelize, DataTypes) => {
     return await this.save();
   };
 
-  Call.prototype.removeParticipant = async function (userId) {
+  Calls.prototype.removeParticipant = async function (userId) {
     if (!this.participantsLeft.includes(userId)) {
       this.participantsLeft = [...this.participantsLeft, userId];
     }
@@ -195,13 +228,13 @@ module.exports = (sequelize, DataTypes) => {
     return await this.save();
   };
 
-  Call.prototype.addIceCandidate = async function (candidate) {
+  Calls.prototype.addIceCandidate = async function (candidate) {
     this.iceCandidates = [...this.iceCandidates, candidate];
     return await this.save();
   };
 
-  // Static methods - FIXED: Using sequelize.models check
-  Call.getActiveCalls = async function (chatId = null) {
+  // Static methods
+  Calls.getActiveCalls = async function (chatId = null) {
     const where = {
       status: ['initiated', 'ringing', 'in-progress'],
     };
@@ -213,17 +246,17 @@ module.exports = (sequelize, DataTypes) => {
     // Check if models are available
     const include = [];
     
-    if (this.sequelize.models.Chat) {
+    if (this.sequelize.models.Chats) {
       include.push({
-        model: this.sequelize.models.Chat,
+        model: this.sequelize.models.Chats,
         attributes: ['id', 'name', 'type'],
       });
     }
     
-    if (this.sequelize.models.User) {
+    if (this.sequelize.models.Users) {
       include.push({
-        model: this.sequelize.models.User,
-        as: 'initiator',
+        model: this.sequelize.models.Users,
+        as: 'caller',
         attributes: ['id', 'username', 'avatar'],
       });
     }
@@ -234,9 +267,13 @@ module.exports = (sequelize, DataTypes) => {
     });
   };
 
-  Call.getUserCalls = async function (userId, options = {}) {
+  Calls.getUserCalls = async function (userId, options = {}) {
     const where = {
-      [Op.or]: [{ initiatorId: userId }, { participants: { [Op.contains]: [userId] } }],
+      [Op.or]: [
+        { callerId: userId }, 
+        { receiverId: userId }, 
+        { participants: { [Op.contains]: [userId] } }
+      ],
     };
 
     if (options.status) {
@@ -250,17 +287,17 @@ module.exports = (sequelize, DataTypes) => {
     // Check if models are available
     const include = [];
     
-    if (this.sequelize.models.Chat) {
+    if (this.sequelize.models.Chats) {
       include.push({
-        model: this.sequelize.models.Chat,
+        model: this.sequelize.models.Chats,
         attributes: ['id', 'name', 'type'],
       });
     }
     
-    if (this.sequelize.models.User) {
+    if (this.sequelize.models.Users) {
       include.push({
-        model: this.sequelize.models.User,
-        as: 'initiator',
+        model: this.sequelize.models.Users,
+        as: 'caller',
         attributes: ['id', 'username', 'avatar'],
       });
     }
@@ -274,7 +311,7 @@ module.exports = (sequelize, DataTypes) => {
     });
   };
 
-  Call.findActiveCall = async function (chatId) {
+  Calls.findActiveCall = async function (chatId) {
     return await this.findOne({
       where: {
         chatId: chatId,
@@ -283,10 +320,10 @@ module.exports = (sequelize, DataTypes) => {
     });
   };
 
-  // Add association method that will be called from models/index.js
-  Call.associate = function (models) {
+  // Associations defined in models/index.js
+  Calls.associate = function (models) {
     // All associations are defined in models/index.js
   };
 
-  return Call;
+  return Calls;
 };

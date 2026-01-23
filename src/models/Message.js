@@ -1,9 +1,9 @@
+// --- MODEL: Messages.js ---
 const { Op } = require('sequelize');
-const { DataTypes } = require('sequelize');
 
 module.exports = (sequelize, DataTypes) => {
-  const Message = sequelize.define(
-    'Message',
+  const Messages = sequelize.define(
+    'Messages',
     {
       id: {
         type: DataTypes.INTEGER,
@@ -14,7 +14,7 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.INTEGER,
         allowNull: false,
         references: {
-          model: 'chats',
+          model: 'Chats',
           key: 'id',
         },
       },
@@ -22,7 +22,7 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.INTEGER,
         allowNull: false,
         references: {
-          model: 'users',
+          model: 'Users',
           key: 'id',
         },
       },
@@ -39,7 +39,7 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.INTEGER,
         allowNull: true,
         references: {
-          model: 'messages',
+          model: 'Messages',
           key: 'id',
         },
       },
@@ -65,7 +65,7 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.INTEGER,
         allowNull: true,
         references: {
-          model: 'users',
+          model: 'Users',
           key: 'id',
         },
       },
@@ -92,48 +92,58 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.DATE,
         allowNull: true,
       },
+      createdAt: {
+        type: DataTypes.DATE,
+        allowNull: false,
+        defaultValue: DataTypes.NOW,
+      },
+      updatedAt: {
+        type: DataTypes.DATE,
+        allowNull: false,
+        defaultValue: DataTypes.NOW,
+      }
     },
     {
-      tableName: 'messages',
+      tableName: 'Messages',
       timestamps: true,
-      underscored: true,
+      underscored: false,
       freezeTableName: true,
       indexes: [
         {
-          fields: ['chat_id'],
+          fields: ['chatId'],
         },
         {
-          fields: ['sender_id'],
+          fields: ['senderId'],
         },
         {
-          fields: ['reply_to_id'],
+          fields: ['replyToId'],
         },
         {
-          fields: ['created_at'],
+          fields: ['createdAt'],
         },
         {
-          fields: ['chat_id', 'created_at'],
+          fields: ['chatId', 'createdAt'],
         },
       ],
     }
   );
 
   // Instance methods
-  Message.prototype.edit = async function (newContent) {
+  Messages.prototype.edit = async function (newContent) {
     this.content = newContent;
     this.isEdited = true;
     this.editedAt = new Date();
     return await this.save();
   };
 
-  Message.prototype.softDelete = async function (deletedBy) {
+  Messages.prototype.softDelete = async function (deletedBy) {
     this.isDeleted = true;
     this.deletedAt = new Date();
     this.deletedBy = deletedBy;
     return await this.save();
   };
 
-  Message.prototype.addReaction = async function (userId, reaction) {
+  Messages.prototype.addReaction = async function (userId, reaction) {
     if (!this.reactions[reaction]) {
       this.reactions[reaction] = [];
     }
@@ -151,20 +161,20 @@ module.exports = (sequelize, DataTypes) => {
     return await this.save();
   };
 
-  Message.prototype.removeReaction = async function (userId, reaction) {
+  Messages.prototype.removeReaction = async function (userId, reaction) {
     if (this.reactions[reaction]) {
       this.reactions[reaction] = this.reactions[reaction].filter(id => id !== userId);
     }
     return await this.save();
   };
 
-  Message.prototype.markAsDelivered = async function () {
+  Messages.prototype.markAsDelivered = async function () {
     this.deliveredAt = new Date();
     return await this.save();
   };
 
   // Static methods
-  Message.getChatMessages = async function (chatId, options = {}) {
+  Messages.getChatMessages = async function (chatId, options = {}) {
     const where = {
       chatId: chatId,
       isDeleted: false,
@@ -182,25 +192,25 @@ module.exports = (sequelize, DataTypes) => {
       where: where,
       include: [
         {
-          model: this.sequelize.models.User,
-          as: 'sender',
-          attributes: ['id', 'username', 'avatar'],
+          model: this.sequelize.models.Users,
+          as: 'messageSender',
+          attributes: ['id', 'username', 'avatar', 'firstName', 'lastName'],
         },
         {
-          model: this.sequelize.models.Message,
-          as: 'replyTo',
+          model: this,
+          as: 'parentMessage',
           attributes: ['id', 'content', 'type', 'senderId'],
           include: [
             {
-              model: this.sequelize.models.User,
-              as: 'sender',
+              model: this.sequelize.models.Users,
+              as: 'messageSender',
               attributes: ['id', 'username', 'avatar'],
             },
           ],
         },
         {
           model: this.sequelize.models.Media,
-          as: 'media',
+          as: 'messageMedia',
           attributes: ['id', 'url', 'type', 'thumbnailUrl', 'metadata'],
         },
       ],
@@ -209,7 +219,7 @@ module.exports = (sequelize, DataTypes) => {
     });
   };
 
-  Message.searchInChat = async function (chatId, query) {
+  Messages.searchInChat = async function (chatId, query) {
     return await this.findAll({
       where: {
         chatId: chatId,
@@ -218,8 +228,8 @@ module.exports = (sequelize, DataTypes) => {
       },
       include: [
         {
-          model: this.sequelize.models.User,
-          as: 'sender',
+          model: this.sequelize.models.Users,
+          as: 'messageSender',
           attributes: ['id', 'username', 'avatar'],
         },
       ],
@@ -229,9 +239,9 @@ module.exports = (sequelize, DataTypes) => {
   };
 
   // Associations defined in models/index.js
-  Message.associate = function(models) {
+  Messages.associate = function(models) {
     // All associations are defined in models/index.js
   };
 
-  return Message;
+  return Messages;
 };

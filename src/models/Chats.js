@@ -1,8 +1,9 @@
+// --- MODEL: Chats.js ---
 const { Op } = require('sequelize');
 
 module.exports = (sequelize, DataTypes) => {
-  const Chat = sequelize.define(
-    'Chat',
+  const Chats = sequelize.define(
+    'Chats',
     {
       id: {
         type: DataTypes.INTEGER,
@@ -17,6 +18,14 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.ENUM('direct', 'group'),
         defaultValue: 'direct',
         allowNull: false,
+      },
+      createdBy: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+        references: {
+          model: 'Users',
+          key: 'id',
+        },
       },
       description: {
         type: DataTypes.TEXT,
@@ -35,7 +44,7 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.INTEGER,
         allowNull: true,
         references: {
-          model: 'messages',
+          model: 'Messages',
           key: 'id',
         },
       },
@@ -62,31 +71,41 @@ module.exports = (sequelize, DataTypes) => {
         defaultValue: {},
         allowNull: false,
       },
+      createdAt: {
+        type: DataTypes.DATE,
+        allowNull: false,
+        defaultValue: DataTypes.NOW,
+      },
+      updatedAt: {
+        type: DataTypes.DATE,
+        allowNull: false,
+        defaultValue: DataTypes.NOW,
+      }
     },
     {
       tableName: 'chats',
       timestamps: true,
-      underscored: true,
+      underscored: false,
       freezeTableName: true,
       indexes: [
         {
           fields: ['type'],
         },
         {
-          fields: ['last_message_at'],
+          fields: ['lastMessageAt'],
         },
       ],
     }
   );
 
   // Instance methods
-  Chat.prototype.updateLastMessage = async function (messageId) {
+  Chats.prototype.updateLastMessage = async function (messageId) {
     this.lastMessageId = messageId;
     this.lastMessageAt = new Date();
     return await this.save();
   };
 
-  Chat.prototype.getParticipantIds = async function () {
+  Chats.prototype.getParticipantIds = async function () {
     if (!this.sequelize.models.ChatParticipant) {
       return [];
     }
@@ -99,7 +118,7 @@ module.exports = (sequelize, DataTypes) => {
   };
 
   // Static methods
-  Chat.getDirectChat = async function (userId1, userId2) {
+  Chats.getDirectChat = async function (userId1, userId2) {
     if (!this.sequelize.models.ChatParticipant) {
       return null;
     }
@@ -118,14 +137,14 @@ module.exports = (sequelize, DataTypes) => {
           required: true,
         },
       ],
-      group: ['Chat.id'],
-      having: this.sequelize.literal('COUNT(DISTINCT "ChatParticipant"."user_id") = 2'),
+      group: ['Chats.id'],
+      having: this.sequelize.literal('COUNT(DISTINCT "ChatParticipant"."userId") = 2'),
     });
 
     return chats[0] || null;
   };
 
-  Chat.getUserChats = async function (userId) {
+  Chats.getUserChats = async function (userId) {
     const include = [
       {
         model: this.sequelize.models.ChatParticipant,
@@ -135,17 +154,19 @@ module.exports = (sequelize, DataTypes) => {
       }
     ];
 
-    // Only include lastMessage if Message model exists
-    if (this.sequelize.models.Message) {
+    // Only include lastMessage if Messages model exists
+    if (this.sequelize.models.Messages) {
       include.push({
-        model: this.sequelize.models.Message,
-        as: 'lastMessage',
+        model: this.sequelize.models.Messages,
+        as: 'chatMessages',
         attributes: ['id', 'content', 'type', 'createdAt'],
         required: false,
-        include: this.sequelize.models.User ? [
+        limit: 1,
+        order: [['createdAt', 'DESC']],
+        include: this.sequelize.models.Users ? [
           {
-            model: this.sequelize.models.User,
-            as: 'sender',
+            model: this.sequelize.models.Users,
+            as: 'messageSender',
             attributes: ['id', 'username', 'avatar'],
           },
         ] : undefined,
@@ -155,16 +176,46 @@ module.exports = (sequelize, DataTypes) => {
     return await this.findAll({
       include: include,
       order: [
-        ['lastMessageAt', 'DESC'],
+        ['lastMessageAt', 'DESC NULLS LAST'],
         ['updatedAt', 'DESC'],
       ],
     });
   };
 
-  // Add association method
-  Chat.associate = function (models) {
-    // All associations are defined in models/index.js
+  // Association method - Essential for proper relationships
+  Chats.associate = function (models) {
+    // Chat has many Messages
+    if (models.Messages) {
+      Chats.hasMany(models.Messages, {
+        foreignKey: 'chatId',
+        as: 'chatMessages'
+      });
+    }
+
+    // Chat has many ChatParticipants
+    if (models.ChatParticipant) {
+      Chats.hasMany(models.ChatParticipant, {
+        foreignKey: 'chatId',
+        as: 'participants'
+      });
+    }
+
+    // Chat belongs to a User (creator)
+    if (models.Users) {
+      Chats.belongsTo(models.Users, {
+        foreignKey: 'createdBy',
+        as: 'creator'
+      });
+    }
+
+    // Chat belongs to a Message (last message)
+    if (models.Messages) {
+      Chats.belongsTo(models.Messages, {
+        foreignKey: 'lastMessageId',
+        as: 'lastMessage'
+      });
+    }
   };
 
-  return Chat;
+  return Chats;
 };

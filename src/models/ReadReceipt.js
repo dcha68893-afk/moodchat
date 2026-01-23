@@ -1,5 +1,5 @@
+// --- MODEL: ReadReceipt.js ---
 const { Op } = require('sequelize');
-const { DataTypes } = require('sequelize');
 
 module.exports = (sequelize, DataTypes) => {
   const ReadReceipt = sequelize.define(
@@ -14,7 +14,7 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.INTEGER,
         allowNull: false,
         references: {
-          model: 'messages',
+          model: 'Message',
           key: 'id',
         },
       },
@@ -22,7 +22,7 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.INTEGER,
         allowNull: false,
         references: {
-          model: 'users',
+          model: 'Users',
           key: 'id',
         },
       },
@@ -39,6 +39,16 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.STRING(45),
         allowNull: true,
       },
+      createdAt: {
+        type: DataTypes.DATE,
+        allowNull: false,
+        defaultValue: DataTypes.NOW,
+      },
+      updatedAt: {
+        type: DataTypes.DATE,
+        allowNull: false,
+        defaultValue: DataTypes.NOW,
+      },
     },
     {
       tableName: 'read_receipts',
@@ -47,17 +57,17 @@ module.exports = (sequelize, DataTypes) => {
       freezeTableName: true,
       indexes: [
         {
-          fields: ['message_id', 'user_id'],
+          fields: ['messageId', 'userId'],
           unique: true,
         },
         {
-          fields: ['message_id'],
+          fields: ['messageId'],
         },
         {
-          fields: ['user_id'],
+          fields: ['userId'],
         },
         {
-          fields: ['read_at'],
+          fields: ['readAt'],
         },
       ],
     }
@@ -90,7 +100,7 @@ module.exports = (sequelize, DataTypes) => {
   ReadReceipt.getUnreadCount = async function (chatId, userId) {
     const query = `
       SELECT COUNT(*) as count
-      FROM messages m
+      FROM Messages m
       LEFT JOIN read_receipts rr ON m.id = rr.message_id AND rr.user_id = ?
       WHERE m.chat_id = ? 
       AND m.sender_id != ? 
@@ -109,7 +119,7 @@ module.exports = (sequelize, DataTypes) => {
   ReadReceipt.getLastReadMessage = async function (chatId, userId) {
     const query = `
       SELECT m.*
-      FROM messages m
+      FROM Messages m
       JOIN read_receipts rr ON m.id = rr.message_id
       WHERE m.chat_id = ? 
       AND rr.user_id = ?

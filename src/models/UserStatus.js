@@ -1,4 +1,5 @@
-const { DataTypes } = require('sequelize');
+// --- MODEL: UserStatus.js ---
+const { Op } = require('sequelize');
 
 module.exports = (sequelize, DataTypes) => {
   const UserStatus = sequelize.define(
@@ -14,7 +15,7 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: false,
         unique: true,
         references: {
-          model: 'users',
+          model: 'Users',
           key: 'id',
         },
       },
@@ -46,7 +47,7 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.INTEGER,
         allowNull: true,
         references: {
-          model: 'chats',
+          model: 'Chats',
           key: 'id',
         },
       },
@@ -63,6 +64,16 @@ module.exports = (sequelize, DataTypes) => {
         defaultValue: [],
         allowNull: false,
       },
+      createdAt: {
+        type: DataTypes.DATE,
+        allowNull: false,
+        defaultValue: DataTypes.NOW,
+      },
+      updatedAt: {
+        type: DataTypes.DATE,
+        allowNull: false,
+        defaultValue: DataTypes.NOW,
+      },
     },
     {
       tableName: 'user_statuses',
@@ -71,17 +82,17 @@ module.exports = (sequelize, DataTypes) => {
       freezeTableName: true,
       indexes: [
         {
-          fields: ['user_id'],
+          fields: ['userId'],
           unique: true,
         },
         {
           fields: ['status'],
         },
         {
-          fields: ['last_seen'],
+          fields: ['lastSeen'],
         },
         {
-          fields: ['is_typing_in'],
+          fields: ['isTypingIn'],
         },
       ],
       hooks: {
@@ -207,7 +218,7 @@ module.exports = (sequelize, DataTypes) => {
       where: { userId },
       include: [
         {
-          model: this.sequelize.models.User,
+          model: this.sequelize.models.Users,
           attributes: ['id', 'username', 'avatar'],
         },
       ],
@@ -223,7 +234,7 @@ module.exports = (sequelize, DataTypes) => {
       where: where,
       include: [
         {
-          model: this.sequelize.models.User,
+          model: this.sequelize.models.Users,
           attributes: ['id', 'username', 'avatar'],
         },
       ],
@@ -241,7 +252,7 @@ module.exports = (sequelize, DataTypes) => {
       },
       include: [
         {
-          model: this.sequelize.models.User,
+          model: this.sequelize.models.Users,
           attributes: ['id', 'username', 'avatar'],
         },
       ],

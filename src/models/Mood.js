@@ -1,5 +1,5 @@
+// --- MODEL: Mood.js ---
 const { Op } = require('sequelize');
-const { DataTypes } = require('sequelize');
 
 module.exports = (sequelize, DataTypes) => {
   const Mood = sequelize.define(
@@ -14,7 +14,7 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.INTEGER,
         allowNull: false,
         references: {
-          model: 'users',
+          model: 'Users',
           key: 'id',
         },
       },
@@ -94,6 +94,16 @@ module.exports = (sequelize, DataTypes) => {
         defaultValue: {},
         allowNull: false,
       },
+      createdAt: {
+        type: DataTypes.DATE,
+        allowNull: false,
+        defaultValue: DataTypes.NOW,
+      },
+      updatedAt: {
+        type: DataTypes.DATE,
+        allowNull: false,
+        defaultValue: DataTypes.NOW,
+      },
     },
     {
       tableName: 'moods',
@@ -102,16 +112,16 @@ module.exports = (sequelize, DataTypes) => {
       freezeTableName: true,
       indexes: [
         {
-          fields: ['user_id'],
+          fields: ['userId'],
         },
         {
           fields: ['mood'],
         },
         {
-          fields: ['created_at'],
+          fields: ['createdAt'],
         },
         {
-          fields: ['user_id', 'created_at'],
+          fields: ['userId', 'createdAt'],
         },
         {
           fields: ['tags'],
@@ -229,7 +239,7 @@ module.exports = (sequelize, DataTypes) => {
       },
       include: [
         {
-          model: this.sequelize.models.User,
+          model: this.sequelize.models.Users,
           attributes: ['id', 'username', 'avatar'],
         },
       ],

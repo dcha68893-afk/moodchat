@@ -1,38 +1,14 @@
-// models/User.js
+// --- MODEL: Users.js ---
 const bcrypt = require('bcryptjs');
 
 module.exports = (sequelize, DataTypes) => {
-  const User = sequelize.define(
-    'User',
+  const Users = sequelize.define(
+    'Users',
     {
       id: {
         type: DataTypes.INTEGER,
         primaryKey: true,
         autoIncrement: true,
-      },
-      username: {
-        type: DataTypes.STRING(50),
-        allowNull: false,
-        unique: {
-          name: 'username',
-          msg: 'Username already exists'
-        },
-        validate: {
-          notNull: {
-            msg: 'Username is required'
-          },
-          notEmpty: {
-            msg: 'Username cannot be empty'
-          },
-          len: {
-            args: [3, 50],
-            msg: 'Username must be between 3 and 50 characters'
-          },
-          is: {
-            args: /^[a-zA-Z0-9_]+$/,
-            msg: 'Username can only contain letters, numbers, and underscores'
-          }
-        }
       },
       email: {
         type: DataTypes.STRING(100),
@@ -57,6 +33,30 @@ module.exports = (sequelize, DataTypes) => {
             msg: 'Email must be less than 100 characters'
           }
         },
+      },
+      username: {
+        type: DataTypes.STRING(50),
+        allowNull: false,
+        unique: {
+          name: 'username',
+          msg: 'Username already exists'
+        },
+        validate: {
+          notNull: {
+            msg: 'Username is required'
+          },
+          notEmpty: {
+            msg: 'Username cannot be empty'
+          },
+          len: {
+            args: [3, 50],
+            msg: 'Username must be between 3 and 50 characters'
+          },
+          is: {
+            args: /^[a-zA-Z0-9_]+$/,
+            msg: 'Username can only contain letters, numbers, and underscores'
+          }
+        }
       },
       password: {
         type: DataTypes.STRING,
@@ -198,17 +198,19 @@ module.exports = (sequelize, DataTypes) => {
       },
       createdAt: {
         type: DataTypes.DATE,
-        defaultValue: DataTypes.NOW
+        defaultValue: DataTypes.NOW,
+        allowNull: false
       },
       updatedAt: {
         type: DataTypes.DATE,
-        defaultValue: DataTypes.NOW
+        defaultValue: DataTypes.NOW,
+        allowNull: false
       }
     },
     {
       tableName: 'Users',
       timestamps: true,
-      underscored: true,
+      underscored: false,
       freezeTableName: true,
       hooks: {
         // Hash password before creating user
@@ -249,7 +251,7 @@ module.exports = (sequelize, DataTypes) => {
 
   // ===== INSTANCE METHODS =====
 
-  User.prototype.validatePassword = async function (password) {
+  Users.prototype.validatePassword = async function (password) {
     if (!password || !this.password) {
       return false;
     }
@@ -261,7 +263,7 @@ module.exports = (sequelize, DataTypes) => {
     }
   };
 
-  User.prototype.toJSON = function () {
+  Users.prototype.toJSON = function () {
     const values = Object.assign({}, this.get());
     
     // Remove sensitive fields
@@ -270,7 +272,7 @@ module.exports = (sequelize, DataTypes) => {
     return values;
   };
 
-  User.prototype.getPublicProfile = function () {
+  Users.prototype.getPublicProfile = function () {
     const { id, username, firstName, lastName, avatar, bio, status, lastSeen } = this;
     return { 
       id, 
@@ -286,7 +288,7 @@ module.exports = (sequelize, DataTypes) => {
     };
   };
 
-  User.prototype.updateLastSeen = async function () {
+  Users.prototype.updateLastSeen = async function () {
     try {
       this.lastSeen = new Date();
       return await this.save();
@@ -296,7 +298,7 @@ module.exports = (sequelize, DataTypes) => {
     }
   };
 
-  User.prototype.updateStatus = async function (status) {
+  Users.prototype.updateStatus = async function (status) {
     try {
       this.status = status;
       this.lastSeen = new Date();
@@ -309,7 +311,7 @@ module.exports = (sequelize, DataTypes) => {
 
   // ===== STATIC METHODS =====
 
-  User.findByEmail = async function (email) {
+  Users.findByEmail = async function (email) {
     if (!email) {
       throw new Error('Email is required');
     }
@@ -325,7 +327,7 @@ module.exports = (sequelize, DataTypes) => {
     }
   };
 
-  User.findByUsername = async function (username) {
+  Users.findByUsername = async function (username) {
     if (!username) {
       throw new Error('Username is required');
     }
@@ -341,7 +343,7 @@ module.exports = (sequelize, DataTypes) => {
     }
   };
 
-  User.findActiveByIdentifier = async function (identifier) {
+  Users.findActiveByIdentifier = async function (identifier) {
     if (!identifier) {
       throw new Error('Identifier is required');
     }
@@ -362,7 +364,7 @@ module.exports = (sequelize, DataTypes) => {
     }
   };
 
-  User.search = async function (query, limit = 20) {
+  Users.search = async function (query, limit = 20) {
     if (!query || query.length < 2) {
       throw new Error('Search query must be at least 2 characters');
     }
@@ -390,7 +392,7 @@ module.exports = (sequelize, DataTypes) => {
     }
   };
 
-  User.getAllActive = async function (limit = 100) {
+  Users.getAllActive = async function (limit = 100) {
     try {
       return await this.findAll({
         where: {
@@ -406,7 +408,7 @@ module.exports = (sequelize, DataTypes) => {
     }
   };
 
-  User.bulkUpdateStatus = async function (userIds, status) {
+  Users.bulkUpdateStatus = async function (userIds, status) {
     if (!Array.isArray(userIds) || userIds.length === 0) {
       throw new Error('User IDs array is required');
     }
@@ -436,9 +438,9 @@ module.exports = (sequelize, DataTypes) => {
   };
 
   // ===== ASSOCIATIONS =====
-  User.associate = function(models) {
+  Users.associate = function(models) {
     // All associations are defined in models/index.js
   };
 
-  return User;
+  return Users;
 };

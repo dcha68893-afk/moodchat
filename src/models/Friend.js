@@ -1,3 +1,4 @@
+// --- MODEL: Friend.js ---
 const { Op } = require('sequelize');
 
 module.exports = (sequelize, DataTypes) => {
@@ -13,7 +14,7 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.INTEGER,
         allowNull: false,
         references: {
-          model: 'users',
+          model: 'Users',
           key: 'id',
         },
       },
@@ -21,7 +22,7 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.INTEGER,
         allowNull: false,
         references: {
-          model: 'users',
+          model: 'Users',
           key: 'id',
         },
       },
@@ -72,14 +73,14 @@ module.exports = (sequelize, DataTypes) => {
       freezeTableName: true,
       indexes: [
         {
-          fields: ['requester_id', 'receiver_id'],
+          fields: ['requesterId', 'receiverId'],
           unique: true,
         },
         {
-          fields: ['requester_id'],
+          fields: ['requesterId'],
         },
         {
-          fields: ['receiver_id'],
+          fields: ['receiverId'],
         },
         {
           fields: ['status'],
@@ -125,7 +126,7 @@ module.exports = (sequelize, DataTypes) => {
   };
 
   Friend.getUserFriends = async function (userId, status = 'accepted') {
-    if (!this.sequelize.models.User) {
+    if (!this.sequelize.models.Users) {
       return [];
     }
 
@@ -136,7 +137,7 @@ module.exports = (sequelize, DataTypes) => {
       },
       include: [
         {
-          model: this.sequelize.models.User,
+          model: this.sequelize.models.Users,
           as: 'receiver',
           attributes: ['id', 'username', 'avatar', 'status', 'lastSeen'],
         },
@@ -150,7 +151,7 @@ module.exports = (sequelize, DataTypes) => {
       },
       include: [
         {
-          model: this.sequelize.models.User,
+          model: this.sequelize.models.Users,
           as: 'requester',
           attributes: ['id', 'username', 'avatar', 'status', 'lastSeen'],
         },
@@ -161,7 +162,7 @@ module.exports = (sequelize, DataTypes) => {
   };
 
   Friend.getPendingRequests = async function (userId) {
-    if (!this.sequelize.models.User) {
+    if (!this.sequelize.models.Users) {
       return [];
     }
 
@@ -172,7 +173,7 @@ module.exports = (sequelize, DataTypes) => {
       },
       include: [
         {
-          model: this.sequelize.models.User,
+          model: this.sequelize.models.Users,
           as: 'requester',
           attributes: ['id', 'username', 'avatar', 'status', 'lastSeen'],
         },
@@ -182,7 +183,7 @@ module.exports = (sequelize, DataTypes) => {
   };
 
   Friend.getSentRequests = async function (userId) {
-    if (!this.sequelize.models.User) {
+    if (!this.sequelize.models.Users) {
       return [];
     }
 
@@ -193,7 +194,7 @@ module.exports = (sequelize, DataTypes) => {
       },
       include: [
         {
-          model: this.sequelize.models.User,
+          model: this.sequelize.models.Users,
           as: 'receiver',
           attributes: ['id', 'username', 'avatar', 'status', 'lastSeen'],
         },

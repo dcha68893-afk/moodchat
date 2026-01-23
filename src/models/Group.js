@@ -1,9 +1,9 @@
+// --- MODEL: Groups.js ---
 const { Op } = require('sequelize');
-const { DataTypes } = require('sequelize');
 
 module.exports = (sequelize, DataTypes) => {
-  const Group = sequelize.define(
-    'Group',
+  const Groups = sequelize.define(
+    'Groups',
     {
       id: {
         type: DataTypes.INTEGER,
@@ -15,17 +15,29 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: false,
         unique: true,
         references: {
-          model: 'chats',
+          model: 'Chats',
           key: 'id',
         },
+      },
+      name: {
+        type: DataTypes.STRING(100),
+        allowNull: false,
       },
       createdBy: {
         type: DataTypes.INTEGER,
         allowNull: false,
         references: {
-          model: 'users',
+          model: 'Users',
           key: 'id',
         },
+      },
+      description: {
+        type: DataTypes.TEXT,
+        allowNull: true,
+      },
+      avatar: {
+        type: DataTypes.STRING,
+        allowNull: true,
       },
       isPublic: {
         type: DataTypes.BOOLEAN,
@@ -74,22 +86,32 @@ module.exports = (sequelize, DataTypes) => {
         },
         allowNull: false,
       },
+      createdAt: {
+        type: DataTypes.DATE,
+        allowNull: false,
+        defaultValue: DataTypes.NOW,
+      },
+      updatedAt: {
+        type: DataTypes.DATE,
+        allowNull: false,
+        defaultValue: DataTypes.NOW,
+      }
     },
     {
-      tableName: 'groups',
+      tableName: 'Groups',
       timestamps: true,
-      underscored: true,
+      underscored: false,
       freezeTableName: true,
       indexes: [
         {
-          fields: ['chat_id'],
+          fields: ['chatId'],
           unique: true,
         },
         {
-          fields: ['invite_link'],
+          fields: ['inviteLink'],
         },
         {
-          fields: ['is_public'],
+          fields: ['isPublic'],
         },
         {
           fields: ['tags'],
@@ -100,20 +122,20 @@ module.exports = (sequelize, DataTypes) => {
   );
 
   // Instance methods
-  Group.prototype.generateInviteLink = async function (expiresInHours = 24) {
+  Groups.prototype.generateInviteLink = async function (expiresInHours = 24) {
     const crypto = require('crypto');
     this.inviteLink = crypto.randomBytes(16).toString('hex');
     this.inviteLinkExpires = new Date(Date.now() + expiresInHours * 60 * 60 * 1000);
     return await this.save();
   };
 
-  Group.prototype.revokeInviteLink = async function () {
+  Groups.prototype.revokeInviteLink = async function () {
     this.inviteLink = null;
     this.inviteLinkExpires = null;
     return await this.save();
   };
 
-  Group.prototype.getMemberCount = async function () {
+  Groups.prototype.getMemberCount = async function () {
     const count = await this.sequelize.models.ChatParticipant.count({
       where: { chatId: this.chatId },
     });
@@ -121,7 +143,7 @@ module.exports = (sequelize, DataTypes) => {
   };
 
   // Static methods
-  Group.search = async function (query, options = {}) {
+  Groups.search = async function (query, options = {}) {
     const where = {
       isPublic: true,
       [Op.or]: [
@@ -135,7 +157,7 @@ module.exports = (sequelize, DataTypes) => {
       where: where,
       include: [
         {
-          model: this.sequelize.models.Chat,
+          model: this.sequelize.models.Chats,
           attributes: ['id', 'name', 'description', 'avatar'],
         },
       ],
@@ -146,9 +168,9 @@ module.exports = (sequelize, DataTypes) => {
   };
 
   // Associations defined in models/index.js
-  Group.associate = function(models) {
+  Groups.associate = function(models) {
     // All associations are defined in models/index.js
   };
 
-  return Group;
+  return Groups;
 };
