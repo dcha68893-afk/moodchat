@@ -405,80 +405,7 @@ async function initializeDatabase() {
       });
     }
     
-    console.log('\n[Database] Step 2: Checking existing tables...');
-    let existingTables = [];
-    try {
-      const queryResult = await sequelize.query(
-        "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE';",
-        { type: sequelize.QueryTypes.SELECT }
-      );
-      existingTables = queryResult.map(row => row.table_name);
-      console.log(`[Database] Found ${existingTables.length} existing tables`);
-    } catch (error) {
-      console.error('[Database] Error checking existing tables:', error.message);
-    }
-    
-    console.log('\n[Database] Step 3: Creating tables in dependency order...');
-    
-    const dependencyLevels = [
-      ['Users', 'Token', 'Profile', 'Mood', 'Status'],
-      ['Friend', 'UserStatus', 'Notification'],
-      ['Chats', 'Groups'],
-      ['Messages', 'ChatParticipant', 'GroupMembers', 'TypingIndicator'],
-      ['ReadReceipt', 'Media', 'Calls', 'SharedMood']
-    ];
-    
-    const syncResults = {
-      created: [],
-      altered: [],
-      skipped: [],
-      failed: [],
-      total: 0
-    };
-    
-    console.log('[Database] Temporarily disabling foreign key constraints...');
-    await sequelize.query('SET CONSTRAINTS ALL DEFERRED');
-    
-    for (let level = 0; level < dependencyLevels.length; level++) {
-      const levelModels = dependencyLevels[level].filter(modelName => models[modelName]);
-      
-      if (levelModels.length === 0) continue;
-      
-      console.log(`\n[Database] Level ${level + 1}: Syncing ${levelModels.join(', ')}`);
-      
-      for (const modelName of levelModels) {
-        const model = models[modelName];
-        const tableName = model.tableName || modelName.toLowerCase();
-        
-        try {
-          const tableExists = existingTables.includes(tableName);
-          
-          if (tableExists) {
-            console.log(`[Database] Table ${tableName} exists, updating schema...`);
-            await model.sync({ force: false, alter: !isProduction });
-            syncResults.altered.push(modelName);
-            console.log(`[Database] ✅ Updated schema for ${tableName}`);
-          } else {
-            console.log(`[Database] Creating table: ${tableName}`);
-            await model.sync({ force: false, alter: false });
-            syncResults.created.push(modelName);
-            console.log(`[Database] ✅ Created table ${tableName}`);
-          }
-          
-          syncResults.total++;
-        } catch (error) {
-          console.error(`[Database] ❌ Failed to sync ${modelName}:`, error.message);
-          syncResults.failed.push({ model: modelName, error: error.message });
-          
-          if (error.message.includes('foreign key')) {
-            console.log(`[Database] Will retry ${modelName} after other tables are created`);
-          }
-        }
-      }
-    }
-    
-    console.log('\n[Database] Step 4: Setting up model associations...');
-    
+    console.log('\n[Database] Step 2: Setting up model associations before sync...');
     for (const [modelName, associateFn] of Object.entries(associateFunctions)) {
       try {
         associateFn(models);
@@ -492,39 +419,49 @@ async function initializeDatabase() {
       }
     }
     
-    console.log('\n[Database] Step 5: Final schema synchronization...');
-    await sequelize.query('SET CONSTRAINTS ALL IMMEDIATE');
+    console.log('\n[Database] Step 3: Synchronizing database schema...');
     
+    const syncResults = {
+      created: [],
+      altered: [],
+      skipped: [],
+      failed: [],
+      total: 0
+    };
+    
+    // Sync all models in dependency-safe order
     for (const modelName of Object.keys(models)) {
       const model = models[modelName];
-      if (model) {
-        try {
-          await model.sync({ force: false, alter: !isProduction });
-        } catch (error) {
-          console.error(`[Database] Final sync warning for ${modelName}:`, error.message);
-        }
+      if (!model) continue;
+      
+      try {
+        console.log(`[Database] Syncing model: ${modelName}`);
+        
+        await model.sync({ 
+          force: false, 
+          alter: !isProduction 
+        });
+        
+        syncResults.altered.push(modelName);
+        syncResults.total++;
+        console.log(`[Database] ✅ Synced model: ${modelName}`);
+        
+      } catch (error) {
+        console.error(`[Database] ❌ Failed to sync ${modelName}:`, error.message);
+        syncResults.failed.push({ model: modelName, error: error.message });
       }
     }
     
     console.log('\n[Database] ===== DATABASE INITIALIZATION REPORT =====');
     console.log(`📊 SUMMARY STATISTICS:`);
     console.log(`  • Total models: ${Object.keys(models).length}`);
-    console.log(`  • Tables created: ${syncResults.created.length}`);
-    console.log(`  • Tables altered: ${syncResults.altered.length}`);
-    console.log(`  • Tables skipped (already existed): ${syncResults.skipped.length}`);
-    console.log(`  • Tables failed: ${syncResults.failed.length}`);
+    console.log(`  • Models altered: ${syncResults.altered.length}`);
+    console.log(`  • Models failed: ${syncResults.failed.length}`);
     console.log(`  • ENUM conflicts: ${enumConflicts.length}`);
     console.log(`  • Association errors: ${Object.keys(associationErrors).length}`);
     
-    if (syncResults.created.length > 0) {
-      console.log(`\n✅ NEW TABLES CREATED:`);
-      syncResults.created.forEach((model, index) => {
-        console.log(`  ${index + 1}. ${model}`);
-      });
-    }
-    
     if (syncResults.failed.length > 0) {
-      console.log(`\n❌ FAILED TABLES:`);
+      console.log(`\n❌ FAILED MODELS:`);
       syncResults.failed.forEach((failure, index) => {
         console.log(`  ${index + 1}. ${failure.model}: ${failure.error}`);
       });

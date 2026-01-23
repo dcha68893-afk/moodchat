@@ -368,79 +368,6 @@ if (!IS_PRODUCTION) {
   app.use(express.static(path.join(__dirname, 'public')));
 }
 
-// ========== STRICT ROUTER MOUNTING FUNCTION - UPDATED ==========
-function mountAllRouters() {
-  console.log('\n📡 Step 6: Mounting ALL routers (STRICT ORDER)...');
-  
-  // FIX 2: Mount auth router FIRST and EXPLICITLY
-  try {
-    const authRouter = require('./routes/auth.js');
-    if (authRouter && typeof authRouter === 'function') {
-      app.use('/api/auth', authRouter);
-      mountedRoutes.push('/api/auth/*');
-      console.log('✅ FIXED: Mounted auth router EXPLICITLY at /api/auth');
-      console.log('   ↳ POST /api/auth/register available');
-      console.log('   ↳ POST /api/auth/login available');
-      console.log('   ↳ GET /api/auth/me available');
-    } else {
-      throw new Error('Auth router is not a valid Express router');
-    }
-  } catch (error) {
-    console.error('❌ FATAL: Failed to mount auth router:', error.message);
-    throw error; // Don't continue if auth router fails
-  }
-  
-  // Mount main API router if it exists
-  try {
-    const mainRouterPath = path.join(__dirname, 'routes', 'index.js');
-    if (fs.existsSync(mainRouterPath)) {
-      const mainRouter = require(mainRouterPath);
-      if (mainRouter && typeof mainRouter === 'function') {
-        app.use('/api', mainRouter);
-        mountedRoutes.push('/api/*');
-        console.log('✅ Mounted main API router at /api');
-      }
-    }
-  } catch (error) {
-    console.warn('⚠️  Could not mount main API router:', error.message);
-  }
-  
-  // Mount additional specific routers
-  const routeMounts = [
-    { path: '/api/messages', file: 'messages.js' },
-    { path: '/api/chats', file: 'chats.js' },
-    { path: '/api/groups', file: 'groups.js' },
-    { path: '/api/calls', file: 'calls.js' },
-    { path: '/api/friends', file: 'friends.js' },
-    { path: '/api/moods', file: 'moods.js' },
-    { path: '/api/notifications', file: 'notifications.js' },
-    { path: '/api/status', file: 'status.js' },
-    { path: '/api/media', file: 'media.js' },
-  ];
-  
-  for (const route of routeMounts) {
-    try {
-      const routePath = path.join(__dirname, 'routes', route.file);
-      if (fs.existsSync(routePath)) {
-        delete require.cache[require.resolve(routePath)];
-        const routeModule = require(routePath);
-        if (routeModule && typeof routeModule === 'function') {
-          app.use(route.path, routeModule);
-          mountedRoutes.push(`${route.path}/*`);
-          console.log(`✅ Mounted ${route.file} at ${route.path}`);
-        }
-      }
-    } catch (error) {
-      console.warn(`⚠️  Could not mount ${route.file}:`, error.message);
-    }
-  }
-  
-  console.log(`✅ Total mounted routes: ${mountedRoutes.length}`);
-  // FIX 5: Log every route registration for verification
-  console.log('\n📋 VERIFICATION - All Registered Routes:');
-  mountedRoutes.forEach(route => console.log(`   • ${route}`));
-}
-
 // ========== AUTHENTICATION MIDDLEWARE ==========
 function authenticateToken(req, res, next) {
   const authHeader = req.headers['authorization'];
@@ -468,6 +395,114 @@ function authenticateToken(req, res, next) {
     req.user = user;
     next();
   });
+}
+
+// ========== STRICT ROUTER MOUNTING FUNCTION - FIXED ==========
+function mountAllRouters() {
+  console.log('\n📡 Step 6: Mounting ALL routers (STRICT ORDER)...');
+  
+  // FIX 2: Mount auth router FIRST and EXPLICITLY with safe verification
+  try {
+    console.log('🔧 Attempting to load auth router from ./routes/auth.js...');
+    const authRouterPath = path.join(__dirname, 'routes', 'auth.js');
+    
+    if (!fs.existsSync(authRouterPath)) {
+      console.error('❌ Auth router file does not exist:', authRouterPath);
+      throw new Error(`Auth router file not found: ${authRouterPath}`);
+    }
+    
+    delete require.cache[require.resolve('./routes/auth.js')];
+    const authRouter = require('./routes/auth.js');
+    
+    if (!authRouter) {
+      throw new Error('Auth router module is null or undefined');
+    }
+    
+    if (typeof authRouter !== 'function' && typeof authRouter !== 'object') {
+      throw new Error(`Auth router is not a valid Express router (type: ${typeof authRouter})`);
+    }
+    
+    // Handle both router as function or object with router property
+    const routerToMount = typeof authRouter === 'function' ? authRouter : 
+                         (authRouter.router || authRouter.default || authRouter);
+    
+    if (typeof routerToMount !== 'function') {
+      throw new Error(`Cannot mount auth router - invalid type after extraction: ${typeof routerToMount}`);
+    }
+    
+    app.use('/api/auth', routerToMount);
+    mountedRoutes.push('/api/auth/*');
+    console.log('✅ FIXED: Mounted auth router EXPLICITLY at /api/auth');
+    console.log('   ↳ POST /api/auth/register available');
+    console.log('   ↳ POST /api/auth/login available');
+    console.log('   ↳ GET /api/auth/me available');
+  } catch (error) {
+    console.error('❌ FATAL: Failed to mount auth router:', error.message);
+    console.error('   Stack:', error.stack);
+    throw error;
+  }
+  
+  // Mount main API router if it exists
+  try {
+    const mainRouterPath = path.join(__dirname, 'routes', 'index.js');
+    if (fs.existsSync(mainRouterPath)) {
+      delete require.cache[require.resolve(mainRouterPath)];
+      const mainRouter = require(mainRouterPath);
+      
+      // Handle different export patterns
+      const routerToMount = typeof mainRouter === 'function' ? mainRouter : 
+                           (mainRouter.router || mainRouter.default || mainRouter);
+      
+      if (routerToMount && typeof routerToMount === 'function') {
+        app.use('/api', routerToMount);
+        mountedRoutes.push('/api/*');
+        console.log('✅ Mounted main API router at /api');
+      }
+    }
+  } catch (error) {
+    console.warn('⚠️  Could not mount main API router:', error.message);
+  }
+  
+  // Mount additional specific routers with safe verification
+  const routeMounts = [
+    { path: '/api/messages', file: 'messages.js' },
+    { path: '/api/chats', file: 'chats.js' },
+    { path: '/api/groups', file: 'groups.js' },
+    { path: '/api/calls', file: 'calls.js' },
+    { path: '/api/friends', file: 'friends.js' },
+    { path: '/api/moods', file: 'moods.js' },
+    { path: '/api/notifications', file: 'notifications.js' },
+    { path: '/api/status', file: 'status.js' },
+    { path: '/api/media', file: 'media.js' },
+  ];
+  
+  for (const route of routeMounts) {
+    try {
+      const routePath = path.join(__dirname, 'routes', route.file);
+      if (fs.existsSync(routePath)) {
+        delete require.cache[require.resolve(routePath)];
+        const routeModule = require(routePath);
+        
+        // Handle different export patterns
+        const routerToMount = typeof routeModule === 'function' ? routeModule : 
+                             (routeModule.router || routeModule.default || routeModule);
+        
+        if (routerToMount && typeof routerToMount === 'function') {
+          app.use(route.path, routerToMount);
+          mountedRoutes.push(`${route.path}/*`);
+          console.log(`✅ Mounted ${route.file} at ${route.path}`);
+        } else {
+          console.warn(`⚠️  ${route.file} exists but does not export a valid router`);
+        }
+      }
+    } catch (error) {
+      console.warn(`⚠️  Could not mount ${route.file}:`, error.message);
+    }
+  }
+  
+  console.log(`✅ Total mounted routes: ${mountedRoutes.length}`);
+  console.log('\n📋 VERIFICATION - All Registered Routes:');
+  mountedRoutes.forEach(route => console.log(`   • ${route}`));
 }
 
 // ========== HEALTH ENDPOINTS ==========
@@ -943,7 +978,17 @@ app.get('/api/chat/messages/:room', authenticateToken, (req, res) => {
 app.post('/api/chat/messages', authenticateToken, async (req, res) => {
     try {
     const { room, content } = req.body;
+    
+    // FIX: Safely handle missing user in memory storage
     const user = users.find(u => u.id === req.user.userId);
+    
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found in memory storage',
+        timestamp: new Date().toISOString()
+      });
+    }
     
     if (!room || !content) {
       return res.status(400).json({
@@ -1161,7 +1206,7 @@ app.use((req, res) => {
   });
 });
 
-// ========== START SERVER WITH STRICT ORDER - UPDATED ==========
+// ========== START SERVER WITH STRICT ORDER - FIXED ==========
 const startServer = async () => {
   console.log('🚀 Starting MoodChat Backend Server...');
   console.log(`📁 Environment: ${NODE_ENV}`);

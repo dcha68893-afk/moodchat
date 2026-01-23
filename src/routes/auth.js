@@ -27,19 +27,6 @@ const PASSWORD_REQUIRE_SYMBOLS = process.env.PASSWORD_REQUIRE_SYMBOLS === 'true'
 const NODE_ENV = process.env.NODE_ENV || 'development';
 const IS_PRODUCTION = NODE_ENV === 'production';
 
-// IMPORT MODELS SAFELY FROM MODELS/INDEX.JS
-let db;
-try {
-  db = require('../models');
-  if (!db || !db.models) {
-    throw new Error('Models not properly loaded from models/index.js');
-  }
-  console.log('✅ Database models loaded in auth router');
-} catch (error) {
-  console.error('❌ Failed to load database models in auth router:', error.message);
-  process.exit(1);
-}
-
 // Password validation helper function
 function validatePassword(password) {
   const errors = [];
@@ -106,7 +93,7 @@ router.post(
       }
 
       // 2. Check database connection
-      const models = db.models;
+      const models = req.app.locals.models;
       const dbConnected = req.app.locals.dbConnected || false;
       
       if (!dbConnected) {
@@ -258,7 +245,7 @@ router.post(
       }
 
       // 2. Check database connection
-      const models = db.models;
+      const models = req.app.locals.models;
       const dbConnected = req.app.locals.dbConnected || false;
       
       if (!dbConnected) {
@@ -413,7 +400,7 @@ router.post(
       }
 
       // Check if models are available from app.locals
-      const models = db.models;
+      const models = req.app.locals.models;
       if (!models || !models.Token) {
         return res.status(500).json({
           success: false,
@@ -423,7 +410,7 @@ router.post(
       }
 
       const TokenModel = models.Token;
-      const { Op } = db.sequelize.Sequelize;
+      const { Op } = req.app.locals.db.Sequelize;
 
       const tokenRecord = await TokenModel.findOne({
         where: {
@@ -516,7 +503,7 @@ router.post(
       const { refreshToken } = req.cookies || req.body;
 
       // Check if models are available from app.locals
-      const models = db.models;
+      const models = req.app.locals.models;
       if (refreshToken && models && models.Token) {
         // Revoke the refresh token
         const tokenRecord = await models.Token.findOne({
@@ -588,7 +575,7 @@ router.get(
       }
       
       // Check if models are available
-      const models = db.models;
+      const models = req.app.locals.models;
       if (!models || !models.Users) {
         return res.status(500).json({
           success: false,
@@ -632,7 +619,7 @@ router.get(
 // Test database connection endpoint
 router.get('/test-db', asyncHandler(async (req, res) => {
   try {
-    const models = db.models;
+    const models = req.app.locals.models;
     if (!models) {
       throw new Error('Models not available');
     }
@@ -688,7 +675,7 @@ router.post('/verify-token', asyncHandler(async (req, res) => {
       const decoded = jwt.verify(token, JWT_SECRET);
       
       // Check if user still exists
-      const models = db.models;
+      const models = req.app.locals.models;
       if (models && models.Users) {
         const user = await models.Users.findByPk(decoded.userId, {
           attributes: { exclude: ['password'] }
@@ -784,7 +771,7 @@ router.post(
         });
       }
       
-      const models = db.models;
+      const models = req.app.locals.models;
       if (!models || !models.Users) {
         return res.status(500).json({
           success: false,
