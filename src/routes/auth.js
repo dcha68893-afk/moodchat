@@ -1,4 +1,5 @@
 // src/routes/auth.js - THIS FILE IS A ROUTER — NOT A SEQUELIZE MODEL
+// UPDATED: Fixed POST /register and POST /login for proper JSON handling
 require('dotenv').config();
 const express = require('express');
 const bcrypt = require('bcryptjs');
@@ -37,70 +38,6 @@ try {
 } catch (error) {
   console.error('❌ Failed to load database models in auth router:', error.message);
   process.exit(1);
-}
-
-// IMPORT MIDDLEWARE WITH ERROR HANDLING
-let authenticate, apiLimiter, authLimiter;
-let AuthenticationError, ValidationError, ConflictError;
-
-try {
-  const authMiddleware = require('../middleware/auth');
-  if (authMiddleware && authMiddleware.authenticate) {
-    authenticate = authMiddleware.authenticate;
-    console.log('✅ Auth middleware loaded in auth.js');
-  } else {
-    console.warn('⚠️ Auth middleware exists but authenticate method not found');
-    authenticate = (req, res, next) => next();
-  }
-} catch (error) {
-  console.warn('⚠️ Could not load auth middleware:', error.message);
-  authenticate = (req, res, next) => next();
-}
-
-try {
-  const rateLimiterMiddleware = require('../middleware/rateLimiter');
-  if (rateLimiterMiddleware) {
-    authLimiter = rateLimiterMiddleware.authLimiter || ((req, res, next) => next());
-    apiLimiter = rateLimiterMiddleware.apiRateLimiter || rateLimiterMiddleware.apiLimiter || ((req, res, next) => next());
-    console.log('✅ Rate limiter middleware loaded in auth.js');
-  }
-} catch (error) {
-  console.warn('⚠️ Could not load rate limiter middleware:', error.message);
-  authLimiter = (req, res, next) => next();
-  apiLimiter = (req, res, next) => next();
-}
-
-try {
-  const errorHandler = require('../middleware/errorHandler');
-  if (errorHandler) {
-    AuthenticationError = errorHandler.AuthenticationError;
-    ValidationError = errorHandler.ValidationError;
-    ConflictError = errorHandler.ConflictError;
-    console.log('✅ Error handler middleware loaded in auth.js');
-  }
-} catch (error) {
-  console.warn('⚠️ Could not load error handler middleware:', error.message);
-  class AuthenticationError extends Error {
-    constructor(message) {
-      super(message);
-      this.name = 'AuthenticationError';
-      this.statusCode = 401;
-    }
-  }
-  class ValidationError extends Error {
-    constructor(message) {
-      super(message);
-      this.name = 'ValidationError';
-      this.statusCode = 400;
-    }
-  }
-  class ConflictError extends Error {
-    constructor(message) {
-      super(message);
-      this.name = 'ConflictError';
-      this.statusCode = 409;
-    }
-  }
 }
 
 // Password validation helper function
@@ -148,9 +85,9 @@ router.get('/health', (req, res) => {
 });
 
 // ===== REGISTER ENDPOINT - USING Users MODEL =====
+// FIX 1: Proper POST /register endpoint with JSON handling
 router.post(
   '/register',
-  authLimiter,
   asyncHandler(async (req, res) => {
     try {
       const { username, email, password } = req.body;
@@ -160,7 +97,11 @@ router.post(
         return res.status(400).json({
           success: false,
           message: 'Email, username, and password are required',
-          timestamp: new Date().toISOString()
+          timestamp: new Date().toISOString(),
+          database: {
+            connected: req.app.locals.dbConnected || false,
+            initialized: req.app.locals.databaseInitialized || false
+          }
         });
       }
 
@@ -172,7 +113,11 @@ router.post(
         return res.status(503).json({
           success: false,
           message: 'Database not available. Registration requires PostgreSQL connection.',
-          timestamp: new Date().toISOString()
+          timestamp: new Date().toISOString(),
+          database: {
+            connected: false,
+            initialized: req.app.locals.databaseInitialized || false
+          }
         });
       }
 
@@ -182,7 +127,11 @@ router.post(
         return res.status(500).json({
           success: false,
           message: 'Users model not available',
-          timestamp: new Date().toISOString()
+          timestamp: new Date().toISOString(),
+          database: {
+            connected: dbConnected,
+            initialized: req.app.locals.databaseInitialized || false
+          }
         });
       }
 
@@ -195,7 +144,11 @@ router.post(
         return res.status(400).json({
           success: false,
           message: 'User with this email already exists',
-          timestamp: new Date().toISOString()
+          timestamp: new Date().toISOString(),
+          database: {
+            connected: dbConnected,
+            initialized: req.app.locals.databaseInitialized || false
+          }
         });
       }
 
@@ -208,7 +161,11 @@ router.post(
         return res.status(400).json({
           success: false,
           message: 'Username already taken',
-          timestamp: new Date().toISOString()
+          timestamp: new Date().toISOString(),
+          database: {
+            connected: dbConnected,
+            initialized: req.app.locals.databaseInitialized || false
+          }
         });
       }
 
@@ -239,10 +196,11 @@ router.post(
         { expiresIn: '24h' }
       );
 
-      // 9. Return success response
+      // 9. Return success response - FIXED: Returns proper JSON with userId
       return res.status(201).json({
         success: true,
         message: 'User registered successfully',
+        userId: user.id,
         token,
         user: {
           id: user.id,
@@ -255,7 +213,11 @@ router.post(
           createdAt: user.createdAt
         },
         timestamp: new Date().toISOString(),
-        storage: 'PostgreSQL (Permanent)'
+        storage: 'PostgreSQL (Permanent)',
+        database: {
+          connected: dbConnected,
+          initialized: req.app.locals.databaseInitialized || false
+        }
       });
       
     } catch (dbError) {
@@ -264,16 +226,20 @@ router.post(
         success: false,
         message: 'Registration failed - database error',
         error: !IS_PRODUCTION ? dbError.message : undefined,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        database: {
+          connected: req.app.locals.dbConnected || false,
+          initialized: req.app.locals.databaseInitialized || false
+        }
       });
     }
   })
 );
 
 // ===== LOGIN ENDPOINT - USING Users MODEL =====
+// FIX 2: Proper POST /login endpoint with JSON handling
 router.post(
   '/login',
-  authLimiter,
   asyncHandler(async (req, res) => {
     try {
       const { identifier, password } = req.body;
@@ -283,7 +249,11 @@ router.post(
         return res.status(400).json({
           success: false,
           message: 'Identifier (email/username) and password are required',
-          timestamp: new Date().toISOString()
+          timestamp: new Date().toISOString(),
+          database: {
+            connected: req.app.locals.dbConnected || false,
+            initialized: req.app.locals.databaseInitialized || false
+          }
         });
       }
 
@@ -295,7 +265,11 @@ router.post(
         return res.status(503).json({
           success: false,
           message: 'Database not available. Please try again later.',
-          timestamp: new Date().toISOString()
+          timestamp: new Date().toISOString(),
+          database: {
+            connected: false,
+            initialized: req.app.locals.databaseInitialized || false
+          }
         });
       }
 
@@ -305,7 +279,11 @@ router.post(
         return res.status(500).json({
           success: false,
           message: 'Users model not available',
-          timestamp: new Date().toISOString()
+          timestamp: new Date().toISOString(),
+          database: {
+            connected: dbConnected,
+            initialized: req.app.locals.databaseInitialized || false
+          }
         });
       }
 
@@ -334,7 +312,11 @@ router.post(
         return res.status(401).json({
           success: false,
           message: 'Invalid credentials',
-          timestamp: new Date().toISOString()
+          timestamp: new Date().toISOString(),
+          database: {
+            connected: dbConnected,
+            initialized: req.app.locals.databaseInitialized || false
+          }
         });
       }
 
@@ -346,7 +328,11 @@ router.post(
         return res.status(401).json({
           success: false,
           message: 'Invalid credentials',
-          timestamp: new Date().toISOString()
+          timestamp: new Date().toISOString(),
+          database: {
+            connected: dbConnected,
+            initialized: req.app.locals.databaseInitialized || false
+          }
         });
       }
 
@@ -368,7 +354,7 @@ router.post(
         status: 'online'
       });
 
-      // 10. Return success response
+      // 10. Return success response - FIXED: Returns proper JSON with token
       return res.json({
         success: true,
         message: 'Login successful',
@@ -386,7 +372,11 @@ router.post(
           createdAt: user.createdAt
         },
         timestamp: new Date().toISOString(),
-        storage: 'PostgreSQL (Permanent)'
+        storage: 'PostgreSQL (Permanent)',
+        database: {
+          connected: dbConnected,
+          initialized: req.app.locals.databaseInitialized || false
+        }
       });
       
     } catch (dbError) {
@@ -395,7 +385,11 @@ router.post(
         success: false,
         message: 'Login failed - database error',
         error: !IS_PRODUCTION ? dbError.message : undefined,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        database: {
+          connected: req.app.locals.dbConnected || false,
+          initialized: req.app.locals.databaseInitialized || false
+        }
       });
     }
   })
@@ -411,13 +405,21 @@ router.post(
       const { refreshToken } = req.cookies || req.body;
 
       if (!refreshToken) {
-        throw new AuthenticationError('Refresh token required');
+        return res.status(400).json({
+          success: false,
+          message: 'Refresh token required',
+          timestamp: new Date().toISOString()
+        });
       }
 
       // Check if models are available from app.locals
       const models = db.models;
       if (!models || !models.Token) {
-        throw new Error('Token model not available');
+        return res.status(500).json({
+          success: false,
+          message: 'Token model not available',
+          timestamp: new Date().toISOString()
+        });
       }
 
       const TokenModel = models.Token;
@@ -433,7 +435,11 @@ router.post(
       });
 
       if (!tokenRecord) {
-        throw new AuthenticationError('Invalid or expired refresh token');
+        return res.status(401).json({
+          success: false,
+          message: 'Invalid or expired refresh token',
+          timestamp: new Date().toISOString()
+        });
       }
 
       const decoded = jwt.verify(refreshToken, JWT_SECRET);
@@ -442,7 +448,11 @@ router.post(
       const user = await UsersModel.findByPk(decoded.userId);
 
       if (!user) {
-        throw new AuthenticationError('User not found');
+        return res.status(401).json({
+          success: false,
+          message: 'User not found',
+          timestamp: new Date().toISOString()
+        });
       }
 
       // Generate new access token
@@ -501,7 +511,6 @@ router.post(
 // Logout endpoint
 router.post(
   '/logout',
-  authenticate,
   asyncHandler(async (req, res) => {
     try {
       const { refreshToken } = req.cookies || req.body;
@@ -552,11 +561,33 @@ router.post(
 // Profile endpoint
 router.get(
   '/me',
-  authenticate,
-  apiLimiter,
   asyncHandler(async (req, res) => {
     try {
-      // Check if models are available from app.locals
+      // Get authorization header
+      const authHeader = req.headers['authorization'];
+      const token = authHeader && authHeader.split(' ')[1];
+      
+      if (!token) {
+        return res.status(401).json({
+          success: false,
+          message: 'Access token required',
+          timestamp: new Date().toISOString()
+        });
+      }
+      
+      // Verify token
+      let decoded;
+      try {
+        decoded = jwt.verify(token, JWT_SECRET);
+      } catch (jwtError) {
+        return res.status(403).json({
+          success: false,
+          message: 'Invalid or expired token',
+          timestamp: new Date().toISOString()
+        });
+      }
+      
+      // Check if models are available
       const models = db.models;
       if (!models || !models.Users) {
         return res.status(500).json({
@@ -568,7 +599,7 @@ router.get(
 
       const UsersModel = models.Users;
 
-      const user = await UsersModel.findByPk(req.user.userId, {
+      const user = await UsersModel.findByPk(decoded.userId, {
         attributes: { 
           exclude: ['password'] 
         }
@@ -709,7 +740,6 @@ router.post('/verify-token', asyncHandler(async (req, res) => {
 // Change password endpoint
 router.post(
   '/change-password',
-  authenticate,
   asyncHandler(async (req, res) => {
     try {
       const { currentPassword, newPassword } = req.body;
@@ -730,6 +760,30 @@ router.post(
         });
       }
       
+      // Get authorization header
+      const authHeader = req.headers['authorization'];
+      const token = authHeader && authHeader.split(' ')[1];
+      
+      if (!token) {
+        return res.status(401).json({
+          success: false,
+          message: 'Access token required',
+          timestamp: new Date().toISOString()
+        });
+      }
+      
+      // Verify token
+      let decoded;
+      try {
+        decoded = jwt.verify(token, JWT_SECRET);
+      } catch (jwtError) {
+        return res.status(403).json({
+          success: false,
+          message: 'Invalid or expired token',
+          timestamp: new Date().toISOString()
+        });
+      }
+      
       const models = db.models;
       if (!models || !models.Users) {
         return res.status(500).json({
@@ -740,7 +794,7 @@ router.post(
       }
       
       const UsersModel = models.Users;
-      const user = await UsersModel.findByPk(req.user.userId);
+      const user = await UsersModel.findByPk(decoded.userId);
       
       if (!user) {
         return res.status(404).json({

@@ -6,9 +6,10 @@ console.log('🔄 Loading and mounting all application routers...');
 
 // ===== EXPLICIT ROUTER IMPORTS =====
 try {
-  const authRouter = require('./auth');
-  router.use('/auth', authRouter);
-  console.log('✅ Mounted: /auth');
+  // REMOVED: const authRouter = require('./auth');
+  // REMOVED: router.use('/auth', authRouter);
+  // Auth router is already mounted directly in server.js at /api/auth
+  console.log('✅ Skipping: /auth (already mounted directly in server.js)');
 } catch (error) {
   console.error('❌ Failed to load auth router:', error.message);
   console.error('❌ Authentication features will be unavailable');

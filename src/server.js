@@ -1,4 +1,4 @@
-﻿﻿﻿﻿// src/server.js - UPDATED: Full auto-initialization with structured reporting
+﻿﻿// src/server.js - UPDATED: Full auto-initialization with structured reporting
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -46,6 +46,104 @@ let dbInitializationResult = null;
 let users = [];
 let messages = [];
 const rooms = ['general', 'random', 'help', 'tech-support'];
+
+// ========== EXPRESS PARSER MIDDLEWARE - ADDED FIRST ==========
+// FIX 1: Ensure Express uses express.json() and express.urlencoded BEFORE any routers
+console.log('🔧 Applying Express parser middleware...');
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+console.log('✅ Express parser middleware applied');
+
+// ========== HELMET MIDDLEWARE ==========
+app.use(helmet({
+  contentSecurityPolicy: false,
+  crossOriginEmbedderPolicy: false,
+  crossOriginResourcePolicy: { policy: "cross-origin" }
+}));
+
+// ========== CORS CONFIGURATION - UPDATED ==========
+// FIX 3: Professional CORS configuration with whitelist-based dynamic origin check
+console.log('🔧 Configuring CORS...');
+
+// Define the whitelist of allowed origins
+const ALLOWED_ORIGINS = [
+  'https://moodfronted.onrender.com',
+  'http://localhost:3000',
+  'http://127.0.0.1:5500',
+  'http://localhost:5500',
+  'http://127.0.0.1:3000',
+  // Add any additional production origins from environment
+  ...(FRONTEND_URL ? [FRONTEND_URL] : [])
+].filter(Boolean);
+
+// Remove duplicates while preserving order
+const UNIQUE_ALLOWED_ORIGINS = [...new Set(ALLOWED_ORIGINS)];
+
+// Dynamic CORS configuration function
+const corsOptions = {
+  origin: function(origin, callback) {
+    // Allow requests with no origin (like Postman, curl, server-to-server)
+    if (!origin) {
+      console.log('🔧 CORS: No origin (server-to-server, Postman, curl)');
+      return callback(null, true);
+    }
+    
+    // Check if the origin is in the whitelist
+    if (UNIQUE_ALLOWED_ORIGINS.includes(origin)) {
+      console.log(`✅ CORS: Allowed origin: ${origin}`);
+      return callback(null, true);
+    }
+    
+    // Check for development origins with different ports
+    if (!IS_PRODUCTION) {
+      const originUrl = new URL(origin);
+      const originHostname = originUrl.hostname;
+      
+      // Allow localhost on any port in development
+      if (originHostname === 'localhost' || originHostname === '127.0.0.1') {
+        console.log(`✅ CORS: Allowed development origin: ${origin}`);
+        return callback(null, true);
+      }
+    }
+    
+    // Origin not allowed
+    console.log(`❌ CORS: Blocked origin: ${origin}`);
+    console.log(`   Allowed origins: ${UNIQUE_ALLOWED_ORIGINS.join(', ')}`);
+    callback(new Error(`Origin ${origin} not allowed by CORS`));
+  },
+  credentials: true, // Allow credentials (cookies / authorization headers)
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH', 'HEAD'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Origin', 'X-Requested-With', 'X-Device-ID', 'X-Request-ID'],
+  exposedHeaders: ['Authorization'],
+  optionsSuccessStatus: 200,
+  maxAge: 86400, // 24 hours for preflight cache
+  preflightContinue: false
+};
+
+// Apply CORS middleware
+app.use(cors(corsOptions));
+
+// Handle preflight requests explicitly
+app.options('*', cors(corsOptions));
+
+console.log(`✅ CORS configured with ${UNIQUE_ALLOWED_ORIGINS.length} allowed origins:`);
+UNIQUE_ALLOWED_ORIGINS.forEach(origin => console.log(`   • ${origin}`));
+console.log(`✅ CORS credentials: ${corsOptions.credentials}`);
+console.log(`✅ CORS methods: ${corsOptions.methods.join(', ')}`);
+
+// ========== REQUEST LOGGER ==========
+if (!IS_PRODUCTION) {
+  app.use((req, res, next) => {
+    const timestamp = new Date().toISOString();
+    console.log(`[${timestamp}] ${req.method} ${req.path} - Origin: ${req.headers.origin || 'no-origin'}`);
+    
+    if (req.path.startsWith('/api/auth/')) {
+      console.log(`[AUTH LOG] ${req.method} ${req.path} - Body:`, req.body ? JSON.stringify(req.body) : 'No body');
+    }
+    
+    next();
+  });
+}
 
 // ========== ENHANCED DATABASE INITIALIZATION ==========
 async function initializeDatabaseWithReporting() {
@@ -263,90 +361,27 @@ async function initializeDatabaseWithReporting() {
   }
 }
 
-// ========== MIDDLEWARE ==========
-app.use(helmet({
-  contentSecurityPolicy: false,
-  crossOriginEmbedderPolicy: false,
-  crossOriginResourcePolicy: { policy: "cross-origin" }
-}));
-
-// Configure Express parsers
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-
-// CORS Configuration from .env
-if (!IS_PRODUCTION) {
-  app.use(cors({
-    origin: CORS_ORIGIN,
-    credentials: CORS_CREDENTIALS,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH', 'HEAD'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Origin', 'X-Requested-With', 'X-Device-ID', 'X-Request-ID'],
-    exposedHeaders: ['Authorization'],
-    optionsSuccessStatus: 200,
-    maxAge: 86400
-  }));
-} else {
-  const allowedOrigins = [
-    'http://localhost:3000',
-    'http://localhost:5500',
-    'http://127.0.0.1:5500',
-    'http://localhost:5000',
-    'http://localhost:8080',
-    'http://localhost:4000',
-    'https://moodfronted.onrender.com',
-    FRONTEND_URL
-  ].filter(Boolean);
-  
-  app.use(cors({
-    origin: function(origin, callback) {
-      if (!origin || allowedOrigins.includes(origin)) {
-        callback(null, true);
-      } else {
-        console.log('CORS blocked origin:', origin);
-        callback(new Error(`Origin ${origin} not allowed by CORS`));
-      }
-    },
-    credentials: CORS_CREDENTIALS,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH', 'HEAD'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Origin', 'X-Requested-With', 'X-Device-ID'],
-    exposedHeaders: ['Authorization'],
-    optionsSuccessStatus: 200,
-    maxAge: 86400
-  }));
-}
-
-// Request logger
-if (!IS_PRODUCTION) {
-  app.use((req, res, next) => {
-    const timestamp = new Date().toISOString();
-    console.log(`[${timestamp}] ${req.method} ${req.path} - Origin: ${req.headers.origin || 'no-origin'}`);
-    
-    if (req.path.startsWith('/api/auth/')) {
-      console.log(`[AUTH LOG] ${req.method} ${req.path} - Body:`, req.body ? JSON.stringify(req.body) : 'No body');
-    }
-    
-    next();
-  });
-}
-
-// Static files - ONLY in development
+// ========== STATIC FILES - ONLY in development ==========
 if (!IS_PRODUCTION) {
   app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
   app.use('/assets', express.static(path.join(__dirname, 'public/assets')));
   app.use(express.static(path.join(__dirname, 'public')));
 }
 
-// ========== STRICT ROUTER MOUNTING FUNCTION ==========
+// ========== STRICT ROUTER MOUNTING FUNCTION - UPDATED ==========
 function mountAllRouters() {
   console.log('\n📡 Step 6: Mounting ALL routers (STRICT ORDER)...');
   
-  // IMPORTANT: Mount auth router FIRST and EXPLICITLY
+  // FIX 2: Mount auth router FIRST and EXPLICITLY
   try {
     const authRouter = require('./routes/auth.js');
     if (authRouter && typeof authRouter === 'function') {
       app.use('/api/auth', authRouter);
       mountedRoutes.push('/api/auth/*');
-      console.log('✅ Mounted auth router EXPLICITLY at /api/auth');
+      console.log('✅ FIXED: Mounted auth router EXPLICITLY at /api/auth');
+      console.log('   ↳ POST /api/auth/register available');
+      console.log('   ↳ POST /api/auth/login available');
+      console.log('   ↳ GET /api/auth/me available');
     } else {
       throw new Error('Auth router is not a valid Express router');
     }
@@ -401,6 +436,9 @@ function mountAllRouters() {
   }
   
   console.log(`✅ Total mounted routes: ${mountedRoutes.length}`);
+  // FIX 5: Log every route registration for verification
+  console.log('\n📋 VERIFICATION - All Registered Routes:');
+  mountedRoutes.forEach(route => console.log(`   • ${route}`));
 }
 
 // ========== AUTHENTICATION MIDDLEWARE ==========
@@ -414,8 +452,8 @@ function authenticateToken(req, res, next) {
       message: 'Access token required',
       timestamp: new Date().toISOString()
     });
-  }
-  
+}
+
   jwt.verify(token, JWT_SECRET, (err, user) => {
     if (err) {
       if (!IS_PRODUCTION) {
@@ -480,7 +518,8 @@ app.get('/api/health', (req, res) => {
     autoInitialization: 'Full automatic with ENUM detection',
     cors: {
       origin: CORS_ORIGIN,
-      credentials: CORS_CREDENTIALS
+      credentials: CORS_CREDENTIALS,
+      allowedOrigins: UNIQUE_ALLOWED_ORIGINS
     }
   });
 });
@@ -505,7 +544,7 @@ app.get('/api/status', (req, res) => {
     allModelsIncluded: 'Yes (auto-loaded from models folder)',
     autoInitialization: 'Full automatic with structured reporting',
     cors: {
-      origin: CORS_ORIGIN,
+      allowedOrigins: UNIQUE_ALLOWED_ORIGINS,
       credentials: CORS_CREDENTIALS
     }
   });
@@ -541,6 +580,11 @@ app.get('/api/debug', (req, res) => {
         allModelsIncluded: true,
         enumDetection: true,
         autoInitialization: true
+      },
+      cors: {
+        allowedOrigins: UNIQUE_ALLOWED_ORIGINS,
+        currentOrigin: req.headers.origin,
+        credentials: CORS_CREDENTIALS
       }
     });
   } else {
@@ -1117,7 +1161,7 @@ app.use((req, res) => {
   });
 });
 
-// ========== START SERVER WITH STRICT ORDER ==========
+// ========== START SERVER WITH STRICT ORDER - UPDATED ==========
 const startServer = async () => {
   console.log('🚀 Starting MoodChat Backend Server...');
   console.log(`📁 Environment: ${NODE_ENV}`);
@@ -1128,12 +1172,13 @@ const startServer = async () => {
   console.log(`🔨 Table Creation: AUTO-CREATE (safe)`);
   console.log(`📈 Schema Updates: Safe (alter=true)`);
   console.log(`🔍 ENUM Detection: Enabled`);
-  console.log(`🌍 CORS Origin: ${CORS_ORIGIN}`);
+  console.log(`🌍 CORS Allowed Origins: ${UNIQUE_ALLOWED_ORIGINS.length} origins configured`);
   console.log(`🔐 CORS Credentials: ${CORS_CREDENTIALS}`);
   console.log(`🛡️  Data Protection: No data loss, safe schema updates`);
   console.log(`📋 All Models: Auto-loaded from models folder`);
   
   // STEP 1: Initialize database with enhanced reporting
+  // FIX 4: Ensure Sequelize database is synced before app.listen()
   console.log('\n🔄 Step 1: Initializing database...');
   try {
     const dbInitSuccess = await initializeDatabaseWithReporting();
@@ -1176,6 +1221,7 @@ const startServer = async () => {
     process.exit(1);
   }
   
+  // FIX 7: Proper error handling on server start
   // STEP 3: Start the server
   const server = app.listen(PORT, HOST, () => {
     console.log(`\n┌─────────────────────────────────────────────────────────────────┐`);
@@ -1193,7 +1239,7 @@ const startServer = async () => {
     console.log(`│   🔧 Schema:   Safe updates (alter=true)                      `);
     console.log(`│   🔍 ENUM:     Conflict detection enabled                     `);
     console.log(`│   📋 Auto-load: All models from models folder                `);
-    console.log(`│   🌍 CORS:     ${CORS_ORIGIN}                                 `);
+    console.log(`│   🌍 CORS:     ${UNIQUE_ALLOWED_ORIGINS.length} allowed origins `);
     console.log(`│   🔐 Creds:    ${CORS_CREDENTIALS}                            `);
     console.log(`│   🛣️  Routes:   ${mountedRoutes.length} mounted                `);
     console.log(`│   📈 Reporting: Structured console output                     `);
@@ -1217,9 +1263,23 @@ const startServer = async () => {
     console.log(`│   ✅ Strict loading order: DB → Models → Routers              │`);
     console.log(`│   ✅ Auth router: Mounted at /api/auth                        │`);
     console.log(`│   ✅ Router protection: No router-as-model loading           │`);
+    console.log(`│   ✅ Express parsers: Applied before routers                  │`);
+    console.log(`│   ✅ CORS configured: Whitelist with credentials              │`);
     console.log(`│   Press Ctrl+C to stop                                       │`);
     console.log(`│                                                                 │`);
     console.log(`└─────────────────────────────────────────────────────────────────┘`);
+  });
+
+  // FIX 7: Error handling for server start
+  server.on('error', (error) => {
+    if (error.code === 'EADDRINUSE') {
+      console.error(`❌ Port ${PORT} is already in use.`);
+      console.error(`   Try: kill -9 $(lsof -t -i:${PORT}) or use a different port`);
+      process.exit(1);
+    } else {
+      console.error('❌ Server error:', error);
+      process.exit(1);
+    }
   });
 
   // Graceful shutdown
@@ -1257,17 +1317,6 @@ const startServer = async () => {
 
   process.on('unhandledRejection', (reason, promise) => {
     console.error('🚨 Unhandled Rejection at:', promise, 'reason:', reason);
-  });
-
-  server.on('error', (error) => {
-    if (error.code === 'EADDRINUSE') {
-      console.error(`❌ Port ${PORT} is already in use.`);
-      console.error(`   Try: kill -9 $(lsof -t -i:${PORT}) or use a different port`);
-      process.exit(1);
-    } else {
-      console.error('❌ Server error:', error);
-      process.exit(1);
-    }
   });
 
   return server;
