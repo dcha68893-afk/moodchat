@@ -95,11 +95,11 @@ router.post(
 
       console.log('🔧 [AUTH] Register request received:', { username, email: email ? '***@***' : 'missing' });
 
-      // 1. Validate required fields
+      // 1. STRICT VALIDATION - EXACT FIELDS REQUIRED
       if (!email || !username || !password) {
         return res.status(400).json({
           success: false,
-          message: 'Email, username, and password are required',
+          message: 'Missing required fields: email, username, and password are all required',
           timestamp: new Date().toISOString(),
           database: {
             connected: req.app.locals.dbConnected || false,
@@ -271,7 +271,7 @@ router.post(
 
       console.log('🔧 [AUTH] Login request received:', { identifier: identifier ? '***' : 'missing' });
 
-      // 1. Validate required fields
+      // 1. STRICT VALIDATION - EXACT FIELDS REQUIRED
       if (!identifier || !password) {
         return res.status(400).json({
           success: false,
@@ -334,11 +334,11 @@ router.post(
         });
       }
 
-      // 5. If user not found
+      // 5. If user not found - RETURN 401 FOR INVALID CREDENTIALS
       if (!user) {
         return res.status(401).json({
           success: false,
-          message: 'Invalid credentials',
+          message: 'Invalid email or password',
           timestamp: new Date().toISOString(),
           database: {
             connected: dbConnected,
@@ -350,11 +350,11 @@ router.post(
       // 6. Compare passwords
       const validPassword = await bcrypt.compare(password, user.password);
       
-      // 7. If password is invalid
+      // 7. If password is invalid - RETURN 401 FOR INVALID CREDENTIALS
       if (!validPassword) {
         return res.status(401).json({
           success: false,
-          message: 'Invalid credentials',
+          message: 'Invalid email or password',
           timestamp: new Date().toISOString(),
           database: {
             connected: dbConnected,
