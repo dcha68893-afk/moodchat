@@ -1,5 +1,4 @@
 // src/routes/auth.js - THIS FILE IS A ROUTER — NOT A SEQUELIZE MODEL
-// UPDATED: Fixed POST /register and POST /login for proper JSON handling
 require('dotenv').config();
 const express = require('express');
 const bcrypt = require('bcryptjs');
@@ -71,13 +70,30 @@ router.get('/health', (req, res) => {
   });
 });
 
+// ===== TEST ENDPOINT =====
+router.get('/test', (req, res) => {
+  res.status(200).json({
+    success: true,
+    message: 'Auth router is working correctly',
+    timestamp: new Date().toISOString(),
+    endpoints: {
+      register: 'POST /api/auth/register',
+      login: 'POST /api/auth/login',
+      me: 'GET /api/auth/me',
+      refreshToken: 'POST /api/auth/refresh-token',
+      logout: 'POST /api/auth/logout'
+    }
+  });
+});
+
 // ===== REGISTER ENDPOINT - USING Users MODEL =====
-// FIX 1: Proper POST /register endpoint with JSON handling
 router.post(
   '/register',
   asyncHandler(async (req, res) => {
     try {
       const { username, email, password } = req.body;
+
+      console.log('🔧 [AUTH] Register request received:', { username, email: email ? '***@***' : 'missing' });
 
       // 1. Validate required fields
       if (!email || !username || !password) {
@@ -171,6 +187,8 @@ router.post(
         role: 'user'
       });
 
+      console.log('🔧 [AUTH] User created successfully:', user.id);
+
       // 8. Generate JWT token
       const token = jwt.sign(
         { 
@@ -183,7 +201,7 @@ router.post(
         { expiresIn: '24h' }
       );
 
-      // 9. Return success response - FIXED: Returns proper JSON with userId
+      // 9. Return success response
       return res.status(201).json({
         success: true,
         message: 'User registered successfully',
@@ -208,7 +226,7 @@ router.post(
       });
       
     } catch (dbError) {
-      console.error('Database registration error:', dbError.message);
+      console.error('🔧 [AUTH] Database registration error:', dbError.message);
       return res.status(500).json({
         success: false,
         message: 'Registration failed - database error',
@@ -224,12 +242,13 @@ router.post(
 );
 
 // ===== LOGIN ENDPOINT - USING Users MODEL =====
-// FIX 2: Proper POST /login endpoint with JSON handling
 router.post(
   '/login',
   asyncHandler(async (req, res) => {
     try {
       const { identifier, password } = req.body;
+
+      console.log('🔧 [AUTH] Login request received:', { identifier: identifier ? '***' : 'missing' });
 
       // 1. Validate required fields
       if (!identifier || !password) {
@@ -341,7 +360,8 @@ router.post(
         status: 'online'
       });
 
-      // 10. Return success response - FIXED: Returns proper JSON with token
+      // 10. Return success response
+      console.log('🔧 [AUTH] Login successful for user:', user.id);
       return res.json({
         success: true,
         message: 'Login successful',
@@ -367,7 +387,7 @@ router.post(
       });
       
     } catch (dbError) {
-      console.error('Database login error:', dbError.message);
+      console.error('🔧 [AUTH] Database login error:', dbError.message);
       return res.status(500).json({
         success: false,
         message: 'Login failed - database error',
@@ -382,9 +402,84 @@ router.post(
   })
 );
 
-// ===== SUPPORTING AUTH ROUTES =====
+// ===== AUTHENTICATION MIDDLEWARE FOR ROUTER =====
+function authenticateTokenRouter(req, res, next) {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+  
+  if (!token) {
+    return res.status(401).json({ 
+      success: false, 
+      message: 'Access token required',
+      timestamp: new Date().toISOString()
+    });
+  }
 
-// Refresh token endpoint
+  jwt.verify(token, JWT_SECRET, (err, user) => {
+    if (err) {
+      if (!IS_PRODUCTION) {
+        console.log('🔧 [AUTH] JWT Verification Error:', err.message);
+      }
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Invalid or expired token',
+        timestamp: new Date().toISOString()
+      });
+    }
+    req.user = user;
+    next();
+  });
+}
+
+// ===== PROFILE ENDPOINT =====
+router.get(
+  '/me',
+  authenticateTokenRouter,
+  asyncHandler(async (req, res) => {
+    try {
+      // Check if models are available
+      const models = req.app.locals.models;
+      if (!models || !models.Users) {
+        return res.status(500).json({
+          success: false,
+          message: 'Users model not available',
+          timestamp: new Date().toISOString()
+        });
+      }
+
+      const UsersModel = models.Users;
+
+      const user = await UsersModel.findByPk(req.user.userId, {
+        attributes: { 
+          exclude: ['password'] 
+        }
+      });
+
+      if (!user) {
+        return res.status(401).json({
+          success: false,
+          message: 'User not found',
+          timestamp: new Date().toISOString()
+        });
+      }
+
+      res.status(200).json({
+        success: true,
+        data: { user },
+        timestamp: new Date().toISOString()
+      });
+    } catch (error) {
+      console.error('🔧 [AUTH] Error fetching user profile:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to fetch user profile',
+        timestamp: new Date().toISOString()
+      });
+    }
+  })
+);
+
+// ===== REFRESH TOKEN ENDPOINT =====
 router.post(
   '/refresh-token',
   asyncHandler(async (req, res) => {
@@ -485,7 +580,7 @@ router.post(
         timestamp: new Date().toISOString()
       });
     } catch (error) {
-      console.error('Error refreshing token:', error);
+      console.error('🔧 [AUTH] Error refreshing token:', error);
       res.status(error.statusCode || 500).json({
         success: false,
         message: error.message || 'Failed to refresh token',
@@ -495,9 +590,10 @@ router.post(
   })
 );
 
-// Logout endpoint
+// ===== LOGOUT ENDPOINT =====
 router.post(
   '/logout',
+  authenticateTokenRouter,
   asyncHandler(async (req, res) => {
     try {
       const { refreshToken } = req.cookies || req.body;
@@ -535,7 +631,7 @@ router.post(
         timestamp: new Date().toISOString()
       });
     } catch (error) {
-      console.error('Error logging out:', error);
+      console.error('🔧 [AUTH] Error logging out:', error);
       res.status(500).json({
         success: false,
         message: 'Failed to logout',
@@ -545,78 +641,7 @@ router.post(
   })
 );
 
-// Profile endpoint
-router.get(
-  '/me',
-  asyncHandler(async (req, res) => {
-    try {
-      // Get authorization header
-      const authHeader = req.headers['authorization'];
-      const token = authHeader && authHeader.split(' ')[1];
-      
-      if (!token) {
-        return res.status(401).json({
-          success: false,
-          message: 'Access token required',
-          timestamp: new Date().toISOString()
-        });
-      }
-      
-      // Verify token
-      let decoded;
-      try {
-        decoded = jwt.verify(token, JWT_SECRET);
-      } catch (jwtError) {
-        return res.status(403).json({
-          success: false,
-          message: 'Invalid or expired token',
-          timestamp: new Date().toISOString()
-        });
-      }
-      
-      // Check if models are available
-      const models = req.app.locals.models;
-      if (!models || !models.Users) {
-        return res.status(500).json({
-          success: false,
-          message: 'Users model not available',
-          timestamp: new Date().toISOString()
-        });
-      }
-
-      const UsersModel = models.Users;
-
-      const user = await UsersModel.findByPk(decoded.userId, {
-        attributes: { 
-          exclude: ['password'] 
-        }
-      });
-
-      if (!user) {
-        return res.status(401).json({
-          success: false,
-          message: 'User not found',
-          timestamp: new Date().toISOString()
-        });
-      }
-
-      res.status(200).json({
-        success: true,
-        data: { user },
-        timestamp: new Date().toISOString()
-      });
-    } catch (error) {
-      console.error('Error fetching user profile:', error);
-      res.status(500).json({
-        success: false,
-        message: 'Failed to fetch user profile',
-        timestamp: new Date().toISOString()
-      });
-    }
-  })
-);
-
-// Test database connection endpoint
+// ===== TEST DATABASE CONNECTION ENDPOINT =====
 router.get('/test-db', asyncHandler(async (req, res) => {
   try {
     const models = req.app.locals.models;
@@ -656,9 +681,7 @@ router.get('/test-db', asyncHandler(async (req, res) => {
   }
 }));
 
-// ===== ADDITIONAL AUTH ENDPOINTS =====
-
-// Verify token endpoint
+// ===== VERIFY TOKEN ENDPOINT =====
 router.post('/verify-token', asyncHandler(async (req, res) => {
   try {
     const token = req.headers.authorization?.replace('Bearer ', '') || req.body.token;
@@ -715,7 +738,7 @@ router.post('/verify-token', asyncHandler(async (req, res) => {
       });
     }
   } catch (error) {
-    console.error('Token verification error:', error);
+    console.error('🔧 [AUTH] Token verification error:', error);
     res.status(500).json({
       success: false,
       message: 'Failed to verify token',
@@ -724,9 +747,10 @@ router.post('/verify-token', asyncHandler(async (req, res) => {
   }
 }));
 
-// Change password endpoint
+// ===== CHANGE PASSWORD ENDPOINT =====
 router.post(
   '/change-password',
+  authenticateTokenRouter,
   asyncHandler(async (req, res) => {
     try {
       const { currentPassword, newPassword } = req.body;
@@ -747,30 +771,6 @@ router.post(
         });
       }
       
-      // Get authorization header
-      const authHeader = req.headers['authorization'];
-      const token = authHeader && authHeader.split(' ')[1];
-      
-      if (!token) {
-        return res.status(401).json({
-          success: false,
-          message: 'Access token required',
-          timestamp: new Date().toISOString()
-        });
-      }
-      
-      // Verify token
-      let decoded;
-      try {
-        decoded = jwt.verify(token, JWT_SECRET);
-      } catch (jwtError) {
-        return res.status(403).json({
-          success: false,
-          message: 'Invalid or expired token',
-          timestamp: new Date().toISOString()
-        });
-      }
-      
       const models = req.app.locals.models;
       if (!models || !models.Users) {
         return res.status(500).json({
@@ -781,7 +781,7 @@ router.post(
       }
       
       const UsersModel = models.Users;
-      const user = await UsersModel.findByPk(decoded.userId);
+      const user = await UsersModel.findByPk(req.user.userId);
       
       if (!user) {
         return res.status(404).json({
@@ -813,7 +813,7 @@ router.post(
       });
       
     } catch (error) {
-      console.error('Change password error:', error);
+      console.error('🔧 [AUTH] Change password error:', error);
       res.status(500).json({
         success: false,
         message: 'Failed to change password',
@@ -823,5 +823,5 @@ router.post(
   })
 );
 
-// CRITICAL: Export the router ONLY - MUST BE EXPORTED AS EXPRESS ROUTER
+// CRITICAL: Export the router ONLY
 module.exports = router;

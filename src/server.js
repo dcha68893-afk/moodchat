@@ -1,4 +1,4 @@
-﻿﻿// src/server.js - UPDATED: Full auto-initialization with structured reporting
+﻿﻿﻿﻿// src/server.js - UPDATED: Full auto-initialization with structured reporting
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -48,7 +48,6 @@ let messages = [];
 const rooms = ['general', 'random', 'help', 'tech-support'];
 
 // ========== EXPRESS PARSER MIDDLEWARE - ADDED FIRST ==========
-// FIX 1: Ensure Express uses express.json() and express.urlencoded BEFORE any routers
 console.log('🔧 Applying Express parser middleware...');
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
@@ -62,68 +61,55 @@ app.use(helmet({
 }));
 
 // ========== CORS CONFIGURATION - UPDATED ==========
-// FIX 3: Professional CORS configuration with whitelist-based dynamic origin check
 console.log('🔧 Configuring CORS...');
 
-// Define the whitelist of allowed origins
 const ALLOWED_ORIGINS = [
   'https://moodfronted.onrender.com',
   'http://localhost:3000',
   'http://127.0.0.1:5500',
   'http://localhost:5500',
   'http://127.0.0.1:3000',
-  // Add any additional production origins from environment
   ...(FRONTEND_URL ? [FRONTEND_URL] : [])
 ].filter(Boolean);
 
-// Remove duplicates while preserving order
 const UNIQUE_ALLOWED_ORIGINS = [...new Set(ALLOWED_ORIGINS)];
 
-// Dynamic CORS configuration function
 const corsOptions = {
   origin: function(origin, callback) {
-    // Allow requests with no origin (like Postman, curl, server-to-server)
     if (!origin) {
       console.log('🔧 CORS: No origin (server-to-server, Postman, curl)');
       return callback(null, true);
     }
     
-    // Check if the origin is in the whitelist
     if (UNIQUE_ALLOWED_ORIGINS.includes(origin)) {
       console.log(`✅ CORS: Allowed origin: ${origin}`);
       return callback(null, true);
     }
     
-    // Check for development origins with different ports
     if (!IS_PRODUCTION) {
       const originUrl = new URL(origin);
       const originHostname = originUrl.hostname;
       
-      // Allow localhost on any port in development
       if (originHostname === 'localhost' || originHostname === '127.0.0.1') {
         console.log(`✅ CORS: Allowed development origin: ${origin}`);
         return callback(null, true);
       }
     }
     
-    // Origin not allowed
     console.log(`❌ CORS: Blocked origin: ${origin}`);
     console.log(`   Allowed origins: ${UNIQUE_ALLOWED_ORIGINS.join(', ')}`);
     callback(new Error(`Origin ${origin} not allowed by CORS`));
   },
-  credentials: true, // Allow credentials (cookies / authorization headers)
+  credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH', 'HEAD'],
   allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Origin', 'X-Requested-With', 'X-Device-ID', 'X-Request-ID'],
   exposedHeaders: ['Authorization'],
   optionsSuccessStatus: 200,
-  maxAge: 86400, // 24 hours for preflight cache
+  maxAge: 86400,
   preflightContinue: false
 };
 
-// Apply CORS middleware
 app.use(cors(corsOptions));
-
-// Handle preflight requests explicitly
 app.options('*', cors(corsOptions));
 
 console.log(`✅ CORS configured with ${UNIQUE_ALLOWED_ORIGINS.length} allowed origins:`);
@@ -156,7 +142,6 @@ async function initializeDatabaseWithReporting() {
   console.log('│                       DATABASE INITIALIZATION                           │');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   
-  // ========== DATABASE CONNECTION ==========
   console.log('\n🔌 Step 1: Establishing database connection...');
   
   let retries = 3;
@@ -185,12 +170,10 @@ async function initializeDatabaseWithReporting() {
   const dbName = sequelize.config.database || 'PostgreSQL';
   console.log(`✅ Database connected successfully to: ${dbName}`);
   
-  // Attach models to app.locals for route access
   app.locals.models = models;
   app.locals.sequelize = sequelize;
   app.locals.dbConnected = dbConnected;
   
-  // ========== LOG ALL IMPORTED MODELS ==========
   const modelNames = Object.keys(models).filter(key => 
     key !== 'sequelize' && key !== 'Sequelize'
   );
@@ -198,7 +181,6 @@ async function initializeDatabaseWithReporting() {
   console.log('\n📋 Step 2: Models imported from models/index.js:');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   
-  // Display models in a table format
   console.log('┌────────────────────┬──────────────────┬──────────────────┐');
   console.log('│ Model Name         │ Status           │ Table Name       │');
   console.log('├────────────────────┼──────────────────┼──────────────────┤');
@@ -212,7 +194,6 @@ async function initializeDatabaseWithReporting() {
   console.log('└────────────────────┴──────────────────┴──────────────────┘');
   console.log(`\n✅ Total models loaded: ${modelNames.length}`);
   
-  // ========== CALL ENHANCED INITIALIZE DATABASE ==========
   console.log('\n🔨 Step 3: Safe database synchronization...');
   console.log('  Safety Rules:');
   console.log('  • force=false    → NEVER drop existing tables');
@@ -221,14 +202,12 @@ async function initializeDatabaseWithReporting() {
   console.log('  • Data protection→ All existing data preserved');
   
   try {
-    // Call the enhanced initialization from models/index.js
     dbInitializationResult = await initializeDatabase();
     
     if (dbInitializationResult.success) {
       dbSyncComplete = true;
       databaseInitialized = true;
       
-      // Display final structured report
       console.log('\n🎉 Step 4: DATABASE INITIALIZATION COMPLETE');
       console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
       console.log('│                           FINAL STATUS REPORT                            │');
@@ -247,11 +226,10 @@ async function initializeDatabaseWithReporting() {
       console.log(`│ ENUM conflicts:      ${dbInitializationResult.enumConflicts.length.toString().padEnd(40)} │`);
       console.log('└──────────────────────────────────────────────────────────────┘');
       
-      // Show table status in structured format
       console.log('\n📋 TABLE STATUS OVERVIEW:');
       console.log('┌────────────────────┬──────────────────┬──────────────────┐');
       console.log('│ Table Name         │ Status           │ Action           │');
-  console.log('├────────────────────┼──────────────────┼──────────────────┤');
+      console.log('├────────────────────┼──────────────────┼──────────────────┤');
       
       for (const tableInfo of syncResults.tablesInfo) {
         let statusIcon = '❓';
@@ -264,7 +242,6 @@ async function initializeDatabaseWithReporting() {
       
       console.log('└────────────────────┴──────────────────┴──────────────────┘');
       
-      // Show ENUM conflicts if any
       if (dbInitializationResult.enumConflicts.length > 0) {
         console.log('\n⚠️  ENUM CONFLICTS (Manual review recommended):');
         console.log('┌────────────────────┬──────────────────┬─────────────────────────────┐');
@@ -281,7 +258,6 @@ async function initializeDatabaseWithReporting() {
         console.log('   Existing database values are preserved. Model may need adjustment.');
       }
       
-      // Verify and log associations
       console.log('\n🔗 Step 5: Verifying model associations...');
       try {
         let totalAssociations = 0;
@@ -339,7 +315,6 @@ async function initializeDatabaseWithReporting() {
   } catch (error) {
     console.error('❌ Database initialization failed:', error.message);
     
-    // Log error details
     if (!IS_PRODUCTION) {
       console.error('Error details:', {
         name: error.name,
@@ -349,7 +324,6 @@ async function initializeDatabaseWithReporting() {
       });
     }
     
-    // In production, we might want to continue if it's a non-critical error
     if (IS_PRODUCTION && (error.message.includes('relation') || error.message.includes('table'))) {
       console.warn('⚠️  Non-critical database error, continuing with partial initialization...');
       databaseInitialized = true;
@@ -379,7 +353,7 @@ function authenticateToken(req, res, next) {
       message: 'Access token required',
       timestamp: new Date().toISOString()
     });
-}
+  }
 
   jwt.verify(token, JWT_SECRET, (err, user) => {
     if (err) {
@@ -401,7 +375,7 @@ function authenticateToken(req, res, next) {
 function mountAllRouters() {
   console.log('\n📡 Step 6: Mounting ALL routers (STRICT ORDER)...');
   
-  // FIX 2: Mount auth router FIRST and EXPLICITLY with safe verification
+  // FIX: Mount auth router FIRST with detailed logging
   try {
     console.log('🔧 Attempting to load auth router from ./routes/auth.js...');
     const authRouterPath = path.join(__dirname, 'routes', 'auth.js');
@@ -422,7 +396,6 @@ function mountAllRouters() {
       throw new Error(`Auth router is not a valid Express router (type: ${typeof authRouter})`);
     }
     
-    // Handle both router as function or object with router property
     const routerToMount = typeof authRouter === 'function' ? authRouter : 
                          (authRouter.router || authRouter.default || authRouter);
     
@@ -430,16 +403,219 @@ function mountAllRouters() {
       throw new Error(`Cannot mount auth router - invalid type after extraction: ${typeof routerToMount}`);
     }
     
+    // Mount the auth router
     app.use('/api/auth', routerToMount);
     mountedRoutes.push('/api/auth/*');
+    
+    // Add a test endpoint to verify the router is working
+    app.get('/api/auth/test', (req, res) => {
+      res.json({
+        success: true,
+        message: 'Auth router is working correctly',
+        timestamp: new Date().toISOString(),
+        endpoints: {
+          register: 'POST /api/auth/register',
+          login: 'POST /api/auth/login',
+          me: 'GET /api/auth/me',
+          refreshToken: 'POST /api/auth/refresh-token',
+          logout: 'POST /api/auth/logout'
+        }
+      });
+    });
+    
     console.log('✅ FIXED: Mounted auth router EXPLICITLY at /api/auth');
     console.log('   ↳ POST /api/auth/register available');
     console.log('   ↳ POST /api/auth/login available');
     console.log('   ↳ GET /api/auth/me available');
+    console.log('   ↳ GET /api/auth/test available (test endpoint)');
+    
   } catch (error) {
     console.error('❌ FATAL: Failed to mount auth router:', error.message);
     console.error('   Stack:', error.stack);
-    throw error;
+    
+    // Create fallback auth endpoints if router fails
+    console.log('🔄 Creating emergency fallback auth endpoints...');
+    
+    app.post('/api/auth/register', async (req, res) => {
+      try {
+        const { username, email, password } = req.body;
+        
+        if (!email || !password || !username) {
+          return res.status(400).json({
+            success: false,
+            message: 'Email, password, and username are required',
+            timestamp: new Date().toISOString()
+          });
+        }
+        
+        if (!dbConnected) {
+          return res.status(503).json({
+            success: false,
+            message: 'Database not available',
+            timestamp: new Date().toISOString()
+          });
+        }
+        
+        const UsersModel = models.Users;
+        if (!UsersModel) {
+          return res.status(500).json({
+            success: false,
+            message: 'Users model not available',
+            timestamp: new Date().toISOString()
+          });
+        }
+        
+        const existingUser = await UsersModel.findOne({ where: { email: email.toLowerCase() } });
+        if (existingUser) {
+          return res.status(400).json({
+            success: false,
+            message: 'User already exists',
+            timestamp: new Date().toISOString()
+          });
+        }
+        
+        const hashedPassword = await bcrypt.hash(password, 10);
+        
+        const user = await UsersModel.create({
+          email: email.toLowerCase(),
+          username,
+          password: hashedPassword,
+          avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(username)}&background=random&color=fff`,
+          status: 'offline',
+          isActive: true
+        });
+        
+        const token = jwt.sign(
+          { 
+            userId: user.id, 
+            email: user.email, 
+            username: user.username 
+          },
+          JWT_SECRET,
+          { expiresIn: '24h' }
+        );
+        
+        return res.status(201).json({
+          success: true,
+          message: 'User registered successfully',
+          token,
+          user: {
+            id: user.id,
+            email: user.email,
+            username: user.username,
+            avatar: user.avatar,
+            createdAt: user.createdAt
+          },
+          timestamp: new Date().toISOString(),
+          storage: 'PostgreSQL (Permanent)',
+          databaseInitialized: databaseInitialized,
+          fallback: true
+        });
+        
+      } catch (error) {
+        console.error('Register error:', error);
+        res.status(500).json({
+          success: false,
+          message: 'Registration failed',
+          error: !IS_PRODUCTION ? error.message : undefined,
+          timestamp: new Date().toISOString()
+        });
+      }
+    });
+    
+    app.post('/api/auth/login', async (req, res) => {
+      try {
+        const { identifier, password } = req.body;
+        
+        if (!identifier || !password) {
+          return res.status(400).json({
+            success: false,
+            message: 'Identifier and password are required',
+            timestamp: new Date().toISOString()
+          });
+        }
+        
+        if (!dbConnected) {
+          return res.status(503).json({
+            success: false,
+            message: 'Database not available',
+            timestamp: new Date().toISOString()
+          });
+        }
+        
+        const UsersModel = models.Users;
+        if (!UsersModel) {
+          return res.status(500).json({
+            success: false,
+            message: 'Users model not available',
+            timestamp: new Date().toISOString()
+          });
+        }
+        
+        let user;
+        if (identifier.includes('@')) {
+          user = await UsersModel.findOne({ where: { email: identifier.toLowerCase() } });
+        } else {
+          user = await UsersModel.findOne({ where: { username: identifier } });
+        }
+        
+        if (!user) {
+          return res.status(401).json({
+            success: false,
+            message: 'Invalid credentials',
+            timestamp: new Date().toISOString()
+          });
+        }
+        
+        const validPassword = await bcrypt.compare(password, user.password);
+        
+        if (!validPassword) {
+          return res.status(401).json({
+            success: false,
+            message: 'Invalid credentials',
+            timestamp: new Date().toISOString()
+          });
+        }
+        
+        const token = jwt.sign(
+          { 
+            userId: user.id, 
+            email: user.email, 
+            username: user.username 
+          },
+          JWT_SECRET,
+          { expiresIn: '24h' }
+        );
+        
+        return res.json({
+          success: true,
+          message: 'Login successful',
+          token,
+          user: {
+            id: user.id,
+            email: user.email,
+            username: user.username,
+            avatar: user.avatar,
+            createdAt: user.createdAt
+          },
+          timestamp: new Date().toISOString(),
+          storage: 'PostgreSQL (Permanent)',
+          databaseInitialized: databaseInitialized,
+          fallback: true
+        });
+        
+      } catch (error) {
+        console.error('Login error:', error);
+        res.status(500).json({
+          success: false,
+          message: 'Login failed',
+          error: !IS_PRODUCTION ? error.message : undefined,
+          timestamp: new Date().toISOString()
+        });
+      }
+    });
+    
+    console.log('✅ Created emergency fallback auth endpoints');
   }
   
   // Mount main API router if it exists
@@ -449,7 +625,6 @@ function mountAllRouters() {
       delete require.cache[require.resolve(mainRouterPath)];
       const mainRouter = require(mainRouterPath);
       
-      // Handle different export patterns
       const routerToMount = typeof mainRouter === 'function' ? mainRouter : 
                            (mainRouter.router || mainRouter.default || mainRouter);
       
@@ -483,7 +658,6 @@ function mountAllRouters() {
         delete require.cache[require.resolve(routePath)];
         const routeModule = require(routePath);
         
-        // Handle different export patterns
         const routerToMount = typeof routeModule === 'function' ? routeModule : 
                              (routeModule.router || routeModule.default || routeModule);
         
@@ -631,275 +805,9 @@ app.get('/api/debug', (req, res) => {
   }
 });
 
-// ========== LEGACY AUTH ROUTES (PRESERVE FOR COMPATIBILITY) ==========
-app.post('/api/register', async (req, res) => {
-  try {
-    const { email, password, username } = req.body;
-    
-    if (!email || !password || !username) {
-      return res.status(400).json({
-        success: false,
-        message: 'Email, password, and username are required',
-        timestamp: new Date().toISOString()
-      });
-    }
-    
-    // REQUIRE database connection for production
-    if (!dbConnected) {
-      return res.status(503).json({
-        success: false,
-        message: 'Database not available. Registration requires PostgreSQL connection.',
-        timestamp: new Date().toISOString()
-      });
-    }
-    
-    // Use database only - no in-memory fallback
-    try {
-      const UsersModel = models.Users;
-      if (!UsersModel) {
-        return res.status(500).json({
-          success: false,
-          message: 'Users model not available',
-          timestamp: new Date().toISOString()
-        });
-      }
-      
-      const existingUser = await UsersModel.findOne({ where: { email: email.toLowerCase() } });
-      if (existingUser) {
-        return res.status(400).json({
-          success: false,
-          message: 'User already exists',
-          timestamp: new Date().toISOString()
-        });
-      }
-      
-      const hashedPassword = await bcrypt.hash(password, 10);
-      
-      const user = await UsersModel.create({
-        email: email.toLowerCase(),
-        username,
-        password: hashedPassword,
-        avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(username)}&background=random&color=fff`,
-        status: 'offline',
-        isActive: true
-      });
-      
-      const token = jwt.sign(
-        { 
-          userId: user.id, 
-          email: user.email, 
-          username: user.username 
-        },
-        JWT_SECRET,
-        { expiresIn: '24h' }
-      );
-      
-      return res.status(201).json({
-        success: true,
-        message: 'User registered successfully',
-        token,
-        user: {
-          id: user.id,
-          email: user.email,
-          username: user.username,
-          avatar: user.avatar,
-          createdAt: user.createdAt
-        },
-        timestamp: new Date().toISOString(),
-        storage: 'PostgreSQL (Permanent)',
-        databaseInitialized: databaseInitialized,
-        tableStatus: 'Auto-created by initialization system'
-      });
-    } catch (dbError) {
-      console.error('Database registration error:', dbError.message);
-      return res.status(500).json({
-        success: false,
-        message: 'Registration failed - database error',
-        error: !IS_PRODUCTION ? dbError.message : undefined,
-        timestamp: new Date().toISOString()
-      });
-    }
-    
-  } catch (error) {
-    console.error('Register error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Registration failed',
-      error: !IS_PRODUCTION ? error.message : undefined,
-      timestamp: new Date().toISOString()
-    });
-  }
-});
-
-app.post('/api/login', async (req, res) => {
-  try {
-    const { email, password } = req.body;
-    
-    if (!email || !password) {
-      return res.status(400).json({
-        success: false,
-        message: 'Email and password are required',
-        timestamp: new Date().toISOString()
-      });
-    }
-    
-    // REQUIRE database connection for production
-    if (!dbConnected) {
-      return res.status(503).json({
-        success: false,
-        message: 'Database not available. Please try again later.',
-        timestamp: new Date().toISOString()
-      });
-    }
-    
-    // Use database only
-    try {
-      const UsersModel = models.Users;
-      if (!UsersModel) {
-        return res.status(500).json({
-          success: false,
-          message: 'Users model not available',
-          timestamp: new Date().toISOString()
-        });
-      }
-      
-      let user;
-      if (email.includes('@')) {
-        user = await UsersModel.findOne({ where: { email: email.toLowerCase() } });
-      } else {
-        user = await UsersModel.findOne({ where: { username: email } });
-      }
-      
-      if (!user) {
-        return res.status(401).json({
-          success: false,
-          message: 'Invalid credentials',
-          timestamp: new Date().toISOString()
-        });
-      }
-      
-      const validPassword = await bcrypt.compare(password, user.password);
-      
-      if (!validPassword) {
-        return res.status(401).json({
-          success: false,
-          message: 'Invalid credentials',
-          timestamp: new Date().toISOString()
-        });
-      }
-      
-      const token = jwt.sign(
-        { 
-          userId: user.id, 
-          email: user.email, 
-          username: user.username 
-        },
-        JWT_SECRET,
-        { expiresIn: '24h' }
-      );
-      
-      return res.json({
-        success: true,
-        message: 'Login successful',
-        token,
-        user: {
-          id: user.id,
-          email: user.email,
-          username: user.username,
-          avatar: user.avatar,
-          createdAt: user.createdAt
-        },
-        timestamp: new Date().toISOString(),
-        storage: 'PostgreSQL (Permanent)',
-        databaseInitialized: databaseInitialized,
-        tableStatus: 'Auto-maintained by initialization system'
-      });
-    } catch (dbError) {
-      console.error('Database login error:', dbError.message);
-      return res.status(500).json({
-        success: false,
-        message: 'Login failed - database error',
-        error: !IS_PRODUCTION ? dbError.message : undefined,
-        timestamp: new Date().toISOString()
-      });
-    }
-    
-  } catch (error) {
-    console.error('Login error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Login failed',
-      error: !IS_PRODUCTION ? error.message : undefined,
-      timestamp: new Date().toISOString()
-    });
-  }
-});
-
-app.get('/api/auth/me', authenticateToken, async (req, res) => {
-  try {
-    // REQUIRE database connection
-    if (!dbConnected) {
-      return res.status(503).json({
-        success: false,
-        message: 'Database not available',
-        timestamp: new Date().toISOString()
-      });
-    }
-    
-    // Use database only
-    try {
-      const UsersModel = models.Users;
-      if (!UsersModel) {
-        return res.status(500).json({
-          success: false,
-          message: 'Users model not available',
-          timestamp: new Date().toISOString()
-        });
-      }
-      
-      const user = await UsersModel.findByPk(req.user.userId);
-      if (!user) {
-        return res.status(404).json({
-          success: false,
-          message: 'User not found',
-          timestamp: new Date().toISOString()
-        });
-      }
-      
-      return res.json({
-        success: true,
-        user: {
-          id: user.id,
-          email: user.email,
-          username: user.username,
-          avatar: user.avatar,
-          createdAt: user.createdAt
-        },
-        timestamp: new Date().toISOString(),
-        storage: 'PostgreSQL (Permanent)',
-        databaseInitialized: databaseInitialized,
-        initializationStatus: dbInitializationResult?.success ? 'Complete' : 'Failed'
-      });
-    } catch (dbError) {
-      console.error('Database profile error:', dbError.message);
-      return res.status(500).json({
-        success: false,
-        message: 'Failed to get profile - database error',
-        error: !IS_PRODUCTION ? dbError.message : undefined,
-        timestamp: new Date().toISOString()
-      });
-    }
-    
-  } catch (error) {
-    console.error('Profile error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to get profile',
-      error: !IS_PRODUCTION ? error.message : undefined,
-      timestamp: new Date().toISOString()
-    });
-  }
-});
+// ========== LEGACY AUTH ROUTES REMOVED - CONFLICTING WITH ROUTER ==========
+// These routes have been removed because they conflict with /api/auth/* router
+// All auth functionality is now handled by the auth router at /api/auth
 
 // ========== CHAT ROUTES ==========
 app.get('/api/chat/rooms', authenticateToken, (req, res) => {
@@ -979,7 +887,6 @@ app.post('/api/chat/messages', authenticateToken, async (req, res) => {
     try {
     const { room, content } = req.body;
     
-    // FIX: Safely handle missing user in memory storage
     const user = users.find(u => u.id === req.user.userId);
     
     if (!user) {
@@ -1020,14 +927,11 @@ app.post('/api/chat/messages', authenticateToken, async (req, res) => {
     
     messages.push(message);
     
-    // Also save to database if available
     if (dbConnected && dbSyncComplete && models.Messages) {
       try {
-        // First check if a Chat exists for this room
         let chat = await models.Chats.findOne({ where: { name: room } });
         
         if (!chat) {
-          // Create a chat for this room
           chat = await models.Chats.create({
             name: room,
             type: 'group',
@@ -1126,7 +1030,6 @@ if (!IS_PRODUCTION) {
     res.sendFile(path.join(__dirname, 'public', 'chat.html'));
   });
 } else {
-  // In production, return API status for root route
   app.get('/', (req, res) => {
     res.json({
       status: 'API running',
@@ -1222,8 +1125,6 @@ const startServer = async () => {
   console.log(`🛡️  Data Protection: No data loss, safe schema updates`);
   console.log(`📋 All Models: Auto-loaded from models folder`);
   
-  // STEP 1: Initialize database with enhanced reporting
-  // FIX 4: Ensure Sequelize database is synced before app.listen()
   console.log('\n🔄 Step 1: Initializing database...');
   try {
     const dbInitSuccess = await initializeDatabaseWithReporting();
@@ -1238,7 +1139,6 @@ const startServer = async () => {
     process.exit(1);
   }
   
-  // STEP 2: ONLY AFTER DB SUCCESS, mount ALL routers
   console.log('\n📡 Step 2: Mounting routers (AFTER database success)...');
   try {
     mountAllRouters();
@@ -1249,7 +1149,6 @@ const startServer = async () => {
     process.exit(1);
   }
   
-  // Final verification
   const modelCount = Object.keys(models).filter(key => key !== 'sequelize' && key !== 'Sequelize').length;
   
   if (dbSyncComplete && databaseInitialized) {
@@ -1266,8 +1165,6 @@ const startServer = async () => {
     process.exit(1);
   }
   
-  // FIX 7: Proper error handling on server start
-  // STEP 3: Start the server
   const server = app.listen(PORT, HOST, () => {
     console.log(`\n┌─────────────────────────────────────────────────────────────────┐`);
     console.log(`│                                                                 │`);
@@ -1315,7 +1212,6 @@ const startServer = async () => {
     console.log(`└─────────────────────────────────────────────────────────────────┘`);
   });
 
-  // FIX 7: Error handling for server start
   server.on('error', (error) => {
     if (error.code === 'EADDRINUSE') {
       console.error(`❌ Port ${PORT} is already in use.`);
@@ -1327,7 +1223,6 @@ const startServer = async () => {
     }
   });
 
-  // Graceful shutdown
   const shutdown = (signal) => {
     console.log(`\n${signal} received. Starting graceful shutdown...`);
     

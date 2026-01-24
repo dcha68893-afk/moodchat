@@ -6,8 +6,6 @@ console.log('🔄 Loading and mounting all application routers...');
 
 // ===== EXPLICIT ROUTER IMPORTS =====
 try {
-  // REMOVED: const authRouter = require('./auth');
-  // REMOVED: router.use('/auth', authRouter);
   // Auth router is already mounted directly in server.js at /api/auth
   console.log('✅ Skipping: /auth (already mounted directly in server.js)');
 } catch (error) {
@@ -51,6 +49,22 @@ try {
   console.error('❌ Group features will be unavailable');
 }
 
+// ===== TEST ENDPOINT FOR MAIN ROUTER =====
+router.get('/test', (req, res) => {
+  res.status(200).json({
+    success: true,
+    message: 'Main API router is working',
+    timestamp: new Date().toISOString(),
+    endpoints: {
+      auth: '/api/auth/* (handled by auth router)',
+      calls: '/api/calls/*',
+      chats: '/api/chats/*',
+      friends: '/api/friends/*',
+      groups: '/api/groups/*'
+    }
+  });
+});
+
 // ===== ROOT HEALTH CHECK =====
 router.get('/', (req, res) => {
   res.status(200).json({
@@ -76,11 +90,11 @@ router.use('*', (req, res) => {
     message: `Route ${req.originalUrl} not found`,
     timestamp: new Date().toISOString(),
     availableRoutes: {
-      auth: '/auth',
-      calls: '/calls',
-      chats: '/chats',
-      friends: '/friends',
-      groups: '/groups'
+      auth: '/api/auth/*',
+      calls: '/api/calls/*',
+      chats: '/api/chats/*',
+      friends: '/api/friends/*',
+      groups: '/api/groups/*'
     }
   });
 });
