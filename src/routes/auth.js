@@ -108,7 +108,28 @@ router.post(
         });
       }
 
-      // 2. Check database connection
+      // 2. Validate email format
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(email)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid email format',
+          timestamp: new Date().toISOString()
+        });
+      }
+
+      // 3. Validate password
+      const passwordErrors = validatePassword(password);
+      if (passwordErrors.length > 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'Password validation failed',
+          errors: passwordErrors,
+          timestamp: new Date().toISOString()
+        });
+      }
+
+      // 4. Check database connection
       const models = req.app.locals.models;
       const dbConnected = req.app.locals.dbConnected || false;
       
@@ -124,7 +145,7 @@ router.post(
         });
       }
 
-      // 3. Get Users model (using Users, not User)
+      // 5. Get Users model (using Users, not User)
       const UsersModel = models.Users;
       if (!UsersModel) {
         return res.status(500).json({
@@ -138,7 +159,7 @@ router.post(
         });
       }
 
-      // 4. Check if user exists by email
+      // 6. Check if user exists by email
       const existingUserByEmail = await UsersModel.findOne({ 
         where: { email: email.toLowerCase() } 
       });
@@ -155,7 +176,7 @@ router.post(
         });
       }
 
-      // 5. Check if user exists by username
+      // 7. Check if user exists by username
       const existingUserByUsername = await UsersModel.findOne({ 
         where: { username: username } 
       });
@@ -172,10 +193,10 @@ router.post(
         });
       }
 
-      // 6. Hash password
+      // 8. Hash password
       const hashedPassword = await bcrypt.hash(password, 10);
 
-      // 7. Create user in Users table
+      // 9. Create user in Users table
       const user = await UsersModel.create({
         email: email.toLowerCase(),
         username: username,
@@ -189,7 +210,7 @@ router.post(
 
       console.log('🔧 [AUTH] User created successfully:', user.id);
 
-      // 8. Generate JWT token
+      // 10. Generate JWT token
       const token = jwt.sign(
         { 
           userId: user.id, 
@@ -201,7 +222,7 @@ router.post(
         { expiresIn: '24h' }
       );
 
-      // 9. Return success response
+      // 11. Return success response
       return res.status(201).json({
         success: true,
         message: 'User registered successfully',
@@ -362,7 +383,7 @@ router.post(
 
       // 10. Return success response
       console.log('🔧 [AUTH] Login successful for user:', user.id);
-      return res.json({
+      return res.status(200).json({
         success: true,
         message: 'Login successful',
         token,
