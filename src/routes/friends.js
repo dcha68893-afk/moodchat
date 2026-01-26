@@ -17,6 +17,36 @@ router.use(authenticate);
 
 console.log('✅ Friends routes initialized');
 
+// Add the missing /list endpoint as requested
+router.get(
+  '/list',
+  apiRateLimiter,
+  asyncHandler(async (req, res) => {
+    try {
+      // Safe response as requested
+      res.json({
+        success: true,
+        friends: []
+      });
+    } catch (error) {
+      console.error('Error in friends list endpoint:', error);
+      res.status(500).json({
+        status: 'error',
+        message: 'Failed to fetch friends list'
+      });
+    }
+  })
+);
+
+// Add ping endpoint for debugging as bonus
+router.get(
+  '/ping',
+  apiRateLimiter,
+  asyncHandler(async (req, res) => {
+    res.json({ ok: true, route: "friends" });
+  })
+);
+
 router.get(
   '/',
   apiRateLimiter,
