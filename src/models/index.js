@@ -1,5 +1,5 @@
-// models/index.js - STRICT, PROFESSIONAL MODEL LOADER WITH ALL FEATURES
-const { Sequelize } = require('sequelize');
+// models/index.js - PRODUCTION-SAFE MODEL LOADER (NO SCHEMA CHANGES)
+const { Sequelize, Op } = require('sequelize');
 const fs = require('fs');
 const path = require('path');
 
@@ -99,12 +99,18 @@ sequelize.authenticate()
     process.exit(1);
   });
 
-// ===== STRICT MODEL LOADING CONFIGURATION =====
-console.log('[Database] 🛡️ Initializing STRICT model loader...');
+// ===== STRICT MODEL LOADING =====
+console.log('[Database] 🛡️ Initializing STRICT model loader (NO SCHEMA CHANGES)...');
 
-const models = {};
-const failedModels = {};
-const skippedFiles = {};
+const db = {
+  sequelize,
+  Sequelize,
+  Op, // Explicitly export Op for use in route files
+  models: {},
+  failedModels: {},
+  skippedFiles: {},
+  associationErrors: {}
+};
 
 // CRITICAL: Define essential core models for system startup
 const CORE_MODELS = ['Users', 'Token', 'Profile'];
@@ -127,19 +133,19 @@ const modelFiles = fs.readdirSync(__dirname)
     
     if (stat.isDirectory()) {
       console.log(`[Database] 📁 Skipping directory: ${file}`);
-      skippedFiles[file] = 'Directory (not a model file)';
+      db.skippedFiles[file] = 'Directory (not a model file)';
       return false;
     }
     
     if (!file.endsWith('.js')) {
       console.log(`[Database] 📄 Skipping non-JS file: ${file}`);
-      skippedFiles[file] = 'Not a JavaScript file';
+      db.skippedFiles[file] = 'Not a JavaScript file';
       return false;
     }
     
     if (file === 'index.js') {
       console.log(`[Database] 🔧 Skipping model index file: ${file}`);
-      skippedFiles[file] = 'Model index file';
+      db.skippedFiles[file] = 'Model index file';
       return false;
     }
     
@@ -151,7 +157,7 @@ const modelFiles = fs.readdirSync(__dirname)
     
     if (isNonModel) {
       console.log(`[Database] 🛡️ Strict Guard: Skipping ${file} - matches non-model pattern`);
-      skippedFiles[file] = 'Matches non-model pattern (router/controller)';
+      db.skippedFiles[file] = 'Matches non-model pattern (router/controller)';
       return false;
     }
     
@@ -160,7 +166,7 @@ const modelFiles = fs.readdirSync(__dirname)
 
 console.log(`[Database] Found ${modelFiles.length} potential model files after filtering`);
 
-// ===== HARD SAFETY: VALIDATE EACH FILE AS REAL SEQUELIZE MODEL =====
+// ===== LOAD MODELS ONLY (NO SYNC, NO ALTER) =====
 modelFiles.forEach(file => {
   const modelName = file.replace('.js', '');
   const filePath = path.join(__dirname, file);
@@ -189,7 +195,7 @@ modelFiles.forEach(file => {
     
     if (isRouterOrController) {
       console.log(`[Database] 🛡️ HARD SAFETY: Skipping ${file} - Detected as router/controller`);
-      failedModels[modelName] = {
+      db.failedModels[modelName] = {
         file: file,
         error: 'File is a router/controller, not a Sequelize model',
         timestamp: new Date().toISOString(),
@@ -200,7 +206,7 @@ modelFiles.forEach(file => {
     
     if (!isSequelizeModel) {
       console.log(`[Database] 🛡️ HARD SAFETY: Skipping ${file} - Not a Sequelize model structure`);
-      failedModels[modelName] = {
+      db.failedModels[modelName] = {
         file: file,
         error: 'File does not export a valid Sequelize model structure',
         timestamp: new Date().toISOString(),
@@ -219,6 +225,7 @@ modelFiles.forEach(file => {
     } else if (modelModule && typeof modelModule.init === 'function') {
       modelInstance = modelModule;
       if (!modelInstance.sequelize) {
+        // Initialize model WITHOUT auto-creating indexes or foreign keys
         modelInstance.init(modelInstance.rawAttributes || {}, {
           sequelize,
           modelName: modelInstance.name || modelName,
@@ -237,9 +244,9 @@ modelFiles.forEach(file => {
     
     const actualModelName = modelInstance.name || modelName;
     
-    if (models[actualModelName]) {
+    if (db.models[actualModelName]) {
       console.warn(`[Database] ⚠️ Duplicate model name detected: ${actualModelName}. Skipping duplicate.`);
-      failedModels[modelName] = {
+      db.failedModels[modelName] = {
         file: file,
         error: `Duplicate model name: ${actualModelName} already loaded`,
         timestamp: new Date().toISOString(),
@@ -248,14 +255,14 @@ modelFiles.forEach(file => {
       return;
     }
     
-    models[actualModelName] = modelInstance;
+    db.models[actualModelName] = modelInstance;
     
-    console.log(`[Database] ✅ Loaded REAL model: ${actualModelName}`);
+    console.log(`[Database] ✅ Loaded model: ${actualModelName} (NO SYNC)`);
     
   } catch (error) {
     console.error(`[Database] ❌ Failed to load model ${modelName}:`, error.message);
     
-    failedModels[modelName] = {
+    db.failedModels[modelName] = {
       file: file,
       error: error.message,
       stack: process.env.NODE_ENV === 'development' ? error.stack : undefined,
@@ -265,20 +272,62 @@ modelFiles.forEach(file => {
   }
 });
 
+// ===== SAFE ASSOCIATION SETUP =====
+console.log('[Database] Setting up associations (constraints: false)...');
+
+Object.keys(db.models).forEach(modelName => {
+  const model = db.models[modelName];
+  if (model && typeof model.associate === 'function') {
+    try {
+      // Wrap associate function to ensure constraints: false
+      const originalAssociate = model.associate;
+      model.associate = function(models) {
+        // Store original associate call
+        const result = originalAssociate.call(this, models);
+        
+        // Override any foreign key constraints to prevent auto-creation
+        if (this.associations) {
+          Object.values(this.associations).forEach(association => {
+            if (association.foreignKeyConstraint !== undefined) {
+              association.foreignKeyConstraint = false;
+            }
+            if (association.options) {
+              association.options.constraints = false;
+              // Remove index flags that trigger creation
+              delete association.options.unique;
+              delete association.options.index;
+            }
+          });
+        }
+        return result;
+      };
+      
+      model.associate(db.models);
+      console.log(`[Database] ✅ Associated model: ${modelName} (constraints: false)`);
+    } catch (error) {
+      console.error(`[Database] ❌ Error associating model ${modelName}:`, error.message);
+      db.associationErrors[modelName] = {
+        error: error.message,
+        timestamp: new Date().toISOString()
+      };
+    }
+  }
+});
+
 // ===== CORE MODEL VALIDATION =====
 console.log('[Database] ===== CORE MODEL VALIDATION =====');
 const failedCoreModels = CORE_MODELS.filter(coreModel => 
-  !models[coreModel] || failedModels[coreModel]
+  !db.models[coreModel] || db.failedModels[coreModel]
 );
 
 if (failedCoreModels.length > 0) {
   console.error('[Database] ❌ CRITICAL: Core models failed to load!');
   console.error('[Database] Failed core models:', failedCoreModels.join(', '));
-  console.error('[Database] System cannot start without core models.');
+  console.error('[Database] System cannot start without core functionality.');
   
   failedCoreModels.forEach(modelName => {
-    if (failedModels[modelName]) {
-      console.error(`  ${modelName}: ${failedModels[modelName].error}`);
+    if (db.failedModels[modelName]) {
+      console.error(`  ${modelName}: ${db.failedModels[modelName].error}`);
     } else {
       console.error(`  ${modelName}: Model not found in loaded models`);
     }
@@ -289,215 +338,8 @@ if (failedCoreModels.length > 0) {
 
 console.log('[Database] ✅ All core models loaded successfully');
 
-// ===== DEFERRED ASSOCIATIONS =====
-console.log('[Database] Setting up model associations (deferred)...');
-
-const associationErrors = {};
-
-const associateFunctions = {};
-
-Object.keys(models).forEach(modelName => {
-  const model = models[modelName];
-  if (model && typeof model.associate === 'function') {
-    associateFunctions[modelName] = model.associate.bind(model);
-    console.log(`[Database] Found association function for: ${modelName}`);
-  }
-});
-
-console.log(`[Database] Association functions found: ${Object.keys(associateFunctions).length}`);
-
-// ===== ENUM CONFLICT DETECTION =====
-async function detectEnumConflicts() {
-  console.log('[Database] Checking for ENUM type conflicts...');
-  const conflicts = [];
-  
-  for (const [modelName, model] of Object.entries(models)) {
-    if (model && model.rawAttributes) {
-      for (const [columnName, column] of Object.entries(model.rawAttributes)) {
-        if (column.type && column.type.key === 'ENUM') {
-          try {
-            const tableName = model.tableName || modelName.toLowerCase();
-            
-            const tableExists = await sequelize.query(
-              `SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'public' AND table_name = '${tableName}')`,
-              { type: sequelize.QueryTypes.SELECT }
-            );
-            
-            if (tableExists[0].exists) {
-              const columnExists = await sequelize.query(
-                `SELECT EXISTS (SELECT FROM information_schema.columns WHERE table_schema = 'public' AND table_name = '${tableName}' AND column_name = '${columnName}')`,
-                { type: sequelize.QueryTypes.SELECT }
-              );
-              
-              if (columnExists[0].exists) {
-                const existingEnumQuery = `
-                  SELECT e.enumlabel 
-                  FROM pg_enum e 
-                  JOIN pg_type t ON e.enumtypid = t.oid 
-                  JOIN pg_class c ON c.relname = t.typname 
-                  WHERE c.relname = '${tableName}_${columnName}_enum' 
-                  ORDER BY e.enumsortorder
-                `;
-                
-                try {
-                  const existingEnumValues = await sequelize.query(existingEnumQuery, {
-                    type: sequelize.QueryTypes.SELECT
-                  });
-                  
-                  const existingValues = existingEnumValues.map(v => v.enumlabel);
-                  const modelValues = column.type.values || [];
-                  
-                  const hasConflict = existingValues.length !== modelValues.length || 
-                                     !existingValues.every((val, idx) => val === modelValues[idx]);
-                  
-                  if (hasConflict) {
-                    conflicts.push({
-                      table: tableName,
-                      column: columnName,
-                      modelName: modelName,
-                      existingValues: existingValues,
-                      modelValues: modelValues,
-                      conflictType: 'ENUM_MISMATCH',
-                      severity: 'WARNING'
-                    });
-                  }
-                } catch (enumError) {
-                  // ENUM type might not exist yet
-                }
-              }
-            }
-          } catch (error) {
-            console.error(`[Database] Error checking ENUM for ${modelName}.${columnName}:`, error.message);
-          }
-        }
-      }
-    }
-  }
-  
-  return conflicts;
-}
-
-// ===== SAFE DATABASE INITIALIZATION FUNCTION =====
-async function initializeDatabase() {
-  const isProduction = process.env.NODE_ENV === 'production';
-  
-  console.log(`[Database] ===== SAFE DATABASE INITIALIZATION =====`);
-  console.log(`[Database] Environment: ${env}`);
-  console.log(`[Database] Production Mode: ${isProduction ? 'Yes' : 'No'}`);
-  console.log(`[Database] Safety Rules:`);
-  console.log(`  • NEVER drop tables (force: false)`);
-  console.log(`  • Add missing columns only (alter: ${!isProduction})`);
-  console.log(`  • Auto-create missing tables`);
-  console.log(`  • Detect ENUM conflicts (continue anyway)`);
-  console.log(`  • CREATE TABLES FIRST, THEN SET ASSOCIATIONS`);
-  console.log(`  • PRESERVE ALL EXISTING DATA`);
-  
-  try {
-    console.log('\n[Database] Step 1: Detecting ENUM conflicts...');
-    const enumConflicts = await detectEnumConflicts();
-    
-    if (enumConflicts.length > 0) {
-      console.log(`⚠️  Found ${enumConflicts.length} ENUM conflicts (continuing anyway):`);
-      enumConflicts.forEach(conflict => {
-        console.log(`  • ${conflict.table}.${conflict.column}:`);
-        console.log(`      Existing: ${JSON.stringify(conflict.existingValues)}`);
-        console.log(`      Model:    ${JSON.stringify(conflict.modelValues)}`);
-      });
-    }
-    
-    console.log('\n[Database] Step 2: Setting up model associations before sync...');
-    for (const [modelName, associateFn] of Object.entries(associateFunctions)) {
-      try {
-        associateFn(models);
-        console.log(`[Database] ✅ Associated model: ${modelName}`);
-      } catch (error) {
-        console.error(`[Database] ❌ Error associating model ${modelName}:`, error.message);
-        associationErrors[modelName] = {
-          error: error.message,
-          timestamp: new Date().toISOString()
-        };
-      }
-    }
-    
-    console.log('\n[Database] Step 3: Synchronizing database schema...');
-    
-    const syncResults = {
-      created: [],
-      altered: [],
-      skipped: [],
-      failed: [],
-      total: 0
-    };
-    
-    // Sync all models in dependency-safe order
-    for (const modelName of Object.keys(models)) {
-      const model = models[modelName];
-      if (!model) continue;
-      
-      try {
-        console.log(`[Database] Syncing model: ${modelName}`);
-        
-        await model.sync({ 
-          force: false, 
-          alter: !isProduction 
-        });
-        
-        syncResults.altered.push(modelName);
-        syncResults.total++;
-        console.log(`[Database] ✅ Synced model: ${modelName}`);
-        
-      } catch (error) {
-        console.error(`[Database] ❌ Failed to sync ${modelName}:`, error.message);
-        syncResults.failed.push({ model: modelName, error: error.message });
-      }
-    }
-    
-    console.log('\n[Database] ===== DATABASE INITIALIZATION REPORT =====');
-    console.log(`📊 SUMMARY STATISTICS:`);
-    console.log(`  • Total models: ${Object.keys(models).length}`);
-    console.log(`  • Models altered: ${syncResults.altered.length}`);
-    console.log(`  • Models failed: ${syncResults.failed.length}`);
-    console.log(`  • ENUM conflicts: ${enumConflicts.length}`);
-    console.log(`  • Association errors: ${Object.keys(associationErrors).length}`);
-    
-    if (syncResults.failed.length > 0) {
-      console.log(`\n❌ FAILED MODELS:`);
-      syncResults.failed.forEach((failure, index) => {
-        console.log(`  ${index + 1}. ${failure.model}: ${failure.error}`);
-      });
-    }
-    
-    if (enumConflicts.length > 0) {
-      console.log(`\n⚠️ ENUM CONFLICTS (manual review recommended):`);
-      enumConflicts.forEach((conflict, index) => {
-        console.log(`  ${index + 1}. ${conflict.table}.${conflict.column}`);
-      });
-    }
-    
-    console.log('\n[Database] ✅ Database initialization completed successfully!');
-    console.log('[Database] All tables are permanent and data-safe');
-    
-    return {
-      success: true,
-      syncResults,
-      enumConflicts,
-      associationErrors,
-      timestamp: new Date().toISOString()
-    };
-    
-  } catch (error) {
-    console.error('[Database] ❌ Unexpected error during database initialization:', error.message);
-    
-    return {
-      success: false,
-      error: error.message,
-      timestamp: new Date().toISOString()
-    };
-  }
-}
-
 // ===== UTILITY FUNCTIONS =====
-async function showCurrentTables() {
+db.showCurrentTables = async function() {
   try {
     console.log('[Database] ===== CURRENT DATABASE TABLES =====');
     
@@ -522,24 +364,9 @@ async function showCurrentTables() {
   } catch (error) {
     console.error('[Database] Error listing tables:', error.message);
   }
-}
-
-// ===== EXPORT MODELS AND FUNCTIONS =====
-const allModels = {
-  sequelize,
-  Sequelize,
-  models,
-  failedModels,
-  skippedFiles,
-  associationErrors,
-  CORE_MODELS
 };
 
-allModels.initializeDatabase = initializeDatabase;
-allModels.showCurrentTables = showCurrentTables;
-allModels.detectEnumConflicts = detectEnumConflicts;
-
-allModels.testConnection = async () => {
+db.testConnection = async function() {
   try {
     await sequelize.authenticate();
     console.log('[Database] Connection test: ✅ SUCCESS');
@@ -550,47 +377,47 @@ allModels.testConnection = async () => {
   }
 };
 
-allModels.getLoadedModels = () => {
-  return Object.keys(models).map(name => ({
+db.getLoadedModels = function() {
+  return Object.keys(db.models).map(name => ({
     name,
-    tableName: models[name].tableName || name,
+    tableName: db.models[name].tableName || name,
     status: 'LOADED',
-    columns: models[name].rawAttributes ? Object.keys(models[name].rawAttributes).length : 0
+    columns: db.models[name].rawAttributes ? Object.keys(db.models[name].rawAttributes).length : 0
   }));
 };
 
-allModels.getFailedModels = () => {
-  return Object.keys(failedModels).map(name => ({
+db.getFailedModels = function() {
+  return Object.keys(db.failedModels).map(name => ({
     name,
-    file: failedModels[name].file,
-    error: failedModels[name].error,
-    timestamp: failedModels[name].timestamp,
+    file: db.failedModels[name].file,
+    error: db.failedModels[name].error,
+    timestamp: db.failedModels[name].timestamp,
     status: 'FAILED',
-    detection: failedModels[name].detection || 'Unknown'
+    detection: db.failedModels[name].detection || 'Unknown'
   }));
 };
 
-allModels.getSkippedFiles = () => {
-  return Object.keys(skippedFiles).map(fileName => ({
+db.getSkippedFiles = function() {
+  return Object.keys(db.skippedFiles).map(fileName => ({
     fileName,
-    reason: skippedFiles[fileName],
+    reason: db.skippedFiles[fileName],
     status: 'SKIPPED'
   }));
 };
 
-allModels.getOperationalStatus = () => {
+db.getOperationalStatus = function() {
   const failedCore = CORE_MODELS.filter(coreModel => 
-    !models[coreModel] || failedModels[coreModel]
+    !db.models[coreModel] || db.failedModels[coreModel]
   );
   
   return {
     mode: failedCore.length > 0 ? 'HALTED' : 
-          (Object.keys(failedModels).length > 0 ? 'PARTIAL' : 'FULL'),
+          (Object.keys(db.failedModels).length > 0 ? 'PARTIAL' : 'FULL'),
     coreOperational: failedCore.length === 0,
-    loadedCount: Object.keys(models).length,
-    failedCount: Object.keys(failedModels).length,
-    skippedCount: Object.keys(skippedFiles).length,
-    failedModels: Object.keys(failedModels),
+    loadedCount: Object.keys(db.models).length,
+    failedCount: Object.keys(db.failedModels).length,
+    skippedCount: Object.keys(db.skippedFiles).length,
+    failedModels: Object.keys(db.failedModels),
     coreModels: CORE_MODELS,
     timestamp: new Date().toISOString()
   };
@@ -600,21 +427,19 @@ allModels.getOperationalStatus = () => {
 console.log('\n[Database] ===== STARTUP REPORT =====');
 console.log(`[Database] Environment: ${env}`);
 console.log(`[Database] Database: ${dbConfig.database || 'DATABASE_URL'}`);
-
-const operationalStatus = allModels.getOperationalStatus();
-console.log(`[Database] Mode: ${operationalStatus.mode}`);
+console.log(`[Database] Mode: ${db.getOperationalStatus().mode}`);
 console.log('');
 
-console.log(`[Database] ✅ SUCCESSFULLY LOADED (${operationalStatus.loadedCount}):`);
-allModels.getLoadedModels().forEach((model, index) => {
+console.log(`[Database] ✅ SUCCESSFULLY LOADED (${Object.keys(db.models).length}):`);
+db.getLoadedModels().forEach((model, index) => {
   console.log(`  ${index + 1}. ${model.name} (table: ${model.tableName})`);
 });
 
 console.log('');
 
-if (operationalStatus.failedCount > 0) {
-  console.log(`[Database] ❌ FAILED TO LOAD (${operationalStatus.failedCount}):`);
-  allModels.getFailedModels().forEach((failed, index) => {
+if (Object.keys(db.failedModels).length > 0) {
+  console.log(`[Database] ❌ FAILED TO LOAD (${Object.keys(db.failedModels).length}):`);
+  db.getFailedModels().forEach((failed, index) => {
     console.log(`  ${index + 1}. ${failed.name} (${failed.file})`);
     console.log(`     Error: ${failed.error}`);
   });
@@ -622,18 +447,19 @@ if (operationalStatus.failedCount > 0) {
 
 console.log('');
 
-if (operationalStatus.skippedCount > 0) {
-  console.log(`[Database] ⏭️  SKIPPED FILES (${operationalStatus.skippedCount}):`);
-  allModels.getSkippedFiles().forEach((skipped, index) => {
+if (Object.keys(db.skippedFiles).length > 0) {
+  console.log(`[Database] ⏭️  SKIPPED FILES (${Object.keys(db.skippedFiles).length}):`);
+  db.getSkippedFiles().forEach((skipped, index) => {
     console.log(`  ${index + 1}. ${skipped.fileName} - ${skipped.reason}`);
   });
 }
 
 console.log('\n[Database] ===== OPERATIONAL STATUS =====');
-if (operationalStatus.mode === 'HALTED') {
+const status = db.getOperationalStatus();
+if (status.mode === 'HALTED') {
   console.log('[Database] ❌ SYSTEM HALTED: Core models missing');
   console.log('[Database] Server cannot start without core functionality');
-} else if (operationalStatus.mode === 'PARTIAL') {
+} else if (status.mode === 'PARTIAL') {
   console.log('[Database] ⚠️ PARTIAL MODE: Some features unavailable');
   console.log('[Database] Core functionality is operational');
 } else {
@@ -642,9 +468,20 @@ if (operationalStatus.mode === 'HALTED') {
 
 console.log('[Database] =================================\n');
 
-if (operationalStatus.coreOperational) {
-  console.log('[Database] 🚀 Server ready for database initialization');
-  console.log('[Database] To initialize database, call: await db.initializeDatabase()');
+if (status.coreOperational) {
+  console.log('[Database] 🚀 Server ready');
+  console.log('[Database] ✅ Schema changes disabled - respecting existing database structure');
+  console.log('[Database] ✅ Associations loaded with constraints: false');
+  console.log('[Database] ✅ No auto-sync, no alter, no force');
+  console.log('[Database] ✅ Sequelize.Op is available for queries');
 }
 
-module.exports = allModels;
+// ===== EXPORT =====
+// Export all necessary Sequelize components in standard pattern
+module.exports = {
+  ...db, // Spread all db properties
+  sequelize, // Direct reference to sequelize instance
+  Sequelize, // Direct reference to Sequelize class
+  Op, // Direct reference to Op operators
+  models: db.models // Direct reference to models
+};

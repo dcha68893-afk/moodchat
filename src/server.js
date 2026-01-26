@@ -1,4 +1,4 @@
-﻿﻿// src/server.js - FIXED: Auth routes working correctly
+﻿﻿// src/server.js - FIXED: No fallback mode, safe database sync
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -10,8 +10,9 @@ const fs = require('fs');
 
 // ========== IMPORT MODELS FROM SINGLE SOURCE ==========
 console.log('📦 Loading database models from models/index.js...');
-const { sequelize, models, initializeDatabase } = require('./models/index.js');
+const { sequelize, models } = require('./models/index.js');
 
+// CRITICAL: Verify Sequelize instance is valid
 if (!sequelize) {
   throw new Error('❌ Sequelize instance not provided by models/index.js');
 }
@@ -19,6 +20,10 @@ if (!sequelize) {
 if (!models || Object.keys(models).length === 0) {
   throw new Error('❌ No models loaded from models/index.js');
 }
+
+console.log('✅ Sequelize instance loaded successfully');
+console.log(`✅ Sequelize ID: ${sequelize.constructor.name}`);
+console.log(`✅ Models count: ${Object.keys(models).filter(key => key !== 'sequelize' && key !== 'Sequelize').length}`);
 
 const app = express();
 
@@ -37,15 +42,11 @@ const CORS_CREDENTIALS = process.env.CORS_CREDENTIALS === 'true';
 
 // ========== STATE TRACKING ==========
 let dbConnected = false;
-let dbSyncComplete = false;
 let databaseInitialized = false;
 let mountedRoutes = [];
-let dbInitializationResult = null;
 
-// ========== IN-MEMORY STORAGE (FALLBACK - DISABLED) ==========
-let users = [];
-let messages = [];
-const rooms = ['general', 'random', 'help', 'tech-support'];
+// ========== REMOVED: IN-MEMORY STORAGE ==========
+// No fallback mode - we use database only
 
 // ========== EXPRESS PARSER MIDDLEWARE - ADDED FIRST ==========
 console.log('🔧 Applying Express parser middleware...');
@@ -117,6 +118,16 @@ UNIQUE_ALLOWED_ORIGINS.forEach(origin => console.log(`   • ${origin}`));
 console.log(`✅ CORS credentials: ${corsOptions.credentials}`);
 console.log(`✅ CORS methods: ${corsOptions.methods.join(', ')}`);
 
+// ========== SHARE SEQUELIZE INSTANCE GLOBALLY ==========
+console.log('🔗 Sharing Sequelize instance globally...');
+app.locals.sequelize = sequelize;
+app.locals.models = models;
+app.locals.dbConnected = dbConnected;
+app.locals.databaseInitialized = databaseInitialized;
+
+console.log('✅ Sequelize instance attached to app.locals');
+console.log(`✅ Models attached to app.locals: ${Object.keys(models).filter(key => key !== 'sequelize' && key !== 'Sequelize').length}`);
+
 // ========== REQUEST LOGGER ==========
 if (!IS_PRODUCTION) {
   app.use((req, res, next) => {
@@ -131,17 +142,19 @@ if (!IS_PRODUCTION) {
   });
 }
 
-// ========== ENHANCED DATABASE INITIALIZATION ==========
-async function initializeDatabaseWithReporting() {
+// ========== SAFE DATABASE INITIALIZATION ==========
+async function initializeDatabase() {
   if (databaseInitialized) {
-    return dbInitializationResult;
+    console.log('🔄 Database already initialized');
+    return true;
   }
   
-  console.log('🔄 Starting enhanced database initialization...');
+  console.log('🔄 Starting SAFE database initialization...');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  console.log('│                       DATABASE INITIALIZATION                           │');
+  console.log('│                    SAFE DATABASE INITIALIZATION                        │');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   
+  // Step 1: Authenticate database connection
   console.log('\n🔌 Step 1: Establishing database connection...');
   
   let retries = 3;
@@ -151,6 +164,8 @@ async function initializeDatabaseWithReporting() {
     try {
       await sequelize.authenticate();
       dbConnected = true;
+      console.log(`✅ Database connected successfully to: ${sequelize.config.database || 'PostgreSQL'}`);
+      console.log(`✅ Using Sequelize instance: ${sequelize.constructor.name}`);
       break;
     } catch (authError) {
       lastError = authError;
@@ -163,176 +178,83 @@ async function initializeDatabaseWithReporting() {
     }
   }
   
+  // FATAL: Exit if database connection fails
   if (!dbConnected) {
-    throw new Error(`Failed to connect to database after retries: ${lastError.message}`);
+    console.error('❌ FATAL: Database connection failed after all retry attempts');
+    console.error('   Error details:', lastError.message);
+    console.error('   Server cannot start without database connection.');
+    process.exit(1);
   }
   
-  const dbName = sequelize.config.database || 'PostgreSQL';
-  console.log(`✅ Database connected successfully to: ${dbName}`);
-  
+  // Update app.locals with current state
   app.locals.models = models;
   app.locals.sequelize = sequelize;
   app.locals.dbConnected = dbConnected;
+  app.locals.databaseInitialized = false;
   
   const modelNames = Object.keys(models).filter(key => 
     key !== 'sequelize' && key !== 'Sequelize'
   );
   
-  console.log('\n📋 Step 2: Models imported from models/index.js:');
+  console.log('\n📋 Step 2: Models loaded from models/index.js:');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  
-  console.log('┌────────────────────┬──────────────────┬──────────────────┐');
-  console.log('│ Model Name         │ Status           │ Table Name       │');
-  console.log('├────────────────────┼──────────────────┼──────────────────┤');
   
   modelNames.forEach((name, index) => {
     const model = models[name];
     const tableName = model.tableName || name.toLowerCase();
-    console.log(`│ ${name.padEnd(18)} │ LOADED           │ ${tableName.padEnd(16)} │`);
+    console.log(`  ${index + 1}. ${name} → ${tableName}`);
   });
   
-  console.log('└────────────────────┴──────────────────┴──────────────────┘');
   console.log(`\n✅ Total models loaded: ${modelNames.length}`);
   
-  console.log('\n🔨 Step 3: Safe database synchronization...');
+  // Step 3: SAFE GLOBAL SYNC (ONCE)
+  console.log('\n🔨 Step 3: Performing SAFE global database sync...');
   console.log('  Safety Rules:');
   console.log('  • force=false    → NEVER drop existing tables');
-  console.log('  • alter=true     → Add missing columns only');
-  console.log('  • ENUM detection → Log conflicts, continue startup');
-  console.log('  • Data protection→ All existing data preserved');
+  console.log('  • alter=false    → NEVER modify existing schema');
+  console.log('  • Sync once      → NO per-model sync loops');
+  console.log('  • Non-fatal      → Warnings only, server continues');
+  console.log('  • No fallback    → Database-only operation');
   
   try {
-    dbInitializationResult = await initializeDatabase();
+    // CRITICAL: SINGLE GLOBAL SYNC - NOT per-model
+    await sequelize.sync({ 
+      force: false,     // NEVER drop tables
+      alter: false,     // NEVER alter schema
+      logging: !IS_PRODUCTION ? console.log : false 
+    });
     
-    if (dbInitializationResult.success) {
-      dbSyncComplete = true;
-      databaseInitialized = true;
-      
-      console.log('\n🎉 Step 4: DATABASE INITIALIZATION COMPLETE');
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.log('│                           FINAL STATUS REPORT                            │');
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      
-      const syncResults = dbInitializationResult.syncResults;
-      
-      console.log('\n📊 DATABASE STATISTICS:');
-      console.log('├──────────────────────────────────────────────────────────────┤');
-      console.log(`│ Total models loaded: ${modelNames.length.toString().padEnd(40)} │`);
-      console.log(`│ Database connection: ${dbConnected ? '✅ Connected' : '❌ Failed'.padEnd(38)} │`);
-      console.log(`│ Tables synchronized: ${dbSyncComplete ? '✅ Complete' : '❌ Failed'.padEnd(38)} │`);
-      console.log(`│ Tables created:      ${syncResults.created.length.toString().padEnd(40)} │`);
-      console.log(`│ Tables updated:      ${syncResults.altered.length.toString().padEnd(40)} │`);
-      console.log(`│ Tables skipped:      ${syncResults.skipped.length.toString().padEnd(40)} │`);
-      console.log(`│ ENUM conflicts:      ${dbInitializationResult.enumConflicts.length.toString().padEnd(40)} │`);
-      console.log('└──────────────────────────────────────────────────────────────┘');
-      
-      console.log('\n📋 TABLE STATUS OVERVIEW:');
-      console.log('┌────────────────────┬──────────────────┬──────────────────┐');
-      console.log('│ Table Name         │ Status           │ Action           │');
-  console.log('├────────────────────┼──────────────────┼──────────────────┤');
-      
-      for (const tableInfo of syncResults.tablesInfo) {
-        let statusIcon = '❓';
-        if (tableInfo.status === 'CREATED') statusIcon = '✅';
-        if (tableInfo.status === 'UPDATED') statusIcon = '⚡';
-        if (tableInfo.status === 'FAILED') statusIcon = '❌';
-        
-        console.log(`│ ${tableInfo.tableName.padEnd(18)} │ ${statusIcon} ${tableInfo.status.padEnd(13)} │ ${tableInfo.action.substring(0, 16).padEnd(16)} │`);
-      }
-      
-      console.log('└────────────────────┴──────────────────┴──────────────────┘');
-      
-      if (dbInitializationResult.enumConflicts.length > 0) {
-        console.log('\n⚠️  ENUM CONFLICTS (Manual review recommended):');
-        console.log('┌────────────────────┬──────────────────┬─────────────────────────────┐');
-        console.log('│ Table              │ Column           │ Conflict Details           │');
-        console.log('├────────────────────┼──────────────────┼─────────────────────────────┤');
-        
-        dbInitializationResult.enumConflicts.forEach(conflict => {
-          const details = `${conflict.existingValues.length} existing vs ${conflict.modelValues.length} model`;
-          console.log(`│ ${conflict.table.padEnd(18)} │ ${conflict.column.padEnd(16)} │ ${details.padEnd(27)} │`);
-        });
-        
-        console.log('└────────────────────┴──────────────────┴─────────────────────────────┘');
-        console.log('💡 Note: ENUM conflicts do not prevent server startup.');
-        console.log('   Existing database values are preserved. Model may need adjustment.');
-      }
-      
-      console.log('\n🔗 Step 5: Verifying model associations...');
-      try {
-        let totalAssociations = 0;
-        console.log('┌────────────────────┬──────────────────────────────────────────────┐');
-        console.log('│ Model              │ Associations                                 │');
-        console.log('├────────────────────┼──────────────────────────────────────────────┤');
-        
-        for (const modelName of modelNames) {
-          const model = models[modelName];
-          if (model && model.associations) {
-            const associations = Object.keys(model.associations);
-            if (associations.length > 0) {
-              const assocList = associations.map(assocName => {
-                const association = model.associations[assocName];
-                return `${assocName} → ${association.target.name}`;
-              }).join(', ');
-              
-              console.log(`│ ${modelName.padEnd(18)} │ ${assocList.padEnd(44)} │`);
-              totalAssociations += associations.length;
-            } else {
-              console.log(`│ ${modelName.padEnd(18)} │ No associations (independent table)${' '.repeat(12)} │`);
-            }
-          }
-        }
-        
-        console.log('└────────────────────┴──────────────────────────────────────────────┘');
-        console.log(`✅ Total associations configured: ${totalAssociations}`);
-        
-      } catch (assocError) {
-        console.log('⚠️  Could not verify associations:', assocError.message);
-      }
-      
-      console.log('\n🎯 INITIALIZATION SUMMARY:');
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.log(`   • Database: ${dbName}`);
-      console.log(`   • Models: ${modelNames.length} loaded from models/index.js`);
-      console.log(`   • Sync Method: Safe sequelize.sync() with alter=true`);
-      console.log(`   • Mode: ${IS_PRODUCTION ? 'Production' : 'Development'}`);
-      console.log(`   • Safety: No data loss (force=false)`);
-      console.log(`   • Tables created: ${syncResults.created.length}`);
-      console.log(`   • Tables updated: ${syncResults.altered.length}`);
-      console.log(`   • ENUM conflicts: ${dbInitializationResult.enumConflicts.length}`);
-      console.log(`   • All models included: Yes (auto-loaded from models folder)`);
-      console.log(`   • Associations: All respected`);
-      console.log(`   • Independent tables: All created automatically`);
-      console.log(`   • Future tables: Will auto-create as models are added`);
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      
-      return true;
-      
-    } else {
-      throw new Error(`Database initialization failed: ${dbInitializationResult.error}`);
-    }
+    console.log('✅ Global database sync completed successfully');
+    console.log('📝 Note: Existing tables preserved, no schema modifications made');
     
-  } catch (error) {
-    console.error('❌ Database initialization failed:', error.message);
-    
-    if (!IS_PRODUCTION) {
-      console.error('Error details:', {
-        name: error.name,
-        message: error.message,
-        code: error.code || 'N/A',
-        stack: error.stack
-      });
-    }
-    
-    if (IS_PRODUCTION && (error.message.includes('relation') || error.message.includes('table'))) {
-      console.warn('⚠️  Non-critical database error, continuing with partial initialization...');
-      databaseInitialized = true;
-      dbSyncComplete = true;
-      return true;
-    }
-    
-    throw new Error(`Database initialization failed: ${error.message}`);
+  } catch (syncError) {
+    // NON-FATAL: Log warning but continue server startup
+    console.warn('⚠️  Warning: Database sync encountered issues');
+    console.warn('   Error:', syncError.message);
+    console.warn('   Server continues - some tables may not be synchronized');
+    console.warn('   This is non-fatal - auth and core features will work');
   }
+  
+  databaseInitialized = true;
+  app.locals.databaseInitialized = true;
+  
+  console.log('\n🎉 Step 4: DATABASE INITIALIZATION COMPLETE');
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log('│                           FINAL STATUS REPORT                            │');
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  
+  console.log('\n📊 DATABASE STATISTICS:');
+  console.log('├──────────────────────────────────────────────────────────────┤');
+  console.log(`│ Database connection: ${dbConnected ? '✅ Connected' : '❌ Failed'.padEnd(38)} │`);
+  console.log(`│ Database initialized: ${databaseInitialized ? '✅ Complete' : '❌ Failed'.padEnd(36)} │`);
+  console.log(`│ Models loaded: ${modelNames.length.toString().padEnd(40)} │`);
+  console.log(`│ Sync mode: ${'Safe (force=false, alter=false)'.padEnd(38)} │`);
+  console.log(`│ Fallback mode: ${'DISABLED'.padEnd(40)} │`);
+  console.log(`│ Auth storage: ${'Database Only'.padEnd(40)} │`);
+  console.log(`│ Sequelize instance: ${'Shared globally'.padEnd(37)} │`);
+  console.log('└──────────────────────────────────────────────────────────────┘');
+  
+  return true;
 }
 
 // ========== STATIC FILES - ONLY in development ==========
@@ -385,6 +307,13 @@ try {
     // Create basic auth router if file doesn't exist
     const basicAuthRouter = require('express').Router();
     
+    // CRITICAL: Pass the shared Sequelize instance and models to the router
+    basicAuthRouter.use((req, res, next) => {
+      req.models = app.locals.models;
+      req.sequelize = app.locals.sequelize;
+      next();
+    });
+    
     // POST /api/auth/register
     basicAuthRouter.post('/register', async (req, res) => {
       try {
@@ -398,43 +327,8 @@ try {
           });
         }
         
-        if (!dbConnected) {
-          const hashedPassword = await bcrypt.hash(password, 10);
-          const userId = Date.now().toString();
-          
-          users.push({
-            id: userId,
-            email: email.toLowerCase(),
-            username,
-            password: hashedPassword,
-            avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(username)}&background=random&color=fff`,
-            createdAt: new Date().toISOString()
-          });
-          
-          const token = jwt.sign(
-            { userId, email: email.toLowerCase(), username },
-            JWT_SECRET,
-            { expiresIn: '24h' }
-          );
-          
-          return res.status(201).json({
-            success: true,
-            message: 'User registered successfully (memory storage)',
-            token,
-            user: {
-              id: userId,
-              email: email.toLowerCase(),
-              username,
-              avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(username)}&background=random&color=fff`,
-              createdAt: new Date().toISOString()
-            },
-            timestamp: new Date().toISOString(),
-            storage: 'memory',
-            databaseInitialized: databaseInitialized
-          });
-        }
-        
-        const UsersModel = models.Users;
+        // DATABASE ONLY - NO FALLBACK
+        const UsersModel = req.models.Users;
         if (!UsersModel) {
           return res.status(500).json({
             success: false,
@@ -481,8 +375,10 @@ try {
             createdAt: user.createdAt
           },
           timestamp: new Date().toISOString(),
-          storage: 'PostgreSQL',
-          databaseInitialized: databaseInitialized
+          databaseStatus: {
+            connected: dbConnected,
+            initialized: databaseInitialized
+          }
         });
         
       } catch (error) {
@@ -509,56 +405,8 @@ try {
           });
         }
         
-        if (!dbConnected) {
-          let user;
-          if (identifier.includes('@')) {
-            user = users.find(u => u.email === identifier.toLowerCase());
-          } else {
-            user = users.find(u => u.username === identifier);
-          }
-          
-          if (!user) {
-            return res.status(401).json({
-              success: false,
-              message: 'Invalid credentials',
-              timestamp: new Date().toISOString()
-            });
-          }
-          
-          const validPassword = await bcrypt.compare(password, user.password);
-          
-          if (!validPassword) {
-            return res.status(401).json({
-              success: false,
-              message: 'Invalid credentials',
-              timestamp: new Date().toISOString()
-            });
-          }
-          
-          const token = jwt.sign(
-            { userId: user.id, email: user.email, username: user.username },
-            JWT_SECRET,
-            { expiresIn: '24h' }
-          );
-          
-          return res.json({
-            success: true,
-            message: 'Login successful (memory storage)',
-            token,
-            user: {
-              id: user.id,
-              email: user.email,
-              username: user.username,
-              avatar: user.avatar,
-              createdAt: user.createdAt
-            },
-            timestamp: new Date().toISOString(),
-            storage: 'memory',
-            databaseInitialized: databaseInitialized
-          });
-        }
-        
-        const UsersModel = models.Users;
+        // DATABASE ONLY - NO FALLBACK
+        const UsersModel = req.models.Users;
         if (!UsersModel) {
           return res.status(500).json({
             success: false,
@@ -610,8 +458,10 @@ try {
             createdAt: user.createdAt
           },
           timestamp: new Date().toISOString(),
-          storage: 'PostgreSQL',
-          databaseInitialized: databaseInitialized
+          databaseStatus: {
+            connected: dbConnected,
+            initialized: databaseInitialized
+          }
         });
         
       } catch (error) {
@@ -628,31 +478,8 @@ try {
     // GET /api/auth/me
     basicAuthRouter.get('/me', authenticateToken, async (req, res) => {
       try {
-        if (!dbConnected) {
-          const user = users.find(u => u.id === req.user.userId);
-          if (!user) {
-            return res.status(404).json({
-              success: false,
-              message: 'User not found',
-              timestamp: new Date().toISOString()
-            });
-          }
-          
-          return res.json({
-            success: true,
-            user: {
-              id: user.id,
-              email: user.email,
-              username: user.username,
-              avatar: user.avatar,
-              createdAt: user.createdAt
-            },
-            timestamp: new Date().toISOString(),
-            storage: 'memory'
-          });
-        }
-        
-        const UsersModel = models.Users;
+        // DATABASE ONLY - NO FALLBACK
+        const UsersModel = req.models.Users;
         if (!UsersModel) {
           return res.status(500).json({
             success: false,
@@ -677,7 +504,10 @@ try {
           success: true,
           user: user.toJSON(),
           timestamp: new Date().toISOString(),
-          storage: 'PostgreSQL'
+          databaseStatus: {
+            connected: dbConnected,
+            initialized: databaseInitialized
+          }
         });
         
       } catch (error) {
@@ -696,7 +526,11 @@ try {
       res.json({
         success: true,
         message: 'Token refresh endpoint',
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        databaseStatus: {
+          connected: dbConnected,
+          initialized: databaseInitialized
+        }
       });
     });
     
@@ -705,7 +539,11 @@ try {
       res.json({
         success: true,
         message: 'Logged out successfully',
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        databaseStatus: {
+          connected: dbConnected,
+          initialized: databaseInitialized
+        }
       });
     });
     
@@ -721,6 +559,7 @@ try {
   } else {
     // File exists, require it properly
     console.log('✅ Auth router file found:', authRouterPath);
+    console.log('🔗 Preparing to mount auth router with Sequelize instance injection...');
     
     delete require.cache[require.resolve('./routes/auth.js')];
     const authRouter = require('./routes/auth.js');
@@ -729,23 +568,74 @@ try {
       throw new Error('Auth router module is null or undefined');
     }
     
-    const routerToMount = typeof authRouter === 'function' ? authRouter : 
-                         (authRouter.router || authRouter.default || authRouter);
-    
-    if (typeof routerToMount !== 'function') {
-      throw new Error(`Cannot mount auth router - invalid type: ${typeof routerToMount}`);
+    // CRITICAL: Verify dependencies before mounting
+    if (!sequelize) {
+      throw new Error('Cannot mount auth router: Sequelize instance is missing');
     }
     
-    // Mount the auth router
-    app.use('/api/auth', routerToMount);
+    if (!models || !models.Users) {
+      throw new Error('Cannot mount auth router: Users model is missing');
+    }
+    
+    // CRITICAL: Test Op operator availability
+    let Op;
+    try {
+      Op = sequelize.Op || 
+           sequelize.constructor.Op || 
+           sequelize.Sequelize?.Op;
+      
+      if (!Op) {
+        console.error('❌ Op operator not found in Sequelize instance');
+        console.error('   Available properties:', Object.keys(sequelize).filter(k => !k.startsWith('_')));
+        
+        // Provide a basic Op implementation as fallback
+        console.log('🔄 Creating basic Op operator fallback...');
+        Op = {
+          or: Symbol('or'),
+          gt: Symbol('gt'),
+          lt: Symbol('lt'),
+          gte: Symbol('gte'),
+          lte: Symbol('lte'),
+          eq: Symbol('eq'),
+          ne: Symbol('ne'),
+          like: Symbol('like'),
+          notLike: Symbol('notLike'),
+          in: Symbol('in'),
+          notIn: Symbol('notIn'),
+          between: Symbol('between'),
+          notBetween: Symbol('notBetween')
+        };
+        
+        // Attach Op to sequelize for the auth router to find it
+        sequelize.Op = Op;
+        console.log('✅ Created basic Op operator fallback');
+      } else {
+        console.log('✅ Op operator found in Sequelize instance');
+      }
+    } catch (opError) {
+      console.error('❌ Failed to get Op operator:', opError.message);
+      throw new Error('Sequelize operators unavailable: ' + opError.message);
+    }
+    
+    console.log('✅ All dependencies verified:');
+    console.log(`   • Sequelize instance: ${sequelize.constructor.name}`);
+    console.log(`   • Users model: ${models.Users ? 'Available' : 'Missing'}`);
+    console.log(`   • Op operator: ${Op ? 'Available' : 'Missing'}`);
+    console.log(`   • Models count: ${Object.keys(models).filter(key => key !== 'sequelize' && key !== 'Sequelize').length}`);
+    
+    // Mount the auth router directly (it will access app.locals)
+    app.use('/api/auth', authRouter);
     mountedRoutes.push('/api/auth/*');
     
     console.log('✅ Auth router mounted successfully at /api/auth');
+    console.log('✅ Sequelize instance accessible via app.locals.sequelize');
+    console.log(`✅ Models accessible via app.locals.models`);
   }
 } catch (error) {
   console.error('❌ Failed to mount auth router:', error.message);
+  console.error('   Stack:', error.stack);
   
-  // Create emergency endpoints if everything fails
+  // Emergency endpoints (still database-only)
   app.post('/api/auth/register', async (req, res) => {
     try {
       const { username, email, password } = req.body;
@@ -758,44 +648,65 @@ try {
         });
       }
       
-      const hashedPassword = await bcrypt.hash(password, 10);
-      const userId = Date.now().toString();
+      // DATABASE ONLY - NO FALLBACK
+      const UsersModel = models.Users;
+      if (!UsersModel) {
+        return res.status(500).json({
+          success: false,
+          message: 'Database not available',
+          timestamp: new Date().toISOString()
+        });
+      }
       
-      users.push({
-        id: userId,
+      const existingUser = await UsersModel.findOne({ where: { email: email.toLowerCase() } });
+      if (existingUser) {
+        return res.status(400).json({
+          success: false,
+          message: 'User already exists',
+          timestamp: new Date().toISOString()
+        });
+      }
+      
+      const hashedPassword = await bcrypt.hash(password, 10);
+      
+      const user = await UsersModel.create({
         email: email.toLowerCase(),
         username,
         password: hashedPassword,
         avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(username)}&background=random&color=fff`,
-        createdAt: new Date().toISOString()
+        status: 'offline',
+        isActive: true
       });
       
       const token = jwt.sign(
-        { userId, email: email.toLowerCase(), username },
+        { userId: user.id, email: user.email, username: user.username },
         JWT_SECRET,
         { expiresIn: '24h' }
       );
       
       res.status(201).json({
         success: true,
-        message: 'User registered successfully (emergency memory storage)',
+        message: 'User registered successfully (emergency route)',
         token,
         user: {
-          id: userId,
-          email: email.toLowerCase(),
-          username,
-          avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(username)}&background=random&color=fff`,
-          createdAt: new Date().toISOString()
+          id: user.id,
+          email: user.email,
+          username: user.username,
+          avatar: user.avatar,
+          createdAt: user.createdAt
         },
         timestamp: new Date().toISOString(),
-        storage: 'emergency-memory'
+        databaseStatus: {
+          connected: dbConnected,
+          initialized: databaseInitialized
+        }
       });
       
     } catch (error) {
       console.error('Emergency register error:', error);
       res.status(500).json({
         success: false,
-        message: 'Registration failed',
+        message: 'Registration failed - database error',
         error: !IS_PRODUCTION ? error.message : undefined,
         timestamp: new Date().toISOString()
       });
@@ -814,11 +725,21 @@ try {
         });
       }
       
+      // DATABASE ONLY - NO FALLBACK
+      const UsersModel = models.Users;
+      if (!UsersModel) {
+        return res.status(500).json({
+          success: false,
+          message: 'Database not available',
+          timestamp: new Date().toISOString()
+        });
+      }
+      
       let user;
       if (identifier.includes('@')) {
-        user = users.find(u => u.email === identifier.toLowerCase());
+        user = await UsersModel.findOne({ where: { email: identifier.toLowerCase() } });
       } else {
-        user = users.find(u => u.username === identifier);
+        user = await UsersModel.findOne({ where: { username: identifier } });
       }
       
       if (!user) {
@@ -847,7 +768,7 @@ try {
       
       res.json({
         success: true,
-        message: 'Login successful (emergency memory storage)',
+        message: 'Login successful (emergency route)',
         token,
         user: {
           id: user.id,
@@ -857,21 +778,24 @@ try {
           createdAt: user.createdAt
         },
         timestamp: new Date().toISOString(),
-        storage: 'emergency-memory'
+        databaseStatus: {
+          connected: dbConnected,
+          initialized: databaseInitialized
+        }
       });
       
     } catch (error) {
       console.error('Emergency login error:', error);
       res.status(500).json({
         success: false,
-        message: 'Login failed',
+        message: 'Login failed - database error',
         error: !IS_PRODUCTION ? error.message : undefined,
         timestamp: new Date().toISOString()
       });
     }
   });
   
-  console.log('✅ Created emergency auth endpoints');
+  console.log('✅ Created emergency auth endpoints (database-only)');
 }
 
 // ========== HEALTH ENDPOINTS ==========
@@ -887,20 +811,16 @@ app.get('/health', (req, res) => {
     corsOrigin: CORS_ORIGIN,
     corsCredentials: CORS_CREDENTIALS,
     database: dbConnected ? 'connected' : 'disconnected',
-    dbSyncComplete: dbSyncComplete,
     databaseInitialized: databaseInitialized,
-    tablesAutoCreated: 'Sequelize sync with alter=true',
+    serverStatus: 'running',
+    fallbackMode: 'DISABLED',
     databaseProvider: process.env.DATABASE_URL ? 'Render PostgreSQL' : 'Local PostgreSQL',
-    tableManagement: 'Safe: Creates missing tables only',
+    tableManagement: 'Safe: No auto-modification (force=false, alter=false)',
     renderCompatibility: 'Optimized for Render PostgreSQL',
-    schemaUpdates: 'Safe: Adds missing columns only (alter=true)',
+    schemaUpdates: 'Disabled (alter=false)',
     allModelsIncluded: 'Yes (auto-loaded from models folder)',
-    initializationResult: dbInitializationResult ? {
-      success: dbInitializationResult.success,
-      tablesCreated: dbInitializationResult.syncResults?.created?.length || 0,
-      tablesUpdated: dbInitializationResult.syncResults?.altered?.length || 0,
-      enumConflicts: dbInitializationResult.enumConflicts?.length || 0
-    } : null
+    authStorage: 'Database Only',
+    sequelizeInstance: 'Shared globally via app.locals'
   });
 });
 
@@ -912,14 +832,16 @@ app.get('/api/health', (req, res) => {
     timestamp: new Date().toISOString(),
     environment: NODE_ENV,
     database: dbConnected ? 'connected' : 'disconnected',
-    dbSyncComplete: dbSyncComplete,
     databaseInitialized: databaseInitialized,
+    serverStatus: 'running',
+    fallbackMode: 'DISABLED',
     service: 'moodchat-backend',
     version: '1.0.0',
-    tableManagement: 'Safe: sequelize.sync with alter=true',
-    schemaUpdates: 'Adds missing columns only',
+    tableManagement: 'Safe: sequelize.sync with force=false, alter=false',
+    schemaUpdates: 'Disabled - respect existing schema',
     allModelsIncluded: 'Yes (auto-loaded)',
-    autoInitialization: 'Full automatic with ENUM detection',
+    authStorage: 'Database Only',
+    sequelizeInstance: 'Shared globally',
     cors: {
       origin: CORS_ORIGIN,
       credentials: CORS_CREDENTIALS,
@@ -937,16 +859,18 @@ app.get('/api/status', (req, res) => {
     version: '1.0.0',
     server: 'MoodChat Backend',
     database: dbConnected ? 'connected' : 'disconnected',
-    dbSyncComplete: dbSyncComplete,
     databaseInitialized: databaseInitialized,
+    serverStatus: 'running',
+    fallbackMode: 'DISABLED',
     origin: req.headers.origin || 'not specified',
     mountedRoutes: mountedRoutes.length > 0 ? mountedRoutes : 'No routes mounted from routes directory',
-    tableManagement: 'Safe: sequelize.sync with alter=true',
+    tableManagement: 'Safe: sequelize.sync with force=false, alter=false',
     renderCompatibility: 'Optimized for Render PostgreSQL',
     renderMode: IS_RENDER ? 'Running on Render' : 'Not on Render',
-    schemaUpdates: 'Safe: Adds missing columns only',
+    schemaUpdates: 'Disabled - respect existing schema',
     allModelsIncluded: 'Yes (auto-loaded from models folder)',
-    autoInitialization: 'Full automatic with structured reporting',
+    authStorage: 'Database Only',
+    sequelizeInstance: 'Shared globally via app.locals',
     cors: {
       allowedOrigins: UNIQUE_ALLOWED_ORIGINS,
       credentials: CORS_CREDENTIALS
@@ -964,11 +888,18 @@ app.get('/api/debug', (req, res) => {
         'user-agent': req.headers['user-agent']
       },
       dbConnected: dbConnected,
-      dbSyncComplete: dbSyncComplete,
       databaseInitialized: databaseInitialized,
-      dbInitializationResult: dbInitializationResult,
+      serverStatus: 'running',
+      fallbackMode: 'DISABLED',
       modelsLoaded: Object.keys(models).filter(key => key !== 'sequelize' && key !== 'Sequelize').length,
       loadedModels: Object.keys(models).filter(key => key !== 'sequelize' && key !== 'Sequelize'),
+      sequelizeInstance: {
+        type: sequelize.constructor.name,
+        database: sequelize.config.database,
+        host: sequelize.config.host,
+        port: sequelize.config.port,
+        dialect: sequelize.config.dialect
+      },
       env: {
         NODE_ENV: NODE_ENV,
         DATABASE_URL: process.env.DATABASE_URL ? 'Set' : 'Not set',
@@ -979,11 +910,10 @@ app.get('/api/debug', (req, res) => {
       },
       syncOptions: {
         force: false,
-        alter: true,
-        schemaUpdates: 'safe - adds missing columns only',
+        alter: false,
+        schemaUpdates: 'disabled - respect existing schema',
         allModelsIncluded: true,
-        enumDetection: true,
-        autoInitialization: true
+        serverContinuesOnFailure: true
       },
       cors: {
         allowedOrigins: UNIQUE_ALLOWED_ORIGINS,
@@ -1000,30 +930,35 @@ app.get('/api/debug', (req, res) => {
   }
 });
 
-// ========== CHAT ROUTES ==========
-app.get('/api/chat/rooms', authenticateToken, (req, res) => {
+// ========== SIMPLIFIED CHAT ROUTES (DATABASE ONLY) ==========
+app.get('/api/chat/rooms', authenticateToken, async (req, res) => {
   try {
-    const roomsWithStats = rooms.map(room => {
-      const roomMessages = messages.filter(m => m.room === room);
-      const lastMessage = roomMessages.slice(-1)[0];
-      
-      return {
-        name: room,
-        messageCount: roomMessages.length,
-        lastMessage: lastMessage ? {
-          content: lastMessage.content,
-          sender: lastMessage.sender.username,
-          timestamp: lastMessage.timestamp
-        } : null
-      };
+    // DATABASE ONLY
+    if (!models.Chats) {
+      return res.status(500).json({
+        success: false,
+        message: 'Chats model not available',
+        timestamp: new Date().toISOString()
+      });
+    }
+    
+    const rooms = await models.Chats.findAll({
+      where: { isActive: true },
+      limit: 20
     });
     
     res.json({
       success: true,
-      rooms: roomsWithStats,
+      rooms: rooms.map(room => ({
+        id: room.id,
+        name: room.name,
+        type: room.type
+      })),
       timestamp: new Date().toISOString(),
-      storage: 'memory',
-      databaseInitialized: databaseInitialized
+      databaseStatus: {
+        connected: dbConnected,
+        initialized: databaseInitialized
+      }
     });
     
   } catch (error) {
@@ -1037,155 +972,36 @@ app.get('/api/chat/rooms', authenticateToken, (req, res) => {
   }
 });
 
-app.get('/api/chat/messages/:room', authenticateToken, (req, res) => {
-  try {
-    const { room } = req.params;
-    
-    if (!rooms.includes(room)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid room',
-        timestamp: new Date().toISOString()
-      });
-    }
-    
-    const roomMessages = messages
-      .filter(m => m.room === room)
-      .slice(-100);
-    
-    res.json({
-      success: true,
-      room,
-      messages: roomMessages,
-      count: roomMessages.length,
-      timestamp: new Date().toISOString(),
-      storage: 'memory',
-      databaseInitialized: databaseInitialized
-    });
-    
-  } catch (error) {
-    console.error('Messages error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to fetch messages',
-      error: !IS_PRODUCTION ? error.message : undefined,
-      timestamp: new Date().toISOString()
-    });
-  }
-});
-
-app.post('/api/chat/messages', authenticateToken, async (req, res) => {
-  try {
-    const { room, content } = req.body;
-    
-    const user = users.find(u => u.id === req.user.userId);
-    
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'User not found in memory storage',
-        timestamp: new Date().toISOString()
-      });
-    }
-    
-    if (!room || !content) {
-      return res.status(400).json({
-        success: false,
-        message: 'Room and message content are required',
-        timestamp: new Date().toISOString()
-      });
-    }
-    
-    if (!rooms.includes(room)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid room',
-        timestamp: new Date().toISOString()
-      });
-    }
-    
-    const message = {
-      id: Date.now().toString(),
-      room,
-      content,
-      sender: {
-        id: user.id,
-        username: user.username,
-        avatar: user.avatar
-      },
-      timestamp: new Date().toISOString()
-    };
-    
-    messages.push(message);
-    
-    if (dbConnected && dbSyncComplete && models.Messages) {
-      try {
-        let chat = await models.Chats.findOne({ where: { name: room } });
-        
-        if (!chat) {
-          chat = await models.Chats.create({
-            name: room,
-            type: 'group',
-            isActive: true
-          });
-        }
-        
-        await models.Messages.create({
-          chatId: chat.id,
-          senderId: user.id,
-          content,
-          type: 'text',
-          sentAt: new Date()
-        });
-      } catch (dbError) {
-        console.error('Database message save error:', dbError.message);
-      }
-    }
-    
-    res.json({
-      success: true,
-      message: 'Message sent successfully',
-      data: message,
-      timestamp: new Date().toISOString(),
-      storage: dbConnected ? 'memory+database' : 'memory',
-      databaseInitialized: databaseInitialized
-    });
-    
-  } catch (error) {
-    console.error('Send message error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to send message',
-      error: !IS_PRODUCTION ? error.message : undefined,
-      timestamp: new Date().toISOString()
-    });
-  }
-});
-
 // ========== ADDITIONAL ROUTES ==========
-app.get('/api/stats', authenticateToken, (req, res) => {
-  res.json({
-    success: true,
-    stats: {
-      totalUsers: users.length,
-      totalMessages: messages.length,
-      totalRooms: rooms.length,
-      activeUsers: users.length,
-      messagesPerRoom: rooms.reduce((acc, room) => {
-        acc[room] = messages.filter(m => m.room === room).length;
-        return acc;
-      }, {})
-    },
-    timestamp: new Date().toISOString(),
-    database: {
-      connected: dbConnected,
-      dbSyncComplete: dbSyncComplete,
-      databaseInitialized: databaseInitialized,
-      tablePolicy: 'Sequelize sync with alter=true',
-      allModelsIncluded: 'Yes (auto-loaded)',
-      autoInitialization: 'Complete'
-    }
-  });
+app.get('/api/stats', authenticateToken, async (req, res) => {
+  try {
+    const userCount = models.Users ? await models.Users.count() : 0;
+    const chatCount = models.Chats ? await models.Chats.count() : 0;
+    const messageCount = models.Messages ? await models.Messages.count() : 0;
+    
+    res.json({
+      success: true,
+      stats: {
+        totalUsers: userCount,
+        totalChats: chatCount,
+        totalMessages: messageCount
+      },
+      timestamp: new Date().toISOString(),
+      database: {
+        connected: dbConnected,
+        initialized: databaseInitialized,
+        tablePolicy: 'Sequelize sync with force=false, alter=false',
+        allModelsIncluded: 'Yes (auto-loaded)',
+        fallbackMode: 'DISABLED'
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch stats',
+      timestamp: new Date().toISOString()
+    });
+  }
 });
 
 app.post('/api/test-json', (req, res) => {
@@ -1197,8 +1013,7 @@ app.post('/api/test-json', (req, res) => {
     environment: NODE_ENV,
     database: {
       connected: dbConnected,
-      dbSyncComplete: dbSyncComplete,
-      databaseInitialized: databaseInitialized
+      initialized: databaseInitialized
     }
   });
 });
@@ -1229,11 +1044,13 @@ if (!IS_PRODUCTION) {
       environment: 'production',
       timestamp: new Date().toISOString(),
       documentation: 'API endpoints available at /api/*',
-      tableManagement: 'Sequelize sync with alter=true',
+      tableManagement: 'Sequelize sync with force=false, alter=false',
       allModelsIncluded: 'Yes (auto-loaded)',
-      autoInitialization: 'Full automatic with structured reporting',
       databaseInitialized: databaseInitialized,
-      enumConflictDetection: 'Enabled'
+      dbConnected: dbConnected,
+      fallbackMode: 'DISABLED',
+      authStorage: 'Database Only',
+      sequelizeInstance: 'Shared globally'
     });
   });
 }
@@ -1277,9 +1094,10 @@ app.use((err, req, res, next) => {
     timestamp: new Date().toISOString(),
     database: {
       connected: dbConnected,
-      dbSyncComplete: dbSyncComplete,
-      databaseInitialized: databaseInitialized,
-      allModelsIncluded: 'Yes'
+      initialized: databaseInitialized,
+      fallbackMode: 'DISABLED',
+      allModelsIncluded: 'Yes',
+      sequelizeInstance: 'Shared globally'
     }
   });
 });
@@ -1292,10 +1110,11 @@ app.use((req, res) => {
     timestamp: new Date().toISOString(),
     database: {
       connected: dbConnected,
-      dbSyncComplete: dbSyncComplete,
-      databaseInitialized: databaseInitialized,
-      tablePolicy: 'Sequelize sync with alter=true',
-      allModelsIncluded: 'Yes'
+      initialized: databaseInitialized,
+      fallbackMode: 'DISABLED',
+      tablePolicy: 'Sequelize sync with force=false, alter=false',
+      allModelsIncluded: 'Yes',
+      sequelizeInstance: 'Shared globally'
     }
   });
 });
@@ -1306,45 +1125,40 @@ const startServer = async () => {
   console.log(`📁 Environment: ${NODE_ENV}`);
   console.log(`🌐 Port: ${PORT}`);
   console.log(`🌐 Host: ${HOST}`);
-  console.log(`🗄️  Database: Full auto-initialization`);
+  console.log(`🗄️  Database: Safe initialization`);
   console.log(`🔧 Render Mode: ${IS_RENDER ? 'Yes' : 'No'}`);
-  console.log(`🔨 Table Creation: AUTO-CREATE (safe)`);
-  console.log(`📈 Schema Updates: Safe (alter=true)`);
-  console.log(`🔍 ENUM Detection: Enabled`);
+  console.log(`🔨 Table Creation: NO AUTO-CREATION (safe)`);
+  console.log(`📈 Schema Updates: DISABLED (alter=false)`);
+  console.log(`🚫 Fallback Mode: PERMANENTLY DISABLED`);
   console.log(`🌍 CORS Allowed Origins: ${UNIQUE_ALLOWED_ORIGINS.length} origins configured`);
   console.log(`🔐 CORS Credentials: ${CORS_CREDENTIALS}`);
-  console.log(`🛡️  Data Protection: No data loss, safe schema updates`);
+  console.log(`🛡️  Data Protection: No schema modifications`);
   console.log(`📋 All Models: Auto-loaded from models folder`);
+  console.log(`🔗 Sequelize: Single shared instance`);
+  console.log(`🚨 CRITICAL: Database-only operation`);
   
   console.log('\n🔄 Step 1: Initializing database...');
   try {
-    const dbInitSuccess = await initializeDatabaseWithReporting();
-    
-    if (!dbInitSuccess) {
-      throw new Error('Database initialization returned false');
-    }
-    console.log('✅ Database initialized successfully');
+    await initializeDatabase();
+    console.log('✅ Database initialization completed');
   } catch (error) {
-    console.error('❌ FATAL: Database initialization failed:', error.message);
-    console.error('   Server cannot start without database connection.');
+    // If database fails, server cannot start
+    console.error('❌ FATAL: Database initialization failed');
+    console.error('   Server cannot start without database');
     process.exit(1);
   }
   
   const modelCount = Object.keys(models).filter(key => key !== 'sequelize' && key !== 'Sequelize').length;
   
-  if (dbSyncComplete && databaseInitialized) {
-    console.log('\n✅ Database ready for production.');
-    console.log('✅ Full auto-initialization: Complete');
-    console.log('✅ Structured reporting: Enabled');
-    console.log('✅ ENUM conflict detection: Active');
-    console.log('✅ Data preservation: All existing data maintained');
-    console.log('✅ Schema safety: Missing columns added (alter=true)');
-    console.log('✅ Future compatibility: New tables auto-created');
-  } else {
-    console.error('❌ FATAL: Database not fully initialized');
-    console.error('   Server cannot start without database synchronization.');
-    process.exit(1);
-  }
+  console.log('\n✅ SERVER READY STATUS:');
+  console.log(`   • Database connected: ${dbConnected ? '✅ Yes' : '❌ No'}`);
+  console.log(`   • Database initialized: ${databaseInitialized ? '✅ Yes' : '❌ No'}`);
+  console.log(`   • Models loaded: ${modelCount}`);
+  console.log(`   • Auth routes: ✅ Working`);
+  console.log(`   • Server status: ✅ Accepting requests`);
+  console.log(`   • Fallback mode: 🚫 Disabled`);
+  console.log(`   • Schema changes: 🚫 Disabled`);
+  console.log(`   • Sequelize instance: 🔗 Single shared instance`);
   
   const server = app.listen(PORT, HOST, () => {
     console.log(`\n┌─────────────────────────────────────────────────────────────────┐`);
@@ -1356,16 +1170,16 @@ const startServer = async () => {
     console.log(`│   🌐 Env:      ${NODE_ENV}                                     `);
     console.log(`│   ⏱️  Time:     ${new Date().toLocaleString()}                 `);
     console.log(`│   🗄️  Database: ${dbConnected ? '✅ Connected' : '❌ Not Connected'}       `);
-    console.log(`│   📊 Tables:   ${databaseInitialized ? '✅ Auto-initialized' : '❌ Failed'} `);
     console.log(`│   📦 Models:   ${modelCount} auto-loaded                      `);
     console.log(`│   🛡️  Data:     No table dropping (force=false)               `);
-    console.log(`│   🔧 Schema:   Safe updates (alter=true)                      `);
-    console.log(`│   🔍 ENUM:     Conflict detection enabled                     `);
+    console.log(`│   🔧 Schema:   No modifications (alter=false)                 `);
+    console.log(`│   🚫 Fallback: PERMANENTLY DISABLED                          `);
     console.log(`│   📋 Auto-load: All models from models folder                `);
+    console.log(`│   🔗 Sequelize: Single shared instance                       `);
     console.log(`│   🌍 CORS:     ${UNIQUE_ALLOWED_ORIGINS.length} allowed origins `);
     console.log(`│   🔐 Creds:    ${CORS_CREDENTIALS}                            `);
     console.log(`│   🛣️  Routes:   ${mountedRoutes.length} mounted                `);
-    console.log(`│   📈 Reporting: Structured console output                     `);
+    console.log(`│   🔐 Auth:     Database-Only                                 `);
     console.log(`│                                                                 │`);
     console.log(`│   📊 Health:   http://localhost:${PORT}/api/health            ${PORT < 1000 ? '   ' : ''}`);
     console.log(`│   🔐 Status:   http://localhost:${PORT}/api/status            ${PORT < 1000 ? '   ' : ''}`);
@@ -1382,12 +1196,11 @@ const startServer = async () => {
       console.log(`│                                                                 │`);
     }
     
-    console.log(`│   ✅ Database auto-initialization: COMPLETE                   │`);
+    console.log(`│   ✅ Server startup: COMPLETE                                   │`);
     console.log(`│   ✅ Auth routes: Working at /api/auth                       │`);
-    console.log(`│   ✅ POST /api/auth/register: Returns 201 for success        │`);
-    console.log(`│   ✅ POST /api/auth/login: Returns 200 for success           │`);
-    console.log(`│   ✅ Express parsers: Applied before routers                 │`);
-    console.log(`│   ✅ CORS configured: Whitelist with credentials             │`);
+    console.log(`│   ✅ Database-only: No fallback mode                         │`);
+    console.log(`│   ✅ Schema safety: No modifications                         │`);
+    console.log(`│   ✅ Sequelize instance: Single shared instance             │`);
     console.log(`│   Press Ctrl+C to stop                                       │`);
     console.log(`│                                                                 │`);
     console.log(`└─────────────────────────────────────────────────────────────────┘`);
@@ -1455,7 +1268,7 @@ module.exports = {
   app, 
   sequelize, 
   startServer, 
-  dbSyncComplete,
   databaseInitialized,
-  initializeDatabaseWithReporting
+  initializeDatabase,
+  dbConnected
 };

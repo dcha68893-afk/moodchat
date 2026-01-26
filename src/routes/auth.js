@@ -4,6 +4,8 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const asyncHandler = require('express-async-handler');
+
+// Create router
 const router = express.Router();
 
 console.log('✅ Auth ROUTER initialized (NOT a Sequelize model)');
@@ -129,18 +131,18 @@ router.post(
         });
       }
 
-      // 4. Check database connection
+      // 4. Check if database models are available
       const models = req.app.locals.models;
-      const dbConnected = req.app.locals.dbConnected || false;
       
-      if (!dbConnected) {
+      if (!models) {
+        console.error('🔧 [AUTH] Models not available in app.locals');
         return res.status(503).json({
           success: false,
-          message: 'Database not available. Registration requires PostgreSQL connection.',
+          message: 'Database service not initialized',
           timestamp: new Date().toISOString(),
           database: {
             connected: false,
-            initialized: req.app.locals.databaseInitialized || false
+            initialized: false
           }
         });
       }
@@ -148,55 +150,100 @@ router.post(
       // 5. Get Users model (using Users, not User)
       const UsersModel = models.Users;
       if (!UsersModel) {
+        console.error('🔧 [AUTH] Users model not found in models:', Object.keys(models));
         return res.status(500).json({
           success: false,
           message: 'Users model not available',
           timestamp: new Date().toISOString(),
           database: {
-            connected: dbConnected,
-            initialized: req.app.locals.databaseInitialized || false
+            connected: false,
+            initialized: false
           }
         });
       }
 
-      // 6. Check if user exists by email
-      const existingUserByEmail = await UsersModel.findOne({ 
-        where: { email: email.toLowerCase() } 
+      // 6. Get Sequelize instance and Op operator safely FROM APP.LOCALS
+      const sequelizeInstance = req.app.locals.sequelize;
+      if (!sequelizeInstance) {
+        console.error('🔧 [AUTH] Sequelize instance not available in app.locals');
+        return res.status(500).json({
+          success: false,
+          message: 'Database configuration error - Sequelize not available',
+          timestamp: new Date().toISOString()
+        });
+      }
+
+      // 7. Get Op operator safely from Sequelize instance
+      let Op;
+      try {
+        // Try multiple ways to get Op (different Sequelize versions)
+        Op = sequelizeInstance.Op || 
+             sequelizeInstance.constructor.Op || 
+             sequelizeInstance.Sequelize?.Op;
+        
+        if (!Op) {
+          console.error('🔧 [AUTH] Op operator not available from Sequelize instance');
+          return res.status(500).json({
+            success: false,
+            message: 'Database query operator not available',
+            timestamp: new Date().toISOString()
+          });
+        }
+      } catch (opError) {
+        console.error('🔧 [AUTH] Failed to get Op operator:', opError.message);
+        return res.status(500).json({
+          success: false,
+          message: 'Server configuration error: Sequelize operators unavailable',
+          timestamp: new Date().toISOString()
+        });
+      }
+
+      // 8. Single database query: Check if user exists by email OR username
+      const existingUser = await UsersModel.findOne({
+        where: {
+          [Op.or]: [
+            { email: email.toLowerCase() },
+            { username: username }
+          ]
+        }
       });
       
-      if (existingUserByEmail) {
-        return res.status(400).json({
+      if (existingUser) {
+        const statusCode = 409; // Consistent 409 for conflicts
+        if (existingUser.email === email.toLowerCase()) {
+          return res.status(statusCode).json({
+            success: false,
+            message: 'User with this email already exists',
+            timestamp: new Date().toISOString()
+          });
+        } else {
+          return res.status(statusCode).json({
+            success: false,
+            message: 'Username already taken',
+            timestamp: new Date().toISOString()
+          });
+        }
+      }
+
+      // 9. Hash password
+      let hashedPassword;
+      try {
+        hashedPassword = await bcrypt.hash(password, 10);
+      } catch (hashError) {
+        console.error('🔧 [AUTH] Password hashing error:', {
+          name: hashError.name,
+          message: hashError.message,
+          stack: hashError.stack
+        });
+        return res.status(500).json({
           success: false,
-          message: 'User with this email already exists',
-          timestamp: new Date().toISOString(),
-          database: {
-            connected: dbConnected,
-            initialized: req.app.locals.databaseInitialized || false
-          }
+          message: 'Password processing failed',
+          error: IS_PRODUCTION ? undefined : hashError.message,
+          timestamp: new Date().toISOString()
         });
       }
 
-      // 7. Check if user exists by username
-      const existingUserByUsername = await UsersModel.findOne({ 
-        where: { username: username } 
-      });
-      
-      if (existingUserByUsername) {
-        return res.status(400).json({
-          success: false,
-          message: 'Username already taken',
-          timestamp: new Date().toISOString(),
-          database: {
-            connected: dbConnected,
-            initialized: req.app.locals.databaseInitialized || false
-          }
-        });
-      }
-
-      // 8. Hash password
-      const hashedPassword = await bcrypt.hash(password, 10);
-
-      // 9. Create user in Users table
+      // 10. Single database query: Create user in Users table
       const user = await UsersModel.create({
         email: email.toLowerCase(),
         username: username,
@@ -210,19 +257,34 @@ router.post(
 
       console.log('🔧 [AUTH] User created successfully:', user.id);
 
-      // 10. Generate JWT token
-      const token = jwt.sign(
-        { 
-          userId: user.id, 
-          email: user.email, 
-          username: user.username,
-          role: user.role
-        },
-        JWT_SECRET,
-        { expiresIn: '24h' }
-      );
+      // 11. Generate JWT token
+      let token;
+      try {
+        token = jwt.sign(
+          { 
+            userId: user.id, 
+            email: user.email, 
+            username: user.username,
+            role: user.role
+          },
+          JWT_SECRET,
+          { expiresIn: '24h' }
+        );
+      } catch (jwtError) {
+        console.error('🔧 [AUTH] JWT generation error:', {
+          name: jwtError.name,
+          message: jwtError.message,
+          stack: jwtError.stack
+        });
+        return res.status(500).json({
+          success: false,
+          message: 'Token generation failed',
+          error: IS_PRODUCTION ? undefined : jwtError.message,
+          timestamp: new Date().toISOString()
+        });
+      }
 
-      // 11. Return success response
+      // 12. Return success response
       return res.status(201).json({
         success: true,
         message: 'User registered successfully',
@@ -239,24 +301,76 @@ router.post(
           createdAt: user.createdAt
         },
         timestamp: new Date().toISOString(),
-        storage: 'PostgreSQL (Permanent)',
-        database: {
-          connected: dbConnected,
-          initialized: req.app.locals.databaseInitialized || false
-        }
+        storage: 'PostgreSQL (Permanent)'
       });
       
-    } catch (dbError) {
-      console.error('🔧 [AUTH] Database registration error:', dbError.message);
+    } catch (error) {
+      // Log detailed error information
+      console.error('🔧 [AUTH] Registration error:', {
+        name: error.name,
+        message: error.message,
+        stack: error.stack,
+        code: error.code,
+        parent: error.parent,
+        original: error.original,
+        sql: error.sql
+      });
+
+      // Handle specific Sequelize errors
+      if (error.name === 'SequelizeConnectionError' || 
+          error.name === 'SequelizeDatabaseError' ||
+          error.message.includes('timeout') ||
+          error.message.includes('connection') ||
+          error.message.includes('ECONNREFUSED')) {
+        return res.status(503).json({
+          success: false,
+          message: 'Database service temporarily unavailable',
+          error: !IS_PRODUCTION ? error.message : undefined,
+          timestamp: new Date().toISOString(),
+          database: {
+            connected: false,
+            initialized: false
+          }
+        });
+      }
+      
+      // Handle unique constraint errors
+      if (error.name === 'SequelizeUniqueConstraintError') {
+        const field = error.errors && error.errors[0] ? error.errors[0].path : 'field';
+        return res.status(409).json({
+          success: false,
+          message: field === 'email' ? 'User with this email already exists' : 'Username already taken',
+          timestamp: new Date().toISOString()
+        });
+      }
+      
+      // Handle validation errors
+      if (error.name === 'SequelizeValidationError') {
+        const errorMessages = error.errors ? error.errors.map(err => err.message) : ['Validation failed'];
+        return res.status(400).json({
+          success: false,
+          message: 'Validation failed',
+          errors: errorMessages,
+          timestamp: new Date().toISOString()
+        });
+      }
+      
+      // Handle other Sequelize errors
+      if (error.name && error.name.includes('Sequelize')) {
+        return res.status(500).json({
+          success: false,
+          message: 'Database operation failed',
+          error: !IS_PRODUCTION ? error.message : undefined,
+          timestamp: new Date().toISOString()
+        });
+      }
+
+      // Generic error response
       return res.status(500).json({
         success: false,
-        message: 'Registration failed - database error',
-        error: !IS_PRODUCTION ? dbError.message : undefined,
-        timestamp: new Date().toISOString(),
-        database: {
-          connected: req.app.locals.dbConnected || false,
-          initialized: req.app.locals.databaseInitialized || false
-        }
+        message: 'Registration failed. Please check server logs.',
+        error: !IS_PRODUCTION ? error.message : undefined,
+        timestamp: new Date().toISOString()
       });
     }
   })
@@ -269,33 +383,29 @@ router.post(
     try {
       const { identifier, password } = req.body;
 
-      console.log('🔧 [AUTH] Login request received:', { identifier: identifier ? '***' : 'missing' });
+      console.log('🔧 [AUTH] Login request received (FIXED VERSION):', { identifier: identifier ? '***' : 'missing' });
 
       // 1. STRICT VALIDATION - EXACT FIELDS REQUIRED
       if (!identifier || !password) {
         return res.status(400).json({
           success: false,
           message: 'Identifier (email/username) and password are required',
-          timestamp: new Date().toISOString(),
-          database: {
-            connected: req.app.locals.dbConnected || false,
-            initialized: req.app.locals.databaseInitialized || false
-          }
+          timestamp: new Date().toISOString()
         });
       }
 
-      // 2. Check database connection
+      // 2. Check if database models are available
       const models = req.app.locals.models;
-      const dbConnected = req.app.locals.dbConnected || false;
       
-      if (!dbConnected) {
+      if (!models) {
+        console.error('🔧 [AUTH] Models not available in app.locals for login');
         return res.status(503).json({
           success: false,
-          message: 'Database not available. Please try again later.',
+          message: 'Database service not initialized',
           timestamp: new Date().toISOString(),
           database: {
             connected: false,
-            initialized: req.app.locals.databaseInitialized || false
+            initialized: false
           }
         });
       }
@@ -303,121 +413,213 @@ router.post(
       // 3. Get Users model
       const UsersModel = models.Users;
       if (!UsersModel) {
+        console.error('🔧 [AUTH] Users model not found for login');
         return res.status(500).json({
           success: false,
           message: 'Users model not available',
           timestamp: new Date().toISOString(),
           database: {
-            connected: dbConnected,
-            initialized: req.app.locals.databaseInitialized || false
+            connected: false,
+            initialized: false
           }
         });
       }
 
-      // 4. Find user by email or username
+      // 4. Single database query: Find user by email or username with all needed data
       let user;
-      if (identifier.includes('@')) {
-        // Search by email
-        user = await UsersModel.findOne({ 
-          where: { 
-            email: identifier.toLowerCase().trim(),
-            isActive: true
-          } 
+      try {
+        if (identifier.includes('@')) {
+          // Search by email
+          user = await UsersModel.findOne({ 
+            where: { 
+              email: identifier.toLowerCase().trim(),
+              isActive: true
+            } 
+          });
+        } else {
+          // Search by username
+          user = await UsersModel.findOne({ 
+            where: { 
+              username: identifier.trim(),
+              isActive: true
+            } 
+          });
+        }
+      } catch (dbError) {
+        console.error('🔧 [AUTH] Database query error during login:', {
+          name: dbError.name,
+          message: dbError.message,
+          stack: dbError.stack
         });
-      } else {
-        // Search by username
-        user = await UsersModel.findOne({ 
-          where: { 
-            username: identifier.trim(),
-            isActive: true
-          } 
+        return res.status(503).json({
+          success: false,
+          message: 'Database service temporarily unavailable',
+          error: !IS_PRODUCTION ? dbError.message : undefined,
+          timestamp: new Date().toISOString()
         });
       }
 
       // 5. If user not found - RETURN 401 FOR INVALID CREDENTIALS
       if (!user) {
+        console.log('🔧 [AUTH] Login failed: User not found');
         return res.status(401).json({
           success: false,
           message: 'Invalid email or password',
-          timestamp: new Date().toISOString(),
-          database: {
-            connected: dbConnected,
-            initialized: req.app.locals.databaseInitialized || false
-          }
+          timestamp: new Date().toISOString()
         });
       }
 
       // 6. Compare passwords
-      const validPassword = await bcrypt.compare(password, user.password);
+      let validPassword;
+      try {
+        console.log('🔧 [AUTH] Comparing password for user:', user.id);
+        validPassword = await bcrypt.compare(password, user.password);
+      } catch (bcryptError) {
+        console.error('🔧 [AUTH] Password comparison error:', {
+          name: bcryptError.name,
+          message: bcryptError.message,
+          stack: bcryptError.stack
+        });
+        return res.status(500).json({
+          success: false,
+          message: 'Authentication failed',
+          error: IS_PRODUCTION ? undefined : bcryptError.message,
+          timestamp: new Date().toISOString()
+        });
+      }
       
       // 7. If password is invalid - RETURN 401 FOR INVALID CREDENTIALS
       if (!validPassword) {
+        console.log('🔧 [AUTH] Login failed: Invalid password for user:', user.id);
         return res.status(401).json({
           success: false,
           message: 'Invalid email or password',
-          timestamp: new Date().toISOString(),
-          database: {
-            connected: dbConnected,
-            initialized: req.app.locals.databaseInitialized || false
-          }
+          timestamp: new Date().toISOString()
         });
       }
 
       // 8. Generate JWT token
-      const token = jwt.sign(
-        { 
-          userId: user.id, 
-          email: user.email, 
-          username: user.username,
-          role: user.role
-        },
-        JWT_SECRET,
-        { expiresIn: '24h' }
-      );
+      let token;
+      try {
+        console.log('🔧 [AUTH] Generating JWT token for user:', user.id);
+        token = jwt.sign(
+          { 
+            userId: user.id, 
+            email: user.email, 
+            username: user.username,
+            role: user.role
+          },
+          JWT_SECRET,
+          { expiresIn: '24h' }
+        );
+      } catch (jwtError) {
+        console.error('🔧 [AUTH] JWT generation error during login:', {
+          name: jwtError.name,
+          message: jwtError.message,
+          stack: jwtError.stack
+        });
+        return res.status(500).json({
+          success: false,
+          message: 'Token generation failed',
+          error: IS_PRODUCTION ? undefined : jwtError.message,
+          timestamp: new Date().toISOString()
+        });
+      }
 
       // 9. Update user's last seen and status
-      await user.update({
-        lastSeen: new Date(),
-        status: 'online'
-      });
+      try {
+        console.log('🔧 [AUTH] Updating user status to online:', user.id);
+        await user.update({
+          lastSeen: new Date(),
+          status: 'online'
+        });
+      } catch (updateError) {
+        console.error('🔧 [AUTH] User update error during login:', {
+          name: updateError.name,
+          message: updateError.message,
+          stack: updateError.stack
+        });
+        // Continue even if update fails - don't break login
+      }
 
-      // 10. Return success response
+      // 10. Return success response with all user data from the single query
       console.log('🔧 [AUTH] Login successful for user:', user.id);
+      
+      // Prepare user response object
+      const userResponse = {
+        id: user.id,
+        email: user.email,
+        username: user.username,
+        avatar: user.avatar,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        status: 'online',
+        role: user.role,
+        isVerified: user.isVerified,
+        createdAt: user.createdAt
+      };
+
       return res.status(200).json({
         success: true,
         message: 'Login successful',
-        token,
-        user: {
-          id: user.id,
-          email: user.email,
-          username: user.username,
-          avatar: user.avatar,
-          firstName: user.firstName,
-          lastName: user.lastName,
-          status: user.status,
-          role: user.role,
-          isVerified: user.isVerified,
-          createdAt: user.createdAt
-        },
+        token: token,
+        user: userResponse,
         timestamp: new Date().toISOString(),
-        storage: 'PostgreSQL (Permanent)',
-        database: {
-          connected: dbConnected,
-          initialized: req.app.locals.databaseInitialized || false
-        }
+        storage: 'PostgreSQL (Permanent)'
       });
       
-    } catch (dbError) {
-      console.error('🔧 [AUTH] Database login error:', dbError.message);
+    } catch (error) {
+      // Log detailed error information
+      console.error('🔧 [AUTH] Login error (CAUGHT):', {
+        name: error.name,
+        message: error.message,
+        stack: error.stack,
+        code: error.code,
+        parent: error.parent,
+        original: error.original
+      });
+
+      // Handle specific Sequelize errors
+      if (error.name === 'SequelizeConnectionError' || 
+          error.name === 'SequelizeDatabaseError' ||
+          error.message.includes('timeout') ||
+          error.message.includes('connection') ||
+          error.message.includes('ECONNREFUSED')) {
+        return res.status(503).json({
+          success: false,
+          message: 'Database service temporarily unavailable',
+          error: !IS_PRODUCTION ? error.message : undefined,
+          timestamp: new Date().toISOString()
+        });
+      }
+      
+      // Handle validation errors
+      if (error.name === 'SequelizeValidationError') {
+        const errorMessages = error.errors ? error.errors.map(err => err.message) : ['Validation failed'];
+        return res.status(400).json({
+          success: false,
+          message: 'Validation failed',
+          errors: errorMessages,
+          timestamp: new Date().toISOString()
+        });
+      }
+      
+      // Handle other Sequelize errors
+      if (error.name && error.name.includes('Sequelize')) {
+        return res.status(500).json({
+          success: false,
+          message: 'Database operation failed',
+          error: !IS_PRODUCTION ? error.message : undefined,
+          timestamp: new Date().toISOString()
+        });
+      }
+
+      // Generic error response
       return res.status(500).json({
         success: false,
-        message: 'Login failed - database error',
-        error: !IS_PRODUCTION ? dbError.message : undefined,
-        timestamp: new Date().toISOString(),
-        database: {
-          connected: req.app.locals.dbConnected || false,
-          initialized: req.app.locals.databaseInitialized || false
-        }
+        message: 'Login failed. Please try again.',
+        error: !IS_PRODUCTION ? error.message : undefined,
+        timestamp: new Date().toISOString()
       });
     }
   })
@@ -438,12 +640,15 @@ function authenticateTokenRouter(req, res, next) {
 
   jwt.verify(token, JWT_SECRET, (err, user) => {
     if (err) {
-      if (!IS_PRODUCTION) {
-        console.log('🔧 [AUTH] JWT Verification Error:', err.message);
-      }
+      console.error('🔧 [AUTH] JWT Verification Error:', {
+        name: err.name,
+        message: err.message,
+        stack: err.stack
+      });
       return res.status(403).json({ 
         success: false, 
         message: 'Invalid or expired token',
+        error: !IS_PRODUCTION ? err.message : undefined,
         timestamp: new Date().toISOString()
       });
     }
@@ -490,10 +695,15 @@ router.get(
         timestamp: new Date().toISOString()
       });
     } catch (error) {
-      console.error('🔧 [AUTH] Error fetching user profile:', error);
+      console.error('🔧 [AUTH] Error fetching user profile:', {
+        name: error.name,
+        message: error.message,
+        stack: error.stack
+      });
       res.status(500).json({
         success: false,
         message: 'Failed to fetch user profile',
+        error: !IS_PRODUCTION ? error.message : undefined,
         timestamp: new Date().toISOString()
       });
     }
@@ -518,6 +728,7 @@ router.post(
       // Check if models are available from app.locals
       const models = req.app.locals.models;
       if (!models || !models.Token) {
+        console.error('🔧 [AUTH] Token model not available for refresh');
         return res.status(500).json({
           success: false,
           message: 'Token model not available',
@@ -526,7 +737,41 @@ router.post(
       }
 
       const TokenModel = models.Token;
-      const { Op } = req.app.locals.db.Sequelize;
+      
+      // Get Sequelize instance FROM APP.LOCALS
+      const sequelizeInstance = req.app.locals.sequelize;
+      if (!sequelizeInstance) {
+        console.error('🔧 [AUTH] Sequelize instance not available in app.locals for refresh');
+        return res.status(500).json({
+          success: false,
+          message: 'Database configuration error',
+          timestamp: new Date().toISOString()
+        });
+      }
+
+      // Get Op operator safely from Sequelize instance
+      let Op;
+      try {
+        Op = sequelizeInstance.Op || 
+             sequelizeInstance.constructor.Op || 
+             sequelizeInstance.Sequelize?.Op;
+        
+        if (!Op) {
+          console.error('🔧 [AUTH] Op operator not available for refresh');
+          return res.status(500).json({
+            success: false,
+            message: 'Database query operator not available',
+            timestamp: new Date().toISOString()
+          });
+        }
+      } catch (opError) {
+        console.error('🔧 [AUTH] Failed to get Op operator for refresh:', opError.message);
+        return res.status(500).json({
+          success: false,
+          message: 'Server configuration error: Sequelize operators unavailable',
+          timestamp: new Date().toISOString()
+        });
+      }
 
       const tokenRecord = await TokenModel.findOne({
         where: {
@@ -601,10 +846,15 @@ router.post(
         timestamp: new Date().toISOString()
       });
     } catch (error) {
-      console.error('🔧 [AUTH] Error refreshing token:', error);
+      console.error('🔧 [AUTH] Error refreshing token:', {
+        name: error.name,
+        message: error.message,
+        stack: error.stack
+      });
       res.status(error.statusCode || 500).json({
         success: false,
         message: error.message || 'Failed to refresh token',
+        error: !IS_PRODUCTION ? error.message : undefined,
         timestamp: new Date().toISOString()
       });
     }
@@ -652,10 +902,15 @@ router.post(
         timestamp: new Date().toISOString()
       });
     } catch (error) {
-      console.error('🔧 [AUTH] Error logging out:', error);
+      console.error('🔧 [AUTH] Error logging out:', {
+        name: error.name,
+        message: error.message,
+        stack: error.stack
+      });
       res.status(500).json({
         success: false,
         message: 'Failed to logout',
+        error: !IS_PRODUCTION ? error.message : undefined,
         timestamp: new Date().toISOString()
       });
     }
@@ -693,6 +948,11 @@ router.get('/test-db', asyncHandler(async (req, res) => {
       }
     });
   } catch (error) {
+    console.error('🔧 [AUTH] Database connection test error:', {
+      name: error.name,
+      message: error.message,
+      stack: error.stack
+    });
     res.status(500).json({
       success: false,
       message: 'Database connection test failed',
@@ -751,18 +1011,28 @@ router.post('/verify-token', asyncHandler(async (req, res) => {
       });
       
     } catch (jwtError) {
+      console.error('🔧 [AUTH] JWT verification error:', {
+        name: jwtError.name,
+        message: jwtError.message,
+        stack: jwtError.stack
+      });
       return res.status(401).json({
         success: false,
         message: 'Invalid or expired token',
-        error: jwtError.message,
+        error: !IS_PRODUCTION ? jwtError.message : undefined,
         timestamp: new Date().toISOString()
       });
     }
   } catch (error) {
-    console.error('🔧 [AUTH] Token verification error:', error);
+    console.error('🔧 [AUTH] Token verification error:', {
+      name: error.name,
+      message: error.message,
+      stack: error.stack
+    });
     res.status(500).json({
       success: false,
       message: 'Failed to verify token',
+      error: !IS_PRODUCTION ? error.message : undefined,
       timestamp: new Date().toISOString()
     });
   }
@@ -834,10 +1104,15 @@ router.post(
       });
       
     } catch (error) {
-      console.error('🔧 [AUTH] Change password error:', error);
+      console.error('🔧 [AUTH] Change password error:', {
+        name: error.name,
+        message: error.message,
+        stack: error.stack
+      });
       res.status(500).json({
         success: false,
         message: 'Failed to change password',
+        error: !IS_PRODUCTION ? error.message : undefined,
         timestamp: new Date().toISOString()
       });
     }

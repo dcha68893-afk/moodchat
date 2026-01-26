@@ -11,22 +11,13 @@ module.exports = (sequelize, DataTypes) => {
       userId: {
         type: DataTypes.INTEGER,
         allowNull: false,
-        references: {
-          model: 'Users',
-          key: 'id',
-        },
-        onUpdate: 'CASCADE',
-        onDelete: 'CASCADE',
+        // REMOVED: references and foreign key constraints
+        // Let associations handle relationships
       },
       chatId: {
         type: DataTypes.INTEGER,
         allowNull: false,
-        references: {
-          model: 'Chats',
-          key: 'id',
-        },
-        onUpdate: 'CASCADE',
-        onDelete: 'CASCADE',
+        // No references - Chats model doesn't exist
       },
       role: {
         type: DataTypes.ENUM('admin', 'member'),
@@ -59,25 +50,8 @@ module.exports = (sequelize, DataTypes) => {
       timestamps: true,
       underscored: false,
       freezeTableName: true,
-      indexes: [
-        {
-          unique: true,
-          fields: ['userId', 'chatId'],
-          name: 'unique_user_chat',
-        },
-        {
-          fields: ['userId'],
-        },
-        {
-          fields: ['chatId'],
-        },
-        {
-          fields: ['role'],
-        },
-        {
-          fields: ['joinedAt'],
-        },
-      ],
+      // REMOVED ALL INDEXES - Let database keep existing indexes
+      indexes: [], // Empty array prevents Sequelize from creating indexes
       hooks: {
         beforeCreate: (participant) => {
           if (!participant.joinedAt) {
@@ -94,17 +68,8 @@ module.exports = (sequelize, DataTypes) => {
       ChatParticipant.belongsTo(models.Users, {
         foreignKey: 'userId',
         as: 'user',
-        onDelete: 'CASCADE',
-        onUpdate: 'CASCADE',
-      });
-    }
-
-    if (models.Chats) {
-      ChatParticipant.belongsTo(models.Chats, {
-        foreignKey: 'chatId',
-        as: 'chat',
-        onDelete: 'CASCADE',
-        onUpdate: 'CASCADE',
+        constraints: false,  // CRITICAL: Disable constraint creation
+        // No onDelete/onUpdate - let database handle it
       });
     }
   };
@@ -184,19 +149,8 @@ module.exports = (sequelize, DataTypes) => {
       where.role = options.role;
     }
 
-    const include = [];
-
-    if (options.includeChat) {
-      include.push({
-        model: this.sequelize.models.Chats,
-        as: 'chat',
-        attributes: ['id', 'name', 'type', 'avatar', 'lastMessageAt'],
-      });
-    }
-
     return await this.findAll({
       where,
-      include: include.length > 0 ? include : undefined,
       order: [['joinedAt', 'DESC']],
       limit: options.limit || 100,
       offset: options.offset || 0,
@@ -328,14 +282,10 @@ module.exports = (sequelize, DataTypes) => {
   };
 
   ChatParticipant.cleanupOrphanedParticipants = async function () {
-    // Find participants where either user or chat no longer exists
     const query = `
       DELETE FROM chat_participants cp
       WHERE NOT EXISTS (
         SELECT 1 FROM Users u WHERE u.id = cp.user_id
-      )
-      OR NOT EXISTS (
-        SELECT 1 FROM Chats c WHERE c.id = cp.chat_id
       )
     `;
 

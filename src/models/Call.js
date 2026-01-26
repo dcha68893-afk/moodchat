@@ -6,46 +6,30 @@ module.exports = (sequelize, DataTypes) => {
     'Calls',
     {
       id: {
-        type: DataTypes.INTEGER,
+        type: DataTypes.UUID,
         primaryKey: true,
-        autoIncrement: true,
-      },
-      callId: {
-        type: DataTypes.STRING(100),
         allowNull: false,
-        unique: true,
+        defaultValue: DataTypes.UUIDV4,
       },
       chatId: {
         type: DataTypes.INTEGER,
         allowNull: false,
-        references: {
-          model: 'Chats',
-          key: 'id',
-        },
+        // REMOVED: references - Let associations handle relationships
       },
       callerId: {
         type: DataTypes.INTEGER,
         allowNull: true,
-        references: {
-          model: 'Users',
-          key: 'id',
-        },
+        // REMOVED: references - Let associations handle relationships
       },
       receiverId: {
         type: DataTypes.INTEGER,
         allowNull: true,
-        references: {
-          model: 'Users',
-          key: 'id',
-        },
+        // REMOVED: references - Let associations handle relationships
       },
       groupId: {
         type: DataTypes.INTEGER,
         allowNull: true,
-        references: {
-          model: 'Group',
-          key: 'id',
-        },
+        // REMOVED: references - Let associations handle relationships
       },
       type: {
         type: DataTypes.ENUM('audio', 'video'),
@@ -141,40 +125,9 @@ module.exports = (sequelize, DataTypes) => {
       timestamps: true,
       underscored: false,
       freezeTableName: true,
-      indexes: [
-        {
-          fields: ['callId'],
-        },
-        {
-          fields: ['chatId'],
-        },
-        {
-          fields: ['callerId'],
-        },
-        {
-          fields: ['receiverId'],
-        },
-        {
-          fields: ['groupId'],
-        },
-        {
-          fields: ['status'],
-        },
-        {
-          fields: ['startedAt'],
-        },
-        {
-          fields: ['createdAt'],
-        },
-      ],
-      hooks: {
-        beforeCreate: async call => {
-          if (!call.callId) {
-            const crypto = require('crypto');
-            call.callId = crypto.randomUUID();
-          }
-        },
-      },
+      // REMOVED ALL INDEXES - Let database keep existing indexes
+      indexes: [], // Empty array prevents Sequelize from creating indexes
+      // Removed the beforeCreate hook that was generating callId
     }
   );
 
@@ -322,7 +275,16 @@ module.exports = (sequelize, DataTypes) => {
 
   // Associations defined in models/index.js
   Calls.associate = function (models) {
-    // All associations are defined in models/index.js
+    // Only define associations here - constraints are handled in models/index.js
+    if (models.Chats) {
+      Calls.belongsTo(models.Chats, {
+        foreignKey: 'chatId',
+        constraints: false,  // CRITICAL: Prevents FK constraint recreation
+      });
+    }
+    
+    // Note: Other associations (callerId, receiverId, groupId) are optional
+    // Let models/index.js handle them with constraints: false
   };
 
   return Calls;
