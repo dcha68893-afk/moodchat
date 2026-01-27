@@ -12,6 +12,34 @@ const { authenticate } = require('../middleware/auth');
 const { apiRateLimiter } = require('../middleware/rateLimiter');
 const { User, Status } = require('../models');
 
+// Public health endpoint - NO AUTHENTICATION REQUIRED
+router.get('/api/status', (req, res) => {
+  try {
+    // Fixed, predictable JSON response that will never change
+    const response = {
+      ok: true,
+      status: 'online',
+      service: 'MoodChat API',
+      timestamp: new Date().toISOString(),
+      version: '1.0.0'
+    };
+    
+    // Always return 200 OK if server is running
+    res.status(200).json(response);
+  } catch (error) {
+    // Even if there's an unexpected error, still return 200 with error status
+    // This ensures frontend health checks never fail due to this endpoint
+    res.status(200).json({
+      ok: false,
+      status: 'error',
+      service: 'MoodChat API',
+      timestamp: new Date().toISOString(),
+      error: 'Server error'
+    });
+  }
+});
+
+// Apply authentication to all other routes EXCEPT the health endpoint
 router.use(authenticate);
 
 console.log('✅ Status routes initialized');
