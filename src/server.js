@@ -257,13 +257,6 @@ async function initializeDatabase() {
   return true;
 }
 
-// ========== STATIC FILES - ONLY in development ==========
-if (!IS_PRODUCTION) {
-  app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
-  app.use('/assets', express.static(path.join(__dirname, 'public/assets')));
-  app.use(express.static(path.join(__dirname, 'public')));
-}
-
 // ========== AUTHENTICATION MIDDLEWARE ==========
 function authenticateToken(req, res, next) {
   const authHeader = req.headers['authorization'];
@@ -293,8 +286,98 @@ function authenticateToken(req, res, next) {
   });
 }
 
-// ========== IMMEDIATE ROUTE MOUNTING - FIX FOR 404 ERROR ==========
-console.log('\n📡 MOUNTING AUTH ROUTES IMMEDIATELY...');
+// ========== PUBLIC ROUTES (MOUNT BEFORE AUTH) ==========
+console.log('\n📡 MOUNTING PUBLIC ROUTES...');
+
+// Health endpoints (must be public)
+app.get('/health', (req, res) => {
+  res.setHeader('Cache-Control', 'no-cache');
+  res.json({ 
+    success: true,
+    status: 'OK',
+    environment: NODE_ENV,
+    timestamp: new Date().toISOString(),
+    uptime: Math.floor(process.uptime()),
+    cors: 'enabled',
+    corsOrigin: CORS_ORIGIN,
+    corsCredentials: CORS_CREDENTIALS,
+    database: dbConnected ? 'connected' : 'disconnected',
+    databaseInitialized: databaseInitialized,
+    serverStatus: 'running',
+    fallbackMode: 'DISABLED',
+    databaseProvider: process.env.DATABASE_URL ? 'Render PostgreSQL' : 'Local PostgreSQL',
+    tableManagement: 'Safe: No auto-modification (force=false, alter=false)',
+    renderCompatibility: 'Optimized for Render PostgreSQL',
+    schemaUpdates: 'Disabled (alter=false)',
+    allModelsIncluded: 'Yes (auto-loaded from models folder)',
+    authStorage: 'Database Only',
+    sequelizeInstance: 'Shared globally via app.locals',
+    mountedRoutes: mountedRoutes
+  });
+});
+
+app.get('/api/health', (req, res) => {
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.status(200).json({
+    status: 'ok',
+    uptime: Math.floor(process.uptime()),
+    timestamp: new Date().toISOString(),
+    environment: NODE_ENV,
+    database: dbConnected ? 'connected' : 'disconnected',
+    databaseInitialized: databaseInitialized,
+    serverStatus: 'running',
+    fallbackMode: 'DISABLED',
+    service: 'moodchat-backend',
+    version: '1.0.0',
+    tableManagement: 'Safe: sequelize.sync with force=false, alter=false',
+    schemaUpdates: 'Disabled - respect existing schema',
+    allModelsIncluded: 'Yes (auto-loaded)',
+    authStorage: 'Database Only',
+    sequelizeInstance: 'Shared globally',
+    cors: {
+      origin: CORS_ORIGIN,
+      credentials: CORS_CREDENTIALS,
+      allowedOrigins: UNIQUE_ALLOWED_ORIGINS
+    },
+    routes: {
+      mounted: mountedRoutes
+    }
+  });
+});
+
+app.get('/api/status', (req, res) => {
+  res.json({
+    success: true,
+    message: 'Backend API running',
+    timestamp: new Date().toISOString(),
+    environment: NODE_ENV,
+    version: '1.0.0',
+    server: 'MoodChat Backend',
+    database: dbConnected ? 'connected' : 'disconnected',
+    databaseInitialized: databaseInitialized,
+    serverStatus: 'running',
+    fallbackMode: 'DISABLED',
+    origin: req.headers.origin || 'not specified',
+    mountedRoutes: mountedRoutes.length > 0 ? mountedRoutes : 'No routes mounted from routes directory',
+    tableManagement: 'Safe: sequelize.sync with force=false, alter=false',
+    renderCompatibility: 'Optimized for Render PostgreSQL',
+    renderMode: IS_RENDER ? 'Running on Render' : 'Not on Render',
+    schemaUpdates: 'Disabled - respect existing schema',
+    allModelsIncluded: 'Yes (auto-loaded from models folder)',
+    authStorage: 'Database Only',
+    sequelizeInstance: 'Shared globally via app.locals',
+    cors: {
+      allowedOrigins: UNIQUE_ALLOWED_ORIGINS,
+      credentials: CORS_CREDENTIALS
+    }
+  });
+});
+
+mountedRoutes.push('/health', '/api/health', '/api/status');
+console.log('✅ Public routes mounted');
+
+// ========== AUTH ROUTES (PUBLIC - NO AUTH REQUIRED) ==========
+console.log('\n📡 MOUNTING AUTH ROUTES...');
 
 // Import and mount auth router immediately
 try {
@@ -475,7 +558,7 @@ try {
       }
     });
     
-    // GET /api/auth/me
+    // GET /api/auth/me (PROTECTED - requires auth)
     basicAuthRouter.get('/me', authenticateToken, async (req, res) => {
       try {
         // DATABASE ONLY - NO FALLBACK
@@ -798,8 +881,8 @@ try {
   console.log('✅ Created emergency auth endpoints (database-only)');
 }
 
-// ========== MOUNT FRIENDS AND GROUP ROUTES ==========
-console.log('\n📡 MOUNTING FRIENDS AND GROUP ROUTES...');
+// ========== PROTECTED ROUTES (REQUIRE AUTH) ==========
+console.log('\n📡 MOUNTING PROTECTED ROUTES...');
 
 // Mount friends routes
 try {
@@ -909,94 +992,178 @@ try {
   console.error('❌ Failed to mount group router:', error.message);
 }
 
-console.log('✅ Route mounting completed');
-console.log(`📋 Mounted routes: ${mountedRoutes.length}`);
-mountedRoutes.forEach(route => console.log(`   • ${route}`));
+// ========== MOUNT ADDITIONAL ROUTERS (NEWLY ADDED) ==========
+console.log('\n📡 MOUNTING ADDITIONAL ROUTERS...');
 
-// ========== HEALTH ENDPOINTS ==========
-app.get('/health', (req, res) => {
-  res.setHeader('Cache-Control', 'no-cache');
-  res.json({ 
-    success: true,
-    status: 'OK',
-    environment: NODE_ENV,
-    timestamp: new Date().toISOString(),
-    uptime: Math.floor(process.uptime()),
-    cors: 'enabled',
-    corsOrigin: CORS_ORIGIN,
-    corsCredentials: CORS_CREDENTIALS,
-    database: dbConnected ? 'connected' : 'disconnected',
-    databaseInitialized: databaseInitialized,
-    serverStatus: 'running',
-    fallbackMode: 'DISABLED',
-    databaseProvider: process.env.DATABASE_URL ? 'Render PostgreSQL' : 'Local PostgreSQL',
-    tableManagement: 'Safe: No auto-modification (force=false, alter=false)',
-    renderCompatibility: 'Optimized for Render PostgreSQL',
-    schemaUpdates: 'Disabled (alter=false)',
-    allModelsIncluded: 'Yes (auto-loaded from models folder)',
-    authStorage: 'Database Only',
-    sequelizeInstance: 'Shared globally via app.locals',
-    mountedRoutes: mountedRoutes
-  });
-});
+// Mount users router if it exists
+try {
+  const usersRouterPath = path.join(__dirname, 'routes', 'users.js');
+  if (fs.existsSync(usersRouterPath)) {
+    console.log('✅ Users router file found:', usersRouterPath);
+    const usersRouter = require('./routes/users.js');
+    app.use('/api/users', authenticateToken, usersRouter); // << ADDED ROUTE MOUNT
+    mountedRoutes.push('/api/users/*');
+    console.log('✅ Users router mounted successfully at /api/users');
+  } else {
+    console.log('⚠️  Users router file not found:', usersRouterPath);
+  }
+} catch (error) {
+  console.error('❌ Failed to mount users router:', error.message);
+}
 
-app.get('/api/health', (req, res) => {
-  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-  res.status(200).json({
-    status: 'ok',
-    uptime: Math.floor(process.uptime()),
-    timestamp: new Date().toISOString(),
-    environment: NODE_ENV,
-    database: dbConnected ? 'connected' : 'disconnected',
-    databaseInitialized: databaseInitialized,
-    serverStatus: 'running',
-    fallbackMode: 'DISABLED',
-    service: 'moodchat-backend',
-    version: '1.0.0',
-    tableManagement: 'Safe: sequelize.sync with force=false, alter=false',
-    schemaUpdates: 'Disabled - respect existing schema',
-    allModelsIncluded: 'Yes (auto-loaded)',
-    authStorage: 'Database Only',
-    sequelizeInstance: 'Shared globally',
-    cors: {
-      origin: CORS_ORIGIN,
-      credentials: CORS_CREDENTIALS,
-      allowedOrigins: UNIQUE_ALLOWED_ORIGINS
-    },
-    routes: {
-      mounted: mountedRoutes
-    }
-  });
-});
+// Mount messages router if it exists
+try {
+  const messagesRouterPath = path.join(__dirname, 'routes', 'messages.js');
+  if (fs.existsSync(messagesRouterPath)) {
+    console.log('✅ Messages router file found:', messagesRouterPath);
+    const messagesRouter = require('./routes/messages.js');
+    app.use('/api/messages', authenticateToken, messagesRouter); // << ADDED ROUTE MOUNT
+    mountedRoutes.push('/api/messages/*');
+    console.log('✅ Messages router mounted successfully at /api/messages');
+  } else {
+    console.log('⚠️  Messages router file not found:', messagesRouterPath);
+  }
+} catch (error) {
+  console.error('❌ Failed to mount messages router:', error.message);
+}
 
-app.get('/api/status', (req, res) => {
-  res.json({
-    success: true,
-    message: 'Backend API running',
-    timestamp: new Date().toISOString(),
-    environment: NODE_ENV,
-    version: '1.0.0',
-    server: 'MoodChat Backend',
-    database: dbConnected ? 'connected' : 'disconnected',
-    databaseInitialized: databaseInitialized,
-    serverStatus: 'running',
-    fallbackMode: 'DISABLED',
-    origin: req.headers.origin || 'not specified',
-    mountedRoutes: mountedRoutes.length > 0 ? mountedRoutes : 'No routes mounted from routes directory',
-    tableManagement: 'Safe: sequelize.sync with force=false, alter=false',
-    renderCompatibility: 'Optimized for Render PostgreSQL',
-    renderMode: IS_RENDER ? 'Running on Render' : 'Not on Render',
-    schemaUpdates: 'Disabled - respect existing schema',
-    allModelsIncluded: 'Yes (auto-loaded from models folder)',
-    authStorage: 'Database Only',
-    sequelizeInstance: 'Shared globally via app.locals',
-    cors: {
-      allowedOrigins: UNIQUE_ALLOWED_ORIGINS,
-      credentials: CORS_CREDENTIALS
-    }
-  });
-});
+// Mount chats router if it exists
+try {
+  const chatsRouterPath = path.join(__dirname, 'routes', 'chats.js');
+  if (fs.existsSync(chatsRouterPath)) {
+    console.log('✅ Chats router file found:', chatsRouterPath);
+    const chatsRouter = require('./routes/chats.js');
+    app.use('/api/chats', authenticateToken, chatsRouter); // << ADDED ROUTE MOUNT
+    mountedRoutes.push('/api/chats/*');
+    console.log('✅ Chats router mounted successfully at /api/chats');
+  } else {
+    console.log('⚠️  Chats router file not found:', chatsRouterPath);
+  }
+} catch (error) {
+  console.error('❌ Failed to mount chats router:', error.message);
+}
 
+// Mount media router if it exists
+try {
+  const mediaRouterPath = path.join(__dirname, 'routes', 'media.js');
+  if (fs.existsSync(mediaRouterPath)) {
+    console.log('✅ Media router file found:', mediaRouterPath);
+    const mediaRouter = require('./routes/media.js');
+    app.use('/api/media', authenticateToken, mediaRouter); // << ADDED ROUTE MOUNT
+    mountedRoutes.push('/api/media/*');
+    console.log('✅ Media router mounted successfully at /api/media');
+  } else {
+    console.log('⚠️  Media router file not found:', mediaRouterPath);
+  }
+} catch (error) {
+  console.error('❌ Failed to mount media router:', error.message);
+}
+
+// Mount tools router if it exists
+try {
+  const toolsRouterPath = path.join(__dirname, 'routes', 'tools.js');
+  if (fs.existsSync(toolsRouterPath)) {
+    console.log('✅ Tools router file found:', toolsRouterPath);
+    const toolsRouter = require('./routes/tools.js');
+    app.use('/api/tools', authenticateToken, toolsRouter); // << ADDED ROUTE MOUNT
+    mountedRoutes.push('/api/tools/*');
+    console.log('✅ Tools router mounted successfully at /api/tools');
+  } else {
+    console.log('⚠️  Tools router file not found:', toolsRouterPath);
+  }
+} catch (error) {
+  console.error('❌ Failed to mount tools router:', error.message);
+}
+
+// Mount moods router if it exists
+try {
+  const moodsRouterPath = path.join(__dirname, 'routes', 'moods.js');
+  if (fs.existsSync(moodsRouterPath)) {
+    console.log('✅ Moods router file found:', moodsRouterPath);
+    const moodsRouter = require('./routes/moods.js');
+    app.use('/api/moods', authenticateToken, moodsRouter); // << ADDED ROUTE MOUNT
+    mountedRoutes.push('/api/moods/*');
+    console.log('✅ Moods router mounted successfully at /api/moods');
+  } else {
+    console.log('⚠️  Moods router file not found:', moodsRouterPath);
+  }
+} catch (error) {
+  console.error('❌ Failed to mount moods router:', error.message);
+}
+
+// Mount notes router if it exists
+try {
+  const notesRouterPath = path.join(__dirname, 'routes', 'notes.js');
+  if (fs.existsSync(notesRouterPath)) {
+    console.log('✅ Notes router file found:', notesRouterPath);
+    const notesRouter = require('./routes/notes.js');
+    app.use('/api/notes', authenticateToken, notesRouter); // << ADDED ROUTE MOUNT
+    mountedRoutes.push('/api/notes/*');
+    console.log('✅ Notes router mounted successfully at /api/notes');
+  } else {
+    console.log('⚠️  Notes router file not found:', notesRouterPath);
+  }
+} catch (error) {
+  console.error('❌ Failed to mount notes router:', error.message);
+}
+
+// Mount profiles router if it exists
+try {
+  const profilesRouterPath = path.join(__dirname, 'routes', 'profiles.js');
+  if (fs.existsSync(profilesRouterPath)) {
+    console.log('✅ Profiles router file found:', profilesRouterPath);
+    const profilesRouter = require('./routes/profiles.js');
+    app.use('/api/profiles', authenticateToken, profilesRouter); // << ADDED ROUTE MOUNT
+    mountedRoutes.push('/api/profiles/*');
+    console.log('✅ Profiles router mounted successfully at /api/profiles');
+  } else {
+    console.log('⚠️  Profiles router file not found:', profilesRouterPath);
+  }
+} catch (error) {
+  console.error('❌ Failed to mount profiles router:', error.message);
+}
+
+// Mount notifications router if it exists
+try {
+  const notificationsRouterPath = path.join(__dirname, 'routes', 'notifications.js');
+  if (fs.existsSync(notificationsRouterPath)) {
+    console.log('✅ Notifications router file found:', notificationsRouterPath);
+    const notificationsRouter = require('./routes/notifications.js');
+    app.use('/api/notifications', authenticateToken, notificationsRouter); // << ADDED ROUTE MOUNT
+    mountedRoutes.push('/api/notifications/*');
+    console.log('✅ Notifications router mounted successfully at /api/notifications');
+  } else {
+    console.log('⚠️  Notifications router file not found:', notificationsRouterPath);
+  }
+} catch (error) {
+  console.error('❌ Failed to mount notifications router:', error.message);
+}
+
+// Mount search router if it exists
+try {
+  const searchRouterPath = path.join(__dirname, 'routes', 'search.js');
+  if (fs.existsSync(searchRouterPath)) {
+    console.log('✅ Search router file found:', searchRouterPath);
+    const searchRouter = require('./routes/search.js');
+    app.use('/api/search', authenticateToken, searchRouter); // << ADDED ROUTE MOUNT
+    mountedRoutes.push('/api/search/*');
+    console.log('✅ Search router mounted successfully at /api/search');
+  } else {
+    console.log('⚠️  Search router file not found:', searchRouterPath);
+  }
+} catch (error) {
+  console.error('❌ Failed to mount search router:', error.message);
+}
+
+// ========== STATIC FILES - ONLY in development ==========
+if (!IS_PRODUCTION) {
+  app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+  app.use('/assets', express.static(path.join(__dirname, 'public/assets')));
+  app.use(express.static(path.join(__dirname, 'public')));
+}
+
+// ========== ADDITIONAL ROUTES ==========
+// Debug endpoint
 app.get('/api/debug', (req, res) => {
   if (!IS_PRODUCTION) {
     res.json({
@@ -1094,7 +1261,7 @@ app.get('/api/chat/rooms', authenticateToken, async (req, res) => {
   }
 });
 
-// ========== ADDITIONAL ROUTES ==========
+// Stats endpoint
 app.get('/api/stats', authenticateToken, async (req, res) => {
   try {
     const userCount = models.Users ? await models.Users.count() : 0;
@@ -1126,6 +1293,7 @@ app.get('/api/stats', authenticateToken, async (req, res) => {
   }
 });
 
+// Test JSON endpoint
 app.post('/api/test-json', (req, res) => {
   res.json({
     success: true,
