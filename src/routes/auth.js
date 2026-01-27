@@ -284,12 +284,17 @@ router.post(
         });
       }
 
-      // 12. Return success response
+      // 12. Return success response with CLIENT-SIDE INSTRUCTIONS
       return res.status(201).json({
         success: true,
         message: 'User registered successfully',
         userId: user.id,
         token,
+        clientInstructions: {
+          localStorageKeys: ['moodchat_token', 'accessToken'],
+          globalVariables: ['window.accessToken', 'window.currentUser'],
+          nextSteps: 'Call /auth/me endpoint to fetch user data'
+        },
         user: {
           id: user.id,
           email: user.email,
@@ -563,6 +568,11 @@ router.post(
         success: true,
         message: 'Login successful',
         token: token,
+        clientInstructions: {
+          localStorageKeys: ['moodchat_token', 'accessToken'],
+          globalVariables: ['window.accessToken', 'window.currentUser'],
+          nextSteps: 'Call /auth/me endpoint to fetch user data'
+        },
         user: userResponse,
         timestamp: new Date().toISOString(),
         storage: 'PostgreSQL (Permanent)'
@@ -839,6 +849,10 @@ router.post(
       res.status(200).json({
         success: true,
         message: 'Token refreshed successfully',
+        clientInstructions: {
+          localStorageKeys: ['moodchat_token', 'accessToken'],
+          globalVariables: ['window.accessToken', 'window.currentUser']
+        },
         data: {
           accessToken: newAccessToken,
           refreshToken: newRefreshToken,
@@ -899,6 +913,11 @@ router.post(
       res.status(200).json({
         success: true,
         message: 'Logged out successfully',
+        clientInstructions: {
+          localStorageKeys: ['moodchat_token', 'accessToken'],
+          globalVariables: ['window.accessToken', 'window.currentUser'],
+          clearInstructions: 'Clear all localStorage entries and global variables'
+        },
         timestamp: new Date().toISOString()
       });
     } catch (error) {
@@ -1118,6 +1137,616 @@ router.post(
     }
   })
 );
+
+// ===== CLIENT-SIDE AUTH HELPER ENDPOINT =====
+router.get('/client-setup', (req, res) => {
+  res.status(200).json({
+    success: true,
+    message: 'Client-side authentication setup guide',
+    instructions: {
+      localStorageSetup: `
+        // After login/register success
+        function handleAuthSuccess(token, userData) {
+          // Save tokens to localStorage
+          localStorage.setItem('moodchat_token', token);
+          localStorage.setItem('accessToken', token);
+          
+          // Set global variables
+          window.accessToken = token;
+          window.currentUser = userData;
+          
+          // Configure API headers
+          if (window.axios) {
+            window.axios.defaults.headers.common['Authorization'] = 'Bearer ' + token;
+          }
+          
+          console.log('✅ Token stored in localStorage');
+          console.log('✅ User data loaded globally');
+        }
+      `,
+      tokenPersistence: `
+        // On page load - check for existing tokens
+        function initializeAuth() {
+          const token = localStorage.getItem('moodchat_token');
+          
+          if (token) {
+            window.accessToken = token;
+            
+            // Set up API headers
+            if (window.axios) {
+              window.axios.defaults.headers.common['Authorization'] = 'Bearer ' + token;
+            }
+            
+            // Fetch current user
+            fetchCurrentUser();
+          }
+        }
+      `,
+      apiHelperFunctions: `
+        // Authentication helper functions
+        const authHelpers = {
+          login: async (identifier, password) => {
+            try {
+              const response = await fetch('/api/auth/login', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ identifier, password })
+              });
+              
+              const data = await response.json();
+              
+              if (data.success && data.token) {
+                // Save token and user data
+                localStorage.setItem('moodchat_token', data.token);
+                localStorage.setItem('accessToken', data.token);
+                window.accessToken = data.token;
+                
+                // Fetch and set current user
+                await fetchCurrentUser();
+                
+                return { success: true, data };
+              }
+              
+              return { success: false, error: data.message };
+            } catch (error) {
+              return { success: false, error: error.message };
+            }
+          },
+          
+          register: async (userDetails) => {
+            try {
+              const response = await fetch('/api/auth/register', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(userDetails)
+              });
+              
+              const data = await response.json();
+              
+              if (data.success && data.token) {
+                // Save token and user data
+                localStorage.setItem('moodchat_token', data.token);
+                localStorage.setItem('accessToken', data.token);
+                window.accessToken = data.token;
+                
+                // Fetch and set current user
+                await fetchCurrentUser();
+                
+                return { success: true, data };
+              }
+              
+              return { success: false, error: data.message };
+            } catch (error) {
+              return { success: false, error: error.message };
+            }
+          },
+          
+          logout: async () => {
+            try {
+              const response = await fetch('/api/auth/logout', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Authorization': 'Bearer ' + window.accessToken
+                }
+              });
+              
+              // Clear local storage regardless of server response
+              localStorage.removeItem('moodchat_token');
+              localStorage.removeItem('accessToken');
+              delete window.accessToken;
+              delete window.currentUser;
+              
+              // Clear API headers
+              if (window.axios) {
+                delete window.axios.defaults.headers.common['Authorization'];
+              }
+              
+              return { success: true };
+            } catch (error) {
+              // Still clear local data even if server call fails
+              localStorage.removeItem('moodchat_token');
+              localStorage.removeItem('accessToken');
+              delete window.accessToken;
+              delete window.currentUser;
+              
+              return { success: false, error: error.message };
+            }
+          },
+          
+          getCurrentUser: async () => {
+            if (window.currentUser) {
+              return { success: true, user: window.currentUser };
+            }
+            
+            const token = localStorage.getItem('moodchat_token');
+            if (!token) {
+              return { success: false, error: 'No token found' };
+            }
+            
+            try {
+              const response = await fetch('/api/auth/me', {
+                headers: {
+                  'Authorization': 'Bearer ' + token
+                }
+              });
+              
+              const data = await response.json();
+              
+              if (data.success && data.data.user) {
+                window.currentUser = data.data.user;
+                return { success: true, user: data.data.user };
+              }
+              
+              return { success: false, error: data.message };
+            } catch (error) {
+              return { success: false, error: error.message };
+            }
+          }
+        };
+        
+        // Auto-attach token to fetch requests
+        const originalFetch = window.fetch;
+        window.fetch = function(resource, options = {}) {
+          const token = localStorage.getItem('moodchat_token');
+          
+          if (token && resource && typeof resource === 'string') {
+            if (resource.startsWith('/api/') || resource.includes('localhost')) {
+              options.headers = {
+                ...options.headers,
+                'Authorization': 'Bearer ' + token
+              };
+            }
+          }
+          
+          return originalFetch.call(this, resource, options);
+        };
+        
+        // Retry logic for /auth/me
+        async function fetchCurrentUserWithRetry(retries = 3, delay = 1000) {
+          for (let i = 0; i < retries; i++) {
+            try {
+              const result = await authHelpers.getCurrentUser();
+              if (result.success) {
+                console.log('✅ User data loaded successfully');
+                return result;
+              }
+              
+              if (i < retries - 1) {
+                console.log('🔄 Retrying user data fetch...');
+                await new Promise(resolve => setTimeout(resolve, delay * (i + 1)));
+              }
+            } catch (error) {
+              if (i < retries - 1) {
+                console.log('🔄 Retrying after error...');
+                await new Promise(resolve => setTimeout(resolve, delay * (i + 1)));
+              }
+            }
+          }
+          
+          console.error('❌ Failed to fetch user data after retries');
+          return { success: false, error: 'Failed to load user data' };
+        }
+      `
+    },
+    timestamp: new Date().toISOString()
+  });
+});
+
+// ===== CLIENT-SIDE AUTH SCRIPT ENDPOINT =====
+router.get('/client-auth.js', (req, res) => {
+  res.setHeader('Content-Type', 'application/javascript');
+  res.send(`
+    // Client-side Authentication Manager for MoodChat
+    // This script should be included in your HTML pages
+    
+    class AuthManager {
+      constructor() {
+        this.tokenKey = 'moodchat_token';
+        this.accessTokenKey = 'accessToken';
+        this.currentUser = null;
+        this.isInitialized = false;
+        
+        this.initialize();
+      }
+      
+      initialize() {
+        if (this.isInitialized) return;
+        
+        // Check for existing token
+        const token = localStorage.getItem(this.tokenKey);
+        
+        if (token) {
+          this.setGlobalToken(token);
+          this.loadCurrentUser();
+        }
+        
+        this.setupRequestInterceptors();
+        this.isInitialized = true;
+        
+        console.log('🔧 AuthManager initialized');
+      }
+      
+      setGlobalToken(token) {
+        // Store in localStorage
+        localStorage.setItem(this.tokenKey, token);
+        localStorage.setItem(this.accessTokenKey, token);
+        
+        // Set global variable
+        window.accessToken = token;
+        
+        // Configure axios if available
+        if (window.axios) {
+          window.axios.defaults.headers.common['Authorization'] = 'Bearer ' + token;
+        }
+        
+        console.log('✅ Token stored globally');
+      }
+      
+      async loadCurrentUser() {
+        if (window.currentUser) {
+          this.currentUser = window.currentUser;
+          return { success: true, user: this.currentUser };
+        }
+        
+        const token = localStorage.getItem(this.tokenKey);
+        if (!token) {
+          return { success: false, error: 'No token found' };
+        }
+        
+        // Retry logic
+        const maxRetries = 3;
+        
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+          try {
+            const response = await fetch('/api/auth/me', {
+              headers: {
+                'Authorization': 'Bearer ' + token
+              }
+            });
+            
+            if (response.status === 401) {
+              // Token is invalid, clear it
+              this.clearAuth();
+              return { success: false, error: 'Invalid token' };
+            }
+            
+            const data = await response.json();
+            
+            if (data.success && data.data && data.data.user) {
+              this.currentUser = data.data.user;
+              window.currentUser = data.data.user;
+              
+              console.log('✅ User data loaded successfully');
+              return { success: true, user: this.currentUser };
+            } else {
+              console.warn('⚠️ Failed to load user data:', data.message);
+              
+              if (attempt < maxRetries) {
+                console.log('🔄 Retrying... attempt', attempt + 1);
+                await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+                continue;
+              }
+              
+              return { success: false, error: data.message || 'Failed to load user' };
+            }
+          } catch (error) {
+            console.error('❌ Error loading user:', error.message);
+            
+            if (attempt < maxRetries) {
+              console.log('🔄 Retrying... attempt', attempt + 1);
+              await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+              continue;
+            }
+            
+            return { success: false, error: error.message };
+          }
+        }
+        
+        return { success: false, error: 'Max retries reached' };
+      }
+      
+      setupRequestInterceptors() {
+        // Intercept fetch requests
+        const originalFetch = window.fetch;
+        window.fetch = async function(resource, options = {}) {
+          const token = localStorage.getItem('moodchat_token');
+          
+          if (token && resource && typeof resource === 'string') {
+            // Only add token to API requests
+            if (resource.startsWith('/api/') || resource.includes('localhost') || 
+                resource.startsWith(window.location.origin + '/api')) {
+              options.headers = {
+                ...options.headers,
+                'Authorization': 'Bearer ' + token
+              };
+            }
+          }
+          
+          const response = await originalFetch.call(this, resource, options);
+          
+          // Handle token expiration
+          if (response.status === 403 || response.status === 401) {
+            try {
+              const data = await response.clone().json();
+              if (data.message && data.message.includes('token')) {
+                console.warn('⚠️ Token expired or invalid');
+                // Don't clear here - let the calling code handle it
+              }
+            } catch (e) {
+              // Not JSON response
+            }
+          }
+          
+          return response;
+        };
+        
+        console.log('🔧 Request interceptors configured');
+      }
+      
+      async login(identifier, password) {
+        try {
+          console.log('🔧 Attempting login...');
+          
+          const response = await fetch('/api/auth/login', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ identifier, password })
+          });
+          
+          const data = await response.json();
+          
+          if (!data.success) {
+            console.error('❌ Login failed:', data.message);
+            return {
+              success: false,
+              message: data.message,
+              errors: data.errors
+            };
+          }
+          
+          if (data.token) {
+            console.log('✅ Login successful, token received');
+            
+            // Store token
+            this.setGlobalToken(data.token);
+            
+            // Load user data with retry
+            const userResult = await this.loadCurrentUser();
+            
+            if (userResult.success) {
+              console.log('✅ User data loaded after login');
+              
+              // Dispatch login event
+              this.dispatchAuthEvent('login', {
+                user: userResult.user,
+                token: data.token
+              });
+              
+              return {
+                success: true,
+                token: data.token,
+                user: userResult.user,
+                message: data.message
+              };
+            } else {
+              console.warn('⚠️ Login succeeded but user data loading failed');
+              return {
+                success: false,
+                message: 'Logged in but failed to load user data',
+                token: data.token
+              };
+            }
+          }
+          
+          return {
+            success: false,
+            message: 'No token received from server'
+          };
+          
+        } catch (error) {
+          console.error('❌ Login error:', error.message);
+          return {
+            success: false,
+            message: 'Login failed: ' + error.message
+          };
+        }
+      }
+      
+      async register(userDetails) {
+        try {
+          console.log('🔧 Attempting registration...');
+          
+          const response = await fetch('/api/auth/register', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(userDetails)
+          });
+          
+          const data = await response.json();
+          
+          if (!data.success) {
+            console.error('❌ Registration failed:', data.message);
+            return {
+              success: false,
+              message: data.message,
+              errors: data.errors
+            };
+          }
+          
+          if (data.token) {
+            console.log('✅ Registration successful, token received');
+            
+            // Store token
+            this.setGlobalToken(data.token);
+            
+            // Load user data with retry
+            const userResult = await this.loadCurrentUser();
+            
+            if (userResult.success) {
+              console.log('✅ User data loaded after registration');
+              
+              // Dispatch registration event
+              this.dispatchAuthEvent('register', {
+                user: userResult.user,
+                token: data.token
+              });
+              
+              return {
+                success: true,
+                token: data.token,
+                user: userResult.user,
+                message: data.message
+              };
+            } else {
+              console.warn('⚠️ Registration succeeded but user data loading failed');
+              return {
+                success: false,
+                message: 'Registered but failed to load user data',
+                token: data.token
+              };
+            }
+          }
+          
+          return {
+            success: false,
+            message: 'No token received from server'
+          };
+          
+        } catch (error) {
+          console.error('❌ Registration error:', error.message);
+          return {
+            success: false,
+            message: 'Registration failed: ' + error.message
+          };
+        }
+      }
+      
+      async logout() {
+        const token = localStorage.getItem(this.tokenKey);
+        
+        if (token) {
+          try {
+            // Try to call server logout endpoint
+            await fetch('/api/auth/logout', {
+              method: 'POST',
+              headers: {
+                'Authorization': 'Bearer ' + token
+              }
+            });
+          } catch (error) {
+            console.warn('⚠️ Server logout failed, but local data will be cleared');
+          }
+        }
+        
+        // Clear all local data regardless of server response
+        this.clearAuth();
+        
+        console.log('✅ Logout completed');
+        
+        // Dispatch logout event
+        this.dispatchAuthEvent('logout', {});
+        
+        return { success: true };
+      }
+      
+      clearAuth() {
+        // Clear localStorage
+        localStorage.removeItem(this.tokenKey);
+        localStorage.removeItem(this.accessTokenKey);
+        
+        // Clear global variables
+        delete window.accessToken;
+        delete window.currentUser;
+        this.currentUser = null;
+        
+        // Clear axios headers if available
+        if (window.axios) {
+          delete window.axios.defaults.headers.common['Authorization'];
+        }
+        
+        console.log('🔧 Auth data cleared');
+      }
+      
+      isAuthenticated() {
+        const token = localStorage.getItem(this.tokenKey);
+        return !!token && !!this.currentUser;
+      }
+      
+      getToken() {
+        return localStorage.getItem(this.tokenKey);
+      }
+      
+      getUser() {
+        return this.currentUser || window.currentUser;
+      }
+      
+      dispatchAuthEvent(type, detail) {
+        const event = new CustomEvent('auth:' + type, {
+          detail: detail,
+          bubbles: true
+        });
+        
+        window.dispatchEvent(event);
+      }
+      
+      // Helper for pages to wait for auth initialization
+      async waitForAuth() {
+        if (this.isAuthenticated()) {
+          return { success: true, user: this.getUser() };
+        }
+        
+        // Check if we have a token but no user
+        const token = this.getToken();
+        if (token) {
+          const result = await this.loadCurrentUser();
+          if (result.success) {
+            return { success: true, user: result.user };
+          }
+        }
+        
+        return { success: false, isAuthenticated: false };
+      }
+    }
+    
+    // Create global auth instance
+    window.AuthManager = new AuthManager();
+    
+    // Auto-initialize on page load
+    document.addEventListener('DOMContentLoaded', function() {
+      console.log('🔧 AuthManager auto-initialized');
+    });
+    
+    // Export for module systems
+    if (typeof module !== 'undefined' && module.exports) {
+      module.exports = window.AuthManager;
+    }
+  `);
+});
 
 // CRITICAL: Export the router ONLY
 module.exports = router;

@@ -135,7 +135,6 @@ module.exports = (sequelize, DataTypes) => {
         }
       ],
       hooks: {
-        // Auto-set expiration date based on token type if not provided
         beforeValidate: async (token) => {
           if (!token.expiresAt) {
             const expiresIn =
@@ -150,7 +149,6 @@ module.exports = (sequelize, DataTypes) => {
             token.expiresAt = new Date(Date.now() + expiresIn);
           }
         },
-        // Generate token if not provided
         beforeCreate: async (token) => {
           if (!token.token) {
             token.token = crypto.randomBytes(64).toString('hex');
@@ -162,7 +160,12 @@ module.exports = (sequelize, DataTypes) => {
 
   // ===== ASSOCIATIONS =====
   Token.associate = function(models) {
-    // All associations are defined in models/index.js
+    Token.belongsTo(models.Users, {
+      foreignKey: 'userId',
+      as: 'user',
+      onDelete: 'CASCADE',
+      onUpdate: 'CASCADE'
+    });
   };
 
   // ===== INSTANCE METHODS =====
@@ -205,6 +208,7 @@ module.exports = (sequelize, DataTypes) => {
       options.include = [
         {
           model: this.sequelize.models.Users,
+          as: 'user',
           attributes: ['id', 'username', 'email', 'isActive', 'isVerified'],
         },
       ];
@@ -231,6 +235,11 @@ module.exports = (sequelize, DataTypes) => {
 
     return await this.findAll({
       where: where,
+      include: [{
+        model: this.sequelize.models.Users,
+        as: 'user',
+        attributes: ['id', 'username', 'email', 'isActive', 'isVerified'],
+      }],
       order: [['createdAt', 'DESC']],
     });
   };
@@ -324,6 +333,127 @@ module.exports = (sequelize, DataTypes) => {
     }
     
     return token;
+  };
+
+  // ===== ADDITIONAL METHODS SPECIFIC FOR REFRESH TOKEN FUNCTIONALITY =====
+
+  Token.storeRefreshToken = async function (userId, refreshToken, options = {}) {
+    if (!userId || !refreshToken) {
+      throw new Error('User ID and refresh token are required');
+    }
+    
+    const { userAgent, ipAddress, deviceInfo } = options;
+    
+    return await this.create({
+      userId,
+      token: refreshToken,
+      tokenType: 'refresh',
+      userAgent,
+      ipAddress,
+      deviceInfo,
+      scope: ['refresh']
+    });
+  };
+
+  Token.validateRefreshToken = async function (refreshToken) {
+    if (!refreshToken) {
+      return null;
+    }
+    
+    const token = await this.findOne({
+      where: {
+        token: refreshToken,
+        tokenType: 'refresh',
+        isRevoked: false
+      },
+      include: [{
+        model: this.sequelize.models.Users,
+        as: 'user',
+        attributes: ['id', 'username', 'email', 'isActive', 'isVerified'],
+      }]
+    });
+    
+    if (!token || token.isExpired() || !token.user || !token.user.isActive) {
+      return null;
+    }
+    
+    return token;
+  };
+
+  Token.updateRefreshToken = async function (oldRefreshToken, newRefreshToken) {
+    if (!oldRefreshToken || !newRefreshToken) {
+      throw new Error('Both old and new refresh tokens are required');
+    }
+    
+    const transaction = await this.sequelize.transaction();
+    
+    try {
+      // Revoke old token
+      await this.update(
+        { isRevoked: true },
+        { where: { token: oldRefreshToken }, transaction }
+      );
+      
+      // Get the old token to copy its data
+      const oldToken = await this.findOne({
+        where: { token: oldRefreshToken },
+        transaction
+      });
+      
+      if (!oldToken) {
+        throw new Error('Old token not found');
+      }
+      
+      // Create new token with same properties
+      const newToken = await this.create({
+        userId: oldToken.userId,
+        token: newRefreshToken,
+        tokenType: 'refresh',
+        userAgent: oldToken.userAgent,
+        ipAddress: oldToken.ipAddress,
+        deviceInfo: oldToken.deviceInfo,
+        scope: oldToken.scope
+      }, { transaction });
+      
+      await transaction.commit();
+      return newToken;
+      
+    } catch (error) {
+      await transaction.rollback();
+      throw error;
+    }
+  };
+
+  Token.revokeRefreshToken = async function (refreshToken) {
+    if (!refreshToken) {
+      throw new Error('Refresh token is required');
+    }
+    
+    return await this.update(
+      { isRevoked: true },
+      { 
+        where: { 
+          token: refreshToken,
+          tokenType: 'refresh'
+        } 
+      }
+    );
+  };
+
+  Token.findRefreshTokenByUserId = async function (userId) {
+    if (!userId) {
+      throw new Error('User ID is required');
+    }
+    
+    return await this.findAll({
+      where: {
+        userId,
+        tokenType: 'refresh',
+        isRevoked: false,
+        expiresAt: { [this.sequelize.Sequelize.Op.gt]: new Date() }
+      },
+      order: [['createdAt', 'DESC']]
+    });
   };
 
   return Token;
