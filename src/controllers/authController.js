@@ -1,10 +1,11 @@
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const validator = require('validator');
-const { Users, Tokens } = require('../models'); // CHANGED: 'User' → 'Users', 'Token' → 'Tokens'
+// FIXED: Removed incorrect import, using models from app.locals
 const { Op } = require('sequelize');
 
-const JWT_SECRET = process.env.JWT_ACCESS_SECRET || process.env.JWT_SECRET || 'development-secret-key-change-in-production';
+// FIXED: Use JWT_SECRET consistently with your .env value
+const JWT_SECRET = process.env.JWT_SECRET || '3e78ab2d6cb698f95b3b8d510614058c';
 
 // In-memory store for login attempts (fallback)
 const loginAttemptsStore = new Map();
@@ -52,9 +53,10 @@ class AuthController {
 
       // Check if user already exists in database
       let existingUser = null;
-      if (req.app.locals.models && req.app.locals.models.Users) { // CHANGED: 'User' → 'Users'
+      if (req.app.locals.models && (req.app.locals.models.User || req.app.locals.models.Users)) {
         try {
-          existingUser = await req.app.locals.models.Users.findOne({ // CHANGED: 'User' → 'Users'
+          const UsersModel = req.app.locals.models.User || req.app.locals.models.Users;
+          existingUser = await UsersModel.findOne({
             where: {
               [Op.or]: [
                 { email: email.toLowerCase().trim() },
@@ -93,18 +95,19 @@ class AuthController {
       let user;
       
       // Try to save to database first
-      if (req.app.locals.models && req.app.locals.models.Users) { // CHANGED: 'User' → 'Users'
+      if (req.app.locals.models && (req.app.locals.models.User || req.app.locals.models.Users)) {
         try {
-          user = await req.app.locals.models.Users.create({ // CHANGED: 'User' → 'Users'
+          const UsersModel = req.app.locals.models.User || req.app.locals.models.Users;
+          user = await UsersModel.create({
             email: email.toLowerCase().trim(),
             username: username.trim(),
             password: hashedPassword,
             avatar: avatar,
             firstName: firstName || null,
             lastName: lastName || null,
-            status: 'online', // ADDED: Missing field
-            isActive: true,   // ADDED: Missing field
-            isVerified: false // ADDED: Missing field
+            status: 'online',
+            isActive: true,
+            isVerified: false
           });
           console.log("✅ User saved to database");
         } catch (dbError) {
@@ -123,9 +126,9 @@ class AuthController {
           avatar: avatar,
           firstName: firstName || null,
           lastName: lastName || null,
-          status: 'online', // ADDED
-          isActive: true,   // ADDED
-          isVerified: false, // ADDED
+          status: 'online',
+          isActive: true,
+          isVerified: false,
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString()
         };
@@ -141,13 +144,13 @@ class AuthController {
       // Generate JWT token using the assumed generateToken function
       const token = this.generateToken(user);
 
-      // Save token to database if available
-      if (req.app.locals.models && req.app.locals.models.Tokens) { // CHANGED: 'Token' → 'Tokens'
+      // Save token to database if available - FIXED: Use Token (singular)
+      if (req.app.locals.models && req.app.locals.models.Token) {
         try {
-          await req.app.locals.models.Tokens.create({ // CHANGED: 'Token' → 'Tokens'
+          await req.app.locals.models.Token.create({
             userId: user.id,
             token: token,
-            type: 'access', // CHANGED: 'tokenType' → 'type'
+            tokenType: 'access',
             expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000)
           });
         } catch (tokenError) {
@@ -170,9 +173,9 @@ class AuthController {
           avatar: user.avatar,
           firstName: user.firstName,
           lastName: user.lastName,
-          status: user.status, // ADDED
-          isActive: user.isActive, // ADDED
-          isVerified: user.isVerified, // ADDED
+          status: user.status,
+          isActive: user.isActive,
+          isVerified: user.isVerified,
           createdAt: user.createdAt || new Date().toISOString()
         },
         timestamp: new Date().toISOString()
@@ -236,14 +239,15 @@ class AuthController {
       let user = null;
       
       // Try database first
-      if (req.app.locals.models && req.app.locals.models.Users) { // CHANGED: 'User' → 'Users'
+      if (req.app.locals.models && (req.app.locals.models.User || req.app.locals.models.Users)) {
         try {
+          const UsersModel = req.app.locals.models.User || req.app.locals.models.Users;
           if (validator.isEmail(identifier)) {
-            user = await req.app.locals.models.Users.findOne({ // CHANGED: 'User' → 'Users'
+            user = await UsersModel.findOne({
               where: { email: identifier.toLowerCase().trim() } 
             });
           } else {
-            user = await req.app.locals.models.Users.findOne({ // CHANGED: 'User' → 'Users'
+            user = await UsersModel.findOne({
               where: { username: identifier.trim() } 
             });
           }
@@ -301,13 +305,13 @@ class AuthController {
       // Generate JWT token using the assumed generateToken function
       const token = this.generateToken(user);
 
-      // Save token to database if available
-      if (req.app.locals.models && req.app.locals.models.Tokens) { // CHANGED: 'Token' → 'Tokens'
+      // Save token to database if available - FIXED: Use Token (singular)
+      if (req.app.locals.models && req.app.locals.models.Token) {
         try {
-          await req.app.locals.models.Tokens.create({ // CHANGED: 'Token' → 'Tokens'
+          await req.app.locals.models.Token.create({
             userId: user.id,
             token: token,
-            type: 'access', // CHANGED: 'tokenType' → 'type'
+            tokenType: 'access',
             expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000)
           });
         } catch (tokenError) {
@@ -330,9 +334,9 @@ class AuthController {
           avatar: user.avatar,
           firstName: user.firstName,
           lastName: user.lastName,
-          status: user.status, // ADDED
-          isActive: user.isActive, // ADDED
-          isVerified: user.isVerified, // ADDED
+          status: user.status,
+          isActive: user.isActive,
+          isVerified: user.isVerified,
           createdAt: user.createdAt || new Date().toISOString()
         },
         timestamp: new Date().toISOString()
@@ -349,10 +353,11 @@ class AuthController {
     return jwt.sign(
       { 
         userId: user.id, 
+        id: user.id, // Add id for compatibility
         email: user.email, 
         username: user.username 
       },
-      JWT_SECRET,
+      JWT_SECRET, // Using JWT_SECRET consistently
       { expiresIn: '24h' }
     );
   }
@@ -361,9 +366,9 @@ class AuthController {
     try {
       const token = req.headers.authorization?.split(' ')[1];
       
-      if (token && req.app.locals.models && req.app.locals.models.Tokens) { // CHANGED: 'Token' → 'Tokens'
-        // Revoke token in database
-        await req.app.locals.models.Tokens.update( // CHANGED: 'Token' → 'Tokens'
+      if (token && req.app.locals.models && req.app.locals.models.Token) {
+        // Revoke token in database - FIXED: Use Token (singular)
+        await req.app.locals.models.Token.update(
           { isRevoked: true },
           { where: { token: token } }
         );
@@ -393,8 +398,8 @@ class AuthController {
         });
       }
       
-      // Check if Token model is available
-      if (!req.app.locals.models || !req.app.locals.models.Tokens) { // CHANGED: 'Token' → 'Tokens'
+      // Check if Token model is available - FIXED: Use Token (singular)
+      if (!req.app.locals.models || !req.app.locals.models.Token) {
         return res.status(501).json({
           success: false,
           message: 'Token refresh not implemented',
@@ -403,15 +408,15 @@ class AuthController {
       }
       
       // Find and validate refresh token
-      const tokenRecord = await req.app.locals.models.Tokens.findOne({ // CHANGED: 'Token' → 'Tokens'
+      const tokenRecord = await req.app.locals.models.Token.findOne({
         where: {
           token: refreshToken,
-          type: 'refresh', // CHANGED: 'tokenType' → 'type'
+          tokenType: 'refresh',
           isRevoked: false,
           expiresAt: { [Op.gt]: new Date() }
         },
         include: [{ 
-          model: req.app.locals.models.Users, // CHANGED: 'User' → 'Users'
+          model: req.app.locals.models.User || req.app.locals.models.Users,
           attributes: ['id', 'email', 'username'] 
         }]
       });
@@ -427,11 +432,11 @@ class AuthController {
       // Generate new access token
       const accessToken = this.generateToken(tokenRecord.User);
       
-      // Create new token record
-      await req.app.locals.models.Tokens.create({ // CHANGED: 'Token' → 'Tokens'
+      // Create new token record - FIXED: Use Token (singular)
+      await req.app.locals.models.Token.create({
         userId: tokenRecord.User.id,
         token: accessToken,
-        type: 'access', // CHANGED: 'tokenType' → 'type'
+        tokenType: 'access',
         expiresAt: new Date(Date.now() + 15 * 60 * 1000) // 15 minutes
       });
       
@@ -466,9 +471,10 @@ class AuthController {
       let user = null;
       
       // Try database first
-      if (req.app.locals.models && req.app.locals.models.Users) { // CHANGED: 'User' → 'Users'
+      if (req.app.locals.models && (req.app.locals.models.User || req.app.locals.models.Users)) {
         try {
-          user = await req.app.locals.models.Users.findByPk(req.user.userId, { // CHANGED: 'User' → 'Users'
+          const UsersModel = req.app.locals.models.User || req.app.locals.models.Users;
+          user = await UsersModel.findByPk(req.user.userId, {
             attributes: ['id', 'email', 'username', 'avatar', 'firstName', 'lastName', 'status', 'isActive', 'isVerified', 'lastSeen', 'createdAt']
           });
         } catch (dbError) {

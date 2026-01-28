@@ -1,4 +1,3 @@
-
 const { Op } = require('sequelize');
 const bcrypt = require('bcryptjs');
 
@@ -10,10 +9,11 @@ class UserController {
       
       let users = [];
       
-      // Try database first
-      if (req.app.locals.dbConnected && req.app.locals.models && req.app.locals.models.User) {
+      // Try database first - FIXED: Use User (singular)
+      if (req.app.locals.dbConnected && req.app.locals.models && (req.app.locals.models.User || req.app.locals.models.Users)) {
         try {
-          users = await req.app.locals.models.User.findAll({
+          const UsersModel = req.app.locals.models.User || req.app.locals.models.Users;
+          users = await UsersModel.findAll({
             where: {
               id: { [Op.ne]: currentUserId }, // Exclude current user
               isActive: true
@@ -42,7 +42,6 @@ class UserController {
             status: user.status || 'offline',
             lastSeen: user.lastSeen,
             createdAt: user.createdAt
-            // Note: password is NOT included
           }));
       }
 
@@ -83,11 +82,12 @@ class UserController {
       
       let user = null;
       
-      // Try database first
-      if (req.app.locals.dbConnected && req.app.locals.models && req.app.locals.models.User) {
+      // Try database first - FIXED: Use User (singular)
+      if (req.app.locals.dbConnected && req.app.locals.models && (req.app.locals.models.User || req.app.locals.models.Users)) {
         try {
-          user = await req.app.locals.models.User.findByPk(userId, {
-            attributes: { exclude: ['password'] } // Explicitly exclude password
+          const UsersModel = req.app.locals.models.User || req.app.locals.models.Users;
+          user = await UsersModel.findByPk(userId, {
+            attributes: { exclude: ['password'] }
           });
         } catch (dbError) {
           console.error('Database fetch error:', dbError);
@@ -100,7 +100,7 @@ class UserController {
         const foundUser = req.app.locals.users.find(u => u.id === userId);
         if (foundUser) {
           user = { ...foundUser };
-          delete user.password; // Remove password from in-memory user
+          delete user.password;
         }
       }
 
@@ -133,7 +133,6 @@ class UserController {
             settings: user.settings || {},
             createdAt: user.createdAt,
             updatedAt: user.updatedAt
-            // Note: password is NOT included
           }
         },
         timestamp: new Date().toISOString()
@@ -176,18 +175,19 @@ class UserController {
 
       let updatedUser = null;
       
-      // Try database update
-      if (req.app.locals.dbConnected && req.app.locals.models && req.app.locals.models.User) {
+      // Try database update - FIXED: Use User (singular)
+      if (req.app.locals.dbConnected && req.app.locals.models && (req.app.locals.models.User || req.app.locals.models.Users)) {
         try {
-          const [affectedRows] = await req.app.locals.models.User.update(updateData, {
+          const UsersModel = req.app.locals.models.User || req.app.locals.models.Users;
+          const [affectedRows] = await UsersModel.update(updateData, {
             where: { id: userId },
             returning: true,
             individualHooks: true
           });
           
           if (affectedRows > 0) {
-            updatedUser = await req.app.locals.models.User.findByPk(userId, {
-              attributes: { exclude: ['password'] } // Explicitly exclude password
+            updatedUser = await UsersModel.findByPk(userId, {
+              attributes: { exclude: ['password'] }
             });
           }
         } catch (dbError) {
@@ -214,7 +214,7 @@ class UserController {
             updatedAt: new Date().toISOString()
           };
           updatedUser = { ...req.app.locals.users[userIndex] };
-          delete updatedUser.password; // Remove password from response
+          delete updatedUser.password;
         }
       }
 
@@ -247,7 +247,6 @@ class UserController {
             settings: updatedUser.settings,
             createdAt: updatedUser.createdAt,
             updatedAt: updatedUser.updatedAt
-            // Note: password is NOT included
           }
         },
         timestamp: new Date().toISOString()
@@ -307,17 +306,18 @@ class UserController {
 
       let updatedUser = null;
       
-      // Try database update
-      if (req.app.locals.dbConnected && req.app.locals.models && req.app.locals.models.User) {
+      // Try database update - FIXED: Use User (singular)
+      if (req.app.locals.dbConnected && req.app.locals.models && (req.app.locals.models.User || req.app.locals.models.Users)) {
         try {
-          const [affectedRows] = await req.app.locals.models.User.update(
+          const UsersModel = req.app.locals.models.User || req.app.locals.models.Users;
+          const [affectedRows] = await UsersModel.update(
             { avatar: avatarUrl },
             { where: { id: userId } }
           );
           
           if (affectedRows > 0) {
-            updatedUser = await req.app.locals.models.User.findByPk(userId, {
-              attributes: ['id', 'username', 'avatar'] // Password not requested
+            updatedUser = await UsersModel.findByPk(userId, {
+              attributes: ['id', 'username', 'avatar']
             });
           }
         } catch (dbError) {
@@ -336,7 +336,6 @@ class UserController {
             id: req.app.locals.users[userIndex].id,
             username: req.app.locals.users[userIndex].username,
             avatar: req.app.locals.users[userIndex].avatar
-            // Note: password is NOT included
           };
         }
       }
@@ -372,17 +371,18 @@ class UserController {
 
       let updatedUser = null;
       
-      // Try database update
-      if (req.app.locals.dbConnected && req.app.locals.models && req.app.locals.models.User) {
+      // Try database update - FIXED: Use User (singular)
+      if (req.app.locals.dbConnected && req.app.locals.models && (req.app.locals.models.User || req.app.locals.models.Users)) {
         try {
-          const [affectedRows] = await req.app.locals.models.User.update(
+          const UsersModel = req.app.locals.models.User || req.app.locals.models.Users;
+          const [affectedRows] = await UsersModel.update(
             { avatar: defaultAvatar },
             { where: { id: userId } }
           );
           
           if (affectedRows > 0) {
-            updatedUser = await req.app.locals.models.User.findByPk(userId, {
-              attributes: ['id', 'username', 'avatar'] // Password not requested
+            updatedUser = await UsersModel.findByPk(userId, {
+              attributes: ['id', 'username', 'avatar']
             });
           }
         } catch (dbError) {
@@ -401,7 +401,6 @@ class UserController {
             id: req.app.locals.users[userIndex].id,
             username: req.app.locals.users[userIndex].username,
             avatar: req.app.locals.users[userIndex].avatar
-            // Note: password is NOT included
           };
         }
       }
@@ -471,10 +470,11 @@ class UserController {
 
       let user = null;
       
-      // Get user first to verify current password
-      if (req.app.locals.dbConnected && req.app.locals.models && req.app.locals.models.User) {
+      // Get user first to verify current password - FIXED: Use User (singular)
+      if (req.app.locals.dbConnected && req.app.locals.models && (req.app.locals.models.User || req.app.locals.models.Users)) {
         try {
-          user = await req.app.locals.models.User.findByPk(userId);
+          const UsersModel = req.app.locals.models.User || req.app.locals.models.Users;
+          user = await UsersModel.findByPk(userId);
         } catch (dbError) {
           console.error('Database fetch error:', dbError);
           return next(dbError);
@@ -513,10 +513,11 @@ class UserController {
       // Hash new password
       const hashedPassword = await bcrypt.hash(newPassword, 10);
 
-      // Update password
-      if (req.app.locals.dbConnected && req.app.locals.models && req.app.locals.models.User) {
+      // Update password - FIXED: Use User (singular)
+      if (req.app.locals.dbConnected && req.app.locals.models && (req.app.locals.models.User || req.app.locals.models.Users)) {
         try {
-          await req.app.locals.models.User.update(
+          const UsersModel = req.app.locals.models.User || req.app.locals.models.Users;
+          await UsersModel.update(
             { password: hashedPassword },
             { where: { id: userId } }
           );
@@ -571,10 +572,11 @@ class UserController {
 
       let users = [];
       
-      // Try database search
-      if (req.app.locals.dbConnected && req.app.locals.models && req.app.locals.models.User) {
+      // Try database search - FIXED: Use User (singular)
+      if (req.app.locals.dbConnected && req.app.locals.models && (req.app.locals.models.User || req.app.locals.models.Users)) {
         try {
-          users = await req.app.locals.models.User.findAll({
+          const UsersModel = req.app.locals.models.User || req.app.locals.models.Users;
+          users = await UsersModel.findAll({
             where: {
               [Op.or]: [
                 { username: { [Op.iLike]: `%${query}%` } },
@@ -587,7 +589,6 @@ class UserController {
             },
             limit: parseInt(limit),
             attributes: ['id', 'username', 'firstName', 'lastName', 'avatar', 'email', 'status', 'lastSeen', 'createdAt'],
-            // Note: password is NOT included in attributes
           });
         } catch (dbError) {
           console.error('Database search error:', dbError);
@@ -618,7 +619,6 @@ class UserController {
             status: user.status || 'offline',
             lastSeen: user.lastSeen,
             createdAt: user.createdAt
-            // Note: password is NOT included
           }));
       }
 
@@ -655,11 +655,12 @@ class UserController {
 
       let user = null;
       
-      // Try database first
-      if (req.app.locals.dbConnected && req.app.locals.models && req.app.locals.models.User) {
+      // Try database first - FIXED: Use User (singular)
+      if (req.app.locals.dbConnected && req.app.locals.models && (req.app.locals.models.User || req.app.locals.models.Users)) {
         try {
-          user = await req.app.locals.models.User.findByPk(userId, {
-            attributes: ['id', 'status', 'lastSeen'] // Password not requested
+          const UsersModel = req.app.locals.models.User || req.app.locals.models.Users;
+          user = await UsersModel.findByPk(userId, {
+            attributes: ['id', 'status', 'lastSeen']
           });
         } catch (dbError) {
           console.error('Database fetch error:', dbError);
@@ -733,16 +734,17 @@ class UserController {
 
       let updatedUser = null;
       
-      // Try database update
-      if (req.app.locals.dbConnected && req.app.locals.models && req.app.locals.models.User) {
+      // Try database update - FIXED: Use User (singular)
+      if (req.app.locals.dbConnected && req.app.locals.models && (req.app.locals.models.User || req.app.locals.models.Users)) {
         try {
-          const [affectedRows] = await req.app.locals.models.User.update(updateData, {
+          const UsersModel = req.app.locals.models.User || req.app.locals.models.Users;
+          const [affectedRows] = await UsersModel.update(updateData, {
             where: { id: userId }
           });
           
           if (affectedRows > 0) {
-            updatedUser = await req.app.locals.models.User.findByPk(userId, {
-              attributes: ['id', 'status', 'lastSeen'] // Password not requested
+            updatedUser = await UsersModel.findByPk(userId, {
+              attributes: ['id', 'status', 'lastSeen']
             });
           }
         } catch (dbError) {
@@ -796,11 +798,12 @@ class UserController {
 
       let user = null;
       
-      // Try database first
-      if (req.app.locals.dbConnected && req.app.locals.models && req.app.locals.models.User) {
+      // Try database first - FIXED: Use User (singular)
+      if (req.app.locals.dbConnected && req.app.locals.models && (req.app.locals.models.User || req.app.locals.models.Users)) {
         try {
-          user = await req.app.locals.models.User.findByPk(userId, {
-            attributes: ['id', 'settings'] // Password not requested
+          const UsersModel = req.app.locals.models.User || req.app.locals.models.Users;
+          user = await UsersModel.findByPk(userId, {
+            attributes: ['id', 'settings']
           });
         } catch (dbError) {
           console.error('Database fetch error:', dbError);
@@ -892,17 +895,18 @@ class UserController {
 
       let updatedUser = null;
       
-      // Try database update
-      if (req.app.locals.dbConnected && req.app.locals.models && req.app.locals.models.User) {
+      // Try database update - FIXED: Use User (singular)
+      if (req.app.locals.dbConnected && req.app.locals.models && (req.app.locals.models.User || req.app.locals.models.Users)) {
         try {
-          const [affectedRows] = await req.app.locals.models.User.update(
+          const UsersModel = req.app.locals.models.User || req.app.locals.models.Users;
+          const [affectedRows] = await UsersModel.update(
             { settings: settings },
             { where: { id: userId } }
           );
           
           if (affectedRows > 0) {
-            updatedUser = await req.app.locals.models.User.findByPk(userId, {
-              attributes: ['id', 'settings'] // Password not requested
+            updatedUser = await UsersModel.findByPk(userId, {
+              attributes: ['id', 'settings']
             });
           }
         } catch (dbError) {
@@ -968,10 +972,11 @@ class UserController {
         });
       }
 
-      // Try database deactivation
-      if (req.app.locals.dbConnected && req.app.locals.models && req.app.locals.models.User) {
+      // Try database deactivation - FIXED: Use User (singular)
+      if (req.app.locals.dbConnected && req.app.locals.models && (req.app.locals.models.User || req.app.locals.models.Users)) {
         try {
-          await req.app.locals.models.User.update(
+          const UsersModel = req.app.locals.models.User || req.app.locals.models.Users;
+          await UsersModel.update(
             { 
               isActive: false,
               status: 'offline'
@@ -1023,12 +1028,12 @@ class UserController {
 
       let user = null;
       
-      // Try database first
-      if (req.app.locals.dbConnected && req.app.locals.models && req.app.locals.models.User) {
+      // Try database first - FIXED: Use User (singular)
+      if (req.app.locals.dbConnected && req.app.locals.models && (req.app.locals.models.User || req.app.locals.models.Users)) {
         try {
-          user = await req.app.locals.models.User.findByPk(userId, {
+          const UsersModel = req.app.locals.models.User || req.app.locals.models.Users;
+          user = await UsersModel.findByPk(userId, {
             attributes: ['id', 'username', 'email', 'avatar', 'firstName', 'lastName', 'bio', 'status', 'lastSeen', 'isActive', 'createdAt']
-            // Note: password is NOT included
           });
         } catch (dbError) {
           console.error('Database lookup error:', dbError);
@@ -1052,7 +1057,6 @@ class UserController {
             lastSeen: foundUser.lastSeen,
             isActive: foundUser.isActive !== false,
             createdAt: foundUser.createdAt
-            // Note: password is NOT included
           };
         }
       }
@@ -1153,12 +1157,12 @@ class UserController {
       
       let user = null;
       
-      // Try database first
-      if (req.app.locals.dbConnected && req.app.locals.models && req.app.locals.models.User) {
+      // Try database first - FIXED: Use User (singular)
+      if (req.app.locals.dbConnected && req.app.locals.models && (req.app.locals.models.User || req.app.locals.models.Users)) {
         try {
-          user = await req.app.locals.models.User.findByPk(req.user.userId, {
+          const UsersModel = req.app.locals.models.User || req.app.locals.models.Users;
+          user = await UsersModel.findByPk(req.user.userId, {
             attributes: ['id', 'email', 'username', 'avatar', 'firstName', 'lastName', 'createdAt']
-            // Note: password is NOT included
           });
         } catch (dbError) {
           console.error('Database lookup error:', dbError);
@@ -1178,7 +1182,6 @@ class UserController {
             firstName: foundUser.firstName,
             lastName: foundUser.lastName,
             createdAt: foundUser.createdAt
-            // Note: password is NOT included
           };
         }
       }

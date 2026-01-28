@@ -5,16 +5,20 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const asyncHandler = require('express-async-handler');
 
+// Import the shared auth middleware
+const { authenticateToken } = require('../middleware/auth');
+
 // Create router
 const router = express.Router();
 
 console.log('✅ Auth ROUTER initialized (NOT a Sequelize model)');
 console.log('✅ POST /login route available at /api/auth/login');
 console.log('✅ POST /register route available at /api/auth/register');
+console.log('✅ GET /me route available at /api/auth/me');
 
-// JWT configuration from .env
-const JWT_SECRET = process.env.JWT_ACCESS_SECRET || process.env.JWT_SECRET || 'default-secret';
-const JWT_ACCESS_EXPIRES_IN = process.env.JWT_ACCESS_EXPIRES_IN || '15m';
+// JWT configuration from .env - FIXED: Use JWT_SECRET consistently
+const JWT_SECRET = process.env.JWT_SECRET || '3e78ab2d6cb698f95b3b8d510614058c'; // Using your .env value
+const JWT_ACCESS_EXPIRES_IN = process.env.JWT_ACCESS_EXPIRES_IN || '24h'; // Changed from 15m to 24h
 const JWT_REFRESH_EXPIRES_IN = process.env.JWT_REFRESH_EXPIRES_IN || '7d';
 
 // Password validation from .env
@@ -54,11 +58,6 @@ function validatePassword(password) {
   
   return errors;
 }
-
-// ===== IMPORT EXISTING AUTH MIDDLEWARE =====
-// This middleware should already exist in your application
-// It's the same middleware used by all other protected routes
-const authenticateToken = require('../middleware/auth');
 
 // ===== HEALTH ENDPOINT =====
 router.get('/health', (req, res) => {
@@ -152,13 +151,13 @@ router.post(
         });
       }
 
-      // 5. Get Users model (using Users, not User)
-      const UsersModel = models.Users;
+      // 5. Get Users model (using Users, not User) - FIXED: Use User (singular) as per your models
+      const UsersModel = models.User || models.Users; // Try both for compatibility
       if (!UsersModel) {
-        console.error('🔧 [AUTH] Users model not found in models:', Object.keys(models));
+        console.error('🔧 [AUTH] User model not found in models:', Object.keys(models));
         return res.status(500).json({
           success: false,
-          message: 'Users model not available',
+          message: 'User model not available',
           timestamp: new Date().toISOString(),
           database: {
             connected: false,
@@ -262,17 +261,18 @@ router.post(
 
       console.log('🔧 [AUTH] User created successfully:', user.id);
 
-      // 11. Generate JWT token
+      // 11. Generate JWT token - FIXED: Use JWT_SECRET consistently
       let token;
       try {
         token = jwt.sign(
           { 
             userId: user.id, 
+            id: user.id, // Add id for compatibility
             email: user.email, 
             username: user.username,
             role: user.role
           },
-          JWT_SECRET,
+          JWT_SECRET, // Using JWT_SECRET from .env
           { expiresIn: '24h' }
         );
       } catch (jwtError) {
@@ -420,13 +420,13 @@ router.post(
         });
       }
 
-      // 3. Get Users model
-      const UsersModel = models.Users;
+      // 3. Get Users model - FIXED: Use User (singular) as per your models
+      const UsersModel = models.User || models.Users; // Try both for compatibility
       if (!UsersModel) {
-        console.error('🔧 [AUTH] Users model not found for login');
+        console.error('🔧 [AUTH] User model not found for login');
         return res.status(500).json({
           success: false,
-          message: 'Users model not available',
+          message: 'User model not available',
           timestamp: new Date().toISOString(),
           database: {
             connected: false,
@@ -508,18 +508,19 @@ router.post(
         });
       }
 
-      // 8. Generate JWT token
+      // 8. Generate JWT token - FIXED: Use JWT_SECRET consistently
       let token;
       try {
         console.log('🔧 [AUTH] Generating JWT token for user:', user.id);
         token = jwt.sign(
           { 
             userId: user.id, 
+            id: user.id, // Add id for compatibility
             email: user.email, 
             username: user.username,
             role: user.role
           },
-          JWT_SECRET,
+          JWT_SECRET, // Using JWT_SECRET from .env
           { expiresIn: '24h' }
         );
       } catch (jwtError) {
@@ -640,78 +641,173 @@ router.post(
   })
 );
 
-// ===== PROFILE ENDPOINT =====
-// Now using the SAME authentication middleware as all other protected routes
+// ===== /auth/me ENDPOINT - NOW USING SHARED AUTH MIDDLEWARE =====
 router.get(
   '/me',
-  authenticateToken, // Using imported existing auth middleware
+  authenticateToken, // Use the shared auth middleware instead of inline verification
   asyncHandler(async (req, res) => {
     try {
-      // The middleware has already validated the JWT and set req.user
-      // No need to manually check token - just use req.user injected by middleware
+      console.log('🔧 [AUTH /me] Endpoint called - USING SHARED MIDDLEWARE');
       
-      // Check if models are available
-      const models = req.app.locals.models;
-      if (!models || !models.Users) {
-        return res.status(500).json({
-          success: false,
-          message: 'Users model not available',
-          timestamp: new Date().toISOString()
-        });
-      }
-
-      const UsersModel = models.Users;
-
-      // Fetch user using the userId from the JWT token payload (req.user.userId)
-      // This is the same pattern used by all other protected routes
-      const user = await UsersModel.findByPk(req.user.userId, {
-        attributes: { 
-          exclude: [
-            'password',
-            'resetPasswordToken',
-            'resetPasswordExpires',
-            'emailVerificationToken',
-            'verificationToken'
-          ] 
-        }
-      });
-
-      if (!user) {
+      // User is already authenticated by middleware, req.user is set
+      if (!req.user || !req.user.userId) {
+        console.error('🔧 [AUTH /me] Middleware did not set req.user properly');
         return res.status(401).json({
           success: false,
-          message: 'User not found',
-          timestamp: new Date().toISOString()
+          message: 'Authentication failed',
+          timestamp: new Date().toISOString(),
+          authValidated: false
+        });
+      }
+      
+      const userId = req.user.userId;
+      console.log('🔧 [AUTH /me] User authenticated via middleware, userId:', userId);
+      
+      // Check if database models are available
+      const models = req.app.locals.models;
+      if (!models || (!models.User && !models.Users)) {
+        console.error('🔧 [AUTH /me] Models not available');
+        
+        // Even if database is down, return success with token data
+        console.log('🔧 [AUTH /me] ⚠️ Database not available, but token is valid - returning token data');
+        return res.status(200).json({
+          success: true,
+          message: 'User authenticated (database temporarily unavailable)',
+          user: {
+            id: userId,
+            email: req.user.email || null,
+            username: req.user.username || null,
+            role: req.user.role || 'user',
+            tokenIssuedAt: req.user.tokenIssuedAt || null,
+            tokenExpiresAt: req.user.tokenExpiresAt || null
+          },
+          timestamp: new Date().toISOString(),
+          authValidated: true,
+          tokenValid: true,
+          databaseAvailable: false
         });
       }
 
-      // Return simplified response with user data
-      res.status(200).json({
+      const UsersModel = models.User || models.Users;
+      
+      console.log('🔧 [AUTH /me] Fetching user from database:', userId);
+      
+      // Fetch user from database
+      let user;
+      try {
+        user = await UsersModel.findByPk(userId, {
+          attributes: { 
+            exclude: [
+              'password',
+              'resetPasswordToken',
+              'resetPasswordExpires',
+              'emailVerificationToken',
+              'verificationToken'
+            ] 
+          }
+        });
+      } catch (dbError) {
+        console.error('🔧 [AUTH /me] Database query error:', dbError.message);
+        // Even if database query fails, token is still valid
+        console.log('🔧 [AUTH /me] ⚠️ Database query failed, but token is valid - returning token data');
+        return res.status(200).json({
+          success: true,
+          message: 'User authenticated (database query failed)',
+          user: {
+            id: userId,
+            email: req.user.email || null,
+            username: req.user.username || null,
+            role: req.user.role || 'user',
+            tokenIssuedAt: req.user.tokenIssuedAt || null,
+            tokenExpiresAt: req.user.tokenExpiresAt || null
+          },
+          timestamp: new Date().toISOString(),
+          authValidated: true,
+          tokenValid: true,
+          databaseError: !IS_PRODUCTION ? dbError.message : undefined
+        });
+      }
+
+      if (!user) {
+        console.warn('🔧 [AUTH /me] User not found in database:', userId);
+        // User not found in database but token is valid
+        // This might happen if user was deleted but token still exists
+        return res.status(404).json({
+          success: false,
+          message: 'User account not found',
+          timestamp: new Date().toISOString(),
+          authValidated: true, // Token IS valid, but user doesn't exist
+          tokenValid: true
+        });
+      }
+      
+      if (!user.isActive) {
+        console.warn('🔧 [AUTH /me] User account is inactive:', userId);
+        return res.status(403).json({
+          success: false,
+          message: 'Account is inactive',
+          timestamp: new Date().toISOString(),
+          authValidated: true, // Token IS valid
+          tokenValid: true
+        });
+      }
+      
+      console.log('🔧 [AUTH /me] ✅ User found, preparing response');
+      
+      // Prepare complete user response
+      const userResponse = {
+        id: user.id,
+        email: user.email,
+        username: user.username,
+        avatar: user.avatar,
+        firstName: user.firstName || '',
+        lastName: user.lastName || '',
+        displayName: user.displayName || user.username,
+        status: user.status || 'offline',
+        role: user.role || 'user',
+        isVerified: user.isVerified || false,
+        isActive: user.isActive || true,
+        lastSeen: user.lastSeen || null,
+        createdAt: user.createdAt,
+        updatedAt: user.updatedAt,
+        bio: user.bio || '',
+        location: user.location || '',
+        website: user.website || '',
+        birthdate: user.birthdate || null,
+        gender: user.gender || null,
+        // Add token metadata for client-side use
+        tokenIssuedAt: req.user.tokenIssuedAt || null,
+        tokenExpiresAt: req.user.tokenExpiresAt || null
+      };
+      
+      console.log('🔧 [AUTH /me] ✅ Successfully returning user data for:', user.email);
+      console.log('🔧 [AUTH /me] ✅ Auth validation: YES - Token is valid and user exists');
+
+      // Return SUCCESS response with authValidated: true
+      return res.status(200).json({
         success: true,
-        user: {
-          id: user.id,
-          email: user.email,
-          username: user.username,
-          avatar: user.avatar,
-          firstName: user.firstName,
-          lastName: user.lastName,
-          status: user.status,
-          role: user.role,
-          isVerified: user.isVerified,
-          isActive: user.isActive,
-          lastSeen: user.lastSeen,
-          createdAt: user.createdAt,
-          updatedAt: user.updatedAt
-        },
-        timestamp: new Date().toISOString()
-      });
-    } catch (error) {
-      console.error('🔧 [AUTH] Error fetching user profile:', {
-        name: error.name,
-        message: error.message,
-        stack: error.stack
+        message: 'User profile retrieved successfully',
+        user: userResponse,
+        timestamp: new Date().toISOString(),
+        authValidated: true, // THIS IS THE KEY FIELD - SET TO TRUE
+        tokenValid: true,
+        databaseAvailable: true,
+        tokenInfo: {
+          issuedAt: req.user.tokenIssuedAt || null,
+          expiresAt: req.user.tokenExpiresAt || null,
+          expiresIn: req.user.tokenExpiresAt ? Math.max(0, Math.floor(req.user.tokenExpiresAt.getTime() / 1000) - Math.floor(Date.now() / 1000)) : null
+        }
       });
       
-      // Handle database errors
+    } catch (error) {
+      console.error('🔧 [AUTH /me] 🚨 Unexpected error:', {
+        name: error.name,
+        message: error.message,
+        stack: error.stack,
+        path: req.path
+      });
+      
+      // Handle database connection errors
       if (error.name === 'SequelizeConnectionError' || 
           error.name === 'SequelizeDatabaseError' ||
           error.message.includes('timeout') ||
@@ -721,7 +817,12 @@ router.get(
           success: false,
           message: 'Database service temporarily unavailable',
           error: !IS_PRODUCTION ? error.message : undefined,
-          timestamp: new Date().toISOString()
+          timestamp: new Date().toISOString(),
+          authValidated: false,
+          database: {
+            connected: false,
+            initialized: false
+          }
         });
       }
       
@@ -731,26 +832,32 @@ router.get(
           success: false,
           message: 'Database operation failed',
           error: !IS_PRODUCTION ? error.message : undefined,
-          timestamp: new Date().toISOString()
+          timestamp: new Date().toISOString(),
+          authValidated: false
         });
       }
       
-      res.status(500).json({
+      // Handle other errors
+      return res.status(500).json({
         success: false,
         message: 'Failed to fetch user profile',
         error: !IS_PRODUCTION ? error.message : undefined,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        authValidated: false
       });
     }
   })
 );
 
-// ===== AUTHENTICATION MIDDLEWARE FOR ROUTER (KEPT FOR OTHER ROUTES) =====
+// ===== AUTHENTICATION MIDDLEWARE FOR ROUTER (KEPT FOR OTHER ROUTES IN THIS FILE) =====
 function authenticateTokenRouter(req, res, next) {
+  console.log('🔧 [Auth Router Middleware] Checking authentication for:', req.method, req.path);
+  
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
   
   if (!token) {
+    console.log('🔧 [Auth Router Middleware] No token provided');
     return res.status(401).json({ 
       success: false, 
       message: 'Access token required',
@@ -758,13 +865,32 @@ function authenticateTokenRouter(req, res, next) {
     });
   }
 
-  jwt.verify(token, JWT_SECRET, (err, user) => {
+  jwt.verify(token, JWT_SECRET, (err, decoded) => {
     if (err) {
-      console.error('🔧 [AUTH] JWT Verification Error:', {
+      console.error('🔧 [Auth Router Middleware] JWT Verification Error:', {
         name: err.name,
         message: err.message,
-        stack: err.stack
+        path: req.path
       });
+      
+      if (err.name === 'TokenExpiredError') {
+        return res.status(401).json({ 
+          success: false, 
+          message: 'Token expired',
+          error: !IS_PRODUCTION ? err.message : undefined,
+          timestamp: new Date().toISOString()
+        });
+      }
+      
+      if (err.name === 'JsonWebTokenError') {
+        return res.status(401).json({ 
+          success: false, 
+          message: 'Invalid token',
+          error: !IS_PRODUCTION ? err.message : undefined,
+          timestamp: new Date().toISOString()
+        });
+      }
+      
       return res.status(403).json({ 
         success: false, 
         message: 'Invalid or expired token',
@@ -772,7 +898,19 @@ function authenticateTokenRouter(req, res, next) {
         timestamp: new Date().toISOString()
       });
     }
-    req.user = user;
+    
+    // Ensure req.user is set with proper structure
+    req.user = {
+      userId: decoded.userId || decoded.id || decoded.sub,
+      id: decoded.userId || decoded.id || decoded.sub,
+      email: decoded.email || null,
+      username: decoded.username || null,
+      role: decoded.role || 'user',
+      tokenIssuedAt: decoded.iat ? new Date(decoded.iat * 1000) : null,
+      tokenExpiresAt: decoded.exp ? new Date(decoded.exp * 1000) : null
+    };
+    
+    console.log('🔧 [Auth Router Middleware] Authentication successful for user:', req.user.userId);
     next();
   });
 }
@@ -792,7 +930,7 @@ router.post(
         });
       }
 
-      // Check if models are available from app.locals
+      // Check if models are available from app.locals - FIXED: Use Token (singular)
       const models = req.app.locals.models;
       if (!models || !models.Token) {
         console.error('🔧 [AUTH] Token model not available for refresh');
@@ -857,9 +995,9 @@ router.post(
         });
       }
 
-      const decoded = jwt.verify(refreshToken, JWT_SECRET);
+      const decoded = jwt.verify(refreshToken, JWT_SECRET); // Using JWT_SECRET
       
-      const UsersModel = models.Users;
+      const UsersModel = models.User || models.Users; // FIXED: Use User (singular)
       const user = await UsersModel.findByPk(decoded.userId);
 
       if (!user) {
@@ -874,18 +1012,19 @@ router.post(
       const newAccessToken = jwt.sign(
         { 
           userId: user.id, 
+          id: user.id, // Add id for compatibility
           username: user.username, 
           email: user.email,
           role: user.role
         },
-        JWT_SECRET,
+        JWT_SECRET, // Using JWT_SECRET
         { expiresIn: JWT_ACCESS_EXPIRES_IN }
       );
 
       // Generate new refresh token
       const newRefreshToken = jwt.sign(
-        { userId: user.id },
-        JWT_SECRET,
+        { userId: user.id, id: user.id }, // Add id for compatibility
+        JWT_SECRET, // Using JWT_SECRET
         { expiresIn: JWT_REFRESH_EXPIRES_IN }
       );
 
@@ -940,7 +1079,7 @@ router.post(
     try {
       const { refreshToken } = req.cookies || req.body;
 
-      // Check if models are available from app.locals
+      // Check if models are available from app.locals - FIXED: Use Token (singular)
       const models = req.app.locals.models;
       if (refreshToken && models && models.Token) {
         // Revoke the refresh token
@@ -953,9 +1092,10 @@ router.post(
         }
       }
 
-      // Update user status
-      if (models && models.Users && req.user) {
-        const user = await models.Users.findByPk(req.user.userId);
+      // Update user status - FIXED: Use User (singular)
+      if (models && (models.User || models.Users) && req.user) {
+        const UsersModel = models.User || models.Users;
+        const user = await UsersModel.findByPk(req.user.userId);
         if (user) {
           await user.update({
             status: 'offline',
@@ -1001,8 +1141,9 @@ router.get('/test-db', asyncHandler(async (req, res) => {
       throw new Error('Models not available');
     }
     
-    // Test Users model
-    const userCount = await models.Users.count();
+    // Test Users model - FIXED: Use User (singular)
+    const UsersModel = models.User || models.Users;
+    const userCount = await UsersModel.count();
     
     // Test Messages model if exists
     let messageCount = 0;
@@ -1052,12 +1193,13 @@ router.post('/verify-token', asyncHandler(async (req, res) => {
     }
 
     try {
-      const decoded = jwt.verify(token, JWT_SECRET);
+      const decoded = jwt.verify(token, JWT_SECRET); // Using JWT_SECRET
       
       // Check if user still exists
       const models = req.app.locals.models;
-      if (models && models.Users) {
-        const user = await models.Users.findByPk(decoded.userId, {
+      if (models && (models.User || models.Users)) {
+        const UsersModel = models.User || models.Users;
+        const user = await UsersModel.findByPk(decoded.userId, {
           attributes: { exclude: ['password'] }
         });
         
@@ -1074,7 +1216,8 @@ router.post('/verify-token', asyncHandler(async (req, res) => {
           message: 'Token is valid',
           user: user,
           expiresIn: decoded.exp - Math.floor(Date.now() / 1000),
-          timestamp: new Date().toISOString()
+          timestamp: new Date().toISOString(),
+          authValidated: true // ADDED
         });
       }
       
@@ -1083,7 +1226,8 @@ router.post('/verify-token', asyncHandler(async (req, res) => {
         message: 'Token is valid',
         user: decoded,
         expiresIn: decoded.exp - Math.floor(Date.now() / 1000),
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        authValidated: true // ADDED
       });
       
     } catch (jwtError) {
@@ -1096,7 +1240,8 @@ router.post('/verify-token', asyncHandler(async (req, res) => {
         success: false,
         message: 'Invalid or expired token',
         error: !IS_PRODUCTION ? jwtError.message : undefined,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        authValidated: false // ADDED
       });
     }
   } catch (error) {
@@ -1109,7 +1254,8 @@ router.post('/verify-token', asyncHandler(async (req, res) => {
       success: false,
       message: 'Failed to verify token',
       error: !IS_PRODUCTION ? error.message : undefined,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      authValidated: false // ADDED
     });
   }
 }));
@@ -1139,15 +1285,15 @@ router.post(
       }
       
       const models = req.app.locals.models;
-      if (!models || !models.Users) {
+      if (!models || (!models.User && !models.Users)) {
         return res.status(500).json({
           success: false,
-          message: 'Users model not available',
+          message: 'User model not available',
           timestamp: new Date().toISOString()
         });
       }
       
-      const UsersModel = models.Users;
+      const UsersModel = models.User || models.Users;
       const user = await UsersModel.findByPk(req.user.userId);
       
       if (!user) {
@@ -1176,7 +1322,8 @@ router.post(
       res.status(200).json({
         success: true,
         message: 'Password changed successfully',
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        authValidated: true // ADDED
       });
       
     } catch (error) {
@@ -1194,6 +1341,58 @@ router.post(
     }
   })
 );
+
+// ===== DEBUG ENDPOINT TO CHECK AUTH STATUS =====
+router.get('/debug-auth', authenticateTokenRouter, asyncHandler(async (req, res) => {
+  try {
+    const models = req.app.locals.models;
+    const UsersModel = models?.User || models?.Users;
+    
+    let userData = null;
+    if (UsersModel && req.user.userId) {
+      userData = await UsersModel.findByPk(req.user.userId, {
+        attributes: { exclude: ['password'] }
+      });
+    }
+    
+    res.status(200).json({
+      success: true,
+      message: 'Auth debug information',
+      debug: {
+        tokenValid: true,
+        middlewareUsed: 'authenticateTokenRouter',
+        reqUser: req.user,
+        databaseModelsAvailable: !!models,
+        userModelAvailable: !!UsersModel,
+        userFromDatabase: userData ? {
+          id: userData.id,
+          email: userData.email,
+          username: userData.username
+        } : null,
+        appLocals: {
+          dbConnected: req.app.locals.dbConnected || false,
+          databaseInitialized: req.app.locals.databaseInitialized || false,
+          hasModels: !!req.app.locals.models,
+          modelsCount: req.app.locals.models ? Object.keys(req.app.locals.models).length : 0
+        },
+        headers: {
+          authorization: req.headers.authorization ? 'Present' : 'Missing',
+          origin: req.headers.origin || 'Not set'
+        }
+      },
+      timestamp: new Date().toISOString(),
+      authValidated: true // ADDED
+    });
+  } catch (error) {
+    console.error('🔧 [AUTH] Debug auth error:', error.message);
+    res.status(500).json({
+      success: false,
+      message: 'Debug endpoint error',
+      error: !IS_PRODUCTION ? error.message : undefined,
+      timestamp: new Date().toISOString()
+    });
+  }
+}));
 
 // ===== CLIENT-SIDE AUTH HELPER ENDPOINT =====
 router.get('/client-setup', (req, res) => {

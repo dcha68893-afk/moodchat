@@ -9,11 +9,12 @@ const {
   ValidationError,
   ConflictError,
 } = require('../middleware/errorHandler');
-const { authenticate } = require('../middleware/auth');
+const { authenticateToken } = require('../middleware/auth');
 const { apiRateLimiter } = require('../middleware/rateLimiter');
 const { User, Chat, Message, Friend } = require('../models');
 
-router.use(authenticate);
+// Replace authenticate with authenticateToken from shared middleware
+router.use(authenticateToken);
 
 console.log('✅ Friends routes initialized');
 
@@ -62,7 +63,7 @@ router.get(
 
       const offset = (parseInt(page) - 1) * parseInt(limit);
       
-      const user = await User.findByPk(req.user.id, {
+      const user = await User.findByPk(req.user.userId, {
         include: [{
           model: User,
           as: 'friends',
@@ -118,15 +119,15 @@ router.get(
           const friendship = await Friend.findOne({
             where: {
               [sequelize.Op.or]: [
-                { userId: req.user.id, friendId: friend.id },
-                { userId: friend.id, friendId: req.user.id }
+                { userId: req.user.userId, friendId: friend.id },
+                { userId: friend.id, friendId: req.user.userId }
               ]
             }
           });
           
           friendObj.friendshipSince = friendship ? friendship.createdAt : new Date();
           
-          const currentUser = await User.findByPk(req.user.id, {
+          const currentUser = await User.findByPk(req.user.userId, {
             include: [{
               model: User,
               as: 'blockedUsers',
@@ -170,7 +171,7 @@ router.get(
       const { friendId } = req.params;
 
       const [user, friend] = await Promise.all([
-        User.findByPk(req.user.id),
+        User.findByPk(req.user.userId),
         User.findByPk(friendId, {
           attributes: { exclude: ['password', 'email', 'resetPasswordToken', 'resetPasswordExpires', 'loginAttempts', 'lockedUntil', 'socketIds'] },
           include: [{
@@ -188,8 +189,8 @@ router.get(
       const isFriend = await Friend.findOne({
         where: {
           [sequelize.Op.or]: [
-            { userId: req.user.id, friendId: friend.id },
-            { userId: friend.id, friendId: req.user.id }
+            { userId: req.user.userId, friendId: friend.id },
+            { userId: friend.id, friendId: req.user.userId }
           ]
         }
       });
@@ -211,19 +212,19 @@ router.get(
         attributes: ['id', 'username', 'avatar', 'online', 'status']
       });
 
-      const recentInteractions = await getRecentInteractions(req.user.id, friendId);
-      const sharedGroups = await getSharedGroups(req.user.id, friendId);
+      const recentInteractions = await getRecentInteractions(req.user.userId, friendId);
+      const sharedGroups = await getSharedGroups(req.user.userId, friendId);
 
       const friendship = await Friend.findOne({
         where: {
           [sequelize.Op.or]: [
-            { userId: req.user.id, friendId: friend.id },
-            { userId: friend.id, friendId: req.user.id }
+            { userId: req.user.userId, friendId: friend.id },
+            { userId: friend.id, friendId: req.user.userId }
           ]
         }
       });
 
-      const currentUser = await User.findByPk(req.user.id, {
+      const currentUser = await User.findByPk(req.user.userId, {
         include: [{
           model: User,
           as: 'blockedUsers',
@@ -262,7 +263,7 @@ router.delete(
       const { friendId } = req.params;
 
       const [user, friend] = await Promise.all([
-        User.findByPk(req.user.id),
+        User.findByPk(req.user.userId),
         User.findByPk(friendId)
       ]);
 
@@ -273,8 +274,8 @@ router.delete(
       const friendship = await Friend.findOne({
         where: {
           [sequelize.Op.or]: [
-            { userId: req.user.id, friendId: friend.id },
-            { userId: friend.id, friendId: req.user.id }
+            { userId: req.user.userId, friendId: friend.id },
+            { userId: friend.id, friendId: req.user.userId }
           ]
         }
       });
@@ -322,12 +323,12 @@ router.post(
     try {
       const { userId } = req.params;
 
-      if (userId === req.user.id) {
+      if (userId === req.user.userId) {
         throw new ValidationError('Cannot block yourself');
       }
 
       const [user, userToBlock] = await Promise.all([
-        User.findByPk(req.user.id),
+        User.findByPk(req.user.userId),
         User.findByPk(userId)
       ]);
 
@@ -345,8 +346,8 @@ router.post(
       const friendship = await Friend.findOne({
         where: {
           [sequelize.Op.or]: [
-            { userId: req.user.id, friendId: userToBlock.id },
-            { userId: userToBlock.id, friendId: req.user.id }
+            { userId: req.user.userId, friendId: userToBlock.id },
+            { userId: userToBlock.id, friendId: req.user.userId }
           ]
         }
       });
@@ -402,7 +403,7 @@ router.post(
     try {
       const { userId } = req.params;
 
-      const user = await User.findByPk(req.user.id);
+      const user = await User.findByPk(req.user.userId);
       const isBlocked = await user.hasBlockedUser(userId);
 
       if (!isBlocked) {
@@ -430,7 +431,7 @@ router.get(
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
-      const user = await User.findByPk(req.user.id, {
+      const user = await User.findByPk(req.user.userId, {
         include: [{
           model: User,
           as: 'blockedUsers',
@@ -465,7 +466,7 @@ router.get(
       }
 
       const offset = (parseInt(page) - 1) * parseInt(limit);
-      const user = await User.findByPk(req.user.id, {
+      const user = await User.findByPk(req.user.userId, {
         include: [
           {
             model: User,
@@ -589,7 +590,7 @@ router.get(
     try {
       const { limit = 10 } = req.query;
 
-      const user = await User.findByPk(req.user.id, {
+      const user = await User.findByPk(req.user.userId, {
         include: [{
           model: User,
           as: 'friends',
@@ -680,7 +681,7 @@ router.get(
     try {
       const { format = 'json' } = req.query;
 
-      const user = await User.findByPk(req.user.id, {
+      const user = await User.findByPk(req.user.userId, {
         include: [{
           model: User,
           as: 'friends',
@@ -746,7 +747,7 @@ router.post(
         throw new ValidationError('Cannot update more than 50 friends at once');
       }
 
-      const user = await User.findByPk(req.user.id);
+      const user = await User.findByPk(req.user.userId);
       const results = {
         success: [],
         failed: [],
@@ -758,8 +759,8 @@ router.post(
         const friendship = await Friend.findOne({
           where: {
             [sequelize.Op.or]: [
-              { userId: req.user.id, friendId },
-              { userId: friendId, friendId: req.user.id }
+              { userId: req.user.userId, friendId },
+              { userId: friendId, friendId: req.user.userId }
             ]
           }
         });
@@ -793,7 +794,7 @@ router.get(
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
-      const user = await User.findByPk(req.user.id, {
+      const user = await User.findByPk(req.user.userId, {
         include: [{
           model: User,
           as: 'friends',
@@ -815,8 +816,8 @@ router.get(
       const recentFriends = await Friend.findAll({
         where: {
           [sequelize.Op.or]: [
-            { userId: req.user.id },
-            { friendId: req.user.id }
+            { userId: req.user.userId },
+            { friendId: req.user.userId }
           ],
           createdAt: { [sequelize.Op.gte]: thirtyDaysAgo }
         },

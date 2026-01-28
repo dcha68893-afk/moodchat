@@ -10,11 +10,13 @@ const {
   ValidationError,
   ConflictError,
 } = require('../middleware/errorHandler');
-const { authenticate } = require('../middleware/auth');
+// FIXED: Import the unified authentication middleware
+const { authenticateToken } = require('../middleware/auth');
 const { apiRateLimiter } = require('../middleware/rateLimiter');
 const { User, Chat, Message, GroupInvite } = require('../models');
 
-router.use(authenticate);
+// FIXED: Apply the unified authentication middleware to all routes
+router.use(authenticateToken);
 
 console.log('✅ Group routes initialized');
 

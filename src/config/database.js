@@ -1,283 +1,351 @@
-// src/database/init.js or src/database/initializeDatabase.js
-const sequelize = require('./database').getSequelizeInstance();
-const fs = require('fs');
-const path = require('path');
+// src/database/database.js
+const { Sequelize } = require('sequelize');
+const pg = require('pg');
 
-async function initializeDatabase() {
-  console.log('[Database] 🛡️ Starting SAFE database initialization (NO MIGRATIONS)...');
+// Database connection configuration
+function getDatabaseConfig() {
+  const isProduction = process.env.NODE_ENV === 'production';
+  const isRender = process.env.RENDER === 'true';
+  
+  console.log(`[Database] Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`[Database] Render environment: ${isRender ? 'Yes' : 'No'}`);
+  
+  // Use Render database URL if available, otherwise use individual environment variables
+  if (process.env.DATABASE_URL) {
+    console.log('[Database] Using DATABASE_URL connection');
+    return {
+      connectionString: process.env.DATABASE_URL,
+      ssl: isProduction ? { rejectUnauthorized: false } : false
+    };
+  }
+  
+  // Fallback to individual environment variables
+  const config = {
+    host: process.env.DB_HOST || 'localhost',
+    port: parseInt(process.env.DB_PORT) || 5432,
+    username: process.env.DB_USER || 'postgres',
+    password: process.env.DB_PASSWORD || 'postgres',
+    database: process.env.DB_NAME || 'myapp',
+    dialect: 'postgres',
+    dialectModule: pg,
+    logging: process.env.DB_LOGGING === 'true' ? console.log : false,
+  };
+  
+  console.log(`[Database] Using individual config: ${config.host}:${config.port}/${config.database}`);
+  return config;
+}
+
+// Initialize Sequelize instance
+let sequelizeInstance = null;
+
+function getSequelizeInstance() {
+  if (sequelizeInstance) {
+    return sequelizeInstance;
+  }
   
   try {
-    // Step 1: Test database connection only
-    await sequelize.authenticate();
-    console.log('[Database] ✅ Connection established successfully.');
+    const config = getDatabaseConfig();
     
-    // ===== CRITICAL: DISABLE ALL AUTO-MIGRATION BEHAVIOR =====
-    console.log('[Database] 🔒 Locking down auto-migration settings...');
-    
-    // Disable PostgreSQL ENUM auto-alter behavior
-    if (sequelize.options.dialect === 'postgres') {
-      sequelize.options.dialectOptions = sequelize.options.dialectOptions || {};
-      sequelize.options.dialectOptions.supportsEnums = false;
-      console.log('[Database] ✅ Disabled PostgreSQL ENUM auto-alter behavior');
-    }
-    
-    // Override any environment variables that could trigger migrations
-    process.env.DB_ALTER_SYNC = 'false';
-    process.env.DB_FORCE_SYNC = 'false';
-    process.env.SEQUELIZE_SYNC = 'false';
-    
-    console.log('[Database] ✅ Overridden dangerous environment variables');
-    
-    // Load all models
-    const models = {};
-    const modelsPath = path.join(__dirname, '..', 'models');
-    
-    console.log('[Database] 📦 Loading models from:', modelsPath);
-    
-    // Read all model files
-    const modelFiles = fs.readdirSync(modelsPath)
-      .filter(file => file.endsWith('.js') && file !== 'index.js');
-    
-    console.log(`[Database] Found ${modelFiles.length} model files`);
-    
-    // Import and initialize each model (NO SYNC)
-    for (const file of modelFiles) {
-      try {
-        const modelPath = path.join(modelsPath, file);
-        const model = require(modelPath)(sequelize, sequelize.Sequelize.DataTypes);
-        models[model.name] = model;
-        console.log(`[Database] ✅ Loaded model: ${model.name} (NO SYNC)`);
-      } catch (modelError) {
-        console.warn(`[Database] ⚠️ Failed to load model from ${file}:`, modelError.message);
-        // Continue loading other models
-      }
-    }
-    
-    // Set up associations if models have associate method
-    console.log('[Database] 🔗 Setting up associations (constraints: false)...');
-    for (const modelName of Object.keys(models)) {
-      if (models[modelName].associate) {
-        try {
-          // Override association to ensure constraints: false
-          const originalAssociate = models[modelName].associate;
-          models[modelName].associate = function(models) {
-            const result = originalAssociate.call(this, models);
-            
-            // Ensure all associations have constraints: false
-            if (this.associations) {
-              Object.values(this.associations).forEach(association => {
-                if (association.options) {
-                  association.options.constraints = false;
-                  delete association.options.unique;
-                  delete association.options.index;
-                }
-              });
-            }
-            return result;
-          };
-          
-          models[modelName].associate(models);
-          console.log(`[Database] ✅ Associated model: ${modelName} (constraints: false)`);
-        } catch (assocError) {
-          console.warn(`[Database] ⚠️ Failed to set up associations for ${modelName}:`, assocError.message);
+    if (config.connectionString) {
+      // Connection using DATABASE_URL
+      sequelizeInstance = new Sequelize(config.connectionString, {
+        dialect: 'postgres',
+        dialectModule: pg,
+        logging: config.logging || false,
+        pool: {
+          max: 10,
+          min: 0,
+          acquire: 30000,
+          idle: 10000
+        },
+        dialectOptions: {
+          ssl: config.ssl || false,
+          keepAlive: true,
+          statement_timeout: 10000,
+          query_timeout: 10000,
+          idle_in_transaction_session_timeout: 10000
+        },
+        define: {
+          timestamps: true,
+          underscored: true,
+          freezeTableName: true
+        },
+        retry: {
+          max: 3,
+          timeout: 10000,
+          match: [
+            /ConnectionError/,
+            /SequelizeConnectionError/,
+            /SequelizeConnectionRefusedError/,
+            /SequelizeHostNotFoundError/,
+            /SequelizeHostNotReachableError/,
+            /SequelizeInvalidConnectionError/,
+            /SequelizeConnectionTimedOutError/,
+            /ETIMEDOUT/,
+            /ECONNREFUSED/,
+            /ENOTFOUND/
+          ]
         }
-      }
-    }
-    
-    // ===== CRITICAL: NO MODEL SYNCING =====
-    console.log('\n[Database] 🚫 MODEL SYNC: DISABLED');
-    console.log('[Database] Safety Rules:');
-    console.log('  • force: false    → NEVER drop tables');
-    console.log('  • alter: false    → NEVER modify schema');
-    console.log('  • No auto-sync    → Models loaded only');
-    console.log('  • Constraints: false → No FK creation');
-    console.log('  • No indexes      → Preserve existing indexes');
-    
-    // Disable sync method on all models to prevent accidental calls
-    Object.keys(models).forEach(modelName => {
-      const model = models[modelName];
-      if (model && typeof model.sync === 'function') {
-        const originalSync = model.sync;
-        model.sync = async function(options = {}) {
-          console.warn(`[Database] 🛡️ BLOCKED: Model sync attempted for ${modelName}`);
-          console.warn(`[Database] Sync options:`, {
-            force: options.force || false,
-            alter: options.alter || false
-          });
-          return {
-            warning: 'Model-level sync disabled for safety',
-            model: modelName,
-            timestamp: new Date().toISOString()
-          };
-        };
-      }
-    });
-    
-    // ===== SAFE DATABASE OPERATIONS =====
-    console.log('\n[Database] 🔍 Performing SAFE database checks...');
-    
-    // Only verify tables exist, don't modify them
-    const syncResults = {
-      success: [],
-      failed: [],
-      tablesInfo: [],
-      warnings: ['Auto-sync disabled - manual intervention required for schema changes']
-    };
-    
-    // Check if tables exist without trying to create them
-    const coreTables = ['Users', 'Token', 'Profile'];
-    const availableCoreTables = [];
-    
-    for (const coreTable of coreTables) {
-      try {
-        if (models[coreTable]) {
-          // Just check if table exists with a simple query
-          const tableName = models[coreTable].tableName || models[coreTable].name;
-          
-          // Use raw query to check existence without triggering sync
-          const [results] = await sequelize.query(
-            `SELECT EXISTS (
-              SELECT FROM information_schema.tables 
-              WHERE table_schema = 'public' 
-              AND table_name = '${tableName.toLowerCase()}'
-            )`
-          );
-          
-          const tableExists = results[0]?.exists || false;
-          
-          if (tableExists) {
-            availableCoreTables.push(coreTable);
-            syncResults.success.push(coreTable);
-            syncResults.tablesInfo.push({
-              model: coreTable,
-              table: tableName,
-              exists: true,
-              status: 'Verified (no sync)'
-            });
-            console.log(`[Database] ✅ Table exists: ${tableName} (verified)`);
-          } else {
-            syncResults.failed.push({
-              model: coreTable,
-              error: `Table ${tableName} does not exist - manual creation required`
-            });
-            syncResults.tablesInfo.push({
-              model: coreTable,
-              table: tableName,
-              exists: false,
-              status: 'Missing - manual creation required'
-            });
-            console.log(`[Database] ⚠️ Table missing: ${tableName} (NO AUTO-CREATION)`);
+      });
+    } else {
+      // Connection using individual parameters
+      sequelizeInstance = new Sequelize(
+        config.database,
+        config.username,
+        config.password,
+        {
+          host: config.host,
+          port: config.port,
+          dialect: config.dialect,
+          dialectModule: config.dialectModule,
+          logging: config.logging,
+          pool: {
+            max: 10,
+            min: 0,
+            acquire: 30000,
+            idle: 10000
+          },
+          dialectOptions: {
+            keepAlive: true,
+            statement_timeout: 10000,
+            query_timeout: 10000,
+            idle_in_transaction_session_timeout: 10000
+          },
+          define: {
+            timestamps: true,
+            underscored: true,
+            freezeTableName: true
+          },
+          retry: {
+            max: 3,
+            timeout: 10000,
+            match: [
+              /ConnectionError/,
+              /SequelizeConnectionError/,
+              /SequelizeConnectionRefusedError/,
+              /SequelizeHostNotFoundError/,
+              /SequelizeHostNotReachableError/,
+              /SequelizeInvalidConnectionError/,
+              /SequelizeConnectionTimedOutError/,
+              /ETIMEDOUT/,
+              /ECONNREFUSED/,
+              /ENOTFOUND/
+            ]
           }
         }
-      } catch (err) {
-        console.warn(`[Database] ⚠️ Could not check table ${coreTable}:`, err.message);
-        syncResults.failed.push({
-          model: coreTable,
-          error: `Check failed: ${err.message}`
-        });
-      }
+      );
     }
     
-    // Check for auth tables
-    const authRequiredTables = ['Users', 'Token'];
-    const hasAuthTables = authRequiredTables.every(table => 
-      availableCoreTables.includes(table)
-    );
-    
-    // ===== FINAL REPORT =====
-    console.log('\n[Database] ===== SAFE INITIALIZATION REPORT =====');
-    console.log(`[Database] Models loaded: ${Object.keys(models).length}`);
-    console.log(`[Database] Tables verified: ${availableCoreTables.length}/${coreTables.length}`);
-    console.log(`[Database] Auth tables available: ${hasAuthTables ? '✅ Yes' : '⚠️ No'}`);
-    console.log(`[Database] Auto-sync: 🚫 DISABLED`);
-    console.log(`[Database] Schema modifications: 🚫 DISABLED`);
-    
-    if (!hasAuthTables) {
-      console.log('\n[Database] ⚠️ WARNING: Missing auth tables!');
-      console.log('[Database] Required tables:', authRequiredTables.join(', '));
-      console.log('[Database] Available tables:', availableCoreTables.join(', ') || 'None');
-      console.log('[Database] ACTION REQUIRED: Create tables manually using SQL');
-      console.log('[Database] SERVER STATUS: Will start but auth will fail');
-    }
-    
-    console.log('\n[Database] 🔧 MANUAL SCHEMA CHANGES REQUIRED:');
-    console.log('  • Use pgAdmin, psql, or database migration tool');
-    console.log('  • Never use sequelize.sync() in production');
-    console.log('  • All schema changes must be manual SQL');
-    console.log('  • Test schema changes in development first');
-    console.log('[Database] ======================================\n');
-    
-    // Always return successful initialization (even with missing tables)
-    return {
-      sequelize,
-      models,
-      syncResults,
-      hasAuthTables,
-      status: 'safe-initialized',
-      safety: {
-        autoSync: 'disabled',
-        force: 'disabled',
-        alter: 'disabled',
-        constraints: 'disabled',
-        migrations: 'manual-only'
-      }
-    };
+    console.log('[Database] Sequelize instance created successfully');
+    return sequelizeInstance;
     
   } catch (error) {
-    // Connection failed - this is still fatal
-    console.error('[Database] ❌ Database connection failed:', error.message);
-    console.error('[Database] Server cannot start without database connection');
-    
-    return {
-      sequelize: null,
-      models: {},
-      syncResults: {
-        success: [],
-        failed: [{ model: 'All', error: `Connection failed: ${error.message}` }],
-        tablesInfo: []
-      },
-      hasAuthTables: false,
-      status: 'connection-failed',
-      safety: {
-        autoSync: 'disabled',
-        force: 'disabled',
-        alter: 'disabled'
-      }
-    };
+    console.error('[Database] Failed to create Sequelize instance:', error.message);
+    throw new Error(`Database configuration error: ${error.message}`);
   }
 }
 
-// Export safe sync wrapper that can be called explicitly
-async function safeManualSync() {
-  console.warn('[Database] 🚨 WARNING: Manual sync requested');
-  console.warn('[Database] This should only be used in development!');
+// Test database connection with retry logic
+async function testDatabaseConnection(maxRetries = 3, retryDelay = 2000) {
+  const sequelize = getSequelizeInstance();
   
-  try {
-    const syncOptions = {
-      force: false,
-      alter: false, // Still false even for manual sync
-      logging: console.log
-    };
-    
-    console.log('[Database] Manual sync options:', syncOptions);
-    const result = await sequelize.sync(syncOptions);
-    console.log('[Database] Manual sync completed (no schema changes)');
-    return result;
-  } catch (error) {
-    console.error('[Database] Manual sync failed:', error.message);
-    throw error;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      console.log(`[Database] Connection attempt ${attempt}/${maxRetries}...`);
+      
+      await sequelize.authenticate();
+      
+      console.log('[Database] ✅ Connection established successfully');
+      console.log('[Database] Connection details:', {
+        host: sequelize.config.host,
+        port: sequelize.config.port,
+        database: sequelize.config.database,
+        username: sequelize.config.username,
+        dialect: sequelize.config.dialect
+      });
+      
+      return {
+        success: true,
+        message: 'Database connection successful',
+        attempt: attempt,
+        timestamp: new Date().toISOString()
+      };
+      
+    } catch (error) {
+      console.error(`[Database] ❌ Connection attempt ${attempt} failed:`, error.message);
+      
+      if (attempt === maxRetries) {
+        const errorDetails = {
+          success: false,
+          message: `Failed to connect to database after ${maxRetries} attempts`,
+          error: error.message,
+          timestamp: new Date().toISOString(),
+          config: {
+            host: sequelize.config.host,
+            port: sequelize.config.port,
+            database: sequelize.config.database,
+            username: sequelize.config.username
+          }
+        };
+        
+        console.error('[Database] Connection error details:', errorDetails);
+        throw new Error(`Database connection failed: ${error.message}`);
+      }
+      
+      // Wait before retrying
+      console.log(`[Database] Retrying in ${retryDelay}ms...`);
+      await new Promise(resolve => setTimeout(resolve, retryDelay));
+    }
   }
 }
 
+// Graceful shutdown handler
+async function closeDatabaseConnection() {
+  if (sequelizeInstance) {
+    try {
+      await sequelizeInstance.close();
+      console.log('[Database] Connection closed gracefully');
+      sequelizeInstance = null;
+    } catch (error) {
+      console.error('[Database] Error closing connection:', error.message);
+    }
+  }
+}
+
+// Health check function for routes
+async function checkDatabaseHealth() {
+  try {
+    const sequelize = getSequelizeInstance();
+    
+    // Test connection
+    await sequelize.authenticate();
+    
+    // Check if auth tables exist
+    const [tablesResult] = await sequelize.query(`
+      SELECT table_name 
+      FROM information_schema.tables 
+      WHERE table_schema = 'public' 
+      AND table_name IN ('users', 'tokens')
+    `);
+    
+    const hasUsersTable = tablesResult.some(row => row.table_name === 'users');
+    const hasTokensTable = tablesResult.some(row => row.table_name === 'tokens');
+    
+    return {
+      status: 'healthy',
+      connected: true,
+      tables: {
+        users: hasUsersTable,
+        tokens: hasTokensTable,
+        allAuthTables: hasUsersTable && hasTokensTable
+      },
+      timestamp: new Date().toISOString(),
+      connection: {
+        host: sequelize.config.host,
+        database: sequelize.config.database,
+        dialect: sequelize.config.dialect
+      }
+    };
+    
+  } catch (error) {
+    return {
+      status: 'unhealthy',
+      connected: false,
+      error: error.message,
+      timestamp: new Date().toISOString()
+    };
+  }
+}
+
+// Enhanced query helper for routes like /auth/me
+async function executeSafeQuery(query, options = {}) {
+  const sequelize = getSequelizeInstance();
+  const defaultOptions = {
+    logging: false,
+    timeout: 5000,
+    retries: 1,
+    ...options
+  };
+  
+  for (let attempt = 0; attempt <= defaultOptions.retries; attempt++) {
+    try {
+      const result = await sequelize.query(query, defaultOptions);
+      return {
+        success: true,
+        data: result[0],
+        metadata: result[1],
+        attempt: attempt + 1
+      };
+    } catch (error) {
+      if (attempt === defaultOptions.retries) {
+        console.error('[Database] Query failed after all retries:', {
+          query: query.substring(0, 100) + '...',
+          error: error.message
+        });
+        
+        // Don't crash the server, return error response
+        return {
+          success: false,
+          error: error.message,
+          code: error.code || 'QUERY_ERROR',
+          attempt: attempt + 1
+        };
+      }
+      
+      console.warn(`[Database] Query attempt ${attempt + 1} failed, retrying...`);
+      await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
+    }
+  }
+}
+
+// Initialize database connection on module load
+(async function initializeOnLoad() {
+  if (process.env.DB_CONNECT_ON_LOAD === 'true') {
+    console.log('[Database] Auto-connecting on module load...');
+    try {
+      await testDatabaseConnection();
+      console.log('[Database] Auto-connection successful');
+    } catch (error) {
+      console.error('[Database] Auto-connection failed, will retry on first request');
+    }
+  }
+})();
+
+// Setup process event handlers for graceful shutdown
+process.on('SIGINT', async () => {
+  console.log('[Database] Received SIGINT, closing connections...');
+  await closeDatabaseConnection();
+  process.exit(0);
+});
+
+process.on('SIGTERM', async () => {
+  console.log('[Database] Received SIGTERM, closing connections...');
+  await closeDatabaseConnection();
+  process.exit(0);
+});
+
+process.on('beforeExit', async () => {
+  console.log('[Database] Process exiting, closing connections...');
+  await closeDatabaseConnection();
+});
+
+// Export everything
 module.exports = {
-  initializeDatabase,
-  safeManualSync,
-  getSafetyRules: () => ({
-    autoSync: 'disabled',
-    force: 'disabled',
-    alter: 'disabled',
-    constraints: 'disabled',
-    environment: process.env.NODE_ENV || 'development',
-    timestamp: new Date().toISOString()
-  })
+  getSequelizeInstance,
+  testDatabaseConnection,
+  closeDatabaseConnection,
+  checkDatabaseHealth,
+  executeSafeQuery,
+  getDatabaseConfig,
+  
+  // For backward compatibility with existing code
+  sequelize: getSequelizeInstance(),
+  
+  // Connection status constants
+  CONNECTION_STATUS: {
+    CONNECTED: 'connected',
+    DISCONNECTED: 'disconnected',
+    CONNECTING: 'connecting',
+    ERROR: 'error'
+  }
 };

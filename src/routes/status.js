@@ -8,7 +8,7 @@ const {
   NotFoundError,
   ValidationError,
 } = require('../middleware/errorHandler');
-const { authenticate } = require('../middleware/auth');
+const { authenticateToken } = require('../middleware/auth');
 const { apiRateLimiter } = require('../middleware/rateLimiter');
 const { User, Status } = require('../models');
 
@@ -40,7 +40,7 @@ router.get('/api/status', (req, res) => {
 });
 
 // Apply authentication to all other routes EXCEPT the health endpoint
-router.use(authenticate);
+router.use(authenticateToken);
 
 console.log('✅ Status routes initialized');
 
@@ -49,7 +49,7 @@ router.get(
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
-      const user = await User.findByPk(req.user.id, {
+      const user = await User.findByPk(req.user.userId, {
         attributes: ['id', 'username', 'avatar', 'displayName', 'online', 'status', 'statusText', 'statusEmoji', 'statusExpiresAt', 'lastActive']
       });
 
@@ -124,19 +124,19 @@ router.put(
         updates.lastActive = new Date();
       }
 
-      const user = await User.findByPk(req.user.id);
+      const user = await User.findByPk(req.user.userId);
       if (!user) {
         throw new NotFoundError('User not found');
       }
 
       await user.update(updates);
 
-      const updatedUser = await User.findByPk(req.user.id, {
+      const updatedUser = await User.findByPk(req.user.userId, {
         attributes: ['id', 'username', 'avatar', 'displayName', 'online', 'status', 'statusText', 'statusEmoji', 'statusExpiresAt', 'lastActive']
       });
 
       if (req.io) {
-        const currentUser = await User.findByPk(req.user.id, {
+        const currentUser = await User.findByPk(req.user.userId, {
           include: [{
             model: User,
             as: 'friends',
@@ -202,7 +202,7 @@ router.get(
 
       const offset = (parseInt(page) - 1) * parseInt(limit);
 
-      const user = await User.findByPk(req.user.id, {
+      const user = await User.findByPk(req.user.userId, {
         include: [{
           model: User,
           as: 'friends',
@@ -273,7 +273,7 @@ router.get(
 
       const offset = (parseInt(page) - 1) * parseInt(limit);
 
-      const where = { userId: req.user.id };
+      const where = { userId: req.user.userId };
 
       if (startDate) {
         where.createdAt = { ...where.createdAt, [sequelize.Op.gte]: new Date(startDate) };
@@ -336,7 +336,7 @@ router.post(
         expiresAt = new Date(Date.now() + expiresInMinutes * 60000);
       }
 
-      const user = await User.findByPk(req.user.id);
+      const user = await User.findByPk(req.user.userId);
       if (!user) {
         throw new NotFoundError('User not found');
       }
@@ -348,12 +348,12 @@ router.post(
         statusExpiresAt: expiresAt,
       });
 
-      const updatedUser = await User.findByPk(req.user.id, {
+      const updatedUser = await User.findByPk(req.user.userId, {
         attributes: ['id', 'username', 'avatar', 'displayName', 'online', 'status', 'statusText', 'statusEmoji', 'statusExpiresAt', 'lastActive']
       });
 
       await Status.create({
-        userId: req.user.id,
+        userId: req.user.userId,
         status: 'custom',
         statusText: text.trim(),
         statusEmoji: emoji || '',
@@ -361,7 +361,7 @@ router.post(
       });
 
       if (req.io) {
-        const currentUser = await User.findByPk(req.user.id, {
+        const currentUser = await User.findByPk(req.user.userId, {
           include: [{
             model: User,
             as: 'friends',
@@ -417,7 +417,7 @@ router.delete(
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
-      const user = await User.findByPk(req.user.id);
+      const user = await User.findByPk(req.user.userId);
       if (!user) {
         throw new NotFoundError('User not found');
       }
@@ -429,12 +429,12 @@ router.delete(
         statusExpiresAt: null,
       });
 
-      const updatedUser = await User.findByPk(req.user.id, {
+      const updatedUser = await User.findByPk(req.user.userId, {
         attributes: ['id', 'username', 'avatar', 'displayName', 'online', 'status', 'statusText', 'statusEmoji', 'statusExpiresAt', 'lastActive']
       });
 
       await Status.create({
-        userId: req.user.id,
+        userId: req.user.userId,
         status: 'online',
         statusText: '',
         statusEmoji: '',
@@ -442,7 +442,7 @@ router.delete(
       });
 
       if (req.io) {
-        const currentUser = await User.findByPk(req.user.id, {
+        const currentUser = await User.findByPk(req.user.userId, {
           include: [{
             model: User,
             as: 'friends',
@@ -551,7 +551,7 @@ router.post(
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
-      const user = await User.findByPk(req.user.id);
+      const user = await User.findByPk(req.user.userId);
       if (!user) {
         throw new NotFoundError('User not found');
       }
@@ -560,7 +560,7 @@ router.post(
         lastActive: new Date(),
       });
 
-      const updatedUser = await User.findByPk(req.user.id, {
+      const updatedUser = await User.findByPk(req.user.userId, {
         attributes: ['id', 'username', 'avatar', 'displayName', 'online', 'status', 'lastActive']
       });
 
@@ -568,7 +568,7 @@ router.post(
         await updatedUser.update({ online: true });
 
         if (req.io) {
-          const currentUser = await User.findByPk(req.user.id, {
+          const currentUser = await User.findByPk(req.user.userId, {
             include: [{
               model: User,
               as: 'friends',
@@ -629,7 +629,7 @@ router.post(
         throw new ValidationError('Idle time must be at least 1 minute');
       }
 
-      const user = await User.findByPk(req.user.id);
+      const user = await User.findByPk(req.user.userId);
       if (!user) {
         throw new NotFoundError('User not found');
       }
@@ -639,19 +639,19 @@ router.post(
         statusExpiresAt: null,
       });
 
-      const updatedUser = await User.findByPk(req.user.id, {
+      const updatedUser = await User.findByPk(req.user.userId, {
         attributes: ['id', 'username', 'avatar', 'displayName', 'online', 'status', 'statusText', 'statusEmoji', 'lastActive']
       });
 
       await Status.create({
-        userId: req.user.id,
+        userId: req.user.userId,
         status: 'away',
         statusText: 'Idle',
         idleTime: idleMinutes,
       });
 
       if (req.io) {
-        const currentUser = await User.findByPk(req.user.id, {
+        const currentUser = await User.findByPk(req.user.userId, {
           include: [{
             model: User,
             as: 'friends',
@@ -728,7 +728,7 @@ router.get(
 
       const statusStats = await Status.findAll({
         where: {
-          userId: req.user.id,
+          userId: req.user.userId,
           createdAt: { [sequelize.Op.gte]: startDate }
         },
         attributes: [
@@ -749,7 +749,7 @@ router.get(
 
       const mostUsedStatuses = await Status.findAll({
         where: {
-          userId: req.user.id,
+          userId: req.user.userId,
           createdAt: { [sequelize.Op.gte]: startDate }
         },
         attributes: [
@@ -767,7 +767,7 @@ router.get(
         raw: true
       });
 
-      const user = await User.findByPk(req.user.id, {
+      const user = await User.findByPk(req.user.userId, {
         include: [{
           model: User,
           as: 'friends',
@@ -837,7 +837,7 @@ router.post(
       }
 
       const scheduledStatus = await Status.create({
-        userId: req.user.id,
+        userId: req.user.userId,
         status: status || 'custom',
         statusText: statusText?.trim(),
         statusEmoji: statusEmoji || '',
@@ -871,7 +871,7 @@ router.get(
 
       const { count, rows: scheduledStatuses } = await Status.findAndCountAll({
         where: {
-          userId: req.user.id,
+          userId: req.user.userId,
           isScheduled: true,
           scheduledAt: { [sequelize.Op.gt]: new Date() }
         },
@@ -912,7 +912,7 @@ router.delete(
       const scheduledStatus = await Status.findOne({
         where: {
           id: statusId,
-          userId: req.user.id,
+          userId: req.user.userId,
           isScheduled: true
         }
       });
