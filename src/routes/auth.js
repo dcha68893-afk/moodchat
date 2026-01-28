@@ -55,6 +55,11 @@ function validatePassword(password) {
   return errors;
 }
 
+// ===== IMPORT EXISTING AUTH MIDDLEWARE =====
+// This middleware should already exist in your application
+// It's the same middleware used by all other protected routes
+const authenticateToken = require('../middleware/auth');
+
 // ===== HEALTH ENDPOINT =====
 router.get('/health', (req, res) => {
   res.status(200).json({
@@ -635,7 +640,112 @@ router.post(
   })
 );
 
-// ===== AUTHENTICATION MIDDLEWARE FOR ROUTER =====
+// ===== PROFILE ENDPOINT =====
+// Now using the SAME authentication middleware as all other protected routes
+router.get(
+  '/me',
+  authenticateToken, // Using imported existing auth middleware
+  asyncHandler(async (req, res) => {
+    try {
+      // The middleware has already validated the JWT and set req.user
+      // No need to manually check token - just use req.user injected by middleware
+      
+      // Check if models are available
+      const models = req.app.locals.models;
+      if (!models || !models.Users) {
+        return res.status(500).json({
+          success: false,
+          message: 'Users model not available',
+          timestamp: new Date().toISOString()
+        });
+      }
+
+      const UsersModel = models.Users;
+
+      // Fetch user using the userId from the JWT token payload (req.user.userId)
+      // This is the same pattern used by all other protected routes
+      const user = await UsersModel.findByPk(req.user.userId, {
+        attributes: { 
+          exclude: [
+            'password',
+            'resetPasswordToken',
+            'resetPasswordExpires',
+            'emailVerificationToken',
+            'verificationToken'
+          ] 
+        }
+      });
+
+      if (!user) {
+        return res.status(401).json({
+          success: false,
+          message: 'User not found',
+          timestamp: new Date().toISOString()
+        });
+      }
+
+      // Return simplified response with user data
+      res.status(200).json({
+        success: true,
+        user: {
+          id: user.id,
+          email: user.email,
+          username: user.username,
+          avatar: user.avatar,
+          firstName: user.firstName,
+          lastName: user.lastName,
+          status: user.status,
+          role: user.role,
+          isVerified: user.isVerified,
+          isActive: user.isActive,
+          lastSeen: user.lastSeen,
+          createdAt: user.createdAt,
+          updatedAt: user.updatedAt
+        },
+        timestamp: new Date().toISOString()
+      });
+    } catch (error) {
+      console.error('🔧 [AUTH] Error fetching user profile:', {
+        name: error.name,
+        message: error.message,
+        stack: error.stack
+      });
+      
+      // Handle database errors
+      if (error.name === 'SequelizeConnectionError' || 
+          error.name === 'SequelizeDatabaseError' ||
+          error.message.includes('timeout') ||
+          error.message.includes('connection') ||
+          error.message.includes('ECONNREFUSED')) {
+        return res.status(503).json({
+          success: false,
+          message: 'Database service temporarily unavailable',
+          error: !IS_PRODUCTION ? error.message : undefined,
+          timestamp: new Date().toISOString()
+        });
+      }
+      
+      // Handle other Sequelize errors
+      if (error.name && error.name.includes('Sequelize')) {
+        return res.status(500).json({
+          success: false,
+          message: 'Database operation failed',
+          error: !IS_PRODUCTION ? error.message : undefined,
+          timestamp: new Date().toISOString()
+        });
+      }
+      
+      res.status(500).json({
+        success: false,
+        message: 'Failed to fetch user profile',
+        error: !IS_PRODUCTION ? error.message : undefined,
+        timestamp: new Date().toISOString()
+      });
+    }
+  })
+);
+
+// ===== AUTHENTICATION MIDDLEWARE FOR ROUTER (KEPT FOR OTHER ROUTES) =====
 function authenticateTokenRouter(req, res, next) {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
@@ -666,59 +776,6 @@ function authenticateTokenRouter(req, res, next) {
     next();
   });
 }
-
-// ===== PROFILE ENDPOINT =====
-router.get(
-  '/me',
-  authenticateTokenRouter,
-  asyncHandler(async (req, res) => {
-    try {
-      // Check if models are available
-      const models = req.app.locals.models;
-      if (!models || !models.Users) {
-        return res.status(500).json({
-          success: false,
-          message: 'Users model not available',
-          timestamp: new Date().toISOString()
-        });
-      }
-
-      const UsersModel = models.Users;
-
-      const user = await UsersModel.findByPk(req.user.userId, {
-        attributes: { 
-          exclude: ['password'] 
-        }
-      });
-
-      if (!user) {
-        return res.status(401).json({
-          success: false,
-          message: 'User not found',
-          timestamp: new Date().toISOString()
-        });
-      }
-
-      res.status(200).json({
-        success: true,
-        data: { user },
-        timestamp: new Date().toISOString()
-      });
-    } catch (error) {
-      console.error('🔧 [AUTH] Error fetching user profile:', {
-        name: error.name,
-        message: error.message,
-        stack: error.stack
-      });
-      res.status(500).json({
-        success: false,
-        message: 'Failed to fetch user profile',
-        error: !IS_PRODUCTION ? error.message : undefined,
-        timestamp: new Date().toISOString()
-      });
-    }
-  })
-);
 
 // ===== REFRESH TOKEN ENDPOINT =====
 router.post(
@@ -1293,9 +1350,9 @@ router.get('/client-setup', (req, res) => {
               
               const data = await response.json();
               
-              if (data.success && data.data.user) {
-                window.currentUser = data.data.user;
-                return { success: true, user: data.data.user };
+              if (data.success && data.user) {
+                window.currentUser = data.user;
+                return { success: true, user: data.user };
               }
               
               return { success: false, error: data.message };
@@ -1433,9 +1490,9 @@ router.get('/client-auth.js', (req, res) => {
             
             const data = await response.json();
             
-            if (data.success && data.data && data.data.user) {
-              this.currentUser = data.data.user;
-              window.currentUser = data.data.user;
+            if (data.success && data.user) {
+              this.currentUser = data.user;
+              window.currentUser = data.user;
               
               console.log('✅ User data loaded successfully');
               return { success: true, user: this.currentUser };
