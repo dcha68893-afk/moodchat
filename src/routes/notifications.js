@@ -44,15 +44,31 @@ router.get(
         }]
       });
 
+      // Handle null/undefined result
+      if (!notifications || !Array.isArray(notifications)) {
+        return res.status(200).json({
+          status: 'success',
+          data: {
+            notifications: [],
+            pagination: {
+              total: 0,
+              page: parseInt(page),
+              limit: parseInt(limit),
+              pages: 0,
+            },
+          },
+        });
+      }
+
       res.status(200).json({
         status: 'success',
         data: {
           notifications,
           pagination: {
-            total: count,
+            total: count || 0,
             page: parseInt(page),
             limit: parseInt(limit),
-            pages: Math.ceil(count / parseInt(limit)),
+            pages: Math.ceil((count || 0) / parseInt(limit)),
           },
         },
       });
@@ -77,7 +93,7 @@ router.get(
           userId: req.user.id,
           isRead: false
         }
-      });
+      }) || 0; // Default to 0 if null/undefined
 
       res.status(200).json({
         status: 'success',
@@ -151,10 +167,12 @@ router.put(
         }
       );
 
+      const updatedCount = result?.[0] || 0; // Safe array access
+
       res.status(200).json({
         status: 'success',
-        message: `${result[0]} notifications marked as read`,
-        data: { updatedCount: result[0] },
+        message: `${updatedCount} notifications marked as read`,
+        data: { updatedCount },
       });
     } catch (error) {
       console.error('Error marking all notifications as read:', error);
@@ -253,7 +271,7 @@ router.delete(
         where.isRead = true;
       }
 
-      const deletedCount = await Notification.destroy({ where });
+      const deletedCount = await Notification.destroy({ where }) || 0; // Default to 0
 
       res.status(200).json({
         status: 'success',
@@ -283,6 +301,7 @@ router.put(
         throw new NotFoundError('User not found');
       }
 
+      // Ensure updates object exists even if all fields are undefined
       const updates = {};
       if (emailNotifications !== undefined) updates.emailNotifications = emailNotifications;
       if (pushNotifications !== undefined) updates.pushNotifications = pushNotifications;
@@ -292,7 +311,10 @@ router.put(
         updates.mutedNotificationTypes = muteTypes;
       }
 
-      await user.update(updates);
+      // Only update if there are actual changes
+      if (Object.keys(updates).length > 0) {
+        await user.update(updates);
+      }
 
       res.status(200).json({
         status: 'success',
@@ -336,8 +358,9 @@ if (process.env.NODE_ENV === 'development') {
         });
 
         if (req.io) {
+          const notificationJson = notification?.toJSON ? notification.toJSON() : notification;
           req.io.to(`user:${req.user.id}`).emit('notification:new', {
-            notification: notification.toJSON(),
+            notification: notificationJson || {},
           });
         }
 
@@ -371,16 +394,16 @@ if (process.env.NODE_ENV === 'development') {
         // In production, you'd integrate with an email service like SendGrid, AWS SES, etc.
         // For now, just log the email
         console.log('Test email would be sent:', {
-          to: req.user.email,
-          subject,
-          body
+          to: req.user?.email || 'unknown',
+          subject: subject || 'No subject',
+          body: body || 'No body'
         });
 
         res.status(200).json({
           status: 'success',
           message: 'Test email would be sent (logged to console)',
           data: {
-            to: req.user.email,
+            to: req.user?.email || 'unknown',
             subject,
             body
           },

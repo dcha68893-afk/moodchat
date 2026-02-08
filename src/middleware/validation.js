@@ -27,7 +27,9 @@ const validate = validations => {
     return res.status(400).json({
       success: false,
       message: 'Validation failed',
+      errorCode: 'VALIDATION_ERROR',
       errors: formatValidationErrors(errors),
+      timestamp: new Date().toISOString()
     });
   };
 };

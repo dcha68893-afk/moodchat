@@ -1,6 +1,6 @@
 const mongoose = require('mongoose');
 const UserStatus = require('../models/UserStatus');
-const User = require('../models/User');
+const User = require('../models/Users');
 const { ServerError, ValidationError, NotFoundError } = require('../utils/errors');
 const {
   STATUS_EXPIRY_MINUTES = 5,

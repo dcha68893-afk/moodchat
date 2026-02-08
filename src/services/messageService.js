@@ -1,6 +1,6 @@
 const mongoose = require('mongoose');
 const Message = require('../models/Message');
-const Conversation = require('../models/Chat');
+const Conversation = require('../models/Chats');
 const { ServerError, ValidationError, NotFoundError } = require('../utils/errors');
 const { MESSAGE_LIMIT_PER_PAGE } = process.env;
 

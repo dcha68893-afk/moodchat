@@ -9,16 +9,30 @@ const {
   ValidationError,
   ConflictError,
 } = require('../middleware/errorHandler');
-const { authenticate } = require('../middleware/auth');
+// FIXED: Import the unified authentication middleware
+const { authenticateToken } = require('../middleware/auth');
 const { apiRateLimiter } = require('../middleware/rateLimiter');
 const { User, Chat, Message } = require('../models');
 
-router.use(authenticate);
+// FIXED: Use the unified authentication middleware
+router.use(authenticateToken);
+
+// FIXED: Add authentication verification before every route that uses req.user
+const verifyAuthenticated = (req, res, next) => {
+  if (!req.user || !req.user.userId) {
+    return res.status(401).json({
+      status: 'error',
+      message: 'Authentication required'
+    });
+  }
+  next();
+};
 
 console.log('✅ Chats routes initialized');
 
 router.get(
   '/',
+  verifyAuthenticated,
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
@@ -33,7 +47,7 @@ router.get(
       const offset = (parseInt(page) - 1) * parseInt(limit);
 
       const where = {
-        '$participants.id$': req.user.id,
+        '$participants.id$': req.user.userId,
         isArchived: false,
       };
 
@@ -67,7 +81,7 @@ router.get(
             as: 'participants',
             attributes: ['id', 'username', 'avatar', 'displayName', 'online', 'status'],
             through: { attributes: [] },
-            where: { id: { [sequelize.Op.ne]: req.user.id } },
+            where: { id: { [sequelize.Op.ne]: req.user.userId } },
             required: false
           },
           {
@@ -91,11 +105,11 @@ router.get(
         chats.map(async chat => {
           const chatObj = chat.toJSON();
           
-          const userUnread = await chat.getUnreadCount(req.user.id);
+          const userUnread = await chat.getUnreadCount(req.user.userId);
           chatObj.unreadCount = userUnread || 0;
 
           if (chatObj.chatType === 'direct') {
-            const otherParticipant = chatObj.participants.find(p => p.id !== req.user.id);
+            const otherParticipant = chatObj.participants.find(p => p.id !== req.user.userId);
             chatObj.otherParticipant = otherParticipant || null;
 
             if (!chatObj.chatName && otherParticipant) {
@@ -131,6 +145,7 @@ router.get(
 
 router.get(
   '/:chatId',
+  verifyAuthenticated,
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
@@ -139,7 +154,7 @@ router.get(
       const chat = await Chat.findOne({
         where: {
           id: chatId,
-          '$participants.id$': req.user.id,
+          '$participants.id$': req.user.userId,
           isArchived: false
         },
         include: [
@@ -171,14 +186,14 @@ router.get(
         throw new NotFoundError('Chat not found or access denied');
       }
 
-      await chat.markAsRead(req.user.id);
+      await chat.markAsRead(req.user.userId);
 
       const chatData = chat.toJSON();
-      const userUnread = await chat.getUnreadCount(req.user.id);
+      const userUnread = await chat.getUnreadCount(req.user.userId);
       chatData.unreadCount = userUnread || 0;
 
       if (chat.chatType === 'direct') {
-        const otherParticipant = chatData.participants.find(p => p.id !== req.user.id);
+        const otherParticipant = chatData.participants.find(p => p.id !== req.user.userId);
         chatData.otherParticipant = otherParticipant || null;
 
         if (!chatData.chatName && otherParticipant) {
@@ -202,6 +217,7 @@ router.get(
 
 router.post(
   '/direct',
+  verifyAuthenticated,
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
@@ -211,7 +227,7 @@ router.post(
         throw new ValidationError('User ID is required');
       }
 
-      if (userId === req.user.id) {
+      if (userId === req.user.userId) {
         throw new ValidationError('Cannot create chat with yourself');
       }
 
@@ -223,7 +239,7 @@ router.post(
       const existingChat = await Chat.findOne({
         where: {
           chatType: 'direct',
-          '$participants.id$': { [sequelize.Op.contains]: [req.user.id, userId] }
+          '$participants.id$': { [sequelize.Op.contains]: [req.user.userId, userId] }
         },
         include: [{
           model: User,
@@ -235,7 +251,7 @@ router.post(
 
       if (existingChat) {
         const chatData = existingChat.toJSON();
-        const otherParticipant = chatData.participants.find(p => p.id !== req.user.id);
+        const otherParticipant = chatData.participants.find(p => p.id !== req.user.userId);
         chatData.otherParticipant = otherParticipant || null;
 
         if (!chatData.chatName && otherParticipant) {
@@ -249,7 +265,7 @@ router.post(
         });
       }
 
-      const currentUser = await User.findByPk(req.user.id, {
+      const currentUser = await User.findByPk(req.user.userId, {
         include: [{
           model: User,
           as: 'blockedUsers',
@@ -269,17 +285,17 @@ router.post(
         }]
       });
 
-      if (otherUserWithBlocks.blockedUsers.some(bu => bu.id === req.user.id)) {
+      if (otherUserWithBlocks.blockedUsers.some(bu => bu.id === req.user.userId)) {
         throw new AuthorizationError('User has blocked you');
       }
 
       const chat = await Chat.create({
         chatType: 'direct',
-        createdBy: req.user.id,
+        createdBy: req.user.userId,
         chatName: null,
       });
 
-      await chat.setParticipants([req.user.id, userId]);
+      await chat.setParticipants([req.user.userId, userId]);
 
       const populatedChat = await Chat.findByPk(chat.id, {
         include: [
@@ -298,7 +314,7 @@ router.post(
       });
 
       const chatData = populatedChat.toJSON();
-      const otherParticipant = chatData.participants.find(p => p.id !== req.user.id);
+      const otherParticipant = chatData.participants.find(p => p.id !== req.user.userId);
       chatData.otherParticipant = otherParticipant || null;
       chatData.chatName = otherParticipant?.displayName || otherParticipant?.username || 'Direct Chat';
 
@@ -307,7 +323,7 @@ router.post(
           req.io.to(socketId).emit('chat:created', {
             chat: chatData,
             createdBy: {
-              id: req.user.id,
+              id: req.user.userId,
               username: currentUser.username,
               avatar: currentUser.avatar,
             },
@@ -332,6 +348,7 @@ router.post(
 
 router.post(
   '/group',
+  verifyAuthenticated,
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
@@ -345,7 +362,7 @@ router.post(
         throw new ValidationError('At least one participant is required');
       }
 
-      const allParticipants = [...new Set([req.user.id, ...participantIds])];
+      const allParticipants = [...new Set([req.user.userId, ...participantIds])];
 
       const participants = await User.findAll({
         where: { id: allParticipants }
@@ -355,7 +372,7 @@ router.post(
         throw new NotFoundError('One or more participants not found');
       }
 
-      const currentUser = await User.findByPk(req.user.id, {
+      const currentUser = await User.findByPk(req.user.userId, {
         include: [{
           model: User,
           as: 'blockedUsers',
@@ -365,7 +382,7 @@ router.post(
 
       const blockedParticipants = participants.filter(p =>
         currentUser.blockedUsers.some(bu => bu.id === p.id) ||
-        p.blockedUsers.some(bu => bu.id === req.user.id)
+        p.blockedUsers.some(bu => bu.id === req.user.userId)
       );
 
       if (blockedParticipants.length > 0) {
@@ -377,11 +394,11 @@ router.post(
         chatName: name.trim(),
         description: description?.trim(),
         avatar,
-        createdBy: req.user.id,
+        createdBy: req.user.userId,
       });
 
       await chat.setParticipants(allParticipants);
-      await chat.setAdmins([req.user.id]);
+      await chat.setAdmins([req.user.userId]);
 
       const populatedChat = await Chat.findByPk(chat.id, {
         include: [
@@ -411,7 +428,7 @@ router.post(
               req.io.to(socketId).emit('group:created', {
                 chat: populatedChat.toJSON(),
                 addedBy: {
-                  id: req.user.id,
+                  id: req.user.userId,
                   username: currentUser.username,
                   avatar: currentUser.avatar,
                 },
@@ -438,6 +455,7 @@ router.post(
 
 router.patch(
   '/:chatId',
+  verifyAuthenticated,
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
@@ -447,7 +465,7 @@ router.patch(
       const chat = await Chat.findOne({
         where: {
           id: chatId,
-          '$participants.id$': req.user.id,
+          '$participants.id$': req.user.userId,
           chatType: 'group'
         },
         include: [{
@@ -462,7 +480,7 @@ router.patch(
         throw new NotFoundError('Group chat not found or access denied');
       }
 
-      const isAdmin = chat.admins.some(admin => admin.id === req.user.id);
+      const isAdmin = chat.admins.some(admin => admin.id === req.user.userId);
       if (!isAdmin) {
         throw new AuthorizationError('Only admins can update group settings');
       }
@@ -503,7 +521,7 @@ router.patch(
                 chatId: chat.id,
                 updates,
                 updatedBy: {
-                  id: req.user.id,
+                  id: req.user.userId,
                   username: req.user.username,
                 },
               });
@@ -529,6 +547,7 @@ router.patch(
 
 router.post(
   '/:chatId/participants',
+  verifyAuthenticated,
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
@@ -542,7 +561,7 @@ router.post(
       const chat = await Chat.findOne({
         where: {
           id: chatId,
-          '$participants.id$': req.user.id,
+          '$participants.id$': req.user.userId,
           chatType: 'group'
         },
         include: [
@@ -565,7 +584,7 @@ router.post(
         throw new NotFoundError('Group chat not found or access denied');
       }
 
-      const isAdmin = chat.admins.some(admin => admin.id === req.user.id);
+      const isAdmin = chat.admins.some(admin => admin.id === req.user.userId);
       if (!isAdmin) {
         throw new AuthorizationError('Only admins can add participants');
       }
@@ -603,7 +622,7 @@ router.post(
         ]
       });
 
-      const currentUser = await User.findByPk(req.user.id);
+      const currentUser = await User.findByPk(req.user.userId);
 
       if (req.io) {
         newParticipants.forEach(participant => {
@@ -612,7 +631,7 @@ router.post(
               req.io.to(socketId).emit('group:joined', {
                 chat: updatedChat.toJSON(),
                 addedBy: {
-                  id: req.user.id,
+                  id: req.user.userId,
                   username: currentUser.username,
                   avatar: currentUser.avatar,
                 },
@@ -639,7 +658,7 @@ router.post(
                   avatar: p.avatar,
                 })),
                 addedBy: {
-                  id: req.user.id,
+                  id: req.user.userId,
                   username: currentUser.username,
                 },
               });
@@ -668,6 +687,7 @@ router.post(
 
 router.delete(
   '/:chatId/participants/:userId',
+  verifyAuthenticated,
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
@@ -676,7 +696,7 @@ router.delete(
       const chat = await Chat.findOne({
         where: {
           id: chatId,
-          '$participants.id$': req.user.id,
+          '$participants.id$': req.user.userId,
           chatType: 'group'
         },
         include: [
@@ -699,8 +719,8 @@ router.delete(
         throw new NotFoundError('Group chat not found or access denied');
       }
 
-      const isAdmin = chat.admins.some(admin => admin.id === req.user.id);
-      const isSelfRemoval = userId === req.user.id;
+      const isAdmin = chat.admins.some(admin => admin.id === req.user.userId);
+      const isSelfRemoval = userId === req.user.userId;
 
       if (!isAdmin && !isSelfRemoval) {
         throw new AuthorizationError('Only admins can remove other participants');
@@ -731,7 +751,7 @@ router.delete(
       });
 
       const removedUser = await User.findByPk(userId);
-      const currentUser = await User.findByPk(req.user.id);
+      const currentUser = await User.findByPk(req.user.userId);
 
       if (req.io) {
         if (removedUser.socketIds && removedUser.socketIds.length > 0) {
@@ -741,7 +761,7 @@ router.delete(
               removedBy: isSelfRemoval
                 ? 'self'
                 : {
-                    id: req.user.id,
+                    id: req.user.userId,
                     username: currentUser.username,
                   },
             });
@@ -761,7 +781,7 @@ router.delete(
                 removedUserId: userId,
                 removedUsername: removedUser.username,
                 removedBy: {
-                  id: req.user.id,
+                  id: req.user.userId,
                   username: currentUser.username,
                 },
               });
@@ -787,6 +807,7 @@ router.delete(
 
 router.post(
   '/:chatId/archive',
+  verifyAuthenticated,
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
@@ -795,7 +816,7 @@ router.post(
       const chat = await Chat.findOne({
         where: {
           id: chatId,
-          '$participants.id$': req.user.id,
+          '$participants.id$': req.user.userId,
           isArchived: false
         }
       });
@@ -806,7 +827,7 @@ router.post(
 
       await chat.update({
         isArchived: true,
-        archivedBy: req.user.id,
+        archivedBy: req.user.userId,
         archivedAt: new Date()
       });
 
@@ -826,6 +847,7 @@ router.post(
 
 router.post(
   '/:chatId/unarchive',
+  verifyAuthenticated,
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
@@ -834,7 +856,7 @@ router.post(
       const chat = await Chat.findOne({
         where: {
           id: chatId,
-          '$participants.id$': req.user.id,
+          '$participants.id$': req.user.userId,
           isArchived: true
         }
       });
@@ -865,6 +887,7 @@ router.post(
 
 router.post(
   '/:chatId/read',
+  verifyAuthenticated,
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
@@ -873,7 +896,7 @@ router.post(
       const chat = await Chat.findOne({
         where: {
           id: chatId,
-          '$participants.id$': req.user.id
+          '$participants.id$': req.user.userId
         }
       });
 
@@ -881,7 +904,7 @@ router.post(
         throw new NotFoundError('Chat not found or access denied');
       }
 
-      await chat.markAsRead(req.user.id);
+      await chat.markAsRead(req.user.userId);
 
       res.status(200).json({
         status: 'success',
@@ -899,6 +922,7 @@ router.post(
 
 router.post(
   '/:chatId/leave',
+  verifyAuthenticated,
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
@@ -907,7 +931,7 @@ router.post(
       const chat = await Chat.findOne({
         where: {
           id: chatId,
-          '$participants.id$': req.user.id,
+          '$participants.id$': req.user.userId,
           chatType: 'group'
         },
         include: [{
@@ -922,18 +946,18 @@ router.post(
         throw new NotFoundError('Group chat not found or access denied');
       }
 
-      const isAdmin = chat.admins.some(admin => admin.id === req.user.id);
+      const isAdmin = chat.admins.some(admin => admin.id === req.user.userId);
       if (isAdmin && chat.admins.length === 1) {
         throw new ValidationError('Cannot leave as the last admin. Promote another admin first.');
       }
 
-      await chat.removeParticipant(req.user.id);
+      await chat.removeParticipant(req.user.userId);
 
       if (isAdmin) {
-        await chat.removeAdmin(req.user.id);
+        await chat.removeAdmin(req.user.userId);
       }
 
-      const currentUser = await User.findByPk(req.user.id);
+      const currentUser = await User.findByPk(req.user.userId);
 
       if (req.io) {
         const remainingUsers = await User.findAll({
@@ -946,7 +970,7 @@ router.post(
             user.socketIds.forEach(socketId => {
               req.io.to(socketId).emit('group:left', {
                 chatId: chat.id,
-                userId: req.user.id,
+                userId: req.user.userId,
                 username: currentUser.username,
               });
             });
@@ -970,6 +994,7 @@ router.post(
 
 router.get(
   '/archived/list',
+  verifyAuthenticated,
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
@@ -978,7 +1003,7 @@ router.get(
 
       const { count, rows: chats } = await Chat.findAndCountAll({
         where: {
-          '$participants.id$': req.user.id,
+          '$participants.id$': req.user.userId,
           isArchived: true
         },
         include: [
@@ -987,7 +1012,7 @@ router.get(
             as: 'participants',
             attributes: ['id', 'username', 'avatar', 'displayName'],
             through: { attributes: [] },
-            where: { id: { [sequelize.Op.ne]: req.user.id } },
+            where: { id: { [sequelize.Op.ne]: req.user.userId } },
             required: false
           },
           {
@@ -1006,7 +1031,7 @@ router.get(
         const chatObj = chat.toJSON();
 
         if (chatObj.chatType === 'direct') {
-          const otherParticipant = chatObj.participants.find(p => p.id !== req.user.id);
+          const otherParticipant = chatObj.participants.find(p => p.id !== req.user.userId);
           chatObj.otherParticipant = otherParticipant || null;
 
           if (!chatObj.chatName && otherParticipant) {

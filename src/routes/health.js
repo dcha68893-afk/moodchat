@@ -1,5 +1,6 @@
 // src/routes/health.js
-const router = require('express').Router();
+const express = require('express');
+const router = express.Router();
 const asyncHandler = require('express-async-handler');
 
 console.log('✅ Health routes initialized');

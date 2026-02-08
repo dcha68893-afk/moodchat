@@ -1,7 +1,7 @@
 const mongoose = require('mongoose');
 const Call = require('../models/Call');
-const User = require('../models/User');
-const Conversation = require('../models/Chat');
+const User = require('../models/Users');
+const Conversation = require('../models/Chats');
 const { ServerError, ValidationError, NotFoundError, ForbiddenError } = require('../utils/errors');
 const {
   MAX_CALL_DURATION = 3600,

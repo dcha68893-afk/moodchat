@@ -23,7 +23,7 @@
     "format": "prettier --write \"src/**/*.js\"",
     "format:check": "prettier --check \"src/**/*.js\"",
     "db:migrate": "sequelize-cli db:migrate",
-    "db:migrate:render": "sequelize-cli db:migrate --env production",  
+    "db:migrate:render": "sequelize-cli db:migrate --env production",
     "db:migrate:undo": "sequelize-cli db:migrate:undo",
     "db:migrate:undo:all": "sequelize-cli db:migrate:undo:all",
     "db:migrate:status": "sequelize-cli db:migrate:status",
@@ -88,20 +88,21 @@
     "bull": "^4.11.5",
     "compression": "^1.7.4",
     "connect-redis": "^7.1.0",
-    "cors": "^2.8.5",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.6",
     "date-fns": "^3.0.6",
     "dotenv": "^16.6.1",
     "express": "^4.22.1",
     "express-async-handler": "^1.2.0",
     "express-rate-limit": "^7.1.5",
-    "express-session": "^1.17.3",
+    "express-session": "^1.19.0",
     "express-validator": "^7.0.1",
     "helmet": "^7.0.0",
     "ioredis": "^5.4.1",
     "jsonwebtoken": "^9.0.3",
     "lodash": "^4.17.21",
     "mongoose": "^9.1.1",
-    "morgan": "^1.10.0",
+    "morgan": "^1.10.1",
     "multer": "^1.4.5-lts.1",
     "multer-s3": "^3.0.1",
     "mysql2": "^3.16.1",
@@ -236,5 +237,4 @@
   "directories": {
     "test": "tests"
   }
-
 }

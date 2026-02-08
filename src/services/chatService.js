@@ -1,9 +1,9 @@
 const mongoose = require('mongoose');
 
 // Import models
-const Chat = require('../models/Chat');
+const Chat = require('../models/Chats');
 const Message = require('../models/Message');
-const User = require('../models/User');
+const User = require('../models/Users');
 
 // Import utilities
 const { logger } = require('../middleware/errorHandler');

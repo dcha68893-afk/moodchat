@@ -113,14 +113,32 @@ const db = {
 };
 
 // CRITICAL: Define essential core models for system startup
-const CORE_MODELS = ['Users', 'Token', 'Profile'];
+const CORE_MODELS = ['Users', 'Token', 'Profile', 'Settings', 'Chats', 'Messages', 'Friend'];
+
+// CRITICAL: Whitelist of all expected model files
+const MODEL_WHITELIST = [
+  'Users', 'Token', 'Profile', 'Settings', 'Features',
+  'Chats', 'Messages', 'ChatParticipant', 'GroupMembers',
+  'TypingIndicator', 'UserStatus', 'ReadReceipt', 'SharedMood',
+  'Notifications', 'Friend', 'Call', 'Group', 'Media', 'Mood', 'Status'
+];
 
 // CRITICAL: Patterns that indicate NON-MODEL files (routers, controllers, etc.)
+// Updated to be more specific to avoid matching model files
 const NON_MODEL_PATTERNS = [
-  'auth', 'route', 'router', 'controller', 'middleware',
-  'index', 'utils', 'status', 'error', 'validator', 'schemas',
-  'calls', 'chats', 'friends', 'group',
-  'rateLimiter', 'errorHandler', 'authMiddleware'
+  // File names that are definitely NOT models
+  'authRoutes', 'authController', 'userController', 'chatController', 'friendController',
+  'groupController', 'messageController', 'notificationController',
+  'authMiddleware', 'errorMiddleware', 'validationMiddleware',
+  'index', 'utils', 'helpers', 'validators', 'schemas',
+  'routes', 'controllers', 'middleware', 'services',
+  // Specific route files with .route.js extension
+  'auth.route', 'user.route', 'chat.route', 'friend.route', 'group.route',
+  'message.route', 'notification.route', 'status.route',
+  // Common non-model patterns in file content
+  'router.get', 'router.post', 'router.put', 'router.delete', 'router.use',
+  'app.get', 'app.post', 'app.put', 'app.delete', 'app.use',
+  'express.Router()', 'express.Router('
 ];
 
 // ===== MODEL FILE VALIDATION =====
@@ -151,6 +169,17 @@ const modelFiles = fs.readdirSync(__dirname)
     
     const fileName = file.toLowerCase().replace('.js', '');
     
+    // Check if file is in our model whitelist (case-insensitive)
+    const isWhitelisted = MODEL_WHITELIST.some(modelName => 
+      modelName.toLowerCase() === fileName
+    );
+    
+    if (isWhitelisted) {
+      console.log(`[Database] ✅ Whitelisted model detected: ${file}`);
+      return true;
+    }
+    
+    // For non-whitelisted files, check if they match non-model patterns
     const isNonModel = NON_MODEL_PATTERNS.some(pattern => 
       fileName.includes(pattern.toLowerCase())
     );
@@ -161,6 +190,8 @@ const modelFiles = fs.readdirSync(__dirname)
       return false;
     }
     
+    // If not whitelisted but also not a non-model pattern, we'll check its content
+    console.log(`[Database] ⚠️ File not in whitelist but not blocked: ${file}. Will check content.`);
     return true;
   });
 
@@ -181,7 +212,8 @@ modelFiles.forEach(file => {
        (fileContent.includes('(sequelize, DataTypes)') || 
         fileContent.includes('function(sequelize, DataTypes)'))) ||
       (fileContent.includes('class') && fileContent.includes('extends Model')) ||
-      fileContent.includes('DataTypes.');
+      fileContent.includes('DataTypes.') ||
+      fileContent.includes('Sequelize.DataTypes');
     
     const isRouterOrController = 
       fileContent.includes('express.Router()') ||
@@ -191,7 +223,9 @@ modelFiles.forEach(file => {
       fileContent.includes('app.use(') ||
       fileContent.includes('router.get(') ||
       fileContent.includes('router.post(') ||
-      fileContent.includes('router.use(');
+      fileContent.includes('router.use(') ||
+      fileContent.includes('require(\'express\')') ||
+      (fileContent.includes('Router') && fileContent.includes('require'));
     
     if (isRouterOrController) {
       console.log(`[Database] 🛡️ HARD SAFETY: Skipping ${file} - Detected as router/controller`);

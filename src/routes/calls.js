@@ -1,7 +1,8 @@
 const asyncHandler = require('express-async-handler');
 const express = require('express');
 const router = express.Router();
-const { authenticate } = require('../middleware/auth');
+// FIXED: Import the unified authentication middleware
+const { authenticateToken } = require('../middleware/auth');
 const { apiRateLimiter } = require('../middleware/rateLimiter');
 const { User, Chat, Call } = require('../models');
 const { Op, fn, col, literal } = require('sequelize');
@@ -9,7 +10,8 @@ const { Op, fn, col, literal } = require('sequelize');
 const CALL_HISTORY_RETENTION_DAYS = parseInt(process.env.CALL_HISTORY_RETENTION_DAYS) || 365;
 const MAX_CALL_DURATION = parseInt(process.env.MAX_CALL_DURATION) || 14400;
 
-router.use(authenticate);
+// FIXED: Use the unified authentication middleware
+router.use(authenticateToken);
 
 console.log('✅ Calls routes initialized');
 
@@ -33,8 +35,8 @@ router.get(
 
       const where = {
         [Op.or]: [
-          { callerId: req.user.id },
-          { '$participants.id$': req.user.id }
+          { callerId: req.user.userId },
+          { '$participants.id$': req.user.userId }
         ],
         endedAt: { [Op.ne]: null },
       };
@@ -45,13 +47,13 @@ router.get(
 
       if (direction) {
         if (direction === 'incoming') {
-          where.callerId = { [Op.ne]: req.user.id };
-          where['$participants.id$'] = req.user.id;
+          where.callerId = { [Op.ne]: req.user.userId };
+          where['$participants.id$'] = req.user.userId;
         } else if (direction === 'outgoing') {
-          where.callerId = req.user.id;
+          where.callerId = req.user.userId;
         } else if (direction === 'missed') {
           where.status = 'missed';
-          where['$participants.id$'] = req.user.id;
+          where['$participants.id$'] = req.user.userId;
         }
       }
 
@@ -65,8 +67,8 @@ router.get(
           },
           {
             [Op.or]: [
-              { callerId: req.user.id },
-              { '$participants.id$': req.user.id }
+              { callerId: req.user.userId },
+              { '$participants.id$': req.user.userId }
             ]
           }
         ];
@@ -95,7 +97,7 @@ router.get(
             as: 'participants',
             attributes: ['username', 'avatar', 'displayName'],
             through: { attributes: [] },
-            where: { id: { [Op.ne]: req.user.id } },
+            where: { id: { [Op.ne]: req.user.userId } },
             required: false
           },
           {
@@ -113,7 +115,7 @@ router.get(
       const enrichedCalls = calls.map(call => {
         const callObj = call.toJSON();
         
-        if (call.callerId === req.user.id) {
+        if (call.callerId === req.user.userId) {
           callObj.direction = 'outgoing';
         } else {
           callObj.direction = 'incoming';
@@ -125,7 +127,7 @@ router.get(
           callObj.duration = 0;
         }
 
-        callObj.otherParticipants = call.participants.filter(p => p.id !== req.user.id);
+        callObj.otherParticipants = call.participants.filter(p => p.id !== req.user.userId);
         return callObj;
       });
 
@@ -135,8 +137,8 @@ router.get(
       const stats = await Call.findAll({
         where: {
           [Op.or]: [
-            { callerId: req.user.id },
-            { '$participants.id$': req.user.id }
+            { callerId: req.user.userId },
+            { '$participants.id$': req.user.userId }
           ],
           startedAt: { [Op.gte]: thirtyDaysAgo }
         },
@@ -210,8 +212,8 @@ router.get(
         where: {
           id: callId,
           [Op.or]: [
-            { callerId: req.user.id },
-            { '$participants.id$': req.user.id }
+            { callerId: req.user.userId },
+            { '$participants.id$': req.user.userId }
           ]
         },
         include: [
@@ -248,7 +250,7 @@ router.get(
       }
 
       const callData = call.toJSON();
-      callData.direction = call.callerId === req.user.id ? 'outgoing' : 'incoming';
+      callData.direction = call.callerId === req.user.userId ? 'outgoing' : 'incoming';
 
       if (call.startedAt && call.endedAt) {
         callData.duration = Math.floor((call.endedAt - call.startedAt) / 1000);
@@ -306,7 +308,7 @@ router.post(
         chat = await Chat.findOne({
           where: {
             id: chatId,
-            '$participants.id$': req.user.id,
+            '$participants.id$': req.user.userId,
             isArchived: false
           },
           include: [{
@@ -331,10 +333,10 @@ router.post(
         }
 
         participants = chat.participants
-          .filter(p => p.id !== req.user.id)
+          .filter(p => p.id !== req.user.userId)
           .map(p => p.id);
 
-        const currentUser = await User.findByPk(req.user.id, {
+        const currentUser = await User.findByPk(req.user.userId, {
           include: [{
             model: User,
             as: 'blockedUsers',
@@ -344,7 +346,7 @@ router.post(
 
         const blockedParticipants = chat.participants.filter(p => 
           currentUser.blockedUsers.some(bu => bu.id === p.id) ||
-          p.blockedUsers.some(bu => bu.id === req.user.id)
+          p.blockedUsers.some(bu => bu.id === req.user.userId)
         );
 
         if (blockedParticipants.length > 0) {
@@ -387,7 +389,7 @@ router.post(
           });
         }
 
-        const currentUser = await User.findByPk(req.user.id, {
+        const currentUser = await User.findByPk(req.user.userId, {
           include: [{
             model: User,
             as: 'blockedUsers',
@@ -397,7 +399,7 @@ router.post(
 
         const blockedParticipants = participantUsers.filter(p =>
           currentUser.blockedUsers.some(bu => bu.id === p.id) ||
-          p.blockedUsers.some(bu => bu.id === req.user.id)
+          p.blockedUsers.some(bu => bu.id === req.user.userId)
         );
 
         if (blockedParticipants.length > 0) {
@@ -411,7 +413,7 @@ router.post(
       }
 
       const call = await Call.create({
-        callerId: req.user.id,
+        callerId: req.user.userId,
         chatId: chatId || null,
         callType,
         isGroupCall,
@@ -419,7 +421,7 @@ router.post(
         startedAt: new Date(),
       });
 
-      await call.setParticipants([req.user.id, ...participants]);
+      await call.setParticipants([req.user.userId, ...participants]);
 
       const populatedCall = await Call.findByPk(call.id, {
         include: [
@@ -437,7 +439,7 @@ router.post(
         ]
       });
 
-      const caller = await User.findByPk(req.user.id);
+      const caller = await User.findByPk(req.user.userId);
 
       if (req.io) {
         const callData = {
@@ -454,7 +456,7 @@ router.post(
         };
 
         populatedCall.participants.forEach(participant => {
-          if (participant.id !== req.user.id && participant.socketIds) {
+          if (participant.id !== req.user.userId && participant.socketIds) {
             participant.socketIds.forEach(socketId => {
               req.io.to(socketId).emit('call:incoming', callData);
             });
@@ -499,7 +501,7 @@ router.post(
       const call = await Call.findOne({
         where: {
           id: callId,
-          '$participants.id$': req.user.id,
+          '$participants.id$': req.user.userId,
           status: 'ringing'
         },
         include: [{
@@ -518,7 +520,7 @@ router.post(
       }
 
       const answeredBy = call.answeredBy || [];
-      answeredBy.push(req.user.id);
+      answeredBy.push(req.user.userId);
       call.answeredBy = answeredBy;
 
       if (answeredBy.length === 1) {
@@ -543,7 +545,7 @@ router.post(
         ]
       });
 
-      const user = await User.findByPk(req.user.id);
+      const user = await User.findByPk(req.user.userId);
 
       if (req.io) {
         updatedCall.participants.forEach(participant => {
@@ -590,7 +592,7 @@ router.post(
       const call = await Call.findOne({
         where: {
           id: callId,
-          '$participants.id$': req.user.id,
+          '$participants.id$': req.user.userId,
           status: { [Op.in]: ['ringing', 'ongoing'] }
         },
         include: [{
@@ -609,10 +611,10 @@ router.post(
       }
 
       const declinedBy = call.declinedBy || [];
-      declinedBy.push(req.user.id);
+      declinedBy.push(req.user.userId);
       call.declinedBy = declinedBy;
 
-      if (call.callerId === req.user.id) {
+      if (call.callerId === req.user.userId) {
         call.status = 'cancelled';
         call.endedAt = new Date();
       } else {
@@ -630,7 +632,7 @@ router.post(
 
       await call.save();
 
-      const user = await User.findByPk(req.user.id);
+      const user = await User.findByPk(req.user.userId);
 
       if (req.io) {
         const callData = await Call.findByPk(callId, {
@@ -689,8 +691,8 @@ router.post(
         where: {
           id: callId,
           [Op.or]: [
-            { callerId: req.user.id },
-            { '$participants.id$': req.user.id }
+            { callerId: req.user.userId },
+            { '$participants.id$': req.user.userId }
           ],
           status: { [Op.in]: ['ringing', 'ongoing'] }
         }
@@ -733,7 +735,7 @@ router.post(
       });
 
       if (req.io) {
-        const user = await User.findByPk(req.user.id);
+        const user = await User.findByPk(req.user.userId);
 
         populatedCall.participants.forEach(participant => {
           if (participant.socketIds) {
@@ -782,8 +784,8 @@ router.get(
 
       const missedCount = await Call.count({
         where: {
-          '$participants.id$': req.user.id,
-          callerId: { [Op.ne]: req.user.id },
+          '$participants.id$': req.user.userId,
+          callerId: { [Op.ne]: req.user.userId },
           status: 'missed',
           startedAt: { [Op.gte]: twentyFourHoursAgo }
         },
@@ -820,11 +822,11 @@ router.post(
 
       if (callIds && Array.isArray(callIds)) {
         await Call.update(
-          { readBy: fn('array_append', col('readBy'), req.user.id) },
+          { readBy: fn('array_append', col('readBy'), req.user.userId) },
           {
             where: {
               id: callIds,
-              '$participants.id$': req.user.id,
+              '$participants.id$': req.user.userId,
               status: 'missed'
             },
             include: [{
@@ -841,14 +843,14 @@ router.post(
         twentyFourHoursAgo.setHours(twentyFourHoursAgo.getHours() - 24);
 
         await Call.update(
-          { readBy: fn('array_append', col('readBy'), req.user.id) },
+          { readBy: fn('array_append', col('readBy'), req.user.userId) },
           {
             where: {
-              '$participants.id$': req.user.id,
-              callerId: { [Op.ne]: req.user.id },
+              '$participants.id$': req.user.userId,
+              callerId: { [Op.ne]: req.user.userId },
               status: 'missed',
               startedAt: { [Op.gte]: twentyFourHoursAgo },
-              readBy: { [Op.not]: literal(`'${req.user.id}' = ANY(readBy)`) }
+              readBy: { [Op.not]: literal(`'${req.user.userId}' = ANY(readBy)`) }
             },
             include: [{
               model: User,
@@ -886,8 +888,8 @@ router.delete(
         const result = await Call.destroy({
           where: {
             [Op.or]: [
-              { callerId: req.user.id },
-              { '$participants.id$': req.user.id }
+              { callerId: req.user.userId },
+              { '$participants.id$': req.user.userId }
             ]
           },
           include: [{
@@ -921,8 +923,8 @@ router.delete(
         const result = await Call.destroy({
           where: {
             [Op.or]: [
-              { callerId: req.user.id },
-              { '$participants.id$': req.user.id }
+              { callerId: req.user.userId },
+              { '$participants.id$': req.user.userId }
             ],
             startedAt: { [Op.lt]: cutoffDate }
           },
@@ -947,8 +949,8 @@ router.delete(
           where: {
             id: callIds,
             [Op.or]: [
-              { callerId: req.user.id },
-              { '$participants.id$': req.user.id }
+              { callerId: req.user.userId },
+              { '$participants.id$': req.user.userId }
             ]
           },
           include: [{
@@ -1012,8 +1014,8 @@ router.get(
       const stats = await Call.findAll({
         where: {
           [Op.or]: [
-            { callerId: req.user.id },
-            { '$participants.id$': req.user.id }
+            { callerId: req.user.userId },
+            { '$participants.id$': req.user.userId }
           ],
           startedAt: { [Op.gte]: startDate }
         },
@@ -1073,8 +1075,8 @@ router.get(
       const typeBreakdown = await Call.findAll({
         where: {
           [Op.or]: [
-            { callerId: req.user.id },
-            { '$participants.id$': req.user.id }
+            { callerId: req.user.userId },
+            { '$participants.id$': req.user.userId }
           ],
           startedAt: { [Op.gte]: startDate }
         },
@@ -1126,8 +1128,8 @@ router.get(
 
       const where = {
         [Op.or]: [
-          { callerId: req.user.id },
-          { '$participants.id$': req.user.id }
+          { callerId: req.user.userId },
+          { '$participants.id$': req.user.userId }
         ]
       };
 

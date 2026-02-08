@@ -16,9 +16,9 @@ console.log('✅ POST /login route available at /api/auth/login');
 console.log('✅ POST /register route available at /api/auth/register');
 console.log('✅ GET /me route available at /api/auth/me');
 
-// JWT configuration from .env - FIXED: Use JWT_SECRET consistently
-const JWT_SECRET = process.env.JWT_SECRET || '3e78ab2d6cb698f95b3b8d510614058c'; // Using your .env value
-const JWT_ACCESS_EXPIRES_IN = process.env.JWT_ACCESS_EXPIRES_IN || '24h'; // Changed from 15m to 24h
+// JWT configuration from .env
+const JWT_SECRET = process.env.JWT_SECRET || '3e78ab2d6cb698f95b3b8d510614058c';
+const JWT_ACCESS_EXPIRES_IN = process.env.JWT_ACCESS_EXPIRES_IN || '24h';
 const JWT_REFRESH_EXPIRES_IN = process.env.JWT_REFRESH_EXPIRES_IN || '7d';
 
 // Password validation from .env
@@ -106,6 +106,7 @@ router.post(
         return res.status(400).json({
           success: false,
           message: 'Missing required fields: email, username, and password are all required',
+          errorCode: 'VALIDATION_ERROR',
           timestamp: new Date().toISOString(),
           database: {
             connected: req.app.locals.dbConnected || false,
@@ -120,6 +121,7 @@ router.post(
         return res.status(400).json({
           success: false,
           message: 'Invalid email format',
+          errorCode: 'VALIDATION_ERROR',
           timestamp: new Date().toISOString()
         });
       }
@@ -130,6 +132,7 @@ router.post(
         return res.status(400).json({
           success: false,
           message: 'Password validation failed',
+          errorCode: 'VALIDATION_ERROR',
           errors: passwordErrors,
           timestamp: new Date().toISOString()
         });
@@ -143,6 +146,7 @@ router.post(
         return res.status(503).json({
           success: false,
           message: 'Database service not initialized',
+          errorCode: 'SERVICE_UNAVAILABLE',
           timestamp: new Date().toISOString(),
           database: {
             connected: false,
@@ -151,13 +155,14 @@ router.post(
         });
       }
 
-      // 5. Get Users model (using Users, not User) - FIXED: Use User (singular) as per your models
-      const UsersModel = models.User || models.Users; // Try both for compatibility
+      // 5. Get Users model
+      const UsersModel = models.User || models.Users;
       if (!UsersModel) {
         console.error('🔧 [AUTH] User model not found in models:', Object.keys(models));
         return res.status(500).json({
           success: false,
           message: 'User model not available',
+          errorCode: 'MODEL_UNAVAILABLE',
           timestamp: new Date().toISOString(),
           database: {
             connected: false,
@@ -173,6 +178,7 @@ router.post(
         return res.status(500).json({
           success: false,
           message: 'Database configuration error - Sequelize not available',
+          errorCode: 'CONFIGURATION_ERROR',
           timestamp: new Date().toISOString()
         });
       }
@@ -180,7 +186,6 @@ router.post(
       // 7. Get Op operator safely from Sequelize instance
       let Op;
       try {
-        // Try multiple ways to get Op (different Sequelize versions)
         Op = sequelizeInstance.Op || 
              sequelizeInstance.constructor.Op || 
              sequelizeInstance.Sequelize?.Op;
@@ -190,6 +195,7 @@ router.post(
           return res.status(500).json({
             success: false,
             message: 'Database query operator not available',
+            errorCode: 'CONFIGURATION_ERROR',
             timestamp: new Date().toISOString()
           });
         }
@@ -198,6 +204,7 @@ router.post(
         return res.status(500).json({
           success: false,
           message: 'Server configuration error: Sequelize operators unavailable',
+          errorCode: 'CONFIGURATION_ERROR',
           timestamp: new Date().toISOString()
         });
       }
@@ -213,17 +220,19 @@ router.post(
       });
       
       if (existingUser) {
-        const statusCode = 409; // Consistent 409 for conflicts
+        const statusCode = 409;
         if (existingUser.email === email.toLowerCase()) {
           return res.status(statusCode).json({
             success: false,
             message: 'User with this email already exists',
+            errorCode: 'USER_EXISTS',
             timestamp: new Date().toISOString()
           });
         } else {
           return res.status(statusCode).json({
             success: false,
             message: 'Username already taken',
+            errorCode: 'USERNAME_TAKEN',
             timestamp: new Date().toISOString()
           });
         }
@@ -242,6 +251,7 @@ router.post(
         return res.status(500).json({
           success: false,
           message: 'Password processing failed',
+          errorCode: 'HASHING_ERROR',
           error: IS_PRODUCTION ? undefined : hashError.message,
           timestamp: new Date().toISOString()
         });
@@ -261,18 +271,18 @@ router.post(
 
       console.log('🔧 [AUTH] User created successfully:', user.id);
 
-      // 11. Generate JWT token - FIXED: Use JWT_SECRET consistently
+      // 11. Generate JWT token
       let token;
       try {
         token = jwt.sign(
           { 
             userId: user.id, 
-            id: user.id, // Add id for compatibility
+            id: user.id,
             email: user.email, 
             username: user.username,
             role: user.role
           },
-          JWT_SECRET, // Using JWT_SECRET from .env
+          JWT_SECRET,
           { expiresIn: '24h' }
         );
       } catch (jwtError) {
@@ -284,6 +294,7 @@ router.post(
         return res.status(500).json({
           success: false,
           message: 'Token generation failed',
+          errorCode: 'TOKEN_GENERATION_ERROR',
           error: IS_PRODUCTION ? undefined : jwtError.message,
           timestamp: new Date().toISOString()
         });
@@ -335,6 +346,7 @@ router.post(
         return res.status(503).json({
           success: false,
           message: 'Database service temporarily unavailable',
+          errorCode: 'DATABASE_UNAVAILABLE',
           error: !IS_PRODUCTION ? error.message : undefined,
           timestamp: new Date().toISOString(),
           database: {
@@ -350,6 +362,7 @@ router.post(
         return res.status(409).json({
           success: false,
           message: field === 'email' ? 'User with this email already exists' : 'Username already taken',
+          errorCode: field === 'email' ? 'USER_EXISTS' : 'USERNAME_TAKEN',
           timestamp: new Date().toISOString()
         });
       }
@@ -360,6 +373,7 @@ router.post(
         return res.status(400).json({
           success: false,
           message: 'Validation failed',
+          errorCode: 'VALIDATION_ERROR',
           errors: errorMessages,
           timestamp: new Date().toISOString()
         });
@@ -370,6 +384,7 @@ router.post(
         return res.status(500).json({
           success: false,
           message: 'Database operation failed',
+          errorCode: 'DATABASE_ERROR',
           error: !IS_PRODUCTION ? error.message : undefined,
           timestamp: new Date().toISOString()
         });
@@ -379,6 +394,7 @@ router.post(
       return res.status(500).json({
         success: false,
         message: 'Registration failed. Please check server logs.',
+        errorCode: 'INTERNAL_ERROR',
         error: !IS_PRODUCTION ? error.message : undefined,
         timestamp: new Date().toISOString()
       });
@@ -400,6 +416,7 @@ router.post(
         return res.status(400).json({
           success: false,
           message: 'Identifier (email/username) and password are required',
+          errorCode: 'VALIDATION_ERROR',
           timestamp: new Date().toISOString()
         });
       }
@@ -412,6 +429,7 @@ router.post(
         return res.status(503).json({
           success: false,
           message: 'Database service not initialized',
+          errorCode: 'SERVICE_UNAVAILABLE',
           timestamp: new Date().toISOString(),
           database: {
             connected: false,
@@ -420,13 +438,14 @@ router.post(
         });
       }
 
-      // 3. Get Users model - FIXED: Use User (singular) as per your models
-      const UsersModel = models.User || models.Users; // Try both for compatibility
+      // 3. Get Users model
+      const UsersModel = models.User || models.Users;
       if (!UsersModel) {
         console.error('🔧 [AUTH] User model not found for login');
         return res.status(500).json({
           success: false,
           message: 'User model not available',
+          errorCode: 'MODEL_UNAVAILABLE',
           timestamp: new Date().toISOString(),
           database: {
             connected: false,
@@ -464,6 +483,7 @@ router.post(
         return res.status(503).json({
           success: false,
           message: 'Database service temporarily unavailable',
+          errorCode: 'DATABASE_UNAVAILABLE',
           error: !IS_PRODUCTION ? dbError.message : undefined,
           timestamp: new Date().toISOString()
         });
@@ -475,6 +495,7 @@ router.post(
         return res.status(401).json({
           success: false,
           message: 'Invalid email or password',
+          errorCode: 'INVALID_CREDENTIALS',
           timestamp: new Date().toISOString()
         });
       }
@@ -493,6 +514,7 @@ router.post(
         return res.status(500).json({
           success: false,
           message: 'Authentication failed',
+          errorCode: 'AUTHENTICATION_ERROR',
           error: IS_PRODUCTION ? undefined : bcryptError.message,
           timestamp: new Date().toISOString()
         });
@@ -504,23 +526,24 @@ router.post(
         return res.status(401).json({
           success: false,
           message: 'Invalid email or password',
+          errorCode: 'INVALID_CREDENTIALS',
           timestamp: new Date().toISOString()
         });
       }
 
-      // 8. Generate JWT token - FIXED: Use JWT_SECRET consistently
+      // 8. Generate JWT token
       let token;
       try {
         console.log('🔧 [AUTH] Generating JWT token for user:', user.id);
         token = jwt.sign(
           { 
             userId: user.id, 
-            id: user.id, // Add id for compatibility
+            id: user.id,
             email: user.email, 
             username: user.username,
             role: user.role
           },
-          JWT_SECRET, // Using JWT_SECRET from .env
+          JWT_SECRET,
           { expiresIn: '24h' }
         );
       } catch (jwtError) {
@@ -532,6 +555,7 @@ router.post(
         return res.status(500).json({
           success: false,
           message: 'Token generation failed',
+          errorCode: 'TOKEN_GENERATION_ERROR',
           error: IS_PRODUCTION ? undefined : jwtError.message,
           timestamp: new Date().toISOString()
         });
@@ -604,6 +628,7 @@ router.post(
         return res.status(503).json({
           success: false,
           message: 'Database service temporarily unavailable',
+          errorCode: 'DATABASE_UNAVAILABLE',
           error: !IS_PRODUCTION ? error.message : undefined,
           timestamp: new Date().toISOString()
         });
@@ -615,6 +640,7 @@ router.post(
         return res.status(400).json({
           success: false,
           message: 'Validation failed',
+          errorCode: 'VALIDATION_ERROR',
           errors: errorMessages,
           timestamp: new Date().toISOString()
         });
@@ -625,6 +651,7 @@ router.post(
         return res.status(500).json({
           success: false,
           message: 'Database operation failed',
+          errorCode: 'DATABASE_ERROR',
           error: !IS_PRODUCTION ? error.message : undefined,
           timestamp: new Date().toISOString()
         });
@@ -634,6 +661,7 @@ router.post(
       return res.status(500).json({
         success: false,
         message: 'Login failed. Please try again.',
+        errorCode: 'INTERNAL_ERROR',
         error: !IS_PRODUCTION ? error.message : undefined,
         timestamp: new Date().toISOString()
       });
@@ -644,7 +672,7 @@ router.post(
 // ===== /auth/me ENDPOINT - NOW USING SHARED AUTH MIDDLEWARE =====
 router.get(
   '/me',
-  authenticateToken, // Use the shared auth middleware instead of inline verification
+  authenticateToken,
   asyncHandler(async (req, res) => {
     try {
       console.log('🔧 [AUTH /me] Endpoint called - USING SHARED MIDDLEWARE');
@@ -655,6 +683,7 @@ router.get(
         return res.status(401).json({
           success: false,
           message: 'Authentication failed',
+          errorCode: 'AUTHENTICATION_FAILED',
           timestamp: new Date().toISOString(),
           authValidated: false
         });
@@ -731,12 +760,12 @@ router.get(
       if (!user) {
         console.warn('🔧 [AUTH /me] User not found in database:', userId);
         // User not found in database but token is valid
-        // This might happen if user was deleted but token still exists
         return res.status(404).json({
           success: false,
           message: 'User account not found',
+          errorCode: 'USER_NOT_FOUND',
           timestamp: new Date().toISOString(),
-          authValidated: true, // Token IS valid, but user doesn't exist
+          authValidated: true,
           tokenValid: true
         });
       }
@@ -746,8 +775,9 @@ router.get(
         return res.status(403).json({
           success: false,
           message: 'Account is inactive',
+          errorCode: 'ACCOUNT_INACTIVE',
           timestamp: new Date().toISOString(),
-          authValidated: true, // Token IS valid
+          authValidated: true,
           tokenValid: true
         });
       }
@@ -775,7 +805,6 @@ router.get(
         website: user.website || '',
         birthdate: user.birthdate || null,
         gender: user.gender || null,
-        // Add token metadata for client-side use
         tokenIssuedAt: req.user.tokenIssuedAt || null,
         tokenExpiresAt: req.user.tokenExpiresAt || null
       };
@@ -789,7 +818,7 @@ router.get(
         message: 'User profile retrieved successfully',
         user: userResponse,
         timestamp: new Date().toISOString(),
-        authValidated: true, // THIS IS THE KEY FIELD - SET TO TRUE
+        authValidated: true,
         tokenValid: true,
         databaseAvailable: true,
         tokenInfo: {
@@ -816,6 +845,7 @@ router.get(
         return res.status(503).json({
           success: false,
           message: 'Database service temporarily unavailable',
+          errorCode: 'DATABASE_UNAVAILABLE',
           error: !IS_PRODUCTION ? error.message : undefined,
           timestamp: new Date().toISOString(),
           authValidated: false,
@@ -831,6 +861,7 @@ router.get(
         return res.status(500).json({
           success: false,
           message: 'Database operation failed',
+          errorCode: 'DATABASE_ERROR',
           error: !IS_PRODUCTION ? error.message : undefined,
           timestamp: new Date().toISOString(),
           authValidated: false
@@ -841,6 +872,7 @@ router.get(
       return res.status(500).json({
         success: false,
         message: 'Failed to fetch user profile',
+        errorCode: 'INTERNAL_ERROR',
         error: !IS_PRODUCTION ? error.message : undefined,
         timestamp: new Date().toISOString(),
         authValidated: false
@@ -861,6 +893,7 @@ function authenticateTokenRouter(req, res, next) {
     return res.status(401).json({ 
       success: false, 
       message: 'Access token required',
+      errorCode: 'TOKEN_REQUIRED',
       timestamp: new Date().toISOString()
     });
   }
@@ -877,6 +910,7 @@ function authenticateTokenRouter(req, res, next) {
         return res.status(401).json({ 
           success: false, 
           message: 'Token expired',
+          errorCode: 'TOKEN_EXPIRED',
           error: !IS_PRODUCTION ? err.message : undefined,
           timestamp: new Date().toISOString()
         });
@@ -886,6 +920,7 @@ function authenticateTokenRouter(req, res, next) {
         return res.status(401).json({ 
           success: false, 
           message: 'Invalid token',
+          errorCode: 'INVALID_TOKEN',
           error: !IS_PRODUCTION ? err.message : undefined,
           timestamp: new Date().toISOString()
         });
@@ -894,6 +929,7 @@ function authenticateTokenRouter(req, res, next) {
       return res.status(403).json({ 
         success: false, 
         message: 'Invalid or expired token',
+        errorCode: 'TOKEN_ERROR',
         error: !IS_PRODUCTION ? err.message : undefined,
         timestamp: new Date().toISOString()
       });
@@ -926,17 +962,19 @@ router.post(
         return res.status(400).json({
           success: false,
           message: 'Refresh token required',
+          errorCode: 'VALIDATION_ERROR',
           timestamp: new Date().toISOString()
         });
       }
 
-      // Check if models are available from app.locals - FIXED: Use Token (singular)
+      // Check if models are available from app.locals
       const models = req.app.locals.models;
       if (!models || !models.Token) {
         console.error('🔧 [AUTH] Token model not available for refresh');
         return res.status(500).json({
           success: false,
           message: 'Token model not available',
+          errorCode: 'MODEL_UNAVAILABLE',
           timestamp: new Date().toISOString()
         });
       }
@@ -950,6 +988,7 @@ router.post(
         return res.status(500).json({
           success: false,
           message: 'Database configuration error',
+          errorCode: 'CONFIGURATION_ERROR',
           timestamp: new Date().toISOString()
         });
       }
@@ -966,6 +1005,7 @@ router.post(
           return res.status(500).json({
             success: false,
             message: 'Database query operator not available',
+            errorCode: 'CONFIGURATION_ERROR',
             timestamp: new Date().toISOString()
           });
         }
@@ -974,6 +1014,7 @@ router.post(
         return res.status(500).json({
           success: false,
           message: 'Server configuration error: Sequelize operators unavailable',
+          errorCode: 'CONFIGURATION_ERROR',
           timestamp: new Date().toISOString()
         });
       }
@@ -991,19 +1032,21 @@ router.post(
         return res.status(401).json({
           success: false,
           message: 'Invalid or expired refresh token',
+          errorCode: 'INVALID_REFRESH_TOKEN',
           timestamp: new Date().toISOString()
         });
       }
 
-      const decoded = jwt.verify(refreshToken, JWT_SECRET); // Using JWT_SECRET
+      const decoded = jwt.verify(refreshToken, JWT_SECRET);
       
-      const UsersModel = models.User || models.Users; // FIXED: Use User (singular)
+      const UsersModel = models.User || models.Users;
       const user = await UsersModel.findByPk(decoded.userId);
 
       if (!user) {
         return res.status(401).json({
           success: false,
           message: 'User not found',
+          errorCode: 'USER_NOT_FOUND',
           timestamp: new Date().toISOString()
         });
       }
@@ -1012,19 +1055,19 @@ router.post(
       const newAccessToken = jwt.sign(
         { 
           userId: user.id, 
-          id: user.id, // Add id for compatibility
+          id: user.id,
           username: user.username, 
           email: user.email,
           role: user.role
         },
-        JWT_SECRET, // Using JWT_SECRET
+        JWT_SECRET,
         { expiresIn: JWT_ACCESS_EXPIRES_IN }
       );
 
       // Generate new refresh token
       const newRefreshToken = jwt.sign(
-        { userId: user.id, id: user.id }, // Add id for compatibility
-        JWT_SECRET, // Using JWT_SECRET
+        { userId: user.id, id: user.id },
+        JWT_SECRET,
         { expiresIn: JWT_REFRESH_EXPIRES_IN }
       );
 
@@ -1061,9 +1104,22 @@ router.post(
         message: error.message,
         stack: error.stack
       });
-      res.status(error.statusCode || 500).json({
+      
+      let statusCode = 500;
+      let errorCode = 'INTERNAL_ERROR';
+      
+      if (error.name === 'JsonWebTokenError') {
+        statusCode = 401;
+        errorCode = 'INVALID_TOKEN';
+      } else if (error.name === 'TokenExpiredError') {
+        statusCode = 401;
+        errorCode = 'TOKEN_EXPIRED';
+      }
+      
+      res.status(statusCode).json({
         success: false,
         message: error.message || 'Failed to refresh token',
+        errorCode: errorCode,
         error: !IS_PRODUCTION ? error.message : undefined,
         timestamp: new Date().toISOString()
       });
@@ -1079,28 +1135,38 @@ router.post(
     try {
       const { refreshToken } = req.cookies || req.body;
 
-      // Check if models are available from app.locals - FIXED: Use Token (singular)
+      // Check if models are available from app.locals
       const models = req.app.locals.models;
       if (refreshToken && models && models.Token) {
-        // Revoke the refresh token
-        const tokenRecord = await models.Token.findOne({
-          where: { token: refreshToken, tokenType: 'refresh' }
-        });
-        
-        if (tokenRecord) {
-          await tokenRecord.update({ isRevoked: true });
+        try {
+          // Revoke the refresh token
+          const tokenRecord = await models.Token.findOne({
+            where: { token: refreshToken, tokenType: 'refresh' }
+          });
+          
+          if (tokenRecord) {
+            await tokenRecord.update({ isRevoked: true });
+          }
+        } catch (dbError) {
+          console.error('Token revoke error during logout:', dbError);
+          // Continue with logout even if token revoke fails
         }
       }
 
-      // Update user status - FIXED: Use User (singular)
+      // Update user status
       if (models && (models.User || models.Users) && req.user) {
-        const UsersModel = models.User || models.Users;
-        const user = await UsersModel.findByPk(req.user.userId);
-        if (user) {
-          await user.update({
-            status: 'offline',
-            lastSeen: new Date()
-          });
+        try {
+          const UsersModel = models.User || models.Users;
+          const user = await UsersModel.findByPk(req.user.userId);
+          if (user) {
+            await user.update({
+              status: 'offline',
+              lastSeen: new Date()
+            });
+          }
+        } catch (updateError) {
+          console.error('User update error during logout:', updateError);
+          // Continue with logout even if user update fails
         }
       }
 
@@ -1126,6 +1192,7 @@ router.post(
       res.status(500).json({
         success: false,
         message: 'Failed to logout',
+        errorCode: 'INTERNAL_ERROR',
         error: !IS_PRODUCTION ? error.message : undefined,
         timestamp: new Date().toISOString()
       });
@@ -1138,10 +1205,15 @@ router.get('/test-db', asyncHandler(async (req, res) => {
   try {
     const models = req.app.locals.models;
     if (!models) {
-      throw new Error('Models not available');
+      return res.status(503).json({
+        success: false,
+        message: 'Models not available',
+        errorCode: 'SERVICE_UNAVAILABLE',
+        timestamp: new Date().toISOString()
+      });
     }
     
-    // Test Users model - FIXED: Use User (singular)
+    // Test Users model
     const UsersModel = models.User || models.Users;
     const userCount = await UsersModel.count();
     
@@ -1173,6 +1245,7 @@ router.get('/test-db', asyncHandler(async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Database connection test failed',
+      errorCode: 'DATABASE_ERROR',
       error: error.message,
       timestamp: new Date().toISOString()
     });
@@ -1188,12 +1261,13 @@ router.post('/verify-token', asyncHandler(async (req, res) => {
       return res.status(400).json({
         success: false,
         message: 'Token is required',
+        errorCode: 'VALIDATION_ERROR',
         timestamp: new Date().toISOString()
       });
     }
 
     try {
-      const decoded = jwt.verify(token, JWT_SECRET); // Using JWT_SECRET
+      const decoded = jwt.verify(token, JWT_SECRET);
       
       // Check if user still exists
       const models = req.app.locals.models;
@@ -1207,7 +1281,9 @@ router.post('/verify-token', asyncHandler(async (req, res) => {
           return res.status(401).json({
             success: false,
             message: 'User not found or inactive',
-            timestamp: new Date().toISOString()
+            errorCode: 'USER_INACTIVE',
+            timestamp: new Date().toISOString(),
+            authValidated: false
           });
         }
         
@@ -1217,7 +1293,7 @@ router.post('/verify-token', asyncHandler(async (req, res) => {
           user: user,
           expiresIn: decoded.exp - Math.floor(Date.now() / 1000),
           timestamp: new Date().toISOString(),
-          authValidated: true // ADDED
+          authValidated: true
         });
       }
       
@@ -1227,7 +1303,7 @@ router.post('/verify-token', asyncHandler(async (req, res) => {
         user: decoded,
         expiresIn: decoded.exp - Math.floor(Date.now() / 1000),
         timestamp: new Date().toISOString(),
-        authValidated: true // ADDED
+        authValidated: true
       });
       
     } catch (jwtError) {
@@ -1236,12 +1312,21 @@ router.post('/verify-token', asyncHandler(async (req, res) => {
         message: jwtError.message,
         stack: jwtError.stack
       });
+      
+      let errorCode = 'TOKEN_ERROR';
+      if (jwtError.name === 'TokenExpiredError') {
+        errorCode = 'TOKEN_EXPIRED';
+      } else if (jwtError.name === 'JsonWebTokenError') {
+        errorCode = 'INVALID_TOKEN';
+      }
+      
       return res.status(401).json({
         success: false,
         message: 'Invalid or expired token',
+        errorCode: errorCode,
         error: !IS_PRODUCTION ? jwtError.message : undefined,
         timestamp: new Date().toISOString(),
-        authValidated: false // ADDED
+        authValidated: false
       });
     }
   } catch (error) {
@@ -1253,9 +1338,10 @@ router.post('/verify-token', asyncHandler(async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Failed to verify token',
+      errorCode: 'INTERNAL_ERROR',
       error: !IS_PRODUCTION ? error.message : undefined,
       timestamp: new Date().toISOString(),
-      authValidated: false // ADDED
+      authValidated: false
     });
   }
 }));
@@ -1272,6 +1358,7 @@ router.post(
         return res.status(400).json({
           success: false,
           message: 'Current password and new password are required',
+          errorCode: 'VALIDATION_ERROR',
           timestamp: new Date().toISOString()
         });
       }
@@ -1280,6 +1367,7 @@ router.post(
         return res.status(400).json({
           success: false,
           message: 'New password must be at least 6 characters',
+          errorCode: 'VALIDATION_ERROR',
           timestamp: new Date().toISOString()
         });
       }
@@ -1289,6 +1377,7 @@ router.post(
         return res.status(500).json({
           success: false,
           message: 'User model not available',
+          errorCode: 'MODEL_UNAVAILABLE',
           timestamp: new Date().toISOString()
         });
       }
@@ -1300,6 +1389,7 @@ router.post(
         return res.status(404).json({
           success: false,
           message: 'User not found',
+          errorCode: 'USER_NOT_FOUND',
           timestamp: new Date().toISOString()
         });
       }
@@ -1311,6 +1401,7 @@ router.post(
         return res.status(401).json({
           success: false,
           message: 'Current password is incorrect',
+          errorCode: 'INVALID_CREDENTIALS',
           timestamp: new Date().toISOString()
         });
       }
@@ -1323,7 +1414,7 @@ router.post(
         success: true,
         message: 'Password changed successfully',
         timestamp: new Date().toISOString(),
-        authValidated: true // ADDED
+        authValidated: true
       });
       
     } catch (error) {
@@ -1335,6 +1426,7 @@ router.post(
       res.status(500).json({
         success: false,
         message: 'Failed to change password',
+        errorCode: 'INTERNAL_ERROR',
         error: !IS_PRODUCTION ? error.message : undefined,
         timestamp: new Date().toISOString()
       });
@@ -1381,13 +1473,14 @@ router.get('/debug-auth', authenticateTokenRouter, asyncHandler(async (req, res)
         }
       },
       timestamp: new Date().toISOString(),
-      authValidated: true // ADDED
+      authValidated: true
     });
   } catch (error) {
     console.error('🔧 [AUTH] Debug auth error:', error.message);
     res.status(500).json({
       success: false,
       message: 'Debug endpoint error',
+      errorCode: 'INTERNAL_ERROR',
       error: !IS_PRODUCTION ? error.message : undefined,
       timestamp: new Date().toISOString()
     });

@@ -1,7 +1,7 @@
 const mongoose = require('mongoose');
 const Group = require('../models/Group');
-const User = require('../models/User');
-const Conversation = require('../models/Chat');
+const User = require('../models/Users');
+const Conversation = require('../models/Chats');
 const { ServerError, ValidationError, NotFoundError, ForbiddenError } = require('../utils/errors');
 const { MAX_GROUP_MEMBERS, DEFAULT_GROUP_PICTURE } = process.env;
 

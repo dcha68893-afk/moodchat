@@ -106,14 +106,14 @@ router.get(
 
       const where = {
         chatType: 'group',
-        '$participants.id$': req.user.id,
+        '$participants.id$': req.user.userId,
         isArchived: false,
       };
 
       if (role === 'admin') {
-        where['$admins.id$'] = req.user.id;
+        where['$admins.id$'] = req.user.userId;
       } else if (role === 'member') {
-        where['$admins.id$'] = { [sequelize.Op.ne]: req.user.id };
+        where['$admins.id$'] = { [sequelize.Op.ne]: req.user.userId };
       }
 
       if (search && search.trim()) {
@@ -155,10 +155,10 @@ router.get(
       const groupsWithMetadata = await Promise.all(
         groups.map(async group => {
           const groupObj = group.toJSON();
-          const isAdmin = group.admins.some(admin => admin.id === req.user.id);
+          const isAdmin = group.admins.some(admin => admin.id === req.user.userId);
           const participantCount = group.participants ? group.participants.length : 0;
           const onlineCount = group.participants ? group.participants.filter(p => p.online).length : 0;
-          const userUnread = await group.getUnreadCount(req.user.id);
+          const userUnread = await group.getUnreadCount(req.user.userId);
 
           return {
             ...groupObj,
@@ -214,9 +214,9 @@ router.post(
         throw new ValidationError('Group name must be less than 100 characters');
       }
 
-      const allParticipants = [req.user.id];
+      const allParticipants = [req.user.userId];
       if (Array.isArray(participantIds) && participantIds.length > 0) {
-        const uniqueParticipants = [...new Set(participantIds.filter(id => id !== req.user.id))];
+        const uniqueParticipants = [...new Set(participantIds.filter(id => id !== req.user.userId))];
 
         if (uniqueParticipants.length > 0) {
           const participants = await User.findAll({
@@ -228,7 +228,7 @@ router.post(
             throw new NotFoundError('One or more participants not found');
           }
 
-          const currentUser = await User.findByPk(req.user.id, {
+          const currentUser = await User.findByPk(req.user.userId, {
             include: [{
               model: User,
               as: 'blockedUsers',
@@ -238,7 +238,7 @@ router.post(
 
           const blockedParticipants = participants.filter(p =>
             currentUser.blockedUsers.some(bu => bu.id === p.id) ||
-            p.blockedUsers.some(bu => bu.id === req.user.id)
+            p.blockedUsers.some(bu => bu.id === req.user.userId)
           );
 
           if (blockedParticipants.length > 0) {
@@ -254,7 +254,7 @@ router.post(
         chatName: name.trim(),
         description: description?.trim(),
         avatar,
-        createdBy: req.user.id,
+        createdBy: req.user.userId,
         isPublic,
         joinSettings,
         settings: {
@@ -266,7 +266,7 @@ router.post(
       });
 
       await group.setParticipants(allParticipants);
-      await group.setAdmins([req.user.id]);
+      await group.setAdmins([req.user.userId]);
 
       const populatedGroup = await Chat.findByPk(group.id, {
         include: [
@@ -289,7 +289,7 @@ router.post(
         ]
       });
 
-      const currentUser = await User.findByPk(req.user.id);
+      const currentUser = await User.findByPk(req.user.userId);
 
       if (req.io) {
         const notificationData = {
@@ -336,7 +336,7 @@ router.get(
         where: {
           id: groupId,
           chatType: 'group',
-          '$participants.id$': req.user.id,
+          '$participants.id$': req.user.userId,
           isArchived: false
         },
         include: [
@@ -369,10 +369,10 @@ router.get(
       }
 
       const groupData = group.toJSON();
-      groupData.isAdmin = group.admins.some(admin => admin.id === req.user.id);
+      groupData.isAdmin = group.admins.some(admin => admin.id === req.user.userId);
       groupData.participantCount = group.participants.length;
       groupData.onlineCount = group.participants.filter(p => p.online).length;
-      const userUnread = await group.getUnreadCount(req.user.id);
+      const userUnread = await group.getUnreadCount(req.user.userId);
       groupData.unreadCount = userUnread || 0;
 
       res.status(200).json({
@@ -401,8 +401,8 @@ router.patch(
         where: {
           id: groupId,
           chatType: 'group',
-          '$participants.id$': req.user.id,
-          '$admins.id$': req.user.id,
+          '$participants.id$': req.user.userId,
+          '$admins.id$': req.user.userId,
           isArchived: false
         },
         include: [{
@@ -453,7 +453,7 @@ router.patch(
                 groupId: group.id,
                 updates,
                 updatedBy: {
-                  id: req.user.id,
+                  id: req.user.userId,
                   username: req.user.username,
                 },
               });
@@ -493,8 +493,8 @@ router.post(
         where: {
           id: groupId,
           chatType: 'group',
-          '$participants.id$': req.user.id,
-          '$admins.id$': req.user.id,
+          '$participants.id$': req.user.userId,
+          '$admins.id$': req.user.userId,
           isArchived: false
         },
         include: [
@@ -531,7 +531,7 @@ router.post(
         throw new NotFoundError('One or more users not found');
       }
 
-      const currentUser = await User.findByPk(req.user.id, {
+      const currentUser = await User.findByPk(req.user.userId, {
         include: [{
           model: User,
           as: 'blockedUsers',
@@ -541,7 +541,7 @@ router.post(
 
       const blockedUsers = usersToAdd.filter(user =>
         currentUser.blockedUsers.some(bu => bu.id === user.id) ||
-        user.blockedUsers.some(bu => bu.id === req.user.id)
+        user.blockedUsers.some(bu => bu.id === req.user.userId)
       );
 
       if (blockedUsers.length > 0) {
@@ -573,7 +573,7 @@ router.post(
         ]
       });
 
-      const currentUserFull = await User.findByPk(req.user.id);
+      const currentUserFull = await User.findByPk(req.user.userId);
 
       if (req.io) {
         newMembers.forEach(member => {
@@ -645,7 +645,7 @@ router.delete(
         where: {
           id: groupId,
           chatType: 'group',
-          '$participants.id$': req.user.id,
+          '$participants.id$': req.user.userId,
           isArchived: false
         },
         include: [
@@ -668,8 +668,8 @@ router.delete(
         throw new NotFoundError('Group not found or access denied');
       }
 
-      const isAdmin = group.admins.some(admin => admin.id === req.user.id);
-      const isSelfRemoval = userId === req.user.id;
+      const isAdmin = group.admins.some(admin => admin.id === req.user.userId);
+      const isSelfRemoval = userId === req.user.userId;
 
       if (!isAdmin && !isSelfRemoval) {
         throw new AuthorizationError('Only admins can remove other members');
@@ -691,7 +691,7 @@ router.delete(
       }
 
       const removedUser = await User.findByPk(userId);
-      const currentUser = await User.findByPk(req.user.id);
+      const currentUser = await User.findByPk(req.user.userId);
 
       if (req.io) {
         if (removedUser.socketIds && removedUser.socketIds.length > 0) {
@@ -722,7 +722,7 @@ router.delete(
                 removedUserId: userId,
                 removedUsername: removedUser.username,
                 removedBy: {
-                  id: req.user.id,
+                  id: req.user.userId,
                   username: currentUser.username,
                 },
               });
@@ -756,8 +756,8 @@ router.post(
         where: {
           id: groupId,
           chatType: 'group',
-          '$participants.id$': req.user.id,
-          '$admins.id$': req.user.id,
+          '$participants.id$': req.user.userId,
+          '$admins.id$': req.user.userId,
           isArchived: false
         },
         include: [
@@ -793,7 +793,7 @@ router.post(
       await group.addAdmin(userId);
 
       const promotedUser = await User.findByPk(userId);
-      const currentUser = await User.findByPk(req.user.id);
+      const currentUser = await User.findByPk(req.user.userId);
 
       if (req.io) {
         if (promotedUser.socketIds && promotedUser.socketIds.length > 0) {
@@ -812,7 +812,7 @@ router.post(
         const otherMembers = await User.findAll({
           where: {
             id: group.participants
-              .filter(p => p.id !== userId && p.id !== req.user.id)
+              .filter(p => p.id !== userId && p.id !== req.user.userId)
               .map(p => p.id)
           },
           attributes: ['id', 'socketIds']
@@ -860,8 +860,8 @@ router.delete(
         where: {
           id: groupId,
           chatType: 'group',
-          '$participants.id$': req.user.id,
-          '$admins.id$': req.user.id,
+          '$participants.id$': req.user.userId,
+          '$admins.id$': req.user.userId,
           isArchived: false
         },
         include: [
@@ -883,7 +883,7 @@ router.delete(
         throw new ValidationError('User is not an admin');
       }
 
-      if (userId === req.user.id) {
+      if (userId === req.user.userId) {
         throw new ValidationError('Cannot demote yourself');
       }
 
@@ -894,7 +894,7 @@ router.delete(
       await group.removeAdmin(userId);
 
       const demotedUser = await User.findByPk(userId);
-      const currentUser = await User.findByPk(req.user.id);
+      const currentUser = await User.findByPk(req.user.userId);
 
       if (req.io) {
         if (demotedUser.socketIds && demotedUser.socketIds.length > 0) {
@@ -913,7 +913,7 @@ router.delete(
         const otherMembers = await User.findAll({
           where: {
             id: group.participants
-              .filter(p => p.id !== userId && p.id !== req.user.id)
+              .filter(p => p.id !== userId && p.id !== req.user.userId)
               .map(p => p.id)
           },
           attributes: ['id', 'socketIds']
@@ -961,7 +961,7 @@ router.post(
         where: {
           id: groupId,
           chatType: 'group',
-          '$participants.id$': req.user.id,
+          '$participants.id$': req.user.userId,
           isArchived: false
         },
         include: [{
@@ -976,18 +976,18 @@ router.post(
         throw new NotFoundError('Group chat not found or access denied');
       }
 
-      const isAdmin = group.admins.some(admin => admin.id === req.user.id);
+      const isAdmin = group.admins.some(admin => admin.id === req.user.userId);
       if (isAdmin && group.admins.length === 1) {
         throw new ValidationError('Cannot leave as the last admin. Transfer ownership first.');
       }
 
-      await group.removeParticipant(req.user.id);
+      await group.removeParticipant(req.user.userId);
 
       if (isAdmin) {
-        await group.removeAdmin(req.user.id);
+        await group.removeAdmin(req.user.userId);
       }
 
-      const currentUser = await User.findByPk(req.user.id);
+      const currentUser = await User.findByPk(req.user.userId);
 
       if (req.io) {
         const remainingUsers = await User.findAll({
@@ -1039,8 +1039,8 @@ router.post(
         where: {
           id: groupId,
           chatType: 'group',
-          '$participants.id$': req.user.id,
-          '$admins.id$': req.user.id,
+          '$participants.id$': req.user.userId,
+          '$admins.id$': req.user.userId,
           isArchived: false
         },
         include: [
@@ -1075,7 +1075,7 @@ router.post(
       }
 
       const newOwner = await User.findByPk(newOwnerId);
-      const currentUser = await User.findByPk(req.user.id);
+      const currentUser = await User.findByPk(req.user.userId);
 
       if (req.io) {
         if (newOwner.socketIds && newOwner.socketIds.length > 0) {
@@ -1136,8 +1136,8 @@ router.post(
         where: {
           id: groupId,
           chatType: 'group',
-          '$participants.id$': req.user.id,
-          '$admins.id$': req.user.id,
+          '$participants.id$': req.user.userId,
+          '$admins.id$': req.user.userId,
           isArchived: false
         }
       });
@@ -1155,7 +1155,7 @@ router.post(
       const invite = await GroupInvite.create({
         groupId: group.id,
         code: inviteCode,
-        createdBy: req.user.id,
+        createdBy: req.user.userId,
         expiresAt,
         maxUses,
         usedBy: [],
@@ -1210,7 +1210,7 @@ router.post(
 
       const group = invite.group;
 
-      const isMember = await group.hasParticipant(req.user.id);
+      const isMember = await group.hasParticipant(req.user.userId);
       if (isMember) {
         throw new ConflictError('Already a member of this group');
       }
@@ -1221,7 +1221,7 @@ router.post(
         throw new ValidationError('Group is full');
       }
 
-      const currentUser = await User.findByPk(req.user.id);
+      const currentUser = await User.findByPk(req.user.userId);
       const groupMembers = await User.findAll({
         where: {
           id: group.participants.map(p => p.id)
@@ -1234,18 +1234,18 @@ router.post(
       });
 
       const isBlocked = groupMembers.some(member =>
-        member.blockedUsers.some(bu => bu.id === req.user.id)
+        member.blockedUsers.some(bu => bu.id === req.user.userId)
       );
 
       if (isBlocked) {
         throw new AuthorizationError('Cannot join group - blocked by a member');
       }
 
-      await group.addParticipant(req.user.id);
+      await group.addParticipant(req.user.userId);
 
       const usedBy = invite.usedBy || [];
       usedBy.push({
-        user: req.user.id,
+        user: req.user.userId,
         usedAt: new Date(),
       });
       await invite.update({ usedBy });
@@ -1279,7 +1279,7 @@ router.post(
         const existingMembers = await User.findAll({
           where: {
             id: group.participants
-              .filter(p => p.id !== req.user.id)
+              .filter(p => p.id !== req.user.userId)
               .map(p => p.id)
           },
           attributes: ['id', 'socketIds']
@@ -1325,7 +1325,7 @@ router.get(
         where: {
           id: groupId,
           chatType: 'group',
-          '$participants.id$': req.user.id,
+          '$participants.id$': req.user.userId,
           isArchived: false
         }
       });
