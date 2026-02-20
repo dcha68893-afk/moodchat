@@ -4004,11 +4004,18 @@ class Application {
         const corsOptions = corsManager.getCorsOptions();
         
         // 1. CORS middleware - FIRST (CRITICAL)
-        this.app.use(cors(corsOptions));
-        
-        // 2. Handle preflight requests
-        this.app.options('*', cors(corsOptions));
-        
+this.app.use(cors(corsOptions));
+
+// 2. Handle preflight requests - FIXED
+this.app.options('*', (req, res) => {
+  // Set ALL required CORS headers for preflight
+  res.header('Access-Control-Allow-Origin', req.headers.origin || 'http://127.0.0.1:5500');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+  res.header('Access-Control-Allow-Credentials', 'true');
+  res.header('Access-Control-Max-Age', '86400'); // 24 hours
+  res.sendStatus(204); // No content, but success
+});
         // 3. Security headers
         this.app.use(helmet({
             contentSecurityPolicy: config.get('NODE_ENV') === 'production',
