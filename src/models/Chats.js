@@ -130,6 +130,7 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.ChatParticipant,
+          as: 'chatParticipants',
           where: {
             userId: [userId1, userId2],
           },
@@ -148,13 +149,13 @@ module.exports = (sequelize, DataTypes) => {
     const include = [
       {
         model: this.sequelize.models.ChatParticipant,
+        as: 'chatParticipants',
         where: { userId: userId },
         required: true,
         attributes: [],
       }
     ];
 
-    // Only include lastMessage if Messages model exists
     if (this.sequelize.models.Messages) {
       include.push({
         model: this.sequelize.models.Messages,
@@ -182,37 +183,36 @@ module.exports = (sequelize, DataTypes) => {
     });
   };
 
-  // Association method - Essential for proper relationships
   Chats.associate = function (models) {
-    // Chat has many Messages
     if (models.Messages) {
       Chats.hasMany(models.Messages, {
         foreignKey: 'chatId',
-        as: 'chatMessages'
+        as: 'chatMessages',
+        constraints: false,
       });
     }
 
-    // Chat has many ChatParticipants
     if (models.ChatParticipant) {
       Chats.hasMany(models.ChatParticipant, {
         foreignKey: 'chatId',
-        as: 'participants'
+        as: 'chatParticipants',
+        constraints: false,
       });
     }
 
-    // Chat belongs to a User (creator)
     if (models.Users) {
       Chats.belongsTo(models.Users, {
         foreignKey: 'createdBy',
-        as: 'creator'
+        as: 'chatCreator',
+        constraints: false,
       });
     }
 
-    // Chat belongs to a Message (last message)
     if (models.Messages) {
       Chats.belongsTo(models.Messages, {
         foreignKey: 'lastMessageId',
-        as: 'lastMessage'
+        as: 'chatLastMessage',
+        constraints: false,
       });
     }
   };

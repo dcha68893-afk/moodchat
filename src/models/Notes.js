@@ -147,16 +147,17 @@ module.exports = (sequelize, DataTypes) => {
     return this.tags;
   };
 
-  // Associations
   Notes.associate = (models) => {
     Notes.belongsTo(models.Users, {
       foreignKey: 'createdBy',
-      as: 'author'
+      as: 'noteAuthor',
+      constraints: false,
     });
     
     Notes.hasMany(models.File, {
       foreignKey: 'noteId',
-      as: 'attachments'
+      as: 'noteAttachments',
+      constraints: false,
     });
   };
 

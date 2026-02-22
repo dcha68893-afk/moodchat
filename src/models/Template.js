@@ -178,7 +178,6 @@ module.exports = (sequelize, DataTypes) => {
   Template.prototype.render = async function (variables = {}) {
     let renderedContent = this.content;
     
-    // Replace variables in content
     this.variables.forEach(variable => {
       const placeholder = `{{${variable.name}}}`;
       const value = variables[variable.name] || variable.default || '';
@@ -207,12 +206,12 @@ module.exports = (sequelize, DataTypes) => {
       ];
     }
 
-    // Check if models are available
     const include = [];
     
     if (this.sequelize.models.Category) {
       include.push({
         model: this.sequelize.models.Category,
+        as: 'templateCategory',
         attributes: ['id', 'name', 'slug'],
       });
     }
@@ -220,7 +219,7 @@ module.exports = (sequelize, DataTypes) => {
     if (this.sequelize.models.Users) {
       include.push({
         model: this.sequelize.models.Users,
-        as: 'creator',
+        as: 'templateCreator',
         foreignKey: 'createdBy',
         attributes: ['id', 'username', 'avatar'],
       });
@@ -248,12 +247,12 @@ module.exports = (sequelize, DataTypes) => {
       where.type = options.type;
     }
 
-    // Check if models are available
     const include = [];
     
     if (this.sequelize.models.Category) {
       include.push({
         model: this.sequelize.models.Category,
+        as: 'templateCategory',
         attributes: ['id', 'name', 'slug'],
       });
     }
@@ -276,6 +275,7 @@ module.exports = (sequelize, DataTypes) => {
       },
       include: this.sequelize.models.Category ? [{
         model: this.sequelize.models.Category,
+        as: 'templateCategory',
         attributes: ['id', 'name', 'slug'],
       }] : undefined,
       order: [['favoritesCount', 'DESC']],
@@ -289,11 +289,12 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         this.sequelize.models.Category ? {
           model: this.sequelize.models.Category,
+          as: 'templateCategory',
           attributes: ['id', 'name', 'slug'],
         } : undefined,
         this.sequelize.models.Users ? {
           model: this.sequelize.models.Users,
-          as: 'creator',
+          as: 'templateCreator',
           foreignKey: 'createdBy',
           attributes: ['id', 'username', 'avatar'],
         } : undefined,
@@ -301,24 +302,24 @@ module.exports = (sequelize, DataTypes) => {
     });
   };
 
-  // Associations
   Template.associate = function (models) {
     if (models.Category) {
       Template.belongsTo(models.Category, {
         foreignKey: 'categoryId',
+        as: 'templateCategory',
         constraints: false,
       });
     }
     
     if (models.Users) {
       Template.belongsTo(models.Users, {
-        as: 'creator',
+        as: 'templateCreator',
         foreignKey: 'createdBy',
         constraints: false,
       });
       
       Template.belongsTo(models.Users, {
-        as: 'updater',
+        as: 'templateUpdater',
         foreignKey: 'updatedBy',
         constraints: false,
       });

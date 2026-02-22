@@ -1,5 +1,5 @@
 ﻿﻿// src/server.js - ADVANCED PRODUCTION SERVER WITH OPTIMIZED MIDDLEWARE ORDER
-// Complete implementation with FIXED middleware order
+// Complete implementation with FIXED middleware order and WebSocket
 // =========================================================================
 
 // ========== BOOTSTRAP & ENVIRONMENT ==========
@@ -7,6 +7,7 @@ const path = require('path');
 const fs = require('fs');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
+const WebSocket = require('ws'); // FIXED: Correct WebSocket import
 
 // Environment detection with proper precedence
 const ENV = {
@@ -1056,38 +1057,55 @@ class ProfessionalLogger {
         console.log(`${this.colors.cyan}   Network:  http://${host}:${port}${this.colors.reset}`);
         console.log(`${this.colors.cyan}   Health:   http://localhost:${port}/health${this.colors.reset}`);
         console.log(`${this.colors.cyan}   API Docs: http://localhost:${port}/api/health${this.colors.reset}`);
+        console.log(`${this.colors.cyan}   WebSocket: ws://localhost:${port}/ws${this.colors.reset}`);
         console.log(`${this.colors.green}══════════════════════════════════════════════════════════════════════════════${this.colors.reset}`);
         console.log(`${this.colors.yellow}   Press Ctrl+C to shutdown gracefully${this.colors.reset}\n`);
     }
     
     // Table display methods
     table(title, headers, rows, options = {}) {
-        if (process.env.NODE_ENV === 'production' && options.hideInProduction) return;
-        
-        console.log(`\n${this.colors.blue}${title}${this.colors.reset}`);
-        console.log(`${this.colors.blue}${'─'.repeat(80)}${this.colors.reset}`);
-        
-        // Headers
-        let headerStr = '';
-        headers.forEach((header, i) => {
-            const width = options.columnWidths?.[i] || 20;
-            headerStr += header.padEnd(width) + '  ';
-        });
-        console.log(`${this.colors.cyan}${headerStr}${this.colors.reset}`);
-        console.log(`${this.colors.blue}${'─'.repeat(80)}${this.colors.reset}`);
-        
-        // Rows
-        rows.forEach(row => {
-            let rowStr = '';
-            row.forEach((cell, i) => {
-                const width = options.columnWidths?.[i] || 20;
-                const cellText = String(cell).substring(0, width);
-                const color = this.getCellColor(cell, i, headers[i]);
-                rowStr += color + cellText.padEnd(width) + this.colors.reset + '  ';
-            });
-            console.log(rowStr);
-        });
-    }
+  if (process.env.NODE_ENV === 'production' && options.hideInProduction) return;
+  
+  // Ensure rows is an array
+  if (!rows || !Array.isArray(rows)) {
+    console.log(`${this.colors.yellow}⚠ Cannot display table: rows is not an array${this.colors.reset}`);
+    return;
+  }
+  
+  console.log(`\n${this.colors.blue}${title}${this.colors.reset}`);
+  console.log(`${this.colors.blue}${'─'.repeat(80)}${this.colors.reset}`);
+  
+  // Headers
+  let headerStr = '';
+  headers.forEach((header, i) => {
+    const width = options.columnWidths?.[i] || 20;
+    headerStr += header.padEnd(width) + '  ';
+  });
+  console.log(`${this.colors.cyan}${headerStr}${this.colors.reset}`);
+  console.log(`${this.colors.blue}${'─'.repeat(80)}${this.colors.reset}`);
+  
+  // Rows - with safe iteration
+  try {
+    rows.forEach(row => {
+      // Ensure row is an array
+      if (!Array.isArray(row)) {
+        console.log(`${this.colors.yellow}⚠ Skipping invalid row: ${JSON.stringify(row)}${this.colors.reset}`);
+        return;
+      }
+      
+      let rowStr = '';
+      row.forEach((cell, i) => {
+        const width = options.columnWidths?.[i] || 20;
+        const cellText = String(cell || '').substring(0, width);
+        const color = this.getCellColor(cell, i, headers[i]);
+        rowStr += color + cellText.padEnd(width) + this.colors.reset + '  ';
+      });
+      console.log(rowStr);
+    });
+  } catch (error) {
+    console.log(`${this.colors.yellow}⚠ Error displaying table: ${error.message}${this.colors.reset}`);
+  }
+}
     
     getCellColor(cell, index, header) {
         if (typeof cell === 'string') {
@@ -1117,40 +1135,41 @@ class ProfessionalLogger {
             ['Routes', `${report.routes.mounted}/${report.routes.total} mounted`, report.routes.skipped > 0 ? '⚠' : '✓'],
             ['CORS Origins', `${report.corsOrigins} allowed`, report.corsOrigins > 0 ? '✓' : '⚠'],
             ['CORS Env', report.corsEnvironment.toUpperCase(), report.corsEnvironment === 'production' ? '🔒' : '🔓'],
+            ['WebSocket', 'ENABLED', '✓'],
             ['Server State', report.serverState, report.serverState === 'READY' ? '✓' : report.serverState === 'DEGRADED' ? '⚠' : '✗']
         ];
         
         this.table('STARTUP REPORT', ['Component', 'Status', 'Health'], rows);
     }
     
-    displaySystemHealth() {
-        const services = [];
-        const connections = [];
-        
-        // Gather service states
-        for (const service of systemState.state.services.values()) {
-            services.push({
-                component: service.name,
-                state: service.healthy ? 'OK' : (service.degraded ? 'DEGRADED' : 'FAILED'),
-                mode: service.status,
-                notes: service.details.notes || ''
-            });
-        }
-        
-        // Gather connection states
-        for (const conn of systemState.state.connections.values()) {
-            connections.push({
-                component: conn.name,
-                state: conn.connected ? 'CONNECTED' : (conn.degraded ? 'DEGRADED' : 'DISCONNECTED'),
-                mode: conn.status,
-                notes: conn.details.reason || ''
-            });
-        }
-        
-        // Display system health
-        this.table('SYSTEM HEALTH', ['Component', 'State', 'Mode', 'Notes'], 
-            [...services, ...connections]);
-    }
+displaySystemHealth() {
+  const services = [];
+  const connections = [];
+  
+  // Gather service states - ensure each is an array
+  for (const [name, service] of systemState.state.services.entries()) {
+    services.push([
+      name || 'Unknown',
+      service.healthy ? 'OK' : (service.degraded ? 'DEGRADED' : 'FAILED'),
+      service.status || 'Unknown',
+      service.details?.notes || ''
+    ]);
+  }
+  
+  // Gather connection states - ensure each is an array
+  for (const [name, conn] of systemState.state.connections.entries()) {
+    connections.push([
+      name || 'Unknown',
+      conn.connected ? 'CONNECTED' : (conn.degraded ? 'DEGRADED' : 'DISCONNECTED'),
+      conn.status || 'Unknown',
+      conn.details?.reason || ''
+    ]);
+  }
+  
+  // Display system health
+  this.table('SYSTEM HEALTH', ['Component', 'State', 'Mode', 'Notes'], 
+    [...services, ...connections]);
+}
     
     displayRoutes() {
         const publicRoutes = [];
@@ -3669,9 +3688,10 @@ class WebSocketService {
         systemState.recordStartupStep('websocket_init_start');
         
         try {
-            const { WebSocketServer } = require('ws');
+            // FIXED: Use correct WebSocket import (already imported at top)
             
-            this.wss = new WebSocketServer({
+            // CORRECT: Use WebSocket.Server constructor
+            this.wss = new WebSocket.Server({
                 server,
                 path: '/ws',
                 clientTracking: true,
@@ -4004,18 +4024,19 @@ class Application {
         const corsOptions = corsManager.getCorsOptions();
         
         // 1. CORS middleware - FIRST (CRITICAL)
-this.app.use(cors(corsOptions));
-
-// 2. Handle preflight requests - FIXED
-this.app.options('*', (req, res) => {
-  // Set ALL required CORS headers for preflight
-  res.header('Access-Control-Allow-Origin', req.headers.origin || 'http://127.0.0.1:5500');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
-  res.header('Access-Control-Allow-Credentials', 'true');
-  res.header('Access-Control-Max-Age', '86400'); // 24 hours
-  res.sendStatus(204); // No content, but success
-});
+        this.app.use(cors(corsOptions));
+        
+        // 2. Handle preflight requests - FIXED
+        this.app.options('*', (req, res) => {
+            // Set ALL required CORS headers for preflight
+            res.header('Access-Control-Allow-Origin', req.headers.origin || 'http://127.0.0.1:5500');
+            res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+            res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+            res.header('Access-Control-Allow-Credentials', 'true');
+            res.header('Access-Control-Max-Age', '86400'); // 24 hours
+            res.sendStatus(204); // No content, but success
+        });
+        
         // 3. Security headers
         this.app.use(helmet({
             contentSecurityPolicy: config.get('NODE_ENV') === 'production',
@@ -4107,6 +4128,11 @@ this.app.options('*', (req, res) => {
                     mode: 'PROTECTED_ROUTES_ONLY',
                     description: 'Authentication required only for protected routes'
                 },
+                websocket: {
+                    enabled: config.get('FEATURE_WEBSOCKETS'),
+                    path: '/ws',
+                    url: `ws://${req.get('host')}/ws`
+                },
                 links: {
                     health: '/health',
                     apiHealth: '/api/health',
@@ -4114,7 +4140,8 @@ this.app.options('*', (req, res) => {
                     info: '/api/info',
                     login: '/api/auth/login',
                     register: '/api/auth/register',
-                    corsInfo: '/api/cors-info'
+                    corsInfo: '/api/cors-info',
+                    websocketTest: '/ws-test.html'
                 }
             });
         });
@@ -4155,6 +4182,11 @@ this.app.options('*', (req, res) => {
                     publicRoutes: this.routerManager.publicRoutes.length,
                     protectedRoutes: this.routerManager.protectedRoutes.length
                 },
+                websocket: {
+                    enabled: config.get('FEATURE_WEBSOCKETS'),
+                    state: this.websocket?.state || 'DISABLED',
+                    clients: this.websocket?.clients?.size || 0
+                },
                 cors: {
                     allowedOrigins: corsManager.getAllowedOrigins().length,
                     environment: corsManager.environment,
@@ -4189,6 +4221,10 @@ this.app.options('*', (req, res) => {
                     mode: 'PROTECTED_ROUTES_ONLY',
                     description: 'Public routes accessible without JWT'
                 },
+                websocket: {
+                    enabled: config.get('FEATURE_WEBSOCKETS'),
+                    state: this.websocket?.state || 'DISABLED'
+                },
                 cors: {
                     allowedOrigins: corsManager.getAllowedOrigins().slice(0, 5),
                     total: corsManager.getAllowedOrigins().length
@@ -4214,6 +4250,11 @@ this.app.options('*', (req, res) => {
                 auth: {
                     architecture: 'PROTECTED_ROUTES_ONLY',
                     description: 'Authentication middleware only on protected routes'
+                },
+                websocket: {
+                    enabled: config.get('FEATURE_WEBSOCKETS'),
+                    path: '/ws',
+                    protocol: 'ws'
                 },
                 cors: {
                     origins: corsManager.getAllowedOrigins().length,
@@ -4246,6 +4287,171 @@ this.app.options('*', (req, res) => {
                 sampleOrigins: corsManager.getAllowedOrigins().slice(0, 10)
             });
         });
+        
+        // WebSocket test page (development only)
+        if (config.get('NODE_ENV') === 'development') {
+            this.app.get('/ws-test.html', (req, res) => {
+                const html = `
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WebSocket Test</title>
+    <style>
+        body { font-family: Arial; margin: 20px; background: #f5f5f5; }
+        .container { max-width: 800px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        h1 { color: #333; }
+        #messages { border: 1px solid #ccc; height: 300px; overflow-y: scroll; padding: 10px; margin-top: 10px; background: #fafafa; border-radius: 4px; }
+        .message { padding: 8px; margin: 5px 0; border-radius: 4px; }
+        .sent { background: #e3f2fd; text-align: right; }
+        .received { background: #f1f8e9; }
+        .error { background: #ffebee; color: #c62828; }
+        .system { background: #fff3e0; color: #ef6c00; }
+        button { padding: 8px 16px; margin: 5px; cursor: pointer; border: none; border-radius: 4px; background: #4CAF50; color: white; }
+        button:hover { opacity: 0.9; }
+        button.disconnect { background: #f44336; }
+        input { padding: 8px; width: 300px; border: 1px solid #ccc; border-radius: 4px; }
+        #status { font-weight: bold; margin: 10px 0; padding: 10px; border-radius: 4px; }
+        .connected { background: #c8e6c9; color: #2e7d32; }
+        .disconnected { background: #ffcdd2; color: #c62828; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>WebSocket Connection Test</h1>
+        <div>
+            <button onclick="connect()">Connect</button>
+            <button onclick="disconnect()" class="disconnect">Disconnect</button>
+            <button onclick="sendPing()">Send Ping</button>
+            <button onclick="sendEcho()">Send Echo</button>
+            <button onclick="clearMessages()">Clear Messages</button>
+        </div>
+        <div>
+            <input type="text" id="messageInput" placeholder="Custom message" style="width: 300px;">
+            <button onclick="sendCustom()">Send Custom</button>
+        </div>
+        <div id="status" class="disconnected">Status: Disconnected</div>
+        <div id="messages"></div>
+    </div>
+
+    <script>
+        let ws = null;
+        const messagesDiv = document.getElementById('messages');
+        const statusDiv = document.getElementById('status');
+        
+        function log(message, type = 'system') {
+            const msgDiv = document.createElement('div');
+            msgDiv.className = 'message ' + type;
+            msgDiv.textContent = '[' + new Date().toLocaleTimeString() + '] ' + message;
+            messagesDiv.appendChild(msgDiv);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+        
+        function connect() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = protocol + '//' + window.location.host + '/ws';
+            
+            log('Connecting to ' + wsUrl + '...', 'system');
+            
+            ws = new WebSocket(wsUrl);
+            
+            ws.onopen = function() {
+                statusDiv.textContent = 'Status: Connected';
+                statusDiv.className = 'connected';
+                log('Connected to WebSocket server', 'system');
+            };
+            
+            ws.onclose = function() {
+                statusDiv.textContent = 'Status: Disconnected';
+                statusDiv.className = 'disconnected';
+                log('Disconnected from WebSocket server', 'system');
+                ws = null;
+            };
+            
+            ws.onerror = function(error) {
+                log('WebSocket error: ' + (error.message || 'Unknown error'), 'error');
+            };
+            
+            ws.onmessage = function(event) {
+                try {
+                    const data = JSON.parse(event.data);
+                    log('Received: ' + JSON.stringify(data, null, 2), 'received');
+                } catch (e) {
+                    log('Received (raw): ' + event.data, 'received');
+                }
+            };
+        }
+        
+        function disconnect() {
+            if (ws) {
+                ws.close();
+            }
+        }
+        
+        function sendPing() {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                log('Not connected', 'error');
+                return;
+            }
+            
+            const message = JSON.stringify({
+                type: 'ping',
+                timestamp: new Date().toISOString()
+            });
+            
+            ws.send(message);
+            log('Sent: ' + message, 'sent');
+        }
+        
+        function sendEcho() {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                log('Not connected', 'error');
+                return;
+            }
+            
+            const message = JSON.stringify({
+                type: 'echo',
+                message: 'Hello WebSocket!',
+                timestamp: new Date().toISOString()
+            });
+            
+            ws.send(message);
+            log('Sent: ' + message, 'sent');
+        }
+        
+        function sendCustom() {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                log('Not connected', 'error');
+                return;
+            }
+            
+            const customMsg = document.getElementById('messageInput').value;
+            if (!customMsg) {
+                log('Please enter a message', 'error');
+                return;
+            }
+            
+            const message = JSON.stringify({
+                type: 'message',
+                content: customMsg,
+                timestamp: new Date().toISOString()
+            });
+            
+            ws.send(message);
+            log('Sent: ' + message, 'sent');
+            document.getElementById('messageInput').value = '';
+        }
+        
+        function clearMessages() {
+            messagesDiv.innerHTML = '';
+        }
+    </script>
+</body>
+</html>
+                `;
+                res.send(html);
+            });
+            console.log('✅ WebSocket test page available at /ws-test.html');
+        }
         
         // Ready endpoint for load balancers (public)
         this.app.get('/ready', (req, res) => {
@@ -4367,9 +4573,9 @@ this.app.options('*', (req, res) => {
                 if (config.get('FEATURE_WEBSOCKETS')) {
                     this.websocket = new WebSocketService();
                     this.websocket.initialize(this.server).then(() => {
-                        logger.debug('WebSocket initialization complete', 'SYSTEM');
+                        logger.success('WebSocket initialized successfully', 'WEBSOCKET');
                     }).catch(error => {
-                        logger.debug(`WebSocket init completed with fallback`, 'SYSTEM');
+                        logger.debug(`WebSocket init completed with fallback: ${error.message}`, 'WEBSOCKET');
                     });
                 }
                 
@@ -4401,6 +4607,7 @@ this.app.options('*', (req, res) => {
                 console.log(`   • /api/auth/forgot-password  - Password reset request`);
                 console.log(`   • /api/auth/reset-password   - Password reset`);
                 console.log(`   • /api/auth/validate-token   - Token validation`);
+                console.log(`   • /ws-test.html              - WebSocket test page`);
                 console.log(`🔒 PROTECTED ROUTES (JWT required):`);
                 console.log(`   • /api/auth/me               - Current user info`);
                 console.log(`   • /api/auth/logout           - User logout`);
@@ -4428,17 +4635,10 @@ this.app.options('*', (req, res) => {
                 console.log(`   • POST /api/auth/logout       - ✅ WORKING (401 if no token)`);
                 console.log('='.repeat(80));
                 
-                console.log('\n🚀 PROTECTED ROUTES ONLY AUTH FEATURES:');
-                console.log(`   ✅ CORS middleware first`);
-                console.log(`   ✅ JSON parser second`);
-                console.log(`   ✅ Auth middleware only on protected routes`);
-                console.log(`   ✅ /, /health, /api/status are PUBLIC`);
-                console.log(`   ✅ Login/register work on all devices`);
-                console.log(`   ✅ Service worker and iframe compatible`);
-                console.log(`   ✅ Proper error handling for auth failures`);
-                console.log(`   ✅ No accidental data leakage`);
-                console.log(`   ✅ Environment-aware behavior`);
-                console.log(`   ✅ All existing features preserved`);
+                console.log('\n✅ WEBSOCKET STATUS:');
+                console.log(`   • Path: /ws`);
+                console.log(`   • Feature Enabled: ${config.get('FEATURE_WEBSOCKETS')}`);
+                console.log(`   • Test Page: /ws-test.html`);
                 console.log('='.repeat(80));
                 
                 resolve(this.server);

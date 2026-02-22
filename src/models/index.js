@@ -2,6 +2,7 @@
 const { Sequelize, Op } = require('sequelize');
 const fs = require('fs');
 const path = require('path');
+const WebSocket = require('ws'); // Add this line for WebSocket
 
 // ===== DATABASE CONFIGURATION =====
 const env = process.env.NODE_ENV || 'development';
@@ -109,7 +110,8 @@ const db = {
   models: {},
   failedModels: {},
   skippedFiles: {},
-  associationErrors: {}
+  associationErrors: {},
+  wss: null // Will be set after server creation
 };
 
 // CRITICAL: Define essential core models for system startup
@@ -120,22 +122,19 @@ const MODEL_WHITELIST = [
   'Users', 'Token', 'Profile', 'Settings', 'Features',
   'Chats', 'Messages', 'ChatParticipant', 'GroupMembers',
   'TypingIndicator', 'UserStatus', 'ReadReceipt', 'SharedMood',
-  'Notifications', 'Friend', 'Call', 'Group', 'Media', 'Mood', 'Status'
+  'Notifications', 'Friend', 'Calls', 'Groups', 'Media', 'Mood', 'Status',
+  'Category', 'Template', 'Notes', 'File'
 ];
 
 // CRITICAL: Patterns that indicate NON-MODEL files (routers, controllers, etc.)
-// Updated to be more specific to avoid matching model files
 const NON_MODEL_PATTERNS = [
-  // File names that are definitely NOT models
   'authRoutes', 'authController', 'userController', 'chatController', 'friendController',
   'groupController', 'messageController', 'notificationController',
   'authMiddleware', 'errorMiddleware', 'validationMiddleware',
   'index', 'utils', 'helpers', 'validators', 'schemas',
   'routes', 'controllers', 'middleware', 'services',
-  // Specific route files with .route.js extension
   'auth.route', 'user.route', 'chat.route', 'friend.route', 'group.route',
   'message.route', 'notification.route', 'status.route',
-  // Common non-model patterns in file content
   'router.get', 'router.post', 'router.put', 'router.delete', 'router.use',
   'app.get', 'app.post', 'app.put', 'app.delete', 'app.use',
   'express.Router()', 'express.Router('
@@ -169,7 +168,6 @@ const modelFiles = fs.readdirSync(__dirname)
     
     const fileName = file.toLowerCase().replace('.js', '');
     
-    // Check if file is in our model whitelist (case-insensitive)
     const isWhitelisted = MODEL_WHITELIST.some(modelName => 
       modelName.toLowerCase() === fileName
     );
@@ -179,7 +177,6 @@ const modelFiles = fs.readdirSync(__dirname)
       return true;
     }
     
-    // For non-whitelisted files, check if they match non-model patterns
     const isNonModel = NON_MODEL_PATTERNS.some(pattern => 
       fileName.includes(pattern.toLowerCase())
     );
@@ -190,7 +187,6 @@ const modelFiles = fs.readdirSync(__dirname)
       return false;
     }
     
-    // If not whitelisted but also not a non-model pattern, we'll check its content
     console.log(`[Database] ⚠️ File not in whitelist but not blocked: ${file}. Will check content.`);
     return true;
   });
@@ -259,7 +255,6 @@ modelFiles.forEach(file => {
     } else if (modelModule && typeof modelModule.init === 'function') {
       modelInstance = modelModule;
       if (!modelInstance.sequelize) {
-        // Initialize model WITHOUT auto-creating indexes or foreign keys
         modelInstance.init(modelInstance.rawAttributes || {}, {
           sequelize,
           modelName: modelInstance.name || modelName,
@@ -313,13 +308,10 @@ Object.keys(db.models).forEach(modelName => {
   const model = db.models[modelName];
   if (model && typeof model.associate === 'function') {
     try {
-      // Wrap associate function to ensure constraints: false
       const originalAssociate = model.associate;
       model.associate = function(models) {
-        // Store original associate call
         const result = originalAssociate.call(this, models);
         
-        // Override any foreign key constraints to prevent auto-creation
         if (this.associations) {
           Object.values(this.associations).forEach(association => {
             if (association.foreignKeyConstraint !== undefined) {
@@ -327,7 +319,6 @@ Object.keys(db.models).forEach(modelName => {
             }
             if (association.options) {
               association.options.constraints = false;
-              // Remove index flags that trigger creation
               delete association.options.unique;
               delete association.options.index;
             }
@@ -457,6 +448,65 @@ db.getOperationalStatus = function() {
   };
 };
 
+// ===== WEBSOCKET INITIALIZATION FUNCTION =====
+db.initializeWebSocket = function(server) {
+  if (!server) {
+    console.error('[WebSocket] ❌ Server instance required for WebSocket initialization');
+    return null;
+  }
+  
+  try {
+    console.log('[WebSocket] 🔌 Initializing WebSocket server...');
+    
+    // CORRECT: Use WebSocket.Server, not WebSocketServer
+    const wss = new WebSocket.Server({ server });
+    
+    wss.on('connection', (socket) => {
+      console.log('[WebSocket] ✅ New client connected');
+      
+      socket.on('message', (msg) => {
+        try {
+          console.log('[WebSocket] 📨 Received:', msg.toString());
+          // Handle real-time messages here
+          // Parse JSON and route to appropriate handlers
+          const data = JSON.parse(msg.toString());
+          
+          // Broadcast to appropriate clients based on message type
+          // This is where real-time messaging logic goes
+          
+        } catch (error) {
+          console.error('[WebSocket] ❌ Error processing message:', error.message);
+        }
+      });
+      
+      socket.on('close', () => {
+        console.log('[WebSocket] 👋 Client disconnected');
+      });
+      
+      socket.on('error', (error) => {
+        console.error('[WebSocket] ❌ Socket error:', error.message);
+      });
+      
+      // Send welcome message
+      socket.send(JSON.stringify({
+        type: 'connection',
+        message: 'Connected to WebSocket server',
+        timestamp: new Date().toISOString()
+      }));
+    });
+    
+    db.wss = wss;
+    console.log('[WebSocket] ✅ WebSocket server initialized successfully');
+    
+    return wss;
+    
+  } catch (error) {
+    console.error('[WebSocket] ❌ WebSocket initialization failed:', error.message);
+    console.error(error.stack);
+    return null;
+  }
+};
+
 // ===== STARTUP REPORT =====
 console.log('\n[Database] ===== STARTUP REPORT =====');
 console.log(`[Database] Environment: ${env}`);
@@ -508,14 +558,15 @@ if (status.coreOperational) {
   console.log('[Database] ✅ Associations loaded with constraints: false');
   console.log('[Database] ✅ No auto-sync, no alter, no force');
   console.log('[Database] ✅ Sequelize.Op is available for queries');
+  console.log('[Database] ✅ WebSocket initialization function available via db.initializeWebSocket(server)');
 }
 
 // ===== EXPORT =====
-// Export all necessary Sequelize components in standard pattern
 module.exports = {
-  ...db, // Spread all db properties
-  sequelize, // Direct reference to sequelize instance
-  Sequelize, // Direct reference to Sequelize class
-  Op, // Direct reference to Op operators
-  models: db.models // Direct reference to models
+  ...db,
+  sequelize,
+  Sequelize,
+  Op,
+  models: db.models,
+  initializeWebSocket: db.initializeWebSocket
 };

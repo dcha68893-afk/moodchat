@@ -11,13 +11,10 @@ module.exports = (sequelize, DataTypes) => {
       userId: {
         type: DataTypes.INTEGER,
         allowNull: false,
-        // REMOVED: references and foreign key constraints
-        // Let associations handle relationships
       },
       chatId: {
         type: DataTypes.INTEGER,
         allowNull: false,
-        // No references - Chats model doesn't exist
       },
       role: {
         type: DataTypes.ENUM('admin', 'member'),
@@ -50,8 +47,7 @@ module.exports = (sequelize, DataTypes) => {
       timestamps: true,
       underscored: false,
       freezeTableName: true,
-      // REMOVED ALL INDEXES - Let database keep existing indexes
-      indexes: [], // Empty array prevents Sequelize from creating indexes
+      indexes: [],
       hooks: {
         beforeCreate: (participant) => {
           if (!participant.joinedAt) {
@@ -62,19 +58,25 @@ module.exports = (sequelize, DataTypes) => {
     }
   );
 
-  // ===== ASSOCIATIONS =====
   ChatParticipant.associate = function (models) {
     if (models.Users) {
       ChatParticipant.belongsTo(models.Users, {
         foreignKey: 'userId',
-        as: 'user',
-        constraints: false,  // CRITICAL: Disable constraint creation
-        // No onDelete/onUpdate - let database handle it
+        as: 'chatParticipantUser',
+        constraints: false,
+      });
+    }
+    
+    if (models.Chats) {
+      ChatParticipant.belongsTo(models.Chats, {
+        foreignKey: 'chatId',
+        as: 'participantChat',
+        constraints: false,
       });
     }
   };
 
-  // ===== INSTANCE METHODS =====
+  // Instance methods
   ChatParticipant.prototype.promoteToAdmin = async function () {
     this.role = 'admin';
     return await this.save();
@@ -111,7 +113,7 @@ module.exports = (sequelize, DataTypes) => {
     };
   };
 
-  // ===== STATIC METHODS =====
+  // Static methods
   ChatParticipant.getChatParticipants = async function (chatId, options = {}) {
     const where = { chatId };
 
@@ -128,7 +130,7 @@ module.exports = (sequelize, DataTypes) => {
     if (options.includeUser) {
       include.push({
         model: this.sequelize.models.Users,
-        as: 'user',
+        as: 'chatParticipantUser',
         attributes: ['id', 'username', 'avatar', 'status', 'lastSeen'],
       });
     }
@@ -166,7 +168,7 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
-          as: 'user',
+          as: 'chatParticipantUser',
           attributes: ['id', 'username', 'avatar', 'email'],
         },
       ],
@@ -207,7 +209,6 @@ module.exports = (sequelize, DataTypes) => {
     });
 
     if (!created) {
-      // Participant already exists, update their status
       participant.role = role;
       participant.isMuted = isMuted;
       await participant.save();
@@ -271,7 +272,6 @@ module.exports = (sequelize, DataTypes) => {
       });
 
       if (!participant.isNewRecord) {
-        // Update existing participant
         await participant.update(data);
       }
 

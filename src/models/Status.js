@@ -233,53 +233,56 @@ module.exports = (sequelize, DataTypes) => {
         },
         beforeUpdate: (status) => {
           if (status.changed('isActive') && !status.isActive) {
-            status.expiresAt = new Date(); // Set expire time when deactivated
+            status.expiresAt = new Date();
           }
         },
       },
     }
   );
 
-  // ===== ASSOCIATIONS =====
   Status.associate = function (models) {
     if (models.Users) {
       Status.belongsTo(models.Users, {
         foreignKey: 'userId',
-        as: 'user',
+        as: 'statusUser', // FIXED: Changed from 'statusOwner'
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
+        constraints: false,
       });
     }
 
     if (models.StatusLike) {
       Status.hasMany(models.StatusLike, {
         foreignKey: 'statusId',
-        as: 'likes',
+        as: 'statusLikes',
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
+        constraints: false,
       });
     }
 
     if (models.StatusComment) {
       Status.hasMany(models.StatusComment, {
         foreignKey: 'statusId',
-        as: 'comments',
+        as: 'statusComments',
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
+        constraints: false,
       });
     }
 
     if (models.StatusView) {
       Status.hasMany(models.StatusView, {
         foreignKey: 'statusId',
-        as: 'views',
+        as: 'statusViews',
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
+        constraints: false,
       });
     }
   };
 
-  // ===== INSTANCE METHODS =====
+  // Instance methods
   Status.prototype.incrementViewCount = async function () {
     this.viewCount += 1;
     return await this.save();
@@ -396,15 +399,12 @@ module.exports = (sequelize, DataTypes) => {
 
   Status.prototype.toJSON = function () {
     const values = Object.assign({}, this.get());
-    
-    // Add calculated fields
     values.timeSinceCreated = this.getTimeSinceCreated();
     values.isExpired = this.isExpired();
-    
     return values;
   };
 
-  // ===== STATIC METHODS =====
+  // Static methods
   Status.getUserStatuses = async function (userId, options = {}) {
     const where = { userId };
 
@@ -425,7 +425,7 @@ module.exports = (sequelize, DataTypes) => {
     if (options.includeUser) {
       include.push({
         model: this.sequelize.models.Users,
-        as: 'user',
+        as: 'statusUser', // FIXED: Changed from 'statusOwner'
         attributes: ['id', 'username', 'avatar', 'status'],
       });
     }
@@ -433,13 +433,13 @@ module.exports = (sequelize, DataTypes) => {
     if (options.includeLikes) {
       include.push({
         model: this.sequelize.models.StatusLike,
-        as: 'likes',
+        as: 'statusLikes',
         attributes: ['id', 'userId', 'createdAt'],
         limit: 5,
         include: [
           {
             model: this.sequelize.models.Users,
-            as: 'user',
+            as: 'likeUser',
             attributes: ['id', 'username', 'avatar'],
           },
         ],
@@ -449,14 +449,14 @@ module.exports = (sequelize, DataTypes) => {
     if (options.includeComments) {
       include.push({
         model: this.sequelize.models.StatusComment,
-        as: 'comments',
+        as: 'statusComments',
         attributes: ['id', 'userId', 'content', 'createdAt'],
         limit: 5,
         order: [['createdAt', 'DESC']],
         include: [
           {
             model: this.sequelize.models.Users,
-            as: 'user',
+            as: 'commentUser',
             attributes: ['id', 'username', 'avatar'],
           },
         ],
@@ -490,7 +490,6 @@ module.exports = (sequelize, DataTypes) => {
       where.moodType = options.moodType;
     }
 
-    // Filter out expired statuses
     const Op = this.sequelize.Op;
     where[Op.or] = [
       { expiresAt: null },
@@ -500,7 +499,7 @@ module.exports = (sequelize, DataTypes) => {
     const include = [
       {
         model: this.sequelize.models.Users,
-        as: 'user',
+        as: 'statusUser', // FIXED: Changed from 'statusOwner'
         attributes: ['id', 'username', 'avatar', 'status'],
       },
     ];
@@ -521,11 +520,10 @@ module.exports = (sequelize, DataTypes) => {
       isActive: true,
       [Op.or]: [
         { isPublic: true },
-        { userId: userId }, // User can see their own private statuses
+        { userId: userId },
       ],
     };
 
-    // Filter out expired statuses
     where[Op.or] = [
       ...(where[Op.or] || []),
       { expiresAt: null },
@@ -535,7 +533,7 @@ module.exports = (sequelize, DataTypes) => {
     const include = [
       {
         model: this.sequelize.models.Users,
-        as: 'user',
+        as: 'statusUser', // FIXED: Changed from 'statusOwner'
         attributes: ['id', 'username', 'avatar', 'status'],
       },
     ];
@@ -543,7 +541,7 @@ module.exports = (sequelize, DataTypes) => {
     if (options.includeStats) {
       include.push({
         model: this.sequelize.models.StatusLike,
-        as: 'likes',
+        as: 'statusLikes',
         attributes: ['id'],
         required: false,
       });
@@ -604,7 +602,7 @@ module.exports = (sequelize, DataTypes) => {
     if (options.includeUser) {
       include.push({
         model: this.sequelize.models.Users,
-        as: 'user',
+        as: 'statusUser', // FIXED: Changed from 'statusOwner'
         attributes: ['id', 'username', 'avatar', 'status'],
       });
     }
@@ -612,12 +610,12 @@ module.exports = (sequelize, DataTypes) => {
     if (options.includeLikes) {
       include.push({
         model: this.sequelize.models.StatusLike,
-        as: 'likes',
+        as: 'statusLikes',
         attributes: ['id', 'userId', 'createdAt'],
         include: [
           {
             model: this.sequelize.models.Users,
-            as: 'user',
+            as: 'likeUser',
             attributes: ['id', 'username', 'avatar'],
           },
         ],
@@ -627,12 +625,12 @@ module.exports = (sequelize, DataTypes) => {
     if (options.includeComments) {
       include.push({
         model: this.sequelize.models.StatusComment,
-        as: 'comments',
+        as: 'statusComments',
         attributes: ['id', 'userId', 'content', 'createdAt'],
         include: [
           {
             model: this.sequelize.models.Users,
-            as: 'user',
+            as: 'commentUser',
             attributes: ['id', 'username', 'avatar'],
           },
         ],
@@ -656,7 +654,6 @@ module.exports = (sequelize, DataTypes) => {
       ],
     };
 
-    // Filter out expired statuses
     where[Op.or] = [
       ...where[Op.or],
       { expiresAt: null },
@@ -666,7 +663,7 @@ module.exports = (sequelize, DataTypes) => {
     const include = [
       {
         model: this.sequelize.models.Users,
-        as: 'user',
+        as: 'statusUser', // FIXED: Changed from 'statusOwner'
         attributes: ['id', 'username', 'avatar', 'status'],
       },
     ];
@@ -686,11 +683,10 @@ module.exports = (sequelize, DataTypes) => {
       isActive: true,
       isPublic: true,
       createdAt: {
-        [Op.gte]: new Date(Date.now() - 24 * 60 * 60 * 1000), // Last 24 hours
+        [Op.gte]: new Date(Date.now() - 24 * 60 * 60 * 1000),
       },
     };
 
-    // Filter out expired statuses
     where[Op.or] = [
       { expiresAt: null },
       { expiresAt: { [Op.gt]: new Date() } },
@@ -699,7 +695,7 @@ module.exports = (sequelize, DataTypes) => {
     const include = [
       {
         model: this.sequelize.models.Users,
-        as: 'user',
+        as: 'statusUser', // FIXED: Changed from 'statusOwner'
         attributes: ['id', 'username', 'avatar', 'status'],
       },
     ];
@@ -726,7 +722,6 @@ module.exports = (sequelize, DataTypes) => {
       moodType: moodType,
     };
 
-    // Filter out expired statuses
     where[Op.or] = [
       { expiresAt: null },
       { expiresAt: { [Op.gt]: new Date() } },
@@ -735,7 +730,7 @@ module.exports = (sequelize, DataTypes) => {
     const include = [
       {
         model: this.sequelize.models.Users,
-        as: 'user',
+        as: 'statusUser', // FIXED: Changed from 'statusOwner'
         attributes: ['id', 'username', 'avatar', 'status'],
       },
     ];

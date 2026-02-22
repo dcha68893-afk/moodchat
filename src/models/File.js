@@ -175,16 +175,17 @@ module.exports = (sequelize, DataTypes) => {
     return false;
   };
 
-  // Associations
   File.associate = (models) => {
     File.belongsTo(models.Users, {
       foreignKey: 'uploadedBy',
-      as: 'uploader'
+      as: 'fileUploader',
+      constraints: false,
     });
     
     File.belongsTo(models.Notes, {
       foreignKey: 'noteId',
-      as: 'note'
+      as: 'fileNote',
+      constraints: false,
     });
   };
 

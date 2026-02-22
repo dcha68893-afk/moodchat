@@ -201,13 +201,8 @@ module.exports = (sequelize, DataTypes) => {
     let totalIntensity = 0;
 
     moods.forEach(mood => {
-      // Count by mood
       stats.byMood[mood.mood] = (stats.byMood[mood.mood] || 0) + 1;
-
-      // Sum intensity
       totalIntensity += mood.intensity;
-
-      // Daily average
       const date = mood.createdAt.toISOString().split('T')[0];
       if (!stats.dailyAverage[date]) {
         stats.dailyAverage[date] = {
@@ -219,10 +214,8 @@ module.exports = (sequelize, DataTypes) => {
       stats.dailyAverage[date].totalIntensity += mood.intensity;
     });
 
-    // Calculate averages
     stats.averageIntensity = moods.length > 0 ? totalIntensity / moods.length : 0;
 
-    // Convert daily average to array with averages
     stats.dailyAverage = Object.entries(stats.dailyAverage).map(([date, data]) => ({
       date,
       averageIntensity: data.totalIntensity / data.count,
@@ -240,6 +233,7 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
+          as: 'moodOwner',
           attributes: ['id', 'username', 'avatar'],
         },
       ],
@@ -247,9 +241,22 @@ module.exports = (sequelize, DataTypes) => {
     });
   };
 
-  // Associations defined in models/index.js
   Mood.associate = function(models) {
-    // All associations are defined in models/index.js
+    if (models.Users) {
+      Mood.belongsTo(models.Users, {
+        foreignKey: 'userId',
+        as: 'moodOwner',
+        constraints: false,
+      });
+    }
+    
+    if (models.SharedMood) {
+      Mood.hasMany(models.SharedMood, {
+        foreignKey: 'moodId',
+        as: 'moodShares',
+        constraints: false,
+      });
+    }
   };
 
   return Mood;

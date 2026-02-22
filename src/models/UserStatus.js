@@ -97,7 +97,6 @@ module.exports = (sequelize, DataTypes) => {
       ],
       hooks: {
         beforeUpdate: async (status, options) => {
-          // Update lastSeen when status changes
           if (status.changed('status') && status.status === 'offline') {
             status.lastSeen = new Date();
           }
@@ -105,6 +104,24 @@ module.exports = (sequelize, DataTypes) => {
       },
     }
   );
+
+  UserStatus.associate = function(models) {
+    if (models.Users) {
+      UserStatus.belongsTo(models.Users, {
+        foreignKey: 'userId',
+        as: 'userStatusOwner', // FIXED: Changed from 'statusOwner'
+        constraints: false,
+      });
+    }
+    
+    if (models.Chats) {
+      UserStatus.belongsTo(models.Chats, {
+        foreignKey: 'isTypingIn',
+        as: 'userTypingChat', // FIXED: Changed from 'typingChat'
+        constraints: false,
+      });
+    }
+  };
 
   // Instance methods
   UserStatus.prototype.setOnline = async function (socketId = null) {
@@ -171,7 +188,6 @@ module.exports = (sequelize, DataTypes) => {
   UserStatus.prototype.removeSocket = async function (socketId) {
     this.socketIds = this.socketIds.filter(id => id !== socketId);
 
-    // If no sockets left, set offline
     if (this.socketIds.length === 0 && this.status !== 'offline' && this.status !== 'invisible') {
       this.status = 'offline';
       this.lastSeen = new Date();
@@ -185,12 +201,10 @@ module.exports = (sequelize, DataTypes) => {
   };
 
   UserStatus.prototype.canBeSeenOnline = function (userId) {
-    // Check if user allows their online status to be seen
     if (!this.showOnlineStatus) {
       return false;
     }
 
-    // If user is invisible, only they can see their online status
     if (this.status === 'invisible') {
       return userId === this.userId;
     }
@@ -199,12 +213,10 @@ module.exports = (sequelize, DataTypes) => {
   };
 
   UserStatus.prototype.canBeSeenLastSeen = function (userId) {
-    // Check if user allows their last seen to be seen
     if (!this.showLastSeen) {
       return false;
     }
 
-    // Users can always see their own last seen
     if (userId === this.userId) {
       return true;
     }
@@ -219,6 +231,7 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
+          as: 'userStatusOwner', // FIXED: Changed from 'statusOwner'
           attributes: ['id', 'username', 'avatar'],
         },
       ],
@@ -235,6 +248,7 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
+          as: 'userStatusOwner', // FIXED: Changed from 'statusOwner'
           attributes: ['id', 'username', 'avatar'],
         },
       ],
@@ -253,6 +267,7 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
+          as: 'userStatusOwner', // FIXED: Changed from 'statusOwner'
           attributes: ['id', 'username', 'avatar'],
         },
       ],
@@ -277,11 +292,6 @@ module.exports = (sequelize, DataTypes) => {
     }
 
     return statuses.length;
-  };
-
-  // Associations defined in models/index.js
-  UserStatus.associate = function(models) {
-    // All associations are defined in models/index.js
   };
 
   return UserStatus;

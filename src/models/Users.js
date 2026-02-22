@@ -213,7 +213,6 @@ module.exports = (sequelize, DataTypes) => {
       underscored: false,
       freezeTableName: true,
       hooks: {
-        // Hash password before creating user
         beforeCreate: async (user) => {
           if (user.password && user.password.length > 0) {
             try {
@@ -224,8 +223,11 @@ module.exports = (sequelize, DataTypes) => {
           } else {
             throw new Error('Password is required');
           }
+          
+          if (!user.avatar || user.avatar === 'https://ui-avatars.com/api/?name=User&background=random&color=fff') {
+            user.avatar = `https://ui-avatars.com/api/?name=${encodeURIComponent(user.username)}&background=random&color=fff`;
+          }
         },
-        // Hash password before updating if it changed
         beforeUpdate: async (user) => {
           if (user.changed('password')) {
             if (user.password && user.password.length > 0) {
@@ -238,19 +240,12 @@ module.exports = (sequelize, DataTypes) => {
               throw new Error('Password cannot be empty');
             }
           }
-        },
-        // Set default avatar if not provided
-        beforeCreate: async (user) => {
-          if (!user.avatar || user.avatar === 'https://ui-avatars.com/api/?name=User&background=random&color=fff') {
-            user.avatar = `https://ui-avatars.com/api/?name=${encodeURIComponent(user.username)}&background=random&color=fff`;
-          }
         }
       },
     }
   );
 
-  // ===== INSTANCE METHODS =====
-
+  // Instance methods
   Users.prototype.validatePassword = async function (password) {
     if (!password || !this.password) {
       return false;
@@ -265,10 +260,7 @@ module.exports = (sequelize, DataTypes) => {
 
   Users.prototype.toJSON = function () {
     const values = Object.assign({}, this.get());
-    
-    // Remove sensitive fields
     delete values.password;
-    
     return values;
   };
 
@@ -309,8 +301,7 @@ module.exports = (sequelize, DataTypes) => {
     }
   };
 
-  // ===== STATIC METHODS =====
-
+  // Static methods
   Users.findByEmail = async function (email) {
     if (!email) {
       throw new Error('Email is required');
@@ -437,9 +428,8 @@ module.exports = (sequelize, DataTypes) => {
     }
   };
 
-  // ===== ASSOCIATIONS =====
   Users.associate = function(models) {
-    // All associations are defined in models/index.js
+    // Associations are defined in other models
   };
 
   return Users;

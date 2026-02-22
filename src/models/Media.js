@@ -155,8 +155,7 @@ module.exports = (sequelize, DataTypes) => {
     if (this.userId === userId) return true;
     if (this.accessLevel === 'public') return true;
     if (this.accessLevel === 'friends') {
-      // Check if users are friends (you'll need to implement this)
-      return false; // Placeholder
+      return false;
     }
     return false;
   };
@@ -190,6 +189,7 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Messages,
+          as: 'mediaMessage',
           where: {
             chatId: chatId,
             isDeleted: false,
@@ -237,9 +237,22 @@ module.exports = (sequelize, DataTypes) => {
     };
   };
 
-  // Associations defined in models/index.js
   Media.associate = function(models) {
-    // All associations are defined in models/index.js
+    if (models.Users) {
+      Media.belongsTo(models.Users, {
+        foreignKey: 'userId',
+        as: 'mediaOwner',
+        constraints: false,
+      });
+    }
+    
+    if (models.Messages) {
+      Media.belongsTo(models.Messages, {
+        foreignKey: 'messageId',
+        as: 'mediaMessage',
+        constraints: false,
+      });
+    }
   };
 
   return Media;

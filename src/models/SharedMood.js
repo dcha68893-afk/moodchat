@@ -118,19 +118,18 @@ module.exports = (sequelize, DataTypes) => {
     }
   );
 
-  // ===== ASSOCIATIONS =====
   SharedMood.associate = function (models) {
     if (models.Users) {
       SharedMood.belongsTo(models.Users, {
         foreignKey: 'senderId',
-        as: 'sender',
+        as: 'moodSender',
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });
 
       SharedMood.belongsTo(models.Users, {
         foreignKey: 'receiverId',
-        as: 'receiver',
+        as: 'moodReceiver',
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });
@@ -139,14 +138,14 @@ module.exports = (sequelize, DataTypes) => {
     if (models.Mood) {
       SharedMood.belongsTo(models.Mood, {
         foreignKey: 'moodId',
-        as: 'mood',
+        as: 'sharedMood',
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });
     }
   };
 
-  // ===== INSTANCE METHODS =====
+  // Instance methods
   SharedMood.prototype.markAsViewed = async function () {
     this.isViewed = true;
     this.viewedAt = new Date();
@@ -185,14 +184,11 @@ module.exports = (sequelize, DataTypes) => {
 
   SharedMood.prototype.toJSON = function () {
     const values = Object.assign({}, this.get());
-    
-    // Add calculated fields
     values.shareAge = this.getShareAge();
-    
     return values;
   };
 
-  // ===== STATIC METHODS =====
+  // Static methods
   SharedMood.getReceivedMoods = async function (receiverId, options = {}) {
     const where = { receiverId };
 
@@ -207,17 +203,17 @@ module.exports = (sequelize, DataTypes) => {
     const include = [
       {
         model: this.sequelize.models.Users,
-        as: 'sender',
+        as: 'moodSender',
         attributes: ['id', 'username', 'avatar', 'status'],
       },
       {
         model: this.sequelize.models.Mood,
-        as: 'mood',
+        as: 'sharedMood',
         attributes: ['id', 'mood', 'intensity', 'notes', 'createdAt', 'userId'],
         include: options.includeMoodUser ? [
           {
             model: this.sequelize.models.Users,
-            as: 'moodUser',
+            as: 'moodOwner',
             attributes: ['id', 'username', 'avatar'],
           },
         ] : undefined,
@@ -243,12 +239,12 @@ module.exports = (sequelize, DataTypes) => {
     const include = [
       {
         model: this.sequelize.models.Users,
-        as: 'receiver',
+        as: 'moodReceiver',
         attributes: ['id', 'username', 'avatar', 'status'],
       },
       {
         model: this.sequelize.models.Mood,
-        as: 'mood',
+        as: 'sharedMood',
         attributes: ['id', 'mood', 'intensity', 'notes', 'createdAt'],
       },
     ];
@@ -289,7 +285,6 @@ module.exports = (sequelize, DataTypes) => {
   };
 
   SharedMood.shareMood = async function (senderId, receiverId, moodId, message = null) {
-    // Check if mood is already shared with this receiver
     const existingShare = await this.findOne({
       where: {
         senderId,
@@ -299,7 +294,6 @@ module.exports = (sequelize, DataTypes) => {
     });
 
     if (existingShare) {
-      // Update existing share
       existingShare.message = message;
       existingShare.isViewed = false;
       existingShare.viewedAt = null;
@@ -307,7 +301,6 @@ module.exports = (sequelize, DataTypes) => {
       return existingShare;
     }
 
-    // Create new share
     return await this.create({
       senderId,
       receiverId,
@@ -339,17 +332,17 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
-          as: 'sender',
+          as: 'moodSender',
           attributes: ['id', 'username', 'avatar'],
         },
         {
           model: this.sequelize.models.Users,
-          as: 'receiver',
+          as: 'moodReceiver',
           attributes: ['id', 'username', 'avatar'],
         },
         {
           model: this.sequelize.models.Mood,
-          as: 'mood',
+          as: 'sharedMood',
           attributes: ['id', 'mood', 'intensity', 'notes', 'createdAt'],
         },
       ],
@@ -362,12 +355,12 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
-          as: 'sender',
+          as: 'moodSender',
           attributes: ['id', 'username', 'avatar'],
         },
         {
           model: this.sequelize.models.Users,
-          as: 'receiver',
+          as: 'moodReceiver',
           attributes: ['id', 'username', 'avatar'],
         },
       ],
@@ -381,12 +374,12 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
-          as: 'receiver',
+          as: 'moodReceiver',
           attributes: ['id', 'username', 'avatar'],
         },
         {
           model: this.sequelize.models.Mood,
-          as: 'mood',
+          as: 'sharedMood',
           attributes: ['id', 'mood', 'intensity'],
         },
       ],
@@ -399,12 +392,12 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
-          as: 'sender',
+          as: 'moodSender',
           attributes: ['id', 'username', 'avatar'],
         },
         {
           model: this.sequelize.models.Mood,
-          as: 'mood',
+          as: 'sharedMood',
           attributes: ['id', 'mood', 'intensity'],
         },
       ],
@@ -430,7 +423,6 @@ module.exports = (sequelize, DataTypes) => {
   };
 
   SharedMood.cleanupOrphanedShares = async function () {
-    // Find shares where sender, receiver, or mood no longer exists
     const query = `
       DELETE FROM shared_moods sm
       WHERE NOT EXISTS (
@@ -445,7 +437,6 @@ module.exports = (sequelize, DataTypes) => {
     `;
 
     const [result] = await this.sequelize.query(query);
-
     return result.rowCount || 0;
   };
 
@@ -472,7 +463,7 @@ module.exports = (sequelize, DataTypes) => {
           { receiverId: userId },
         ],
         createdAt: {
-          [this.sequelize.Op.gte]: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000), // Last 7 days
+          [this.sequelize.Op.gte]: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000),
         },
       },
     });

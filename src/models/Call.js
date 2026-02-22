@@ -14,22 +14,18 @@ module.exports = (sequelize, DataTypes) => {
       chatId: {
         type: DataTypes.INTEGER,
         allowNull: false,
-        // REMOVED: references - Let associations handle relationships
       },
       callerId: {
         type: DataTypes.INTEGER,
         allowNull: true,
-        // REMOVED: references - Let associations handle relationships
       },
       receiverId: {
         type: DataTypes.INTEGER,
         allowNull: true,
-        // REMOVED: references - Let associations handle relationships
       },
       groupId: {
         type: DataTypes.INTEGER,
         allowNull: true,
-        // REMOVED: references - Let associations handle relationships
       },
       type: {
         type: DataTypes.ENUM('audio', 'video'),
@@ -125,9 +121,7 @@ module.exports = (sequelize, DataTypes) => {
       timestamps: true,
       underscored: false,
       freezeTableName: true,
-      // REMOVED ALL INDEXES - Let database keep existing indexes
-      indexes: [], // Empty array prevents Sequelize from creating indexes
-      // Removed the beforeCreate hook that was generating callId
+      indexes: [],
     }
   );
 
@@ -196,12 +190,12 @@ module.exports = (sequelize, DataTypes) => {
       where.chatId = chatId;
     }
 
-    // Check if models are available
     const include = [];
     
     if (this.sequelize.models.Chats) {
       include.push({
         model: this.sequelize.models.Chats,
+        as: 'callChat',
         attributes: ['id', 'name', 'type'],
       });
     }
@@ -209,7 +203,13 @@ module.exports = (sequelize, DataTypes) => {
     if (this.sequelize.models.Users) {
       include.push({
         model: this.sequelize.models.Users,
-        as: 'caller',
+        as: 'callCaller',
+        attributes: ['id', 'username', 'avatar'],
+      });
+      
+      include.push({
+        model: this.sequelize.models.Users,
+        as: 'callReceiver',
         attributes: ['id', 'username', 'avatar'],
       });
     }
@@ -237,12 +237,12 @@ module.exports = (sequelize, DataTypes) => {
       where.type = options.type;
     }
 
-    // Check if models are available
     const include = [];
     
     if (this.sequelize.models.Chats) {
       include.push({
         model: this.sequelize.models.Chats,
+        as: 'callChat',
         attributes: ['id', 'name', 'type'],
       });
     }
@@ -250,7 +250,13 @@ module.exports = (sequelize, DataTypes) => {
     if (this.sequelize.models.Users) {
       include.push({
         model: this.sequelize.models.Users,
-        as: 'caller',
+        as: 'callCaller',
+        attributes: ['id', 'username', 'avatar'],
+      });
+      
+      include.push({
+        model: this.sequelize.models.Users,
+        as: 'callReceiver',
         attributes: ['id', 'username', 'avatar'],
       });
     }
@@ -273,18 +279,36 @@ module.exports = (sequelize, DataTypes) => {
     });
   };
 
-  // Associations defined in models/index.js
   Calls.associate = function (models) {
-    // Only define associations here - constraints are handled in models/index.js
     if (models.Chats) {
       Calls.belongsTo(models.Chats, {
         foreignKey: 'chatId',
-        constraints: false,  // CRITICAL: Prevents FK constraint recreation
+        as: 'callChat',
+        constraints: false,
       });
     }
     
-    // Note: Other associations (callerId, receiverId, groupId) are optional
-    // Let models/index.js handle them with constraints: false
+    if (models.Users) {
+      Calls.belongsTo(models.Users, {
+        foreignKey: 'callerId',
+        as: 'callCaller',
+        constraints: false,
+      });
+      
+      Calls.belongsTo(models.Users, {
+        foreignKey: 'receiverId',
+        as: 'callReceiver',
+        constraints: false,
+      });
+    }
+    
+    if (models.Groups) {
+      Calls.belongsTo(models.Groups, {
+        foreignKey: 'groupId',
+        as: 'callGroup',
+        constraints: false,
+      });
+    }
   };
 
   return Calls;

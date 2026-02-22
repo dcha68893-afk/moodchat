@@ -179,11 +179,11 @@ module.exports = (sequelize, DataTypes) => {
     return Math.abs(hash);
   };
 
-  // Associations
   Features.associate = (models) => {
     Features.belongsTo(models.Users, {
       foreignKey: 'createdBy',
-      as: 'creator'
+      as: 'featureCreator',
+      constraints: false,
     });
   };
 

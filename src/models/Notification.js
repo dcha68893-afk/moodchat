@@ -163,13 +163,11 @@ module.exports = (sequelize, DataTypes) => {
       where.priority = options.priority;
     }
 
-    // Handle scheduled notifications
     where[Op.or] = [
       { scheduledFor: null },
       { scheduledFor: { [Op.lte]: new Date() } },
     ];
 
-    // Handle expired notifications
     where[Op.or] = [
       { expiresAt: null },
       { expiresAt: { [Op.gte]: new Date() } },
@@ -192,12 +190,10 @@ module.exports = (sequelize, DataTypes) => {
         userId: userId,
         isRead: false,
         isArchived: false,
-        // Handle scheduled notifications
         [Op.or]: [
           { scheduledFor: null },
           { scheduledFor: { [Op.lte]: new Date() } },
         ],
-        // Handle expired notifications
         [Op.or]: [
           { expiresAt: null },
           { expiresAt: { [Op.gte]: new Date() } },
@@ -231,9 +227,14 @@ module.exports = (sequelize, DataTypes) => {
     });
   };
 
-  // Associations defined in models/index.js
   Notification.associate = function(models) {
-    // All associations are defined in models/index.js
+    if (models.Users) {
+      Notification.belongsTo(models.Users, {
+        foreignKey: 'userId',
+        as: 'notificationRecipient',
+        constraints: false,
+      });
+    }
   };
 
   return Notification;

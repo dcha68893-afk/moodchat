@@ -136,9 +136,22 @@ module.exports = (sequelize, DataTypes) => {
     return results;
   };
 
-  // Associations defined in models/index.js
   ReadReceipt.associate = function(models) {
-    // All associations are defined in models/index.js
+    if (models.Messages) {
+      ReadReceipt.belongsTo(models.Messages, {
+        foreignKey: 'messageId',
+        as: 'readMessage',
+        constraints: false,
+      });
+    }
+    
+    if (models.Users) {
+      ReadReceipt.belongsTo(models.Users, {
+        foreignKey: 'userId',
+        as: 'readUser',
+        constraints: false,
+      });
+    }
   };
 
   return ReadReceipt;

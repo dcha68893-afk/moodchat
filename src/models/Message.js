@@ -148,12 +148,10 @@ module.exports = (sequelize, DataTypes) => {
       this.reactions[reaction] = [];
     }
     
-    // Remove existing reaction from user if any
     Object.keys(this.reactions).forEach(key => {
       this.reactions[key] = this.reactions[key].filter(id => id !== userId);
     });
     
-    // Add new reaction
     if (!this.reactions[reaction].includes(userId)) {
       this.reactions[reaction].push(userId);
     }
@@ -198,7 +196,7 @@ module.exports = (sequelize, DataTypes) => {
         },
         {
           model: this,
-          as: 'parentMessage',
+          as: 'messageParent',
           attributes: ['id', 'content', 'type', 'senderId'],
           include: [
             {
@@ -238,9 +236,58 @@ module.exports = (sequelize, DataTypes) => {
     });
   };
 
-  // Associations defined in models/index.js
   Messages.associate = function(models) {
-    // All associations are defined in models/index.js
+    if (models.Chats) {
+      Messages.belongsTo(models.Chats, {
+        foreignKey: 'chatId',
+        as: 'messageChat',
+        constraints: false,
+      });
+    }
+    
+    if (models.Users) {
+      Messages.belongsTo(models.Users, {
+        foreignKey: 'senderId',
+        as: 'messageSender',
+        constraints: false,
+      });
+      
+      Messages.belongsTo(models.Users, {
+        foreignKey: 'deletedBy',
+        as: 'messageDeleter',
+        constraints: false,
+      });
+    }
+    
+    if (models.Messages) {
+      Messages.belongsTo(models.Messages, {
+        foreignKey: 'replyToId',
+        as: 'messageParent',
+        constraints: false,
+      });
+      
+      Messages.hasMany(models.Messages, {
+        foreignKey: 'replyToId',
+        as: 'messageReplies',
+        constraints: false,
+      });
+    }
+    
+    if (models.Media) {
+      Messages.hasMany(models.Media, {
+        foreignKey: 'messageId',
+        as: 'messageMedia',
+        constraints: false,
+      });
+    }
+    
+    if (models.ReadReceipt) {
+      Messages.hasMany(models.ReadReceipt, {
+        foreignKey: 'messageId',
+        as: 'messageReadReceipts',
+        constraints: false,
+      });
+    }
   };
 
   return Messages;

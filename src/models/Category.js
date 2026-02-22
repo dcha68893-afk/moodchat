@@ -215,17 +215,16 @@ module.exports = (sequelize, DataTypes) => {
     });
   };
 
-  // Associations
   Category.associate = function (models) {
     // Self-referential relationship for parent-child categories
     Category.belongsTo(Category, {
-      as: 'parent',
+      as: 'parentCategory',
       foreignKey: 'parentId',
       constraints: false,
     });
 
     Category.hasMany(Category, {
-      as: 'children',
+      as: 'childCategories',
       foreignKey: 'parentId',
       constraints: false,
     });
@@ -233,19 +232,20 @@ module.exports = (sequelize, DataTypes) => {
     if (models.Template) {
       Category.hasMany(models.Template, {
         foreignKey: 'categoryId',
+        as: 'categoryTemplates',
         constraints: false,
       });
     }
     
     if (models.Users) {
       Category.belongsTo(models.Users, {
-        as: 'creator',
+        as: 'categoryCreator',
         foreignKey: 'createdBy',
         constraints: false,
       });
       
       Category.belongsTo(models.Users, {
-        as: 'updater',
+        as: 'categoryUpdater',
         foreignKey: 'updatedBy',
         constraints: false,
       });

@@ -108,6 +108,7 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
+          as: 'groupMemberUser',
           attributes: ['id', 'username', 'avatar', 'email'],
         },
       ],
@@ -123,9 +124,11 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Groups,
+          as: 'userGroup',
           include: [
             {
               model: this.sequelize.models.Chats,
+              as: 'groupChat',
               attributes: ['id', 'name', 'avatar', 'type'],
             },
           ],
@@ -134,9 +137,22 @@ module.exports = (sequelize, DataTypes) => {
     });
   };
 
-  // Associations defined in models/index.js
   GroupMembers.associate = function(models) {
-    // All associations are defined in models/index.js
+    if (models.Groups) {
+      GroupMembers.belongsTo(models.Groups, {
+        foreignKey: 'groupId',
+        as: 'userGroup',
+        constraints: false,
+      });
+    }
+    
+    if (models.Users) {
+      GroupMembers.belongsTo(models.Users, {
+        foreignKey: 'userId',
+        as: 'groupMemberUser',
+        constraints: false,
+      });
+    }
   };
 
   return GroupMembers;

@@ -80,6 +80,24 @@ module.exports = (sequelize, DataTypes) => {
     }
   );
 
+  TypingIndicator.associate = function(models) {
+    if (models.Chats) {
+      TypingIndicator.belongsTo(models.Chats, {
+        foreignKey: 'chatId',
+        as: 'indicatorChat', // FIXED: Changed from 'typingChat'
+        constraints: false,
+      });
+    }
+    
+    if (models.Users) {
+      TypingIndicator.belongsTo(models.Users, {
+        foreignKey: 'userId',
+        as: 'indicatorUser', // FIXED: Changed from 'typingUser'
+        constraints: false,
+      });
+    }
+  };
+
   // Instance methods
   TypingIndicator.prototype.updateActivity = async function () {
     this.lastUpdatedAt = new Date();
@@ -130,7 +148,6 @@ module.exports = (sequelize, DataTypes) => {
   };
 
   TypingIndicator.getActiveTypers = async function (chatId) {
-    // Clean up old indicators (more than 10 seconds ago)
     await this.update(
       { isActive: false },
       {
@@ -150,16 +167,12 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
+          as: 'indicatorUser', // FIXED: Changed from 'typingUser'
           attributes: ['id', 'username', 'avatar'],
         },
       ],
       order: [['lastUpdatedAt', 'DESC']],
     });
-  };
-
-  // Associations defined in models/index.js
-  TypingIndicator.associate = function(models) {
-    // All associations are defined in models/index.js
   };
 
   return TypingIndicator;

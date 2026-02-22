@@ -115,11 +115,11 @@ module.exports = (sequelize, DataTypes) => {
   Settings.associate = (models) => {
     Settings.belongsTo(models.Users, {
       foreignKey: 'userId',
-      as: 'user'
+      as: 'settingOwner',
+      constraints: false,
     });
   };
 
-  // Static method equivalent
   Settings.getDefaultSettings = function() {
     return {
       theme: 'light',
@@ -150,7 +150,6 @@ module.exports = (sequelize, DataTypes) => {
     };
   };
 
-  // Instance method equivalent
   Settings.prototype.updateSettings = async function(updates) {
     const allowedUpdates = [
       'theme', 'accentColor', 'notificationsEnabled', 'language', 'fontSize',

@@ -138,7 +138,7 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
-          as: 'receiver',
+          as: 'friendReceiver',
           attributes: ['id', 'username', 'avatar', 'status', 'lastSeen'],
         },
       ],
@@ -152,7 +152,7 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
-          as: 'requester',
+          as: 'friendRequester',
           attributes: ['id', 'username', 'avatar', 'status', 'lastSeen'],
         },
       ],
@@ -174,7 +174,7 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
-          as: 'requester',
+          as: 'friendRequester',
           attributes: ['id', 'username', 'avatar', 'status', 'lastSeen'],
         },
       ],
@@ -195,7 +195,7 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
-          as: 'receiver',
+          as: 'friendReceiver',
           attributes: ['id', 'username', 'avatar', 'status', 'lastSeen'],
         },
       ],
@@ -203,9 +203,20 @@ module.exports = (sequelize, DataTypes) => {
     });
   };
 
-  // Add association method
   Friend.associate = function (models) {
-    // All associations are defined in models/index.js
+    if (models.Users) {
+      Friend.belongsTo(models.Users, {
+        foreignKey: 'requesterId',
+        as: 'friendRequester',
+        constraints: false,
+      });
+      
+      Friend.belongsTo(models.Users, {
+        foreignKey: 'receiverId',
+        as: 'friendReceiver',
+        constraints: false,
+      });
+    }
   };
 
   return Friend;

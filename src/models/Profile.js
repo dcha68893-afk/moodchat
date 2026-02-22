@@ -117,7 +117,6 @@ module.exports = (sequelize, DataTypes) => {
       'socialLinks',
     ];
 
-    // Filter based on privacy settings
     const result = {};
     publicFields.forEach(field => {
       if (field === 'location' && !this.privacySettings.showLocation) return;
@@ -129,9 +128,14 @@ module.exports = (sequelize, DataTypes) => {
     return result;
   };
 
-  // Associations defined in models/index.js
   Profile.associate = function(models) {
-    // All associations are defined in models/index.js
+    if (models.Users) {
+      Profile.belongsTo(models.Users, {
+        foreignKey: 'userId',
+        as: 'profileOwner',
+        constraints: false,
+      });
+    }
   };
 
   return Profile;

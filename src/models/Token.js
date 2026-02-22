@@ -139,11 +139,11 @@ module.exports = (sequelize, DataTypes) => {
           if (!token.expiresAt) {
             const expiresIn =
               {
-                access: 15 * 60 * 1000, // 15 minutes
-                refresh: 7 * 24 * 60 * 60 * 1000, // 7 days
-                verification: 24 * 60 * 60 * 1000, // 24 hours
-                password_reset: 1 * 60 * 60 * 1000, // 1 hour
-                api: 30 * 24 * 60 * 60 * 1000, // 30 days
+                access: 15 * 60 * 1000,
+                refresh: 7 * 24 * 60 * 60 * 1000,
+                verification: 24 * 60 * 60 * 1000,
+                password_reset: 1 * 60 * 60 * 1000,
+                api: 30 * 24 * 60 * 60 * 1000,
               }[token.tokenType] || 15 * 60 * 1000;
 
             token.expiresAt = new Date(Date.now() + expiresIn);
@@ -158,18 +158,16 @@ module.exports = (sequelize, DataTypes) => {
     }
   );
 
-  // ===== ASSOCIATIONS =====
   Token.associate = function(models) {
     Token.belongsTo(models.Users, {
       foreignKey: 'userId',
-      as: 'user',
+      as: 'tokenOwner',
       onDelete: 'CASCADE',
       onUpdate: 'CASCADE'
     });
   };
 
-  // ===== INSTANCE METHODS =====
-
+  // Instance methods
   Token.prototype.isExpired = function () {
     return this.expiresAt < new Date();
   };
@@ -193,8 +191,7 @@ module.exports = (sequelize, DataTypes) => {
     return await this.save();
   };
 
-  // ===== STATIC METHODS =====
-
+  // Static methods
   Token.findByToken = async function (tokenString, includeUser = false) {
     if (!tokenString) {
       throw new Error('Token string is required');
@@ -208,7 +205,7 @@ module.exports = (sequelize, DataTypes) => {
       options.include = [
         {
           model: this.sequelize.models.Users,
-          as: 'user',
+          as: 'tokenOwner',
           attributes: ['id', 'username', 'email', 'isActive', 'isVerified'],
         },
       ];
@@ -237,7 +234,7 @@ module.exports = (sequelize, DataTypes) => {
       where: where,
       include: [{
         model: this.sequelize.models.Users,
-        as: 'user',
+        as: 'tokenOwner',
         attributes: ['id', 'username', 'email', 'isActive', 'isVerified'],
       }],
       order: [['createdAt', 'DESC']],
@@ -295,7 +292,6 @@ module.exports = (sequelize, DataTypes) => {
     
     const { userAgent, ipAddress, deviceInfo } = options;
     
-    // Create refresh token
     const refreshToken = await this.create({
       userId,
       tokenType: 'refresh',
@@ -305,7 +301,6 @@ module.exports = (sequelize, DataTypes) => {
       scope: ['refresh']
     });
     
-    // Create access token
     const accessToken = await this.create({
       userId,
       tokenType: 'access',
@@ -328,14 +323,12 @@ module.exports = (sequelize, DataTypes) => {
     
     const token = await this.findByToken(tokenString, true);
     
-    if (!token || !token.isValid() || !token.user || !token.user.isActive) {
+    if (!token || !token.isValid() || !token.tokenOwner || !token.tokenOwner.isActive) {
       return null;
     }
     
     return token;
   };
-
-  // ===== ADDITIONAL METHODS SPECIFIC FOR REFRESH TOKEN FUNCTIONALITY =====
 
   Token.storeRefreshToken = async function (userId, refreshToken, options = {}) {
     if (!userId || !refreshToken) {
@@ -368,12 +361,12 @@ module.exports = (sequelize, DataTypes) => {
       },
       include: [{
         model: this.sequelize.models.Users,
-        as: 'user',
+        as: 'tokenOwner',
         attributes: ['id', 'username', 'email', 'isActive', 'isVerified'],
       }]
     });
     
-    if (!token || token.isExpired() || !token.user || !token.user.isActive) {
+    if (!token || token.isExpired() || !token.tokenOwner || !token.tokenOwner.isActive) {
       return null;
     }
     
@@ -388,13 +381,11 @@ module.exports = (sequelize, DataTypes) => {
     const transaction = await this.sequelize.transaction();
     
     try {
-      // Revoke old token
       await this.update(
         { isRevoked: true },
         { where: { token: oldRefreshToken }, transaction }
       );
       
-      // Get the old token to copy its data
       const oldToken = await this.findOne({
         where: { token: oldRefreshToken },
         transaction
@@ -404,7 +395,6 @@ module.exports = (sequelize, DataTypes) => {
         throw new Error('Old token not found');
       }
       
-      // Create new token with same properties
       const newToken = await this.create({
         userId: oldToken.userId,
         token: newRefreshToken,
