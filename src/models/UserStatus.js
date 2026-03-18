@@ -14,10 +14,6 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.INTEGER,
         allowNull: false,
         unique: true,
-        references: {
-          model: 'Users',
-          key: 'id',
-        },
       },
       status: {
         type: DataTypes.ENUM('online', 'offline', 'away', 'busy', 'invisible'),
@@ -46,10 +42,6 @@ module.exports = (sequelize, DataTypes) => {
       isTypingIn: {
         type: DataTypes.INTEGER,
         allowNull: true,
-        references: {
-          model: 'Chats',
-          key: 'id',
-        },
       },
       typingStartedAt: {
         type: DataTypes.DATE,
@@ -76,7 +68,8 @@ module.exports = (sequelize, DataTypes) => {
       },
     },
     {
-      tableName: 'user_statuses',
+      tableName: 'user_statuses',            // Standardized: lowercase table name
+      modelName: 'UserStatus',                // Explicit model name
       timestamps: true,
       underscored: true,
       freezeTableName: true,
@@ -105,25 +98,7 @@ module.exports = (sequelize, DataTypes) => {
     }
   );
 
-  UserStatus.associate = function(models) {
-    if (models.Users) {
-      UserStatus.belongsTo(models.Users, {
-        foreignKey: 'userId',
-        as: 'userStatusOwner', // FIXED: Changed from 'statusOwner'
-        constraints: false,
-      });
-    }
-    
-    if (models.Chats) {
-      UserStatus.belongsTo(models.Chats, {
-        foreignKey: 'isTypingIn',
-        as: 'userTypingChat', // FIXED: Changed from 'typingChat'
-        constraints: false,
-      });
-    }
-  };
-
-  // Instance methods
+  // Instance methods (PRESERVED)
   UserStatus.prototype.setOnline = async function (socketId = null) {
     this.status = 'online';
     this.lastSeen = new Date();
@@ -224,14 +199,14 @@ module.exports = (sequelize, DataTypes) => {
     return true;
   };
 
-  // Static methods
+  // Static methods (PRESERVED)
   UserStatus.findByUserId = async function (userId) {
     return await this.findOne({
       where: { userId },
       include: [
         {
           model: this.sequelize.models.Users,
-          as: 'userStatusOwner', // FIXED: Changed from 'statusOwner'
+          as: 'userStatusOwnerDetails',        // FIXED: Unique alias
           attributes: ['id', 'username', 'avatar'],
         },
       ],
@@ -248,7 +223,7 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
-          as: 'userStatusOwner', // FIXED: Changed from 'statusOwner'
+          as: 'userStatusOwnerDetails',        // FIXED: Unique alias
           attributes: ['id', 'username', 'avatar'],
         },
       ],
@@ -267,7 +242,7 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
-          as: 'userStatusOwner', // FIXED: Changed from 'statusOwner'
+          as: 'userStatusOwnerDetails',        // FIXED: Unique alias
           attributes: ['id', 'username', 'avatar'],
         },
       ],
@@ -292,6 +267,29 @@ module.exports = (sequelize, DataTypes) => {
     }
 
     return statuses.length;
+  };
+
+  // FIXED: Associations with unique aliases
+  UserStatus.associate = function(models) {
+    if (models.Users) {
+      UserStatus.belongsTo(models.Users, {
+        foreignKey: 'userId',
+        as: 'userStatusOwnerDetails',          // FIXED: Unique alias
+        constraints: false,
+        onDelete: 'CASCADE',
+        onUpdate: 'CASCADE',
+      });
+    }
+    
+    if (models.Chats) {
+      UserStatus.belongsTo(models.Chats, {
+        foreignKey: 'isTypingIn',
+        as: 'userTypingChatDetails',           // FIXED: Unique alias
+        constraints: false,
+        onDelete: 'SET NULL',
+        onUpdate: 'CASCADE',
+      });
+    }
   };
 
   return UserStatus;

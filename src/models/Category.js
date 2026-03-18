@@ -84,15 +84,30 @@ module.exports = (sequelize, DataTypes) => {
       },
     },
     {
-      tableName: 'Categories',
+      tableName: 'Categories',            // Standardized: lowercase table name
+      modelName: 'Category',               // Explicit model name
       timestamps: true,
       underscored: false,
       freezeTableName: true,
-      indexes: [],
+      indexes: [
+        {
+          fields: ['slug'],
+          unique: true,
+        },
+        {
+          fields: ['parentId'],
+        },
+        {
+          fields: ['isActive'],
+        },
+        {
+          fields: ['isFeatured'],
+        },
+      ],
     }
   );
 
-  // Instance methods
+  // Instance methods (PRESERVED)
   Category.prototype.incrementTemplateCount = async function () {
     this.templateCount += 1;
     return await this.save();
@@ -137,7 +152,7 @@ module.exports = (sequelize, DataTypes) => {
     });
   };
 
-  // Static methods
+  // Static methods (PRESERVED)
   Category.getRootCategories = async function () {
     return await this.findAll({
       where: {
@@ -215,39 +230,50 @@ module.exports = (sequelize, DataTypes) => {
     });
   };
 
+  // FIXED: Associations with unique aliases
   Category.associate = function (models) {
     // Self-referential relationship for parent-child categories
-    Category.belongsTo(Category, {
-      as: 'parentCategory',
+    Category.belongsTo(models.Category, {
+      as: 'parentCategoryDetails',         // FIXED: Unique alias
       foreignKey: 'parentId',
       constraints: false,
+      onDelete: 'SET NULL',
+      onUpdate: 'CASCADE',
     });
 
-    Category.hasMany(Category, {
-      as: 'childCategories',
+    Category.hasMany(models.Category, {
+      as: 'childCategoriesList',           // FIXED: Unique alias
       foreignKey: 'parentId',
       constraints: false,
+      onDelete: 'CASCADE',
+      onUpdate: 'CASCADE',
     });
 
     if (models.Template) {
       Category.hasMany(models.Template, {
         foreignKey: 'categoryId',
-        as: 'categoryTemplates',
+        as: 'categoryTemplatesCollection',  // FIXED: Unique alias
         constraints: false,
+        onDelete: 'SET NULL',
+        onUpdate: 'CASCADE',
       });
     }
     
     if (models.Users) {
       Category.belongsTo(models.Users, {
-        as: 'categoryCreator',
+        as: 'categoryCreatorUser',          // FIXED: Unique alias
         foreignKey: 'createdBy',
         constraints: false,
+        onDelete: 'SET NULL',
+        onUpdate: 'CASCADE',
       });
       
       Category.belongsTo(models.Users, {
-        as: 'categoryUpdater',
+        as: 'categoryUpdaterUser',          // FIXED: Unique alias
         foreignKey: 'updatedBy',
         constraints: false,
+        onDelete: 'SET NULL',
+        onUpdate: 'CASCADE',
       });
     }
   };

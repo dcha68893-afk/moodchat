@@ -1,25 +1,63 @@
 const asyncHandler = require('express-async-handler');
 const express = require('express');
 const router = express.Router();
-// FIXED: Import the unified authentication middleware
+
+// Import database models
+const db = require('../models');
+const User = db.User || db.Users;
+const Chat = db.Chat;
+const Call = db.Call;
+
+// Import the unified authentication middleware
 const { authenticateToken } = require('../middleware/auth');
 const { apiRateLimiter } = require('../middleware/rateLimiter');
-const { User, Chat, Call } = require('../models');
-const { Op, fn, col, literal } = require('sequelize');
+
+// Get Sequelize operators
+const Sequelize = require('sequelize');
+const { Op, fn, col, literal } = Sequelize;
 
 const CALL_HISTORY_RETENTION_DAYS = parseInt(process.env.CALL_HISTORY_RETENTION_DAYS) || 365;
 const MAX_CALL_DURATION = parseInt(process.env.MAX_CALL_DURATION) || 14400;
 
-// FIXED: Use the unified authentication middleware
+// Use the unified authentication middleware
 router.use(authenticateToken);
 
 console.log('✅ Calls routes initialized');
+
+// Helper function to check authentication
+const checkAuth = (req, res) => {
+  if (!req.user || (!req.user.userId && !req.user.id)) {
+    return res.status(401).json({
+      status: 'error',
+      message: 'Authentication required'
+    });
+  }
+  const userId = req.user.userId || req.user.id;
+  return { userId };
+};
+
+// Helper function to check database models
+const checkModels = (res) => {
+  if (!db || !Call || !User) {
+    return res.status(503).json({
+      status: 'error',
+      message: 'Database service not available'
+    });
+  }
+  return true;
+};
 
 router.get(
   '/history',
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
+      const auth = checkAuth(req, res);
+      if (auth.status) return auth;
+      const userId = auth.userId;
+
+      if (!checkModels(res)) return;
+
       const {
         page = 1,
         limit = 20,
@@ -35,8 +73,8 @@ router.get(
 
       const where = {
         [Op.or]: [
-          { callerId: req.user.userId },
-          { '$participants.id$': req.user.userId }
+          { callerId: userId },
+          { '$participants.id$': userId }
         ],
         endedAt: { [Op.ne]: null },
       };
@@ -47,13 +85,13 @@ router.get(
 
       if (direction) {
         if (direction === 'incoming') {
-          where.callerId = { [Op.ne]: req.user.userId };
-          where['$participants.id$'] = req.user.userId;
+          where.callerId = { [Op.ne]: userId };
+          where['$participants.id$'] = userId;
         } else if (direction === 'outgoing') {
-          where.callerId = req.user.userId;
+          where.callerId = userId;
         } else if (direction === 'missed') {
           where.status = 'missed';
-          where['$participants.id$'] = req.user.userId;
+          where['$participants.id$'] = userId;
         }
       }
 
@@ -67,8 +105,8 @@ router.get(
           },
           {
             [Op.or]: [
-              { callerId: req.user.userId },
-              { '$participants.id$': req.user.userId }
+              { callerId: userId },
+              { '$participants.id$': userId }
             ]
           }
         ];
@@ -97,7 +135,7 @@ router.get(
             as: 'participants',
             attributes: ['username', 'avatar', 'displayName'],
             through: { attributes: [] },
-            where: { id: { [Op.ne]: req.user.userId } },
+            where: { id: { [Op.ne]: userId } },
             required: false
           },
           {
@@ -112,22 +150,22 @@ router.get(
         distinct: true
       });
 
-      const enrichedCalls = calls.map(call => {
-        const callObj = call.toJSON();
+      const enrichedCalls = (calls || []).map(call => {
+        const callObj = call.toJSON ? call.toJSON() : call;
         
-        if (call.callerId === req.user.userId) {
+        if (call.callerId === userId) {
           callObj.direction = 'outgoing';
         } else {
           callObj.direction = 'incoming';
         }
 
         if (call.startedAt && call.endedAt) {
-          callObj.duration = Math.floor((call.endedAt - call.startedAt) / 1000);
+          callObj.duration = Math.floor((new Date(call.endedAt) - new Date(call.startedAt)) / 1000);
         } else {
           callObj.duration = 0;
         }
 
-        callObj.otherParticipants = call.participants.filter(p => p.id !== req.user.userId);
+        callObj.otherParticipants = (callObj.participants || []).filter(p => p.id !== userId);
         return callObj;
       });
 
@@ -137,8 +175,8 @@ router.get(
       const stats = await Call.findAll({
         where: {
           [Op.or]: [
-            { callerId: req.user.userId },
-            { '$participants.id$': req.user.userId }
+            { callerId: userId },
+            { '$participants.id$': userId }
           ],
           startedAt: { [Op.gte]: thirtyDaysAgo }
         },
@@ -177,22 +215,22 @@ router.get(
         status: 'success',
         data: {
           calls: enrichedCalls,
-          statistics: stats[0] || {
+          statistics: (stats && stats[0]) || {
             totalCalls: 0,
             totalDuration: 0,
             completedCalls: 0,
             missedCalls: 0,
           },
           pagination: {
-            total: count,
+            total: count || 0,
             page: parseInt(page),
             limit: parseInt(limit),
-            pages: Math.ceil(count / parseInt(limit)),
+            pages: count ? Math.ceil(count / parseInt(limit)) : 0,
           },
         },
       });
     } catch (error) {
-      console.error('Error getting call history:', error);
+      console.error('Error getting call history:', error.message);
       res.status(500).json({
         status: 'error',
         message: 'Failed to fetch call history'
@@ -206,14 +244,27 @@ router.get(
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
+      const auth = checkAuth(req, res);
+      if (auth.status) return auth;
+      const userId = auth.userId;
+
+      if (!checkModels(res)) return;
+
       const { callId } = req.params;
+
+      if (!callId) {
+        return res.status(400).json({
+          status: 'error',
+          message: 'Call ID is required'
+        });
+      }
 
       const call = await Call.findOne({
         where: {
           id: callId,
           [Op.or]: [
-            { callerId: req.user.userId },
-            { '$participants.id$': req.user.userId }
+            { callerId: userId },
+            { '$participants.id$': userId }
           ]
         },
         include: [
@@ -249,20 +300,20 @@ router.get(
         });
       }
 
-      const callData = call.toJSON();
-      callData.direction = call.callerId === req.user.userId ? 'outgoing' : 'incoming';
+      const callData = call.toJSON ? call.toJSON() : call;
+      callData.direction = call.callerId === userId ? 'outgoing' : 'incoming';
 
       if (call.startedAt && call.endedAt) {
-        callData.duration = Math.floor((call.endedAt - call.startedAt) / 1000);
+        callData.duration = Math.floor((new Date(call.endedAt) - new Date(call.startedAt)) / 1000);
       } else {
         callData.duration = 0;
       }
 
-      callData.answeredParticipants = call.participants.filter(
+      callData.answeredParticipants = (callData.participants || []).filter(
         p => call.answeredBy && call.answeredBy.includes(p.id)
       );
 
-      callData.declinedParticipants = call.participants.filter(
+      callData.declinedParticipants = (callData.participants || []).filter(
         p => call.declinedBy && call.declinedBy.includes(p.id)
       );
 
@@ -271,7 +322,7 @@ router.get(
         data: { call: callData },
       });
     } catch (error) {
-      console.error('Error getting call details:', error);
+      console.error('Error getting call details:', error.message);
       res.status(500).json({
         status: 'error',
         message: 'Failed to fetch call details'
@@ -285,6 +336,12 @@ router.post(
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
+      const auth = checkAuth(req, res);
+      if (auth.status) return auth;
+      const userId = auth.userId;
+
+      if (!checkModels(res)) return;
+
       const { participantIds, chatId, callType = 'audio', isGroupCall = false } = req.body;
 
       if (!Array.isArray(participantIds) && !chatId) {
@@ -308,7 +365,7 @@ router.post(
         chat = await Chat.findOne({
           where: {
             id: chatId,
-            '$participants.id$': req.user.userId,
+            '$participants.id$': userId,
             isArchived: false
           },
           include: [{
@@ -332,11 +389,11 @@ router.post(
           });
         }
 
-        participants = chat.participants
-          .filter(p => p.id !== req.user.userId)
+        participants = (chat.participants || [])
+          .filter(p => p.id !== userId)
           .map(p => p.id);
 
-        const currentUser = await User.findByPk(req.user.userId, {
+        const currentUser = await User.findByPk(userId, {
           include: [{
             model: User,
             as: 'blockedUsers',
@@ -344,9 +401,16 @@ router.post(
           }]
         });
 
-        const blockedParticipants = chat.participants.filter(p => 
-          currentUser.blockedUsers.some(bu => bu.id === p.id) ||
-          p.blockedUsers.some(bu => bu.id === req.user.userId)
+        if (!currentUser) {
+          return res.status(404).json({
+            status: 'error',
+            message: 'User not found'
+          });
+        }
+
+        const blockedParticipants = (chat.participants || []).filter(p => 
+          currentUser.blockedUsers && currentUser.blockedUsers.some(bu => bu.id === p.id) ||
+          (p.blockedUsers && p.blockedUsers.some(bu => bu.id === userId))
         );
 
         if (blockedParticipants.length > 0) {
@@ -363,7 +427,7 @@ router.post(
           });
         }
       } else {
-        if (participantIds.length === 0) {
+        if (!participantIds || participantIds.length === 0) {
           return res.status(400).json({
             status: 'error',
             message: 'At least one participant is required'
@@ -389,7 +453,7 @@ router.post(
           });
         }
 
-        const currentUser = await User.findByPk(req.user.userId, {
+        const currentUser = await User.findByPk(userId, {
           include: [{
             model: User,
             as: 'blockedUsers',
@@ -397,9 +461,16 @@ router.post(
           }]
         });
 
+        if (!currentUser) {
+          return res.status(404).json({
+            status: 'error',
+            message: 'User not found'
+          });
+        }
+
         const blockedParticipants = participantUsers.filter(p =>
-          currentUser.blockedUsers.some(bu => bu.id === p.id) ||
-          p.blockedUsers.some(bu => bu.id === req.user.userId)
+          (currentUser.blockedUsers && currentUser.blockedUsers.some(bu => bu.id === p.id)) ||
+          (p.blockedUsers && p.blockedUsers.some(bu => bu.id === userId))
         );
 
         if (blockedParticipants.length > 0) {
@@ -413,7 +484,7 @@ router.post(
       }
 
       const call = await Call.create({
-        callerId: req.user.userId,
+        callerId: userId,
         chatId: chatId || null,
         callType,
         isGroupCall,
@@ -421,7 +492,14 @@ router.post(
         startedAt: new Date(),
       });
 
-      await call.setParticipants([req.user.userId, ...participants]);
+      if (!call) {
+        return res.status(500).json({
+          status: 'error',
+          message: 'Failed to create call'
+        });
+      }
+
+      await call.setParticipants([userId, ...participants]);
 
       const populatedCall = await Call.findByPk(call.id, {
         include: [
@@ -439,9 +517,9 @@ router.post(
         ]
       });
 
-      const caller = await User.findByPk(req.user.userId);
+      const caller = await User.findByPk(userId);
 
-      if (req.io) {
+      if (req.io && populatedCall && populatedCall.participants) {
         const callData = {
           callId: call.id,
           caller: {
@@ -456,14 +534,14 @@ router.post(
         };
 
         populatedCall.participants.forEach(participant => {
-          if (participant.id !== req.user.userId && participant.socketIds) {
+          if (participant.id !== userId && participant.socketIds && Array.isArray(participant.socketIds)) {
             participant.socketIds.forEach(socketId => {
               req.io.to(socketId).emit('call:incoming', callData);
             });
           }
         });
 
-        if (caller.socketIds) {
+        if (caller && caller.socketIds && Array.isArray(caller.socketIds)) {
           caller.socketIds.forEach(socketId => {
             req.io.to(socketId).emit('call:ringing', {
               callId: call.id,
@@ -482,7 +560,7 @@ router.post(
         },
       });
     } catch (error) {
-      console.error('Error starting call:', error);
+      console.error('Error starting call:', error.message);
       res.status(500).json({
         status: 'error',
         message: 'Failed to start call'
@@ -496,12 +574,25 @@ router.post(
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
+      const auth = checkAuth(req, res);
+      if (auth.status) return auth;
+      const userId = auth.userId;
+
+      if (!checkModels(res)) return;
+
       const { callId } = req.params;
+
+      if (!callId) {
+        return res.status(400).json({
+          status: 'error',
+          message: 'Call ID is required'
+        });
+      }
 
       const call = await Call.findOne({
         where: {
           id: callId,
-          '$participants.id$': req.user.userId,
+          '$participants.id$': userId,
           status: 'ringing'
         },
         include: [{
@@ -520,7 +611,7 @@ router.post(
       }
 
       const answeredBy = call.answeredBy || [];
-      answeredBy.push(req.user.userId);
+      answeredBy.push(userId);
       call.answeredBy = answeredBy;
 
       if (answeredBy.length === 1) {
@@ -545,11 +636,11 @@ router.post(
         ]
       });
 
-      const user = await User.findByPk(req.user.userId);
+      const user = await User.findByPk(userId);
 
-      if (req.io) {
+      if (req.io && updatedCall && updatedCall.participants) {
         updatedCall.participants.forEach(participant => {
-          if (participant.socketIds) {
+          if (participant.socketIds && Array.isArray(participant.socketIds)) {
             participant.socketIds.forEach(socketId => {
               req.io.to(socketId).emit('call:answered', {
                 callId: call.id,
@@ -572,7 +663,7 @@ router.post(
         data: { call: updatedCall },
       });
     } catch (error) {
-      console.error('Error accepting call:', error);
+      console.error('Error accepting call:', error.message);
       res.status(500).json({
         status: 'error',
         message: 'Failed to accept call'
@@ -586,13 +677,26 @@ router.post(
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
+      const auth = checkAuth(req, res);
+      if (auth.status) return auth;
+      const userId = auth.userId;
+
+      if (!checkModels(res)) return;
+
       const { callId } = req.params;
       const { reason = 'declined' } = req.body;
+
+      if (!callId) {
+        return res.status(400).json({
+          status: 'error',
+          message: 'Call ID is required'
+        });
+      }
 
       const call = await Call.findOne({
         where: {
           id: callId,
-          '$participants.id$': req.user.userId,
+          '$participants.id$': userId,
           status: { [Op.in]: ['ringing', 'ongoing'] }
         },
         include: [{
@@ -611,16 +715,16 @@ router.post(
       }
 
       const declinedBy = call.declinedBy || [];
-      declinedBy.push(req.user.userId);
+      declinedBy.push(userId);
       call.declinedBy = declinedBy;
 
-      if (call.callerId === req.user.userId) {
+      if (call.callerId === userId) {
         call.status = 'cancelled';
         call.endedAt = new Date();
       } else {
         const answeredBy = call.answeredBy || [];
         const declinedBySet = new Set(call.declinedBy || []);
-        const remainingParticipants = call.participants.filter(
+        const remainingParticipants = (call.participants || []).filter(
           p => !answeredBy.includes(p.id) && !declinedBySet.has(p.id)
         );
 
@@ -632,7 +736,7 @@ router.post(
 
       await call.save();
 
-      const user = await User.findByPk(req.user.userId);
+      const user = await User.findByPk(userId);
 
       if (req.io) {
         const callData = await Call.findByPk(callId, {
@@ -644,9 +748,9 @@ router.post(
           }]
         });
 
-        if (callData) {
+        if (callData && callData.participants) {
           callData.participants.forEach(participant => {
-            if (participant.socketIds) {
+            if (participant.socketIds && Array.isArray(participant.socketIds)) {
               participant.socketIds.forEach(socketId => {
                 req.io.to(socketId).emit('call:rejected', {
                   callId: call.id,
@@ -670,7 +774,7 @@ router.post(
         data: { status: call.status },
       });
     } catch (error) {
-      console.error('Error rejecting call:', error);
+      console.error('Error rejecting call:', error.message);
       res.status(500).json({
         status: 'error',
         message: 'Failed to reject call'
@@ -684,15 +788,28 @@ router.post(
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
+      const auth = checkAuth(req, res);
+      if (auth.status) return auth;
+      const userId = auth.userId;
+
+      if (!checkModels(res)) return;
+
       const { callId } = req.params;
       const { duration } = req.body;
+
+      if (!callId) {
+        return res.status(400).json({
+          status: 'error',
+          message: 'Call ID is required'
+        });
+      }
 
       const call = await Call.findOne({
         where: {
           id: callId,
           [Op.or]: [
-            { callerId: req.user.userId },
-            { '$participants.id$': req.user.userId }
+            { callerId: userId },
+            { '$participants.id$': userId }
           ],
           status: { [Op.in]: ['ringing', 'ongoing'] }
         }
@@ -713,7 +830,7 @@ router.post(
       }
 
       const actualDuration = duration || 
-        (call.startedAt ? Math.floor((new Date() - call.startedAt) / 1000) : 0);
+        (call.startedAt ? Math.floor((new Date() - new Date(call.startedAt)) / 1000) : 0);
 
       call.status = 'completed';
       call.endedAt = new Date();
@@ -734,11 +851,11 @@ router.post(
         }]
       });
 
-      if (req.io) {
-        const user = await User.findByPk(req.user.userId);
+      if (req.io && populatedCall && populatedCall.participants) {
+        const user = await User.findByPk(userId);
 
         populatedCall.participants.forEach(participant => {
-          if (participant.socketIds) {
+          if (participant.socketIds && Array.isArray(participant.socketIds)) {
             participant.socketIds.forEach(socketId => {
               req.io.to(socketId).emit('call:ended', {
                 callId: call.id,
@@ -765,7 +882,7 @@ router.post(
         },
       });
     } catch (error) {
-      console.error('Error ending call:', error);
+      console.error('Error ending call:', error.message);
       res.status(500).json({
         status: 'error',
         message: 'Failed to end call'
@@ -779,13 +896,19 @@ router.get(
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
+      const auth = checkAuth(req, res);
+      if (auth.status) return auth;
+      const userId = auth.userId;
+
+      if (!checkModels(res)) return;
+
       const twentyFourHoursAgo = new Date();
       twentyFourHoursAgo.setHours(twentyFourHoursAgo.getHours() - 24);
 
       const missedCount = await Call.count({
         where: {
-          '$participants.id$': req.user.userId,
-          callerId: { [Op.ne]: req.user.userId },
+          '$participants.id$': userId,
+          callerId: { [Op.ne]: userId },
           status: 'missed',
           startedAt: { [Op.gte]: twentyFourHoursAgo }
         },
@@ -801,10 +924,10 @@ router.get(
 
       res.status(200).json({
         status: 'success',
-        data: { missedCount },
+        data: { missedCount: missedCount || 0 },
       });
     } catch (error) {
-      console.error('Error getting missed calls count:', error);
+      console.error('Error getting missed calls count:', error.message);
       res.status(500).json({
         status: 'error',
         message: 'Failed to fetch missed calls count'
@@ -818,15 +941,21 @@ router.post(
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
+      const auth = checkAuth(req, res);
+      if (auth.status) return auth;
+      const userId = auth.userId;
+
+      if (!checkModels(res)) return;
+
       const { callIds } = req.body;
 
       if (callIds && Array.isArray(callIds)) {
         await Call.update(
-          { readBy: fn('array_append', col('readBy'), req.user.userId) },
+          { readBy: fn('array_append', col('readBy'), userId) },
           {
             where: {
               id: callIds,
-              '$participants.id$': req.user.userId,
+              '$participants.id$': userId,
               status: 'missed'
             },
             include: [{
@@ -843,14 +972,14 @@ router.post(
         twentyFourHoursAgo.setHours(twentyFourHoursAgo.getHours() - 24);
 
         await Call.update(
-          { readBy: fn('array_append', col('readBy'), req.user.userId) },
+          { readBy: fn('array_append', col('readBy'), userId) },
           {
             where: {
-              '$participants.id$': req.user.userId,
-              callerId: { [Op.ne]: req.user.userId },
+              '$participants.id$': userId,
+              callerId: { [Op.ne]: userId },
               status: 'missed',
               startedAt: { [Op.gte]: twentyFourHoursAgo },
-              readBy: { [Op.not]: literal(`'${req.user.userId}' = ANY(readBy)`) }
+              readBy: { [Op.not]: literal(`'${userId}' = ANY(readBy)`) }
             },
             include: [{
               model: User,
@@ -868,7 +997,7 @@ router.post(
         message: 'Missed calls marked as read',
       });
     } catch (error) {
-      console.error('Error marking missed calls as read:', error);
+      console.error('Error marking missed calls as read:', error.message);
       res.status(500).json({
         status: 'error',
         message: 'Failed to mark missed calls as read'
@@ -882,14 +1011,20 @@ router.delete(
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
+      const auth = checkAuth(req, res);
+      if (auth.status) return auth;
+      const userId = auth.userId;
+
+      if (!checkModels(res)) return;
+
       const { callIds, deleteAll = false, olderThanDays } = req.body;
 
       if (deleteAll) {
         const result = await Call.destroy({
           where: {
             [Op.or]: [
-              { callerId: req.user.userId },
-              { '$participants.id$': req.user.userId }
+              { callerId: userId },
+              { '$participants.id$': userId }
             ]
           },
           include: [{
@@ -903,8 +1038,8 @@ router.delete(
 
         return res.status(200).json({
           status: 'success',
-          message: `Deleted ${result} calls`,
-          data: { deletedCount: result },
+          message: `Deleted ${result || 0} calls`,
+          data: { deletedCount: result || 0 },
         });
       }
 
@@ -923,8 +1058,8 @@ router.delete(
         const result = await Call.destroy({
           where: {
             [Op.or]: [
-              { callerId: req.user.userId },
-              { '$participants.id$': req.user.userId }
+              { callerId: userId },
+              { '$participants.id$': userId }
             ],
             startedAt: { [Op.lt]: cutoffDate }
           },
@@ -939,8 +1074,8 @@ router.delete(
 
         return res.status(200).json({
           status: 'success',
-          message: `Deleted ${result} calls older than ${days} days`,
-          data: { deletedCount: result },
+          message: `Deleted ${result || 0} calls older than ${days} days`,
+          data: { deletedCount: result || 0 },
         });
       }
 
@@ -949,8 +1084,8 @@ router.delete(
           where: {
             id: callIds,
             [Op.or]: [
-              { callerId: req.user.userId },
-              { '$participants.id$': req.user.userId }
+              { callerId: userId },
+              { '$participants.id$': userId }
             ]
           },
           include: [{
@@ -964,8 +1099,8 @@ router.delete(
 
         return res.status(200).json({
           status: 'success',
-          message: `Deleted ${result} calls`,
-          data: { deletedCount: result },
+          message: `Deleted ${result || 0} calls`,
+          data: { deletedCount: result || 0 },
         });
       }
 
@@ -974,7 +1109,7 @@ router.delete(
         message: 'Provide callIds, deleteAll=true, or olderThanDays'
       });
     } catch (error) {
-      console.error('Error deleting call history:', error);
+      console.error('Error deleting call history:', error.message);
       res.status(500).json({
         status: 'error',
         message: 'Failed to delete call history'
@@ -988,6 +1123,12 @@ router.get(
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
+      const auth = checkAuth(req, res);
+      if (auth.status) return auth;
+      const userId = auth.userId;
+
+      if (!checkModels(res)) return;
+
       const { period = '30d' } = req.query;
 
       let startDate = new Date();
@@ -1014,8 +1155,8 @@ router.get(
       const stats = await Call.findAll({
         where: {
           [Op.or]: [
-            { callerId: req.user.userId },
-            { '$participants.id$': req.user.userId }
+            { callerId: userId },
+            { '$participants.id$': userId }
           ],
           startedAt: { [Op.gte]: startDate }
         },
@@ -1065,18 +1206,18 @@ router.get(
       });
 
       const overallStats = {
-        totalCalls: stats.length,
-        totalDuration: Math.floor(stats.reduce((sum, stat) => sum + (stat.totalDuration || 0), 0)),
-        avgDuration: Math.floor(stats.reduce((sum, stat) => sum + (stat.avgDuration || 0), 0) / stats.length),
-        longestCall: Math.floor(Math.max(...stats.map(stat => stat.longestCall || 0))),
-        shortestCall: Math.floor(Math.min(...stats.map(stat => stat.shortestCall || 0)))
+        totalCalls: (stats || []).length,
+        totalDuration: Math.floor((stats || []).reduce((sum, stat) => sum + (stat.totalDuration || 0), 0)),
+        avgDuration: (stats && stats.length) ? Math.floor((stats || []).reduce((sum, stat) => sum + (stat.avgDuration || 0), 0) / stats.length) : 0,
+        longestCall: Math.floor(Math.max(...(stats || []).map(stat => stat.longestCall || 0))),
+        shortestCall: Math.floor(Math.min(...(stats || []).map(stat => stat.shortestCall || 0)))
       };
 
       const typeBreakdown = await Call.findAll({
         where: {
           [Op.or]: [
-            { callerId: req.user.userId },
-            { '$participants.id$': req.user.userId }
+            { callerId: userId },
+            { '$participants.id$': userId }
           ],
           startedAt: { [Op.gte]: startDate }
         },
@@ -1106,11 +1247,11 @@ router.get(
         data: {
           period,
           overall: overallStats,
-          typeBreakdown,
+          typeBreakdown: typeBreakdown || [],
         },
       });
     } catch (error) {
-      console.error('Error getting call statistics:', error);
+      console.error('Error getting call statistics:', error.message);
       res.status(500).json({
         status: 'error',
         message: 'Failed to fetch call statistics'
@@ -1124,12 +1265,18 @@ router.get(
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
+      const auth = checkAuth(req, res);
+      if (auth.status) return auth;
+      const userId = auth.userId;
+
+      if (!checkModels(res)) return;
+
       const { format = 'json', startDate, endDate } = req.query;
 
       const where = {
         [Op.or]: [
-          { callerId: req.user.userId },
-          { '$participants.id$': req.user.userId }
+          { callerId: userId },
+          { '$participants.id$': userId }
         ]
       };
 
@@ -1159,19 +1306,19 @@ router.get(
         order: [['startedAt', 'DESC']]
       });
 
-      const exportData = calls.map(call => {
-        const callJSON = call.toJSON();
-        const participants = callJSON.participants.map(p => ({
+      const exportData = (calls || []).map(call => {
+        const callJSON = call.toJSON ? call.toJSON() : call;
+        const participants = (callJSON.participants || []).map(p => ({
           id: p.id,
           username: p.username,
           email: p.email,
         }));
 
-        const answeredBy = callJSON.answeredBy
+        const answeredBy = (callJSON.answeredBy || [])
           ?.map(id => participants.find(p => p.id === id))
           .filter(Boolean) || [];
 
-        const declinedBy = callJSON.declinedBy
+        const declinedBy = (callJSON.declinedBy || [])
           ?.map(id => participants.find(p => p.id === id))
           .filter(Boolean) || [];
 
@@ -1184,9 +1331,9 @@ router.get(
           endedAt: callJSON.endedAt,
           duration: callJSON.duration,
           caller: {
-            id: callJSON.caller.id,
-            username: callJSON.caller.username,
-            email: callJSON.caller.email,
+            id: callJSON.caller?.id,
+            username: callJSON.caller?.username,
+            email: callJSON.caller?.email,
           },
           participants,
           answeredBy,
@@ -1213,13 +1360,13 @@ router.get(
           call.startedAt,
           call.endedAt,
           call.duration,
-          call.caller.username,
-          call.participants.map(p => p.username).join('; '),
+          call.caller?.username || '',
+          (call.participants || []).map(p => p.username).join('; '),
         ]);
 
         const csv = [
           fields.join(','),
-          ...csvRows.map(row => row.map(field => `"${field}"`).join(',')),
+          ...csvRows.map(row => row.map(field => `"${field || ''}"`).join(',')),
         ].join('\n');
 
         res.setHeader('Content-Type', 'text/csv');
@@ -1239,7 +1386,7 @@ router.get(
         },
       });
     } catch (error) {
-      console.error('Error exporting call history:', error);
+      console.error('Error exporting call history:', error.message);
       res.status(500).json({
         status: 'error',
         message: 'Failed to export call history'

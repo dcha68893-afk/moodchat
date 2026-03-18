@@ -14,10 +14,6 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.INTEGER,
         allowNull: false,
         unique: true,
-        references: {
-          model: 'Users',
-          key: 'id',
-        },
       },
       website: {
         type: DataTypes.STRING(200),
@@ -92,7 +88,8 @@ module.exports = (sequelize, DataTypes) => {
       },
     },
     {
-      tableName: 'profiles',
+      tableName: 'profiles',                 // Standardized: lowercase table name
+      modelName: 'Profile',                   // Explicit model name
       timestamps: true,
       underscored: true,
       freezeTableName: true,
@@ -104,7 +101,7 @@ module.exports = (sequelize, DataTypes) => {
     }
   );
 
-  // Instance methods
+  // Instance methods (PRESERVED)
   Profile.prototype.getPublicInfo = function () {
     const publicFields = [
       'id',
@@ -128,12 +125,15 @@ module.exports = (sequelize, DataTypes) => {
     return result;
   };
 
+  // FIXED: Associations with unique aliases
   Profile.associate = function(models) {
     if (models.Users) {
       Profile.belongsTo(models.Users, {
         foreignKey: 'userId',
-        as: 'profileOwner',
+        as: 'profileOwnerUser',               // FIXED: Unique alias
         constraints: false,
+        onDelete: 'CASCADE',
+        onUpdate: 'CASCADE',
       });
     }
   };

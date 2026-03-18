@@ -1,118 +1,121 @@
+// --- MODEL: Features.js ---
 module.exports = (sequelize, DataTypes) => {
-  const Features = sequelize.define('Features', {
-    id: {
-      type: DataTypes.UUID,
-      defaultValue: DataTypes.UUIDV4,
-      primaryKey: true,
-      allowNull: false
-    },
-    name: {
-      type: DataTypes.STRING,
-      allowNull: false,
-      unique: true,
-      validate: {
-        notEmpty: true
-      }
-    },
-    enabled: {
-      type: DataTypes.BOOLEAN,
-      defaultValue: false,
-      allowNull: false
-    },
-    description: {
-      type: DataTypes.TEXT,
-      allowNull: true,
-      validate: {
-        len: [0, 500]
-      }
-    },
-    category: {
-      type: DataTypes.STRING,
-      defaultValue: 'core',
-      validate: {
-        isIn: [['core', 'premium', 'experimental', 'beta', 'legacy']]
-      }
-    },
-    version: {
-      type: DataTypes.STRING,
-      defaultValue: '1.0.0'
-    },
-    requiresPermission: {
-      type: DataTypes.BOOLEAN,
-      defaultValue: false
-    },
-    allowedUserTypes: {
-      type: DataTypes.ARRAY(DataTypes.STRING),
-      defaultValue: ['all'],
-      validate: {
-        isValidArray(value) {
-          if (!Array.isArray(value)) {
-            throw new Error('allowedUserTypes must be an array');
-          }
-          const validValues = ['free', 'premium', 'admin', 'moderator', 'all'];
-          for (const val of value) {
-            if (!validValues.includes(val)) {
-              throw new Error(`Invalid user type: ${val}`);
+  const Features = sequelize.define(
+    'Features',
+    {
+      id: {
+        type: DataTypes.UUID,
+        defaultValue: DataTypes.UUIDV4,
+        primaryKey: true,
+        allowNull: false
+      },
+      name: {
+        type: DataTypes.STRING,
+        allowNull: false,
+        unique: true,
+        validate: {
+          notEmpty: true
+        }
+      },
+      enabled: {
+        type: DataTypes.BOOLEAN,
+        defaultValue: false,
+        allowNull: false
+      },
+      description: {
+        type: DataTypes.TEXT,
+        allowNull: true,
+        validate: {
+          len: [0, 500]
+        }
+      },
+      category: {
+        type: DataTypes.STRING,
+        defaultValue: 'core',
+        validate: {
+          isIn: [['core', 'premium', 'experimental', 'beta', 'legacy']]
+        }
+      },
+      version: {
+        type: DataTypes.STRING,
+        defaultValue: '1.0.0'
+      },
+      requiresPermission: {
+        type: DataTypes.BOOLEAN,
+        defaultValue: false
+      },
+      allowedUserTypes: {
+        type: DataTypes.ARRAY(DataTypes.STRING),
+        defaultValue: ['all'],
+        validate: {
+          isValidArray(value) {
+            if (!Array.isArray(value)) {
+              throw new Error('allowedUserTypes must be an array');
+            }
+            const validValues = ['free', 'premium', 'admin', 'moderator', 'all'];
+            for (const val of value) {
+              if (!validValues.includes(val)) {
+                throw new Error(`Invalid user type: ${val}`);
+              }
             }
           }
         }
+      },
+      rolloutPercentage: {
+        type: DataTypes.INTEGER,
+        defaultValue: 100,
+        validate: {
+          min: 0,
+          max: 100
+        }
+      },
+      configuration: {
+        type: DataTypes.JSONB,
+        defaultValue: {}
+      },
+      dependencies: {
+        type: DataTypes.ARRAY(DataTypes.STRING),
+        defaultValue: []
+      },
+      lastEnabledAt: {
+        type: DataTypes.DATE,
+        allowNull: true
+      },
+      lastDisabledAt: {
+        type: DataTypes.DATE,
+        allowNull: true
+      },
+      createdBy: {
+        type: DataTypes.UUID,
+        allowNull: true,
+      },
+      metadata: {
+        type: DataTypes.JSONB,
+        defaultValue: {}
       }
     },
-    rolloutPercentage: {
-      type: DataTypes.INTEGER,
-      defaultValue: 100,
-      validate: {
-        min: 0,
-        max: 100
-      }
-    },
-    configuration: {
-      type: DataTypes.JSONB,
-      defaultValue: {}
-    },
-    dependencies: {
-      type: DataTypes.ARRAY(DataTypes.STRING),
-      defaultValue: []
-    },
-    lastEnabledAt: {
-      type: DataTypes.DATE,
-      allowNull: true
-    },
-    lastDisabledAt: {
-      type: DataTypes.DATE,
-      allowNull: true
-    },
-    createdBy: {
-      type: DataTypes.UUID,
-      allowNull: true,
-      references: {
-        model: 'Users',
-        key: 'id'
-      }
-    },
-    metadata: {
-      type: DataTypes.JSONB,
-      defaultValue: {}
+    {
+      tableName: 'features',                // Standardized: lowercase table name
+      modelName: 'Features',                 // Explicit model name
+      timestamps: true,
+      underscored: true,
+      freezeTableName: true,
+      indexes: [
+        {
+          unique: true,
+          fields: ['name']
+        },
+        {
+          fields: ['enabled']
+        },
+        {
+          fields: ['category']
+        }
+      ]
     }
-  }, {
-    tableName: 'features',
-    timestamps: true,
-    underscored: true,
-    indexes: [
-      {
-        unique: true,
-        fields: ['name']
-      },
-      {
-        fields: ['enabled']
-      },
-      {
-        fields: ['category']
-      }
-    ]
-  });
+  );
 
-  // Virtual property simulation
+  // Virtual property simulation (PRESERVED)
   Features.prototype.getStatus = function() {
     if (this.enabled && this.rolloutPercentage === 100) return 'active';
     if (this.enabled && this.rolloutPercentage < 100) return 'rolling_out';
@@ -120,7 +123,7 @@ module.exports = (sequelize, DataTypes) => {
     return 'unknown';
   };
 
-  // Static methods
+  // Static methods (PRESERVED)
   Features.getEnabledFeatures = async function() {
     return await this.findAll({
       where: { enabled: true },
@@ -148,14 +151,10 @@ module.exports = (sequelize, DataTypes) => {
       feature.lastDisabledAt = new Date();
     }
     
-    if (userId) {
-      feature.updatedBy = userId;
-    }
-    
     return await feature.save();
   };
 
-  // Instance methods
+  // Instance methods (PRESERVED)
   Features.prototype.isAvailableForUser = function(userType) {
     if (this.allowedUserTypes.includes('all')) return true;
     return this.allowedUserTypes.includes(userType);
@@ -169,7 +168,7 @@ module.exports = (sequelize, DataTypes) => {
     return (hash % 100) < this.rolloutPercentage;
   };
 
-  // Helper method
+  // Helper method (PRESERVED)
   Features.prototype._hashString = function(str) {
     let hash = 0;
     for (let i = 0; i < str.length; i++) {
@@ -179,12 +178,17 @@ module.exports = (sequelize, DataTypes) => {
     return Math.abs(hash);
   };
 
+  // FIXED: Associations with unique aliases
   Features.associate = (models) => {
-    Features.belongsTo(models.Users, {
-      foreignKey: 'createdBy',
-      as: 'featureCreator',
-      constraints: false,
-    });
+    if (models.Users) {
+      Features.belongsTo(models.Users, {
+        foreignKey: 'createdBy',
+        as: 'featureCreatorUser',            // FIXED: Unique alias
+        constraints: false,
+        onDelete: 'SET NULL',
+        onUpdate: 'CASCADE',
+      });
+    }
   };
 
   return Features;

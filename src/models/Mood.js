@@ -13,10 +13,6 @@ module.exports = (sequelize, DataTypes) => {
       userId: {
         type: DataTypes.INTEGER,
         allowNull: false,
-        references: {
-          model: 'Users',
-          key: 'id',
-        },
       },
       mood: {
         type: DataTypes.ENUM(
@@ -106,7 +102,8 @@ module.exports = (sequelize, DataTypes) => {
       },
     },
     {
-      tableName: 'moods',
+      tableName: 'moods',                   // Standardized: lowercase table name
+      modelName: 'Mood',                     // Explicit model name
       timestamps: true,
       underscored: true,
       freezeTableName: true,
@@ -131,7 +128,7 @@ module.exports = (sequelize, DataTypes) => {
     }
   );
 
-  // Instance methods
+  // Instance methods (PRESERVED)
   Mood.prototype.shareWithUser = async function (userId) {
     if (!this.sharedWith.includes(userId)) {
       this.sharedWith = [...this.sharedWith, userId];
@@ -154,7 +151,7 @@ module.exports = (sequelize, DataTypes) => {
     );
   };
 
-  // Static methods
+  // Static methods (PRESERVED)
   Mood.getUserMoods = async function (userId, options = {}) {
     const where = { userId: userId };
 
@@ -233,7 +230,7 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
-          as: 'moodOwner',
+          as: 'moodOwnerUser',                 // FIXED: Unique alias
           attributes: ['id', 'username', 'avatar'],
         },
       ],
@@ -241,20 +238,25 @@ module.exports = (sequelize, DataTypes) => {
     });
   };
 
+  // FIXED: Associations with unique aliases
   Mood.associate = function(models) {
     if (models.Users) {
       Mood.belongsTo(models.Users, {
         foreignKey: 'userId',
-        as: 'moodOwner',
+        as: 'moodOwnerUser',                   // FIXED: Unique alias
         constraints: false,
+        onDelete: 'CASCADE',
+        onUpdate: 'CASCADE',
       });
     }
     
     if (models.SharedMood) {
       Mood.hasMany(models.SharedMood, {
         foreignKey: 'moodId',
-        as: 'moodShares',
+        as: 'moodSharesList',                   // FIXED: Unique alias
         constraints: false,
+        onDelete: 'CASCADE',
+        onUpdate: 'CASCADE',
       });
     }
   };

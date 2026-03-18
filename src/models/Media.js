@@ -13,18 +13,10 @@ module.exports = (sequelize, DataTypes) => {
       userId: {
         type: DataTypes.INTEGER,
         allowNull: false,
-        references: {
-          model: 'Users',
-          key: 'id',
-        },
       },
       messageId: {
         type: DataTypes.INTEGER,
         allowNull: true,
-        references: {
-          model: 'Message',
-          key: 'id',
-        },
       },
       url: {
         type: DataTypes.STRING,
@@ -118,7 +110,8 @@ module.exports = (sequelize, DataTypes) => {
       },
     },
     {
-      tableName: 'media',
+      tableName: 'media',                   // Standardized: lowercase table name
+      modelName: 'Media',                    // Explicit model name
       timestamps: true,
       underscored: true,
       freezeTableName: true,
@@ -142,7 +135,7 @@ module.exports = (sequelize, DataTypes) => {
     }
   );
 
-  // Instance methods
+  // Instance methods (PRESERVED)
   Media.prototype.getPublicUrl = function () {
     if (this.accessLevel === 'public') {
       return this.url;
@@ -165,7 +158,7 @@ module.exports = (sequelize, DataTypes) => {
     return await this.save();
   };
 
-  // Static methods
+  // Static methods (PRESERVED)
   Media.getUserMedia = async function (userId, options = {}) {
     const where = {
       userId: userId,
@@ -189,7 +182,7 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Messages,
-          as: 'mediaMessage',
+          as: 'mediaMessageDetails',          // FIXED: Unique alias
           where: {
             chatId: chatId,
             isDeleted: false,
@@ -237,20 +230,25 @@ module.exports = (sequelize, DataTypes) => {
     };
   };
 
+  // FIXED: Associations with unique aliases
   Media.associate = function(models) {
     if (models.Users) {
       Media.belongsTo(models.Users, {
         foreignKey: 'userId',
-        as: 'mediaOwner',
+        as: 'mediaOwnerUser',                 // FIXED: Unique alias
         constraints: false,
+        onDelete: 'CASCADE',
+        onUpdate: 'CASCADE',
       });
     }
     
     if (models.Messages) {
       Media.belongsTo(models.Messages, {
         foreignKey: 'messageId',
-        as: 'mediaMessage',
+        as: 'mediaMessageDetails',             // FIXED: Unique alias
         constraints: false,
+        onDelete: 'CASCADE',
+        onUpdate: 'CASCADE',
       });
     }
   };

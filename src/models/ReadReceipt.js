@@ -13,18 +13,10 @@ module.exports = (sequelize, DataTypes) => {
       messageId: {
         type: DataTypes.INTEGER,
         allowNull: false,
-        references: {
-          model: 'Message',
-          key: 'id',
-        },
       },
       userId: {
         type: DataTypes.INTEGER,
         allowNull: false,
-        references: {
-          model: 'Users',
-          key: 'id',
-        },
       },
       readAt: {
         type: DataTypes.DATE,
@@ -51,7 +43,8 @@ module.exports = (sequelize, DataTypes) => {
       },
     },
     {
-      tableName: 'read_receipts',
+      tableName: 'read_receipts',            // Standardized: lowercase table name
+      modelName: 'ReadReceipt',               // Explicit model name
       timestamps: true,
       underscored: true,
       freezeTableName: true,
@@ -73,7 +66,7 @@ module.exports = (sequelize, DataTypes) => {
     }
   );
 
-  // Static methods
+  // Static methods (PRESERVED)
   ReadReceipt.markAsRead = async function (messageId, userId, deviceInfo = {}) {
     const [receipt, created] = await this.findOrCreate({
       where: {
@@ -100,11 +93,11 @@ module.exports = (sequelize, DataTypes) => {
   ReadReceipt.getUnreadCount = async function (chatId, userId) {
     const query = `
       SELECT COUNT(*) as count
-      FROM Messages m
-      LEFT JOIN read_receipts rr ON m.id = rr.message_id AND rr.user_id = ?
-      WHERE m.chat_id = ? 
-      AND m.sender_id != ? 
-      AND m.is_deleted = false
+      FROM messages m
+      LEFT JOIN read_receipts rr ON m.id = rr.messageId AND rr.userId = ?
+      WHERE m.chatId = ? 
+      AND m.senderId != ? 
+      AND m.isDeleted = false
       AND rr.id IS NULL
     `;
 
@@ -119,12 +112,12 @@ module.exports = (sequelize, DataTypes) => {
   ReadReceipt.getLastReadMessage = async function (chatId, userId) {
     const query = `
       SELECT m.*
-      FROM Messages m
-      JOIN read_receipts rr ON m.id = rr.message_id
-      WHERE m.chat_id = ? 
-      AND rr.user_id = ?
-      AND m.is_deleted = false
-      ORDER BY rr.read_at DESC
+      FROM messages m
+      JOIN read_receipts rr ON m.id = rr.messageId
+      WHERE m.chatId = ? 
+      AND rr.userId = ?
+      AND m.isDeleted = false
+      ORDER BY rr.readAt DESC
       LIMIT 1
     `;
 
@@ -136,20 +129,25 @@ module.exports = (sequelize, DataTypes) => {
     return results;
   };
 
+  // FIXED: Associations with unique aliases
   ReadReceipt.associate = function(models) {
     if (models.Messages) {
       ReadReceipt.belongsTo(models.Messages, {
         foreignKey: 'messageId',
-        as: 'readMessage',
+        as: 'readMessageDetails',             // FIXED: Unique alias
         constraints: false,
+        onDelete: 'CASCADE',
+        onUpdate: 'CASCADE',
       });
     }
     
     if (models.Users) {
       ReadReceipt.belongsTo(models.Users, {
         foreignKey: 'userId',
-        as: 'readUser',
+        as: 'readUserDetails',                // FIXED: Unique alias
         constraints: false,
+        onDelete: 'CASCADE',
+        onUpdate: 'CASCADE',
       });
     }
   };

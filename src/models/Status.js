@@ -13,12 +13,6 @@ module.exports = (sequelize, DataTypes) => {
       userId: {
         type: DataTypes.INTEGER,
         allowNull: false,
-        references: {
-          model: 'Users',
-          key: 'id',
-        },
-        onUpdate: 'CASCADE',
-        onDelete: 'CASCADE',
       },
       content: {
         type: DataTypes.TEXT,
@@ -176,7 +170,8 @@ module.exports = (sequelize, DataTypes) => {
       },
     },
     {
-      tableName: 'statuses',
+      tableName: 'statuses',                 // Standardized: lowercase table name
+      modelName: 'Status',                    // Explicit model name
       timestamps: true,
       underscored: false,
       freezeTableName: true,
@@ -240,49 +235,7 @@ module.exports = (sequelize, DataTypes) => {
     }
   );
 
-  Status.associate = function (models) {
-    if (models.Users) {
-      Status.belongsTo(models.Users, {
-        foreignKey: 'userId',
-        as: 'statusUser', // FIXED: Changed from 'statusOwner'
-        onDelete: 'CASCADE',
-        onUpdate: 'CASCADE',
-        constraints: false,
-      });
-    }
-
-    if (models.StatusLike) {
-      Status.hasMany(models.StatusLike, {
-        foreignKey: 'statusId',
-        as: 'statusLikes',
-        onDelete: 'CASCADE',
-        onUpdate: 'CASCADE',
-        constraints: false,
-      });
-    }
-
-    if (models.StatusComment) {
-      Status.hasMany(models.StatusComment, {
-        foreignKey: 'statusId',
-        as: 'statusComments',
-        onDelete: 'CASCADE',
-        onUpdate: 'CASCADE',
-        constraints: false,
-      });
-    }
-
-    if (models.StatusView) {
-      Status.hasMany(models.StatusView, {
-        foreignKey: 'statusId',
-        as: 'statusViews',
-        onDelete: 'CASCADE',
-        onUpdate: 'CASCADE',
-        constraints: false,
-      });
-    }
-  };
-
-  // Instance methods
+  // Instance methods (PRESERVED)
   Status.prototype.incrementViewCount = async function () {
     this.viewCount += 1;
     return await this.save();
@@ -404,7 +357,7 @@ module.exports = (sequelize, DataTypes) => {
     return values;
   };
 
-  // Static methods
+  // Static methods (PRESERVED)
   Status.getUserStatuses = async function (userId, options = {}) {
     const where = { userId };
 
@@ -425,7 +378,7 @@ module.exports = (sequelize, DataTypes) => {
     if (options.includeUser) {
       include.push({
         model: this.sequelize.models.Users,
-        as: 'statusUser', // FIXED: Changed from 'statusOwner'
+        as: 'statusUserDetails',              // FIXED: Unique alias
         attributes: ['id', 'username', 'avatar', 'status'],
       });
     }
@@ -433,13 +386,13 @@ module.exports = (sequelize, DataTypes) => {
     if (options.includeLikes) {
       include.push({
         model: this.sequelize.models.StatusLike,
-        as: 'statusLikes',
+        as: 'statusLikesList',                 // FIXED: Unique alias
         attributes: ['id', 'userId', 'createdAt'],
         limit: 5,
         include: [
           {
             model: this.sequelize.models.Users,
-            as: 'likeUser',
+            as: 'likeUserDetails',             // FIXED: Unique alias
             attributes: ['id', 'username', 'avatar'],
           },
         ],
@@ -449,14 +402,14 @@ module.exports = (sequelize, DataTypes) => {
     if (options.includeComments) {
       include.push({
         model: this.sequelize.models.StatusComment,
-        as: 'statusComments',
+        as: 'statusCommentsList',               // FIXED: Unique alias
         attributes: ['id', 'userId', 'content', 'createdAt'],
         limit: 5,
         order: [['createdAt', 'DESC']],
         include: [
           {
             model: this.sequelize.models.Users,
-            as: 'commentUser',
+            as: 'commentUserDetails',            // FIXED: Unique alias
             attributes: ['id', 'username', 'avatar'],
           },
         ],
@@ -490,7 +443,6 @@ module.exports = (sequelize, DataTypes) => {
       where.moodType = options.moodType;
     }
 
-    const Op = this.sequelize.Op;
     where[Op.or] = [
       { expiresAt: null },
       { expiresAt: { [Op.gt]: new Date() } },
@@ -499,7 +451,7 @@ module.exports = (sequelize, DataTypes) => {
     const include = [
       {
         model: this.sequelize.models.Users,
-        as: 'statusUser', // FIXED: Changed from 'statusOwner'
+        as: 'statusUserDetails',                // FIXED: Unique alias
         attributes: ['id', 'username', 'avatar', 'status'],
       },
     ];
@@ -514,7 +466,6 @@ module.exports = (sequelize, DataTypes) => {
   };
 
   Status.getFriendsStatuses = async function (userId, friendIds, options = {}) {
-    const Op = this.sequelize.Op;
     const where = {
       userId: { [Op.in]: friendIds },
       isActive: true,
@@ -533,7 +484,7 @@ module.exports = (sequelize, DataTypes) => {
     const include = [
       {
         model: this.sequelize.models.Users,
-        as: 'statusUser', // FIXED: Changed from 'statusOwner'
+        as: 'statusUserDetails',                // FIXED: Unique alias
         attributes: ['id', 'username', 'avatar', 'status'],
       },
     ];
@@ -541,7 +492,7 @@ module.exports = (sequelize, DataTypes) => {
     if (options.includeStats) {
       include.push({
         model: this.sequelize.models.StatusLike,
-        as: 'statusLikes',
+        as: 'statusLikesList',                   // FIXED: Unique alias
         attributes: ['id'],
         required: false,
       });
@@ -602,7 +553,7 @@ module.exports = (sequelize, DataTypes) => {
     if (options.includeUser) {
       include.push({
         model: this.sequelize.models.Users,
-        as: 'statusUser', // FIXED: Changed from 'statusOwner'
+        as: 'statusUserDetails',                // FIXED: Unique alias
         attributes: ['id', 'username', 'avatar', 'status'],
       });
     }
@@ -610,12 +561,12 @@ module.exports = (sequelize, DataTypes) => {
     if (options.includeLikes) {
       include.push({
         model: this.sequelize.models.StatusLike,
-        as: 'statusLikes',
+        as: 'statusLikesList',                   // FIXED: Unique alias
         attributes: ['id', 'userId', 'createdAt'],
         include: [
           {
             model: this.sequelize.models.Users,
-            as: 'likeUser',
+            as: 'likeUserDetails',                // FIXED: Unique alias
             attributes: ['id', 'username', 'avatar'],
           },
         ],
@@ -625,12 +576,12 @@ module.exports = (sequelize, DataTypes) => {
     if (options.includeComments) {
       include.push({
         model: this.sequelize.models.StatusComment,
-        as: 'statusComments',
+        as: 'statusCommentsList',                 // FIXED: Unique alias
         attributes: ['id', 'userId', 'content', 'createdAt'],
         include: [
           {
             model: this.sequelize.models.Users,
-            as: 'commentUser',
+            as: 'commentUserDetails',              // FIXED: Unique alias
             attributes: ['id', 'username', 'avatar'],
           },
         ],
@@ -644,7 +595,6 @@ module.exports = (sequelize, DataTypes) => {
   };
 
   Status.searchStatuses = async function (query, options = {}) {
-    const Op = this.sequelize.Op;
     const where = {
       isActive: true,
       isPublic: true,
@@ -663,7 +613,7 @@ module.exports = (sequelize, DataTypes) => {
     const include = [
       {
         model: this.sequelize.models.Users,
-        as: 'statusUser', // FIXED: Changed from 'statusOwner'
+        as: 'statusUserDetails',                 // FIXED: Unique alias
         attributes: ['id', 'username', 'avatar', 'status'],
       },
     ];
@@ -678,7 +628,6 @@ module.exports = (sequelize, DataTypes) => {
   };
 
   Status.getTrendingStatuses = async function (options = {}) {
-    const Op = this.sequelize.Op;
     const where = {
       isActive: true,
       isPublic: true,
@@ -695,7 +644,7 @@ module.exports = (sequelize, DataTypes) => {
     const include = [
       {
         model: this.sequelize.models.Users,
-        as: 'statusUser', // FIXED: Changed from 'statusOwner'
+        as: 'statusUserDetails',                  // FIXED: Unique alias
         attributes: ['id', 'username', 'avatar', 'status'],
       },
     ];
@@ -714,7 +663,6 @@ module.exports = (sequelize, DataTypes) => {
   };
 
   Status.getMoodStatuses = async function (moodType, options = {}) {
-    const Op = this.sequelize.Op;
     const where = {
       isActive: true,
       isPublic: true,
@@ -730,7 +678,7 @@ module.exports = (sequelize, DataTypes) => {
     const include = [
       {
         model: this.sequelize.models.Users,
-        as: 'statusUser', // FIXED: Changed from 'statusOwner'
+        as: 'statusUserDetails',                  // FIXED: Unique alias
         attributes: ['id', 'username', 'avatar', 'status'],
       },
     ];
@@ -745,7 +693,6 @@ module.exports = (sequelize, DataTypes) => {
   };
 
   Status.cleanupExpiredStatuses = async function () {
-    const Op = this.sequelize.Op;
     const result = await this.update(
       { isActive: false },
       {
@@ -760,7 +707,6 @@ module.exports = (sequelize, DataTypes) => {
   };
 
   Status.getStatusStats = async function (userId = null) {
-    const Op = this.sequelize.Op;
     const where = {};
 
     if (userId) {
@@ -819,6 +765,49 @@ module.exports = (sequelize, DataTypes) => {
       totalViews: totalViews || 0,
       totalComments: totalComments || 0,
     };
+  };
+
+  // FIXED: Associations with unique aliases
+  Status.associate = function (models) {
+    if (models.Users) {
+      Status.belongsTo(models.Users, {
+        foreignKey: 'userId',
+        as: 'statusUserDetails',                // FIXED: Unique alias
+        constraints: false,
+        onDelete: 'CASCADE',
+        onUpdate: 'CASCADE',
+      });
+    }
+
+    if (models.StatusLike) {
+      Status.hasMany(models.StatusLike, {
+        foreignKey: 'statusId',
+        as: 'statusLikesList',                   // FIXED: Unique alias
+        constraints: false,
+        onDelete: 'CASCADE',
+        onUpdate: 'CASCADE',
+      });
+    }
+
+    if (models.StatusComment) {
+      Status.hasMany(models.StatusComment, {
+        foreignKey: 'statusId',
+        as: 'statusCommentsList',                 // FIXED: Unique alias
+        constraints: false,
+        onDelete: 'CASCADE',
+        onUpdate: 'CASCADE',
+      });
+    }
+
+    if (models.StatusView) {
+      Status.hasMany(models.StatusView, {
+        foreignKey: 'statusId',
+        as: 'statusViewsList',                    // FIXED: Unique alias
+        constraints: false,
+        onDelete: 'CASCADE',
+        onUpdate: 'CASCADE',
+      });
+    }
   };
 
   return Status;

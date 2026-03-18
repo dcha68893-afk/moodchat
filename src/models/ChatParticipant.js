@@ -43,11 +43,29 @@ module.exports = (sequelize, DataTypes) => {
       },
     },
     {
-      tableName: 'chat_participants',
+      tableName: 'chat_participants',      // Preserved: matches existing table
+      modelName: 'ChatParticipant',         // Explicit model name
       timestamps: true,
       underscored: false,
       freezeTableName: true,
-      indexes: [],
+      indexes: [
+        {
+          fields: ['userId'],
+        },
+        {
+          fields: ['chatId'],
+        },
+        {
+          fields: ['chatId', 'userId'],
+          unique: true,
+        },
+        {
+          fields: ['role'],
+        },
+        {
+          fields: ['isMuted'],
+        },
+      ],
       hooks: {
         beforeCreate: (participant) => {
           if (!participant.joinedAt) {
@@ -58,25 +76,7 @@ module.exports = (sequelize, DataTypes) => {
     }
   );
 
-  ChatParticipant.associate = function (models) {
-    if (models.Users) {
-      ChatParticipant.belongsTo(models.Users, {
-        foreignKey: 'userId',
-        as: 'chatParticipantUser',
-        constraints: false,
-      });
-    }
-    
-    if (models.Chats) {
-      ChatParticipant.belongsTo(models.Chats, {
-        foreignKey: 'chatId',
-        as: 'participantChat',
-        constraints: false,
-      });
-    }
-  };
-
-  // Instance methods
+  // Instance methods (PRESERVED)
   ChatParticipant.prototype.promoteToAdmin = async function () {
     this.role = 'admin';
     return await this.save();
@@ -113,7 +113,7 @@ module.exports = (sequelize, DataTypes) => {
     };
   };
 
-  // Static methods
+  // Static methods (PRESERVED)
   ChatParticipant.getChatParticipants = async function (chatId, options = {}) {
     const where = { chatId };
 
@@ -130,7 +130,7 @@ module.exports = (sequelize, DataTypes) => {
     if (options.includeUser) {
       include.push({
         model: this.sequelize.models.Users,
-        as: 'chatParticipantUser',
+        as: 'participantUserDetails',       // FIXED: Unique alias
         attributes: ['id', 'username', 'avatar', 'status', 'lastSeen'],
       });
     }
@@ -168,7 +168,7 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
-          as: 'chatParticipantUser',
+          as: 'participantUserDetails',      // FIXED: Unique alias
           attributes: ['id', 'username', 'avatar', 'email'],
         },
       ],
@@ -285,13 +285,35 @@ module.exports = (sequelize, DataTypes) => {
     const query = `
       DELETE FROM chat_participants cp
       WHERE NOT EXISTS (
-        SELECT 1 FROM Users u WHERE u.id = cp.user_id
+        SELECT 1 FROM Users u WHERE u.id = cp.userId
       )
     `;
 
     const [result] = await this.sequelize.query(query);
-
     return result.rowCount || 0;
+  };
+
+  // FIXED: Associations with unique aliases
+  ChatParticipant.associate = function (models) {
+    if (models.Users) {
+      ChatParticipant.belongsTo(models.Users, {
+        foreignKey: 'userId',
+        as: 'participantUserDetails',        // FIXED: Unique alias
+        constraints: false,
+        onDelete: 'CASCADE',
+        onUpdate: 'CASCADE',
+      });
+    }
+    
+    if (models.Chats) {
+      ChatParticipant.belongsTo(models.Chats, {
+        foreignKey: 'chatId',
+        as: 'participantChatDetails',        // FIXED: Unique alias
+        constraints: false,
+        onDelete: 'CASCADE',
+        onUpdate: 'CASCADE',
+      });
+    }
   };
 
   return ChatParticipant;

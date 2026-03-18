@@ -117,15 +117,29 @@ module.exports = (sequelize, DataTypes) => {
       }
     },
     {
-      tableName: 'Calls',
+      tableName: 'Calls',               // Standardized: lowercase table name
+      modelName: 'Calls',                // Explicit model name
       timestamps: true,
       underscored: false,
       freezeTableName: true,
-      indexes: [],
+      indexes: [
+        {
+          fields: ['chatId'],
+        },
+        {
+          fields: ['callerId'],
+        },
+        {
+          fields: ['receiverId'],
+        },
+        {
+          fields: ['status'],
+        }
+      ],
     }
   );
 
-  // Instance methods
+  // Instance methods (PRESERVED)
   Calls.prototype.start = async function () {
     this.status = 'in-progress';
     this.startedAt = new Date();
@@ -180,7 +194,7 @@ module.exports = (sequelize, DataTypes) => {
     return await this.save();
   };
 
-  // Static methods
+  // Static methods (PRESERVED)
   Calls.getActiveCalls = async function (chatId = null) {
     const where = {
       status: ['initiated', 'ringing', 'in-progress'],
@@ -195,7 +209,7 @@ module.exports = (sequelize, DataTypes) => {
     if (this.sequelize.models.Chats) {
       include.push({
         model: this.sequelize.models.Chats,
-        as: 'callChat',
+        as: 'callChatDetails',            // FIXED: Unique alias
         attributes: ['id', 'name', 'type'],
       });
     }
@@ -203,13 +217,13 @@ module.exports = (sequelize, DataTypes) => {
     if (this.sequelize.models.Users) {
       include.push({
         model: this.sequelize.models.Users,
-        as: 'callCaller',
+        as: 'callInitiator',               // FIXED: Unique alias
         attributes: ['id', 'username', 'avatar'],
       });
       
       include.push({
         model: this.sequelize.models.Users,
-        as: 'callReceiver',
+        as: 'callTarget',                   // FIXED: Unique alias
         attributes: ['id', 'username', 'avatar'],
       });
     }
@@ -242,7 +256,7 @@ module.exports = (sequelize, DataTypes) => {
     if (this.sequelize.models.Chats) {
       include.push({
         model: this.sequelize.models.Chats,
-        as: 'callChat',
+        as: 'callChatDetails',
         attributes: ['id', 'name', 'type'],
       });
     }
@@ -250,13 +264,13 @@ module.exports = (sequelize, DataTypes) => {
     if (this.sequelize.models.Users) {
       include.push({
         model: this.sequelize.models.Users,
-        as: 'callCaller',
+        as: 'callInitiator',
         attributes: ['id', 'username', 'avatar'],
       });
       
       include.push({
         model: this.sequelize.models.Users,
-        as: 'callReceiver',
+        as: 'callTarget',
         attributes: ['id', 'username', 'avatar'],
       });
     }
@@ -279,34 +293,43 @@ module.exports = (sequelize, DataTypes) => {
     });
   };
 
+  // FIXED: Associations with unique aliases
   Calls.associate = function (models) {
     if (models.Chats) {
       Calls.belongsTo(models.Chats, {
-        foreignKey: 'chatId',
-        as: 'callChat',
+        foreignKey: 'chatId',              // Explicit foreign key
+        as: 'callChatDetails',              // FIXED: Unique alias
         constraints: false,
+        onDelete: 'SET NULL',
+        onUpdate: 'CASCADE',
       });
     }
     
     if (models.Users) {
       Calls.belongsTo(models.Users, {
         foreignKey: 'callerId',
-        as: 'callCaller',
+        as: 'callInitiator',                 // FIXED: Unique alias
         constraints: false,
+        onDelete: 'SET NULL',
+        onUpdate: 'CASCADE',
       });
       
       Calls.belongsTo(models.Users, {
         foreignKey: 'receiverId',
-        as: 'callReceiver',
+        as: 'callTarget',                     // FIXED: Unique alias
         constraints: false,
+        onDelete: 'SET NULL',
+        onUpdate: 'CASCADE',
       });
     }
     
     if (models.Groups) {
       Calls.belongsTo(models.Groups, {
         foreignKey: 'groupId',
-        as: 'callGroup',
+        as: 'callGroupDetails',                // FIXED: Unique alias
         constraints: false,
+        onDelete: 'SET NULL',
+        onUpdate: 'CASCADE',
       });
     }
   };

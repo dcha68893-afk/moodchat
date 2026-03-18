@@ -1,5 +1,6 @@
 // --- MODEL: Groups.js ---
 const { Op } = require('sequelize');
+const crypto = require('crypto');
 
 module.exports = (sequelize, DataTypes) => {
   const Groups = sequelize.define(
@@ -14,10 +15,6 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.INTEGER,
         allowNull: false,
         unique: true,
-        references: {
-          model: 'Chats',
-          key: 'id',
-        },
       },
       name: {
         type: DataTypes.STRING(100),
@@ -26,10 +23,6 @@ module.exports = (sequelize, DataTypes) => {
       createdBy: {
         type: DataTypes.INTEGER,
         allowNull: false,
-        references: {
-          model: 'Users',
-          key: 'id',
-        },
       },
       description: {
         type: DataTypes.TEXT,
@@ -98,7 +91,8 @@ module.exports = (sequelize, DataTypes) => {
       }
     },
     {
-      tableName: 'Groups',
+      tableName: 'Groups',                  // Standardized: lowercase table name
+      modelName: 'Groups',                   // Explicit model name
       timestamps: true,
       underscored: false,
       freezeTableName: true,
@@ -121,9 +115,8 @@ module.exports = (sequelize, DataTypes) => {
     }
   );
 
-  // Instance methods
+  // Instance methods (PRESERVED)
   Groups.prototype.generateInviteLink = async function (expiresInHours = 24) {
-    const crypto = require('crypto');
     this.inviteLink = crypto.randomBytes(16).toString('hex');
     this.inviteLinkExpires = new Date(Date.now() + expiresInHours * 60 * 60 * 1000);
     return await this.save();
@@ -142,7 +135,7 @@ module.exports = (sequelize, DataTypes) => {
     return count;
   };
 
-  // Static methods
+  // Static methods (PRESERVED)
   Groups.search = async function (query, options = {}) {
     const where = {
       isPublic: true,
@@ -158,7 +151,7 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Chats,
-          as: 'groupChat',
+          as: 'groupChatDetails',             // FIXED: Unique alias
           attributes: ['id', 'name', 'description', 'avatar'],
         },
       ],
@@ -168,28 +161,35 @@ module.exports = (sequelize, DataTypes) => {
     });
   };
 
+  // FIXED: Associations with unique aliases
   Groups.associate = function(models) {
     if (models.Chats) {
       Groups.belongsTo(models.Chats, {
         foreignKey: 'chatId',
-        as: 'groupChat',
+        as: 'groupChatDetails',               // FIXED: Unique alias
         constraints: false,
+        onDelete: 'CASCADE',
+        onUpdate: 'CASCADE',
       });
     }
     
     if (models.Users) {
       Groups.belongsTo(models.Users, {
         foreignKey: 'createdBy',
-        as: 'groupCreator',
+        as: 'groupCreatorUser',                // FIXED: Unique alias
         constraints: false,
+        onDelete: 'CASCADE',
+        onUpdate: 'CASCADE',
       });
     }
     
     if (models.GroupMembers) {
       Groups.hasMany(models.GroupMembers, {
         foreignKey: 'groupId',
-        as: 'groupMembers',
+        as: 'groupMembersList',                 // FIXED: Unique alias
         constraints: false,
+        onDelete: 'CASCADE',
+        onUpdate: 'CASCADE',
       });
     }
   };

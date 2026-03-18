@@ -1,36 +1,62 @@
 const express = require('express');
 const router = express.Router();
-const sequelize = require('sequelize');
+
+// Import database models
+const db = require('../models');
+const User = db.User || db.Users;
+const Chat = db.Chat;
+const Message = db.Message;
+const Friend = db.Friend;
+const Call = db.Call;
+
+// Get Sequelize operators
+const Sequelize = require('sequelize');
+const { Op } = Sequelize;
+
 const asyncHandler = require('express-async-handler');
-const {
-  AuthenticationError,
-  AuthorizationError,
-  NotFoundError,
-  ValidationError,
-  ConflictError,
-} = require('../middleware/errorHandler');
 const { authenticateToken } = require('../middleware/auth');
 const { apiRateLimiter } = require('../middleware/rateLimiter');
-const { User, Chat, Message, Friend } = require('../models');
 
-// Replace authenticate with authenticateToken from shared middleware
+// Use the unified authentication middleware
 router.use(authenticateToken);
 
 console.log('✅ Friends routes initialized');
 
-// Add the missing /list endpoint as requested
+// Helper function to check authentication
+const checkAuth = (req, res) => {
+  if (!req.user || (!req.user.userId && !req.user.id)) {
+    return res.status(401).json({
+      status: 'error',
+      message: 'Authentication required'
+    });
+  }
+  const userId = req.user.userId || req.user.id;
+  return { userId };
+};
+
+// Helper function to check database models
+const checkModels = (res) => {
+  if (!db || !User || !Friend) {
+    return res.status(503).json({
+      status: 'error',
+      message: 'Database service not available'
+    });
+  }
+  return true;
+};
+
+// GET /friends/list - safe response
 router.get(
   '/list',
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
-      // Safe response as requested
       res.json({
         success: true,
         friends: []
       });
     } catch (error) {
-      console.error('Error in friends list endpoint:', error);
+      console.error('Error in friends list endpoint:', error.message);
       res.status(500).json({
         status: 'error',
         message: 'Failed to fetch friends list'
@@ -39,20 +65,32 @@ router.get(
   })
 );
 
-// Add ping endpoint for debugging as bonus
+// GET /friends/ping - debug endpoint
 router.get(
   '/ping',
   apiRateLimiter,
   asyncHandler(async (req, res) => {
-    res.json({ ok: true, route: "friends" });
+    try {
+      res.json({ ok: true, route: "friends" });
+    } catch (error) {
+      console.error('Ping error:', error.message);
+      res.status(500).json({ ok: false, error: error.message });
+    }
   })
 );
 
+// GET /friends - get all friends
 router.get(
   '/',
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
+      const auth = checkAuth(req, res);
+      if (auth.status) return auth;
+      const userId = auth.userId;
+
+      if (!checkModels(res)) return;
+
       const {
         page = 1,
         limit = 50,
@@ -63,7 +101,7 @@ router.get(
 
       const offset = (parseInt(page) - 1) * parseInt(limit);
       
-      const user = await User.findByPk(req.user.userId, {
+      const user = await User.findByPk(userId, {
         include: [{
           model: User,
           as: 'friends',
@@ -72,12 +110,15 @@ router.get(
       });
 
       if (!user) {
-        throw new NotFoundError('User not found');
+        return res.status(404).json({
+          status: 'error',
+          message: 'User not found'
+        });
       }
 
-      const friendIds = user.friends.map(friend => friend.id);
+      const friendIds = (user.friends || []).map(friend => friend.id);
       
-      const where = { id: { [sequelize.Op.in]: friendIds } };
+      const where = { id: { [Op.in]: friendIds } };
 
       if (status && status !== 'all') {
         where.online = status === 'online';
@@ -85,9 +126,9 @@ router.get(
 
       if (search && search.trim()) {
         const searchRegex = `%${search}%`;
-        where[sequelize.Op.or] = [
-          { username: { [sequelize.Op.iLike]: searchRegex } },
-          { displayName: { [sequelize.Op.iLike]: searchRegex } }
+        where[Op.or] = [
+          { username: { [Op.iLike]: searchRegex } },
+          { displayName: { [Op.iLike]: searchRegex } }
         ];
       }
 
@@ -114,20 +155,20 @@ router.get(
       });
 
       const friendsWithMetadata = await Promise.all(
-        friends.map(async friend => {
-          const friendObj = friend.toJSON();
+        (friends || []).map(async friend => {
+          const friendObj = friend.toJSON ? friend.toJSON() : friend;
           const friendship = await Friend.findOne({
             where: {
-              [sequelize.Op.or]: [
-                { userId: req.user.userId, friendId: friend.id },
-                { userId: friend.id, friendId: req.user.userId }
+              [Op.or]: [
+                { userId: userId, friendId: friend.id },
+                { userId: friend.id, friendId: userId }
               ]
             }
           });
           
           friendObj.friendshipSince = friendship ? friendship.createdAt : new Date();
           
-          const currentUser = await User.findByPk(req.user.userId, {
+          const currentUser = await User.findByPk(userId, {
             include: [{
               model: User,
               as: 'blockedUsers',
@@ -135,7 +176,8 @@ router.get(
             }]
           });
           
-          friendObj.isBlocked = currentUser.blockedUsers.some(bu => bu.id === friend.id);
+          friendObj.isBlocked = currentUser && currentUser.blockedUsers ? 
+            currentUser.blockedUsers.some(bu => bu.id === friend.id) : false;
           
           return friendObj;
         })
@@ -146,15 +188,15 @@ router.get(
         data: {
           friends: friendsWithMetadata,
           pagination: {
-            total: count,
+            total: count || 0,
             page: parseInt(page),
             limit: parseInt(limit),
-            pages: Math.ceil(count / parseInt(limit)),
+            pages: count ? Math.ceil(count / parseInt(limit)) : 0,
           },
         },
       });
     } catch (error) {
-      console.error('Error fetching friends:', error);
+      console.error('Error fetching friends:', error.message);
       res.status(500).json({
         status: 'error',
         message: 'Failed to fetch friends'
@@ -163,15 +205,29 @@ router.get(
   })
 );
 
+// GET /friends/:friendId - get friend details
 router.get(
   '/:friendId',
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
+      const auth = checkAuth(req, res);
+      if (auth.status) return auth;
+      const userId = auth.userId;
+
+      if (!checkModels(res)) return;
+
       const { friendId } = req.params;
 
+      if (!friendId) {
+        return res.status(400).json({
+          status: 'error',
+          message: 'Friend ID is required'
+        });
+      }
+
       const [user, friend] = await Promise.all([
-        User.findByPk(req.user.userId),
+        User.findByPk(userId),
         User.findByPk(friendId, {
           attributes: { exclude: ['password', 'email', 'resetPasswordToken', 'resetPasswordExpires', 'loginAttempts', 'lockedUntil', 'socketIds'] },
           include: [{
@@ -183,28 +239,34 @@ router.get(
       ]);
 
       if (!user || !friend) {
-        throw new NotFoundError('User or friend not found');
+        return res.status(404).json({
+          status: 'error',
+          message: 'User or friend not found'
+        });
       }
 
       const isFriend = await Friend.findOne({
         where: {
-          [sequelize.Op.or]: [
-            { userId: req.user.userId, friendId: friend.id },
-            { userId: friend.id, friendId: req.user.userId }
+          [Op.or]: [
+            { userId: userId, friendId: friend.id },
+            { userId: friend.id, friendId: userId }
           ]
         }
       });
 
       if (!isFriend) {
-        throw new ValidationError('This user is not in your friends list');
+        return res.status(400).json({
+          status: 'error',
+          message: 'This user is not in your friends list'
+        });
       }
 
       const mutualFriends = await User.findAll({
         where: {
           id: {
-            [sequelize.Op.in]: friend.friends
+            [Op.in]: (friend.friends || [])
               .filter(friendUser => 
-                user.friends.some(userFriend => userFriend.id === friendUser.id)
+                (user.friends || []).some(userFriend => userFriend.id === friendUser.id)
               )
               .map(f => f.id)
           }
@@ -212,19 +274,19 @@ router.get(
         attributes: ['id', 'username', 'avatar', 'online', 'status']
       });
 
-      const recentInteractions = await getRecentInteractions(req.user.userId, friendId);
-      const sharedGroups = await getSharedGroups(req.user.userId, friendId);
+      const recentInteractions = await getRecentInteractions(userId, friendId);
+      const sharedGroups = await getSharedGroups(userId, friendId);
 
       const friendship = await Friend.findOne({
         where: {
-          [sequelize.Op.or]: [
-            { userId: req.user.userId, friendId: friend.id },
-            { userId: friend.id, friendId: req.user.userId }
+          [Op.or]: [
+            { userId: userId, friendId: friend.id },
+            { userId: friend.id, friendId: userId }
           ]
         }
       });
 
-      const currentUser = await User.findByPk(req.user.userId, {
+      const currentUser = await User.findByPk(userId, {
         include: [{
           model: User,
           as: 'blockedUsers',
@@ -233,8 +295,9 @@ router.get(
       });
 
       const friendData = {
-        ...friend.toJSON(),
-        isBlocked: currentUser.blockedUsers.some(bu => bu.id === friend.id),
+        ...(friend.toJSON ? friend.toJSON() : friend),
+        isBlocked: currentUser && currentUser.blockedUsers ? 
+          currentUser.blockedUsers.some(bu => bu.id === friend.id) : false,
         friendshipSince: friendship ? friendship.createdAt : null,
         mutualFriends,
         recentInteractions,
@@ -246,7 +309,7 @@ router.get(
         data: { friend: friendData },
       });
     } catch (error) {
-      console.error('Error fetching friend details:', error);
+      console.error('Error fetching friend details:', error.message);
       res.status(500).json({
         status: 'error',
         message: 'Failed to fetch friend details'
@@ -255,44 +318,64 @@ router.get(
   })
 );
 
+// DELETE /friends/:friendId - remove friend
 router.delete(
   '/:friendId',
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
+      const auth = checkAuth(req, res);
+      if (auth.status) return auth;
+      const userId = auth.userId;
+
+      if (!checkModels(res)) return;
+
       const { friendId } = req.params;
 
+      if (!friendId) {
+        return res.status(400).json({
+          status: 'error',
+          message: 'Friend ID is required'
+        });
+      }
+
       const [user, friend] = await Promise.all([
-        User.findByPk(req.user.userId),
+        User.findByPk(userId),
         User.findByPk(friendId)
       ]);
 
       if (!user || !friend) {
-        throw new NotFoundError('User or friend not found');
+        return res.status(404).json({
+          status: 'error',
+          message: 'User or friend not found'
+        });
       }
 
       const friendship = await Friend.findOne({
         where: {
-          [sequelize.Op.or]: [
-            { userId: req.user.userId, friendId: friend.id },
-            { userId: friend.id, friendId: req.user.userId }
+          [Op.or]: [
+            { userId: userId, friendId: friend.id },
+            { userId: friend.id, friendId: userId }
           ]
         }
       });
 
       if (!friendship) {
-        throw new ValidationError('This user is not in your friends list');
+        return res.status(400).json({
+          status: 'error',
+          message: 'This user is not in your friends list'
+        });
       }
 
       await friendship.destroy();
 
-      await user.removeFriend(friend.id);
-      await friend.removeFriend(user.id);
+      if (user.removeFriend) await user.removeFriend(friend.id);
+      if (friend.removeFriend) await friend.removeFriend(user.id);
 
-      await user.removeFriendRequest(friend.id);
-      await friend.removeFriendRequest(user.id);
+      if (user.removeFriendRequest) await user.removeFriendRequest(friend.id);
+      if (friend.removeFriendRequest) await friend.removeFriendRequest(user.id);
 
-      if (req.io && friend.socketIds && friend.socketIds.length > 0) {
+      if (req.io && friend.socketIds && Array.isArray(friend.socketIds) && friend.socketIds.length > 0) {
         friend.socketIds.forEach(socketId => {
           req.io.to(socketId).emit('friend:removed', {
             byUserId: user.id,
@@ -307,7 +390,7 @@ router.delete(
         message: 'Friend removed successfully',
       });
     } catch (error) {
-      console.error('Error removing friend:', error);
+      console.error('Error removing friend:', error.message);
       res.status(500).json({
         status: 'error',
         message: 'Failed to remove friend'
@@ -316,48 +399,79 @@ router.delete(
   })
 );
 
+// POST /friends/:userId/block - block user
 router.post(
   '/:userId/block',
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
-      const { userId } = req.params;
+      const auth = checkAuth(req, res);
+      if (auth.status) return auth;
+      const userId = auth.userId;
 
-      if (userId === req.user.userId) {
-        throw new ValidationError('Cannot block yourself');
+      if (!checkModels(res)) return;
+
+      const { userId: targetUserId } = req.params;
+
+      if (!targetUserId) {
+        return res.status(400).json({
+          status: 'error',
+          message: 'User ID is required'
+        });
+      }
+
+      if (targetUserId === userId) {
+        return res.status(400).json({
+          status: 'error',
+          message: 'Cannot block yourself'
+        });
       }
 
       const [user, userToBlock] = await Promise.all([
-        User.findByPk(req.user.userId),
-        User.findByPk(userId)
+        User.findByPk(userId),
+        User.findByPk(targetUserId)
       ]);
 
       if (!user || !userToBlock) {
-        throw new NotFoundError('User not found');
+        return res.status(404).json({
+          status: 'error',
+          message: 'User not found'
+        });
       }
 
-      const alreadyBlocked = await user.hasBlockedUser(userToBlock.id);
-      if (alreadyBlocked) {
-        throw new ConflictError('User is already blocked');
-      }
+      if (user.hasBlockedUser) {
+        const alreadyBlocked = await user.hasBlockedUser(userToBlock.id);
+        if (alreadyBlocked) {
+          return res.status(409).json({
+            status: 'error',
+            message: 'User is already blocked'
+          });
+        }
 
-      await user.addBlockedUser(userToBlock.id);
+        await user.addBlockedUser(userToBlock.id);
+      } else {
+        // Fallback if association methods not available
+        return res.status(500).json({
+          status: 'error',
+          message: 'Block functionality not available'
+        });
+      }
 
       const friendship = await Friend.findOne({
         where: {
-          [sequelize.Op.or]: [
-            { userId: req.user.userId, friendId: userToBlock.id },
-            { userId: userToBlock.id, friendId: req.user.userId }
+          [Op.or]: [
+            { userId: userId, friendId: userToBlock.id },
+            { userId: userToBlock.id, friendId: userId }
           ]
         }
       });
 
       if (friendship) {
         await friendship.destroy();
-        await user.removeFriend(userToBlock.id);
-        await userToBlock.removeFriend(user.id);
+        if (user.removeFriend) await user.removeFriend(userToBlock.id);
+        if (userToBlock.removeFriend) await userToBlock.removeFriend(user.id);
 
-        if (req.io && userToBlock.socketIds && userToBlock.socketIds.length > 0) {
+        if (req.io && userToBlock.socketIds && Array.isArray(userToBlock.socketIds) && userToBlock.socketIds.length > 0) {
           userToBlock.socketIds.forEach(socketId => {
             req.io.to(socketId).emit('friend:removed', {
               byUserId: user.id,
@@ -369,10 +483,10 @@ router.post(
         }
       }
 
-      await user.removeFriendRequest(userToBlock.id);
-      await userToBlock.removeFriendRequest(user.id);
+      if (user.removeFriendRequest) await user.removeFriendRequest(userToBlock.id);
+      if (userToBlock.removeFriendRequest) await userToBlock.removeFriendRequest(user.id);
 
-      if (req.io && userToBlock.socketIds && userToBlock.socketIds.length > 0) {
+      if (req.io && userToBlock.socketIds && Array.isArray(userToBlock.socketIds) && userToBlock.socketIds.length > 0) {
         userToBlock.socketIds.forEach(socketId => {
           req.io.to(socketId).emit('user:blocked', {
             blockedByUserId: user.id,
@@ -387,7 +501,7 @@ router.post(
         message: 'User blocked successfully',
       });
     } catch (error) {
-      console.error('Error blocking user:', error);
+      console.error('Error blocking user:', error.message);
       res.status(500).json({
         status: 'error',
         message: 'Failed to block user'
@@ -396,28 +510,59 @@ router.post(
   })
 );
 
+// POST /friends/:userId/unblock - unblock user
 router.post(
   '/:userId/unblock',
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
-      const { userId } = req.params;
+      const auth = checkAuth(req, res);
+      if (auth.status) return auth;
+      const userId = auth.userId;
 
-      const user = await User.findByPk(req.user.userId);
-      const isBlocked = await user.hasBlockedUser(userId);
+      if (!checkModels(res)) return;
 
-      if (!isBlocked) {
-        throw new ValidationError('User is not blocked');
+      const { userId: targetUserId } = req.params;
+
+      if (!targetUserId) {
+        return res.status(400).json({
+          status: 'error',
+          message: 'User ID is required'
+        });
       }
 
-      await user.removeBlockedUser(userId);
+      const user = await User.findByPk(userId);
+
+      if (!user) {
+        return res.status(404).json({
+          status: 'error',
+          message: 'User not found'
+        });
+      }
+
+      if (user.hasBlockedUser) {
+        const isBlocked = await user.hasBlockedUser(targetUserId);
+        if (!isBlocked) {
+          return res.status(400).json({
+            status: 'error',
+            message: 'User is not blocked'
+          });
+        }
+
+        await user.removeBlockedUser(targetUserId);
+      } else {
+        return res.status(500).json({
+          status: 'error',
+          message: 'Unblock functionality not available'
+        });
+      }
 
       res.status(200).json({
         status: 'success',
         message: 'User unblocked successfully',
       });
     } catch (error) {
-      console.error('Error unblocking user:', error);
+      console.error('Error unblocking user:', error.message);
       res.status(500).json({
         status: 'error',
         message: 'Failed to unblock user'
@@ -426,12 +571,19 @@ router.post(
   })
 );
 
+// GET /friends/blocked/list - get blocked users
 router.get(
   '/blocked/list',
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
-      const user = await User.findByPk(req.user.userId, {
+      const auth = checkAuth(req, res);
+      if (auth.status) return auth;
+      const userId = auth.userId;
+
+      if (!checkModels(res)) return;
+
+      const user = await User.findByPk(userId, {
         include: [{
           model: User,
           as: 'blockedUsers',
@@ -440,12 +592,19 @@ router.get(
         }]
       });
 
+      if (!user) {
+        return res.status(404).json({
+          status: 'error',
+          message: 'User not found'
+        });
+      }
+
       res.status(200).json({
         status: 'success',
         data: { blockedUsers: user.blockedUsers || [] },
       });
     } catch (error) {
-      console.error('Error fetching blocked users:', error);
+      console.error('Error fetching blocked users:', error.message);
       res.status(500).json({
         status: 'error',
         message: 'Failed to fetch blocked users'
@@ -454,19 +613,29 @@ router.get(
   })
 );
 
+// GET /friends/search/new - search for new users
 router.get(
   '/search/new',
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
+      const auth = checkAuth(req, res);
+      if (auth.status) return auth;
+      const userId = auth.userId;
+
+      if (!checkModels(res)) return;
+
       const { query, page = 1, limit = 20, excludeFriends = true } = req.query;
 
       if (!query || query.trim().length < 2) {
-        throw new ValidationError('Search query must be at least 2 characters');
+        return res.status(400).json({
+          status: 'error',
+          message: 'Search query must be at least 2 characters'
+        });
       }
 
       const offset = (parseInt(page) - 1) * parseInt(limit);
-      const user = await User.findByPk(req.user.userId, {
+      const user = await User.findByPk(userId, {
         include: [
           {
             model: User,
@@ -481,31 +650,43 @@ router.get(
         ]
       });
 
+      if (!user) {
+        return res.status(404).json({
+          status: 'error',
+          message: 'User not found'
+        });
+      }
+
       const searchRegex = `%${query}%`;
 
       const where = {
-        [sequelize.Op.and]: [
-          { id: { [sequelize.Op.ne]: user.id } },
+        [Op.and]: [
+          { id: { [Op.ne]: user.id } },
           {
-            [sequelize.Op.or]: [
-              { username: { [sequelize.Op.iLike]: searchRegex } },
-              { displayName: { [sequelize.Op.iLike]: searchRegex } }
+            [Op.or]: [
+              { username: { [Op.iLike]: searchRegex } },
+              { displayName: { [Op.iLike]: searchRegex } }
             ]
           }
         ]
       };
 
-      if (excludeFriends === 'true' && user.friends.length > 0) {
-        where.id = {
-          ...where.id,
-          [sequelize.Op.notIn]: user.friends.map(f => f.id)
-        };
+      const friendIds = (user.friends || []).map(f => f.id);
+      const blockedIds = (user.blockedUsers || []).map(bu => bu.id);
+
+      let excludedIds = [];
+      if (excludeFriends === 'true' && friendIds.length > 0) {
+        excludedIds = [...excludedIds, ...friendIds];
       }
 
-      if (user.blockedUsers && user.blockedUsers.length > 0) {
+      if (blockedIds.length > 0) {
+        excludedIds = [...excludedIds, ...blockedIds];
+      }
+
+      if (excludedIds.length > 0) {
         where.id = {
           ...where.id,
-          [sequelize.Op.notIn]: [...(where.id[sequelize.Op.notIn] || []), ...user.blockedUsers.map(bu => bu.id)]
+          [Op.notIn]: excludedIds
         };
       }
 
@@ -524,9 +705,10 @@ router.get(
       });
 
       if (usersWhoBlockedMe.length > 0) {
+        const currentExcluded = where.id && where.id[Op.notIn] ? where.id[Op.notIn] : [];
         where.id = {
           ...where.id,
-          [sequelize.Op.notIn]: [...(where.id[sequelize.Op.notIn] || []), ...usersWhoBlockedMe.map(u => u.id)]
+          [Op.notIn]: [...currentExcluded, ...usersWhoBlockedMe.map(u => u.id)]
         };
       }
 
@@ -539,18 +721,18 @@ router.get(
       });
 
       const usersWithStatus = await Promise.all(
-        users.map(async otherUser => {
-          const isFriend = user.friends.some(friend => friend.id === otherUser.id);
+        (users || []).map(async otherUser => {
+          const isFriend = (user.friends || []).some(friend => friend.id === otherUser.id);
           const hasSentRequest = await Friend.findOne({
             where: { userId: user.id, friendId: otherUser.id, status: 'pending' }
           });
           const hasReceivedRequest = await Friend.findOne({
             where: { userId: otherUser.id, friendId: user.id, status: 'pending' }
           });
-          const isBlocked = user.blockedUsers.some(blocked => blocked.id === otherUser.id);
+          const isBlocked = (user.blockedUsers || []).some(blocked => blocked.id === otherUser.id);
 
           return {
-            ...otherUser.toJSON(),
+            ...(otherUser.toJSON ? otherUser.toJSON() : otherUser),
             relationship: {
               isFriend,
               hasSentRequest: !!hasSentRequest,
@@ -566,15 +748,15 @@ router.get(
         data: {
           users: usersWithStatus,
           pagination: {
-            total: count,
+            total: count || 0,
             page: parseInt(page),
             limit: parseInt(limit),
-            pages: Math.ceil(count / parseInt(limit)),
+            pages: count ? Math.ceil(count / parseInt(limit)) : 0,
           },
         },
       });
     } catch (error) {
-      console.error('Error searching users:', error);
+      console.error('Error searching users:', error.message);
       res.status(500).json({
         status: 'error',
         message: 'Failed to search users'
@@ -583,14 +765,21 @@ router.get(
   })
 );
 
+// GET /friends/suggestions - get friend suggestions
 router.get(
   '/suggestions',
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
+      const auth = checkAuth(req, res);
+      if (auth.status) return auth;
+      const userId = auth.userId;
+
+      if (!checkModels(res)) return;
+
       const { limit = 10 } = req.query;
 
-      const user = await User.findByPk(req.user.userId, {
+      const user = await User.findByPk(userId, {
         include: [{
           model: User,
           as: 'friends',
@@ -598,14 +787,22 @@ router.get(
         }]
       });
 
-      const friendIds = user.friends.map(friend => friend.id);
+      if (!user) {
+        return res.status(404).json({
+          status: 'error',
+          message: 'User not found'
+        });
+      }
+
+      const friendIds = (user.friends || []).map(friend => friend.id);
+      const blockedIds = (user.blockedUsers || []).map(bu => bu.id);
 
       if (friendIds.length === 0) {
         const suggestions = await User.findAll({
           where: {
             id: {
-              [sequelize.Op.ne]: user.id,
-              [sequelize.Op.notIn]: user.blockedUsers || []
+              [Op.ne]: user.id,
+              [Op.notIn]: blockedIds
             }
           },
           attributes: ['id', 'username', 'avatar', 'displayName', 'online', 'status', 'bio'],
@@ -615,17 +812,17 @@ router.get(
 
         return res.status(200).json({
           status: 'success',
-          data: { suggestions },
+          data: { suggestions: suggestions || [] },
         });
       }
 
       const suggestions = await User.findAll({
         where: {
           id: {
-            [sequelize.Op.ne]: user.id,
-            [sequelize.Op.notIn]: [...friendIds, ...(user.blockedUsers || [])]
+            [Op.ne]: user.id,
+            [Op.notIn]: [...friendIds, ...blockedIds]
           },
-          '$friends.id$': { [sequelize.Op.in]: friendIds }
+          '$friends.id$': { [Op.in]: friendIds }
         },
         include: [{
           model: User,
@@ -643,7 +840,7 @@ router.get(
           'status',
           'bio',
           [
-            sequelize.literal(`(
+            Sequelize.literal(`(
               SELECT COUNT(*)
               FROM "Friends" f1
               WHERE f1."userId" = "User".id
@@ -653,7 +850,7 @@ router.get(
           ]
         ],
         order: [
-          [sequelize.literal('"mutualCount"'), 'DESC'],
+          [Sequelize.literal('"mutualCount"'), 'DESC'],
           ['online', 'DESC'],
           ['createdAt', 'DESC']
         ],
@@ -662,10 +859,10 @@ router.get(
 
       res.status(200).json({
         status: 'success',
-        data: { suggestions },
+        data: { suggestions: suggestions || [] },
       });
     } catch (error) {
-      console.error('Error fetching friend suggestions:', error);
+      console.error('Error fetching friend suggestions:', error.message);
       res.status(500).json({
         status: 'error',
         message: 'Failed to fetch friend suggestions'
@@ -674,14 +871,21 @@ router.get(
   })
 );
 
+// GET /friends/export - export friends
 router.get(
   '/export',
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
+      const auth = checkAuth(req, res);
+      if (auth.status) return auth;
+      const userId = auth.userId;
+
+      if (!checkModels(res)) return;
+
       const { format = 'json' } = req.query;
 
-      const user = await User.findByPk(req.user.userId, {
+      const user = await User.findByPk(userId, {
         include: [{
           model: User,
           as: 'friends',
@@ -690,7 +894,14 @@ router.get(
         }]
       });
 
-      const friendsData = user.friends.map(friend => ({
+      if (!user) {
+        return res.status(404).json({
+          status: 'error',
+          message: 'User not found'
+        });
+      }
+
+      const friendsData = (user.friends || []).map(friend => ({
         username: friend.username,
         displayName: friend.displayName,
         email: friend.email,
@@ -723,7 +934,7 @@ router.get(
         },
       });
     } catch (error) {
-      console.error('Error exporting friends:', error);
+      console.error('Error exporting friends:', error.message);
       res.status(500).json({
         status: 'error',
         message: 'Failed to export friends'
@@ -732,22 +943,42 @@ router.get(
   })
 );
 
+// POST /friends/bulk/categories - bulk update categories
 router.post(
   '/bulk/categories',
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
+      const auth = checkAuth(req, res);
+      if (auth.status) return auth;
+      const userId = auth.userId;
+
+      if (!checkModels(res)) return;
+
       const { updates } = req.body;
 
       if (!Array.isArray(updates) || updates.length === 0) {
-        throw new ValidationError('Updates array is required');
+        return res.status(400).json({
+          status: 'error',
+          message: 'Updates array is required'
+        });
       }
 
       if (updates.length > 50) {
-        throw new ValidationError('Cannot update more than 50 friends at once');
+        return res.status(400).json({
+          status: 'error',
+          message: 'Cannot update more than 50 friends at once'
+        });
       }
 
-      const user = await User.findByPk(req.user.userId);
+      const user = await User.findByPk(userId);
+      if (!user) {
+        return res.status(404).json({
+          status: 'error',
+          message: 'User not found'
+        });
+      }
+
       const results = {
         success: [],
         failed: [],
@@ -758,9 +989,9 @@ router.post(
 
         const friendship = await Friend.findOne({
           where: {
-            [sequelize.Op.or]: [
-              { userId: req.user.userId, friendId },
-              { userId: friendId, friendId: req.user.userId }
+            [Op.or]: [
+              { userId: userId, friendId },
+              { userId: friendId, friendId: userId }
             ]
           }
         });
@@ -780,7 +1011,7 @@ router.post(
         data: results,
       });
     } catch (error) {
-      console.error('Error updating friend categories:', error);
+      console.error('Error updating friend categories:', error.message);
       res.status(500).json({
         status: 'error',
         message: 'Failed to update friend categories'
@@ -789,12 +1020,19 @@ router.post(
   })
 );
 
+// GET /friends/stats - get friend statistics
 router.get(
   '/stats',
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
-      const user = await User.findByPk(req.user.userId, {
+      const auth = checkAuth(req, res);
+      if (auth.status) return auth;
+      const userId = auth.userId;
+
+      if (!checkModels(res)) return;
+
+      const user = await User.findByPk(userId, {
         include: [{
           model: User,
           as: 'friends',
@@ -802,12 +1040,19 @@ router.get(
         }]
       });
 
-      const onlineCount = user.friends.filter(friend => friend.online).length;
+      if (!user) {
+        return res.status(404).json({
+          status: 'error',
+          message: 'User not found'
+        });
+      }
+
+      const onlineCount = (user.friends || []).filter(friend => friend.online).length;
       
       const sevenDaysAgo = new Date();
       sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-      const recentActiveCount = user.friends.filter(friend => 
-        friend.lastActive > sevenDaysAgo
+      const recentActiveCount = (user.friends || []).filter(friend => 
+        friend.lastActive && new Date(friend.lastActive) > sevenDaysAgo
       ).length;
 
       const thirtyDaysAgo = new Date();
@@ -815,11 +1060,11 @@ router.get(
 
       const recentFriends = await Friend.findAll({
         where: {
-          [sequelize.Op.or]: [
-            { userId: req.user.userId },
-            { friendId: req.user.userId }
+          [Op.or]: [
+            { userId: userId },
+            { friendId: userId }
           ],
-          createdAt: { [sequelize.Op.gte]: thirtyDaysAgo }
+          createdAt: { [Op.gte]: thirtyDaysAgo }
         },
         include: [{
           model: User,
@@ -827,29 +1072,30 @@ router.get(
           attributes: ['id', 'createdAt']
         }],
         attributes: [
-          [sequelize.fn('DATE', sequelize.col('Friend.createdAt')), 'date'],
-          [sequelize.fn('COUNT', sequelize.col('Friend.id')), 'count']
+          [Sequelize.fn('DATE', Sequelize.col('Friend.createdAt')), 'date'],
+          [Sequelize.fn('COUNT', Sequelize.col('Friend.id')), 'count']
         ],
-        group: [sequelize.fn('DATE', sequelize.col('Friend.createdAt'))],
-        order: [[sequelize.fn('DATE', sequelize.col('Friend.createdAt')), 'ASC']]
+        group: [Sequelize.fn('DATE', Sequelize.col('Friend.createdAt'))],
+        order: [[Sequelize.fn('DATE', Sequelize.col('Friend.createdAt')), 'ASC']],
+        raw: true
       });
 
       res.status(200).json({
         status: 'success',
         data: {
-          total: user.friends.length,
+          total: (user.friends || []).length,
           online: onlineCount,
-          offline: user.friends.length - onlineCount,
+          offline: (user.friends || []).length - onlineCount,
           recentlyActive: recentActiveCount,
-          newLast30Days: recentFriends.reduce((sum, day) => sum + parseInt(day.dataValues.count), 0),
-          additionTrend: recentFriends.map(r => ({
-            _id: r.dataValues.date,
-            count: parseInt(r.dataValues.count)
+          newLast30Days: (recentFriends || []).reduce((sum, day) => sum + parseInt(day.count || 0), 0),
+          additionTrend: (recentFriends || []).map(r => ({
+            _id: r.date,
+            count: parseInt(r.count || 0)
           })),
         },
       });
     } catch (error) {
-      console.error('Error fetching friend statistics:', error);
+      console.error('Error fetching friend statistics:', error.message);
       res.status(500).json({
         status: 'error',
         message: 'Failed to fetch friend statistics'
@@ -858,11 +1104,20 @@ router.get(
   })
 );
 
+// Helper function for recent interactions
 const getRecentInteractions = async (userId, friendId) => {
   try {
+    if (!db || !Message || !Call) {
+      return {
+        messageCount: 0,
+        lastMessage: null,
+        calls: [],
+      };
+    }
+
     const messages = await Message.findAll({
       where: {
-        [sequelize.Op.or]: [
+        [Op.or]: [
           { senderId: userId, '$chat.participants.id$': friendId },
           { senderId: friendId, '$chat.participants.id$': userId }
         ]
@@ -883,7 +1138,7 @@ const getRecentInteractions = async (userId, friendId) => {
 
     const calls = await Call.findAll({
       where: {
-        [sequelize.Op.or]: [
+        [Op.or]: [
           { callerId: userId, '$participants.id$': friendId },
           { callerId: friendId, '$participants.id$': userId }
         ]
@@ -899,12 +1154,12 @@ const getRecentInteractions = async (userId, friendId) => {
     });
 
     return {
-      messageCount: messages.length,
-      lastMessage: messages[0] || null,
-      calls: calls.map(call => call.toJSON()),
+      messageCount: (messages || []).length,
+      lastMessage: messages && messages[0] ? messages[0] : null,
+      calls: (calls || []).map(call => call.toJSON ? call.toJSON() : call),
     };
   } catch (error) {
-    console.error('Error getting recent interactions:', error);
+    console.error('Error getting recent interactions:', error.message);
     return {
       messageCount: 0,
       lastMessage: null,
@@ -913,12 +1168,17 @@ const getRecentInteractions = async (userId, friendId) => {
   }
 };
 
+// Helper function for shared groups
 const getSharedGroups = async (userId, friendId) => {
   try {
+    if (!db || !Chat) {
+      return [];
+    }
+
     const sharedGroups = await Chat.findAll({
       where: {
         chatType: 'group',
-        '$participants.id$': { [sequelize.Op.contains]: [userId, friendId] }
+        '$participants.id$': { [Op.contains]: [userId, friendId] }
       },
       include: [{
         model: User,
@@ -929,9 +1189,9 @@ const getSharedGroups = async (userId, friendId) => {
       attributes: ['id', 'chatName', 'avatar']
     });
 
-    return sharedGroups;
+    return sharedGroups || [];
   } catch (error) {
-    console.error('Error getting shared groups:', error);
+    console.error('Error getting shared groups:', error.message);
     return [];
   }
 };

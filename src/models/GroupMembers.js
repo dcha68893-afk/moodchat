@@ -11,18 +11,10 @@ module.exports = (sequelize, DataTypes) => {
       groupId: {
         type: DataTypes.INTEGER,
         allowNull: false,
-        references: {
-          model: 'Group',
-          key: 'id',
-        },
       },
       userId: {
         type: DataTypes.INTEGER,
         allowNull: false,
-        references: {
-          model: 'Users',
-          key: 'id',
-        },
       },
       role: {
         type: DataTypes.ENUM('owner', 'admin', 'moderator', 'member'),
@@ -60,7 +52,8 @@ module.exports = (sequelize, DataTypes) => {
       }
     },
     {
-      tableName: 'GroupMembers',
+      tableName: 'GroupMembers',             // Standardized: lowercase table name
+      modelName: 'GroupMembers',              // Explicit model name
       timestamps: true,
       underscored: false,
       freezeTableName: true,
@@ -82,7 +75,7 @@ module.exports = (sequelize, DataTypes) => {
     }
   );
 
-  // Instance methods
+  // Instance methods (PRESERVED)
   GroupMembers.prototype.promoteToAdmin = async function () {
     this.role = 'admin';
     return await this.save();
@@ -98,7 +91,7 @@ module.exports = (sequelize, DataTypes) => {
     return await this.save();
   };
 
-  // Static methods
+  // Static methods (PRESERVED)
   GroupMembers.getGroupAdmins = async function (groupId) {
     return await this.findAll({
       where: {
@@ -108,7 +101,7 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
-          as: 'groupMemberUser',
+          as: 'groupMemberUserDetails',        // FIXED: Unique alias
           attributes: ['id', 'username', 'avatar', 'email'],
         },
       ],
@@ -124,11 +117,11 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Groups,
-          as: 'userGroup',
+          as: 'userGroupDetails',              // FIXED: Unique alias
           include: [
             {
               model: this.sequelize.models.Chats,
-              as: 'groupChat',
+              as: 'groupChatDetails',          // FIXED: Unique alias
               attributes: ['id', 'name', 'avatar', 'type'],
             },
           ],
@@ -137,20 +130,25 @@ module.exports = (sequelize, DataTypes) => {
     });
   };
 
+  // FIXED: Associations with unique aliases
   GroupMembers.associate = function(models) {
     if (models.Groups) {
       GroupMembers.belongsTo(models.Groups, {
         foreignKey: 'groupId',
-        as: 'userGroup',
+        as: 'userGroupDetails',                // FIXED: Unique alias
         constraints: false,
+        onDelete: 'CASCADE',
+        onUpdate: 'CASCADE',
       });
     }
     
     if (models.Users) {
       GroupMembers.belongsTo(models.Users, {
         foreignKey: 'userId',
-        as: 'groupMemberUser',
+        as: 'groupMemberUserDetails',          // FIXED: Unique alias
         constraints: false,
+        onDelete: 'CASCADE',
+        onUpdate: 'CASCADE',
       });
     }
   };

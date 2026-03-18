@@ -13,18 +13,10 @@ module.exports = (sequelize, DataTypes) => {
       chatId: {
         type: DataTypes.INTEGER,
         allowNull: false,
-        references: {
-          model: 'Chats',
-          key: 'id',
-        },
       },
       userId: {
         type: DataTypes.INTEGER,
         allowNull: false,
-        references: {
-          model: 'Users',
-          key: 'id',
-        },
       },
       startedAt: {
         type: DataTypes.DATE,
@@ -58,7 +50,8 @@ module.exports = (sequelize, DataTypes) => {
       },
     },
     {
-      tableName: 'typing_indicators',
+      tableName: 'typing_indicators',        // Standardized: lowercase table name
+      modelName: 'TypingIndicator',           // Explicit model name
       timestamps: true,
       underscored: true,
       freezeTableName: true,
@@ -80,25 +73,7 @@ module.exports = (sequelize, DataTypes) => {
     }
   );
 
-  TypingIndicator.associate = function(models) {
-    if (models.Chats) {
-      TypingIndicator.belongsTo(models.Chats, {
-        foreignKey: 'chatId',
-        as: 'indicatorChat', // FIXED: Changed from 'typingChat'
-        constraints: false,
-      });
-    }
-    
-    if (models.Users) {
-      TypingIndicator.belongsTo(models.Users, {
-        foreignKey: 'userId',
-        as: 'indicatorUser', // FIXED: Changed from 'typingUser'
-        constraints: false,
-      });
-    }
-  };
-
-  // Instance methods
+  // Instance methods (PRESERVED)
   TypingIndicator.prototype.updateActivity = async function () {
     this.lastUpdatedAt = new Date();
     this.isActive = true;
@@ -110,7 +85,7 @@ module.exports = (sequelize, DataTypes) => {
     return await this.save();
   };
 
-  // Static methods
+  // Static methods (PRESERVED)
   TypingIndicator.startTyping = async function (chatId, userId) {
     const [indicator, created] = await this.findOrCreate({
       where: {
@@ -167,12 +142,35 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
-          as: 'indicatorUser', // FIXED: Changed from 'typingUser'
+          as: 'indicatorUserDetails',          // FIXED: Unique alias
           attributes: ['id', 'username', 'avatar'],
         },
       ],
       order: [['lastUpdatedAt', 'DESC']],
     });
+  };
+
+  // FIXED: Associations with unique aliases
+  TypingIndicator.associate = function(models) {
+    if (models.Chats) {
+      TypingIndicator.belongsTo(models.Chats, {
+        foreignKey: 'chatId',
+        as: 'indicatorChatDetails',            // FIXED: Unique alias
+        constraints: false,
+        onDelete: 'CASCADE',
+        onUpdate: 'CASCADE',
+      });
+    }
+    
+    if (models.Users) {
+      TypingIndicator.belongsTo(models.Users, {
+        foreignKey: 'userId',
+        as: 'indicatorUserDetails',            // FIXED: Unique alias
+        constraints: false,
+        onDelete: 'CASCADE',
+        onUpdate: 'CASCADE',
+      });
+    }
   };
 
   return TypingIndicator;

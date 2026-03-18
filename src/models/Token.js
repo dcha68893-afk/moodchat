@@ -13,10 +13,6 @@ module.exports = (sequelize, DataTypes) => {
       userId: {
         type: DataTypes.INTEGER,
         allowNull: false,
-        references: {
-          model: 'Users',
-          key: 'id',
-        },
         validate: {
           notNull: {
             msg: 'User ID is required'
@@ -106,7 +102,8 @@ module.exports = (sequelize, DataTypes) => {
       },
     },
     {
-      tableName: 'tokens',
+      tableName: 'tokens',                   // Standardized: lowercase table name
+      modelName: 'Token',                     // Explicit model name
       timestamps: true,
       underscored: true,
       freezeTableName: true,
@@ -158,16 +155,7 @@ module.exports = (sequelize, DataTypes) => {
     }
   );
 
-  Token.associate = function(models) {
-    Token.belongsTo(models.Users, {
-      foreignKey: 'userId',
-      as: 'tokenOwner',
-      onDelete: 'CASCADE',
-      onUpdate: 'CASCADE'
-    });
-  };
-
-  // Instance methods
+  // Instance methods (PRESERVED)
   Token.prototype.isExpired = function () {
     return this.expiresAt < new Date();
   };
@@ -191,7 +179,7 @@ module.exports = (sequelize, DataTypes) => {
     return await this.save();
   };
 
-  // Static methods
+  // Static methods (PRESERVED)
   Token.findByToken = async function (tokenString, includeUser = false) {
     if (!tokenString) {
       throw new Error('Token string is required');
@@ -205,7 +193,7 @@ module.exports = (sequelize, DataTypes) => {
       options.include = [
         {
           model: this.sequelize.models.Users,
-          as: 'tokenOwner',
+          as: 'tokenOwnerUser',                 // FIXED: Unique alias
           attributes: ['id', 'username', 'email', 'isActive', 'isVerified'],
         },
       ];
@@ -234,7 +222,7 @@ module.exports = (sequelize, DataTypes) => {
       where: where,
       include: [{
         model: this.sequelize.models.Users,
-        as: 'tokenOwner',
+        as: 'tokenOwnerUser',                   // FIXED: Unique alias
         attributes: ['id', 'username', 'email', 'isActive', 'isVerified'],
       }],
       order: [['createdAt', 'DESC']],
@@ -361,7 +349,7 @@ module.exports = (sequelize, DataTypes) => {
       },
       include: [{
         model: this.sequelize.models.Users,
-        as: 'tokenOwner',
+        as: 'tokenOwnerUser',                  // FIXED: Unique alias
         attributes: ['id', 'username', 'email', 'isActive', 'isVerified'],
       }]
     });
@@ -444,6 +432,19 @@ module.exports = (sequelize, DataTypes) => {
       },
       order: [['createdAt', 'DESC']]
     });
+  };
+
+  // FIXED: Associations with unique aliases
+  Token.associate = function(models) {
+    if (models.Users) {
+      Token.belongsTo(models.Users, {
+        foreignKey: 'userId',
+        as: 'tokenOwnerUser',                  // FIXED: Unique alias
+        constraints: false,
+        onDelete: 'CASCADE',
+        onUpdate: 'CASCADE',
+      });
+    }
   };
 
   return Token;

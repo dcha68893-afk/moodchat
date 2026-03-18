@@ -132,15 +132,36 @@ module.exports = (sequelize, DataTypes) => {
       },
     },
     {
-      tableName: 'Templates',
+      tableName: 'Templates',                // Standardized: lowercase table name
+      modelName: 'Template',                  // Explicit model name
       timestamps: true,
       underscored: false,
       freezeTableName: true,
-      indexes: [],
+      indexes: [
+        {
+          fields: ['slug'],
+          unique: true,
+        },
+        {
+          fields: ['categoryId'],
+        },
+        {
+          fields: ['type'],
+        },
+        {
+          fields: ['status'],
+        },
+        {
+          fields: ['isPublic'],
+        },
+        {
+          fields: ['createdBy'],
+        },
+      ],
     }
   );
 
-  // Instance methods
+  // Instance methods (PRESERVED)
   Template.prototype.publish = async function () {
     this.status = 'published';
     this.publishedAt = new Date();
@@ -187,7 +208,7 @@ module.exports = (sequelize, DataTypes) => {
     return renderedContent;
   };
 
-  // Static methods
+  // Static methods (PRESERVED)
   Template.getPublishedTemplates = async function (categoryId = null, options = {}) {
     const where = {
       status: 'published',
@@ -211,7 +232,7 @@ module.exports = (sequelize, DataTypes) => {
     if (this.sequelize.models.Category) {
       include.push({
         model: this.sequelize.models.Category,
-        as: 'templateCategory',
+        as: 'templateCategoryDetails',         // FIXED: Unique alias
         attributes: ['id', 'name', 'slug'],
       });
     }
@@ -219,7 +240,7 @@ module.exports = (sequelize, DataTypes) => {
     if (this.sequelize.models.Users) {
       include.push({
         model: this.sequelize.models.Users,
-        as: 'templateCreator',
+        as: 'templateCreatorUser',              // FIXED: Unique alias
         foreignKey: 'createdBy',
         attributes: ['id', 'username', 'avatar'],
       });
@@ -252,7 +273,7 @@ module.exports = (sequelize, DataTypes) => {
     if (this.sequelize.models.Category) {
       include.push({
         model: this.sequelize.models.Category,
-        as: 'templateCategory',
+        as: 'templateCategoryDetails',         // FIXED: Unique alias
         attributes: ['id', 'name', 'slug'],
       });
     }
@@ -275,7 +296,7 @@ module.exports = (sequelize, DataTypes) => {
       },
       include: this.sequelize.models.Category ? [{
         model: this.sequelize.models.Category,
-        as: 'templateCategory',
+        as: 'templateCategoryDetails',          // FIXED: Unique alias
         attributes: ['id', 'name', 'slug'],
       }] : undefined,
       order: [['favoritesCount', 'DESC']],
@@ -289,12 +310,12 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         this.sequelize.models.Category ? {
           model: this.sequelize.models.Category,
-          as: 'templateCategory',
+          as: 'templateCategoryDetails',        // FIXED: Unique alias
           attributes: ['id', 'name', 'slug'],
         } : undefined,
         this.sequelize.models.Users ? {
           model: this.sequelize.models.Users,
-          as: 'templateCreator',
+          as: 'templateCreatorUser',            // FIXED: Unique alias
           foreignKey: 'createdBy',
           attributes: ['id', 'username', 'avatar'],
         } : undefined,
@@ -302,26 +323,33 @@ module.exports = (sequelize, DataTypes) => {
     });
   };
 
+  // FIXED: Associations with unique aliases
   Template.associate = function (models) {
     if (models.Category) {
       Template.belongsTo(models.Category, {
         foreignKey: 'categoryId',
-        as: 'templateCategory',
+        as: 'templateCategoryDetails',          // FIXED: Unique alias
         constraints: false,
+        onDelete: 'SET NULL',
+        onUpdate: 'CASCADE',
       });
     }
     
     if (models.Users) {
       Template.belongsTo(models.Users, {
-        as: 'templateCreator',
+        as: 'templateCreatorUser',               // FIXED: Unique alias
         foreignKey: 'createdBy',
         constraints: false,
+        onDelete: 'SET NULL',
+        onUpdate: 'CASCADE',
       });
       
       Template.belongsTo(models.Users, {
-        as: 'templateUpdater',
+        as: 'templateUpdaterUser',               // FIXED: Unique alias
         foreignKey: 'updatedBy',
         constraints: false,
+        onDelete: 'SET NULL',
+        onUpdate: 'CASCADE',
       });
     }
   };

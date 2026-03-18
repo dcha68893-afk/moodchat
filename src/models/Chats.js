@@ -22,10 +22,6 @@ module.exports = (sequelize, DataTypes) => {
       createdBy: {
         type: DataTypes.INTEGER,
         allowNull: true,
-        references: {
-          model: 'Users',
-          key: 'id',
-        },
       },
       description: {
         type: DataTypes.TEXT,
@@ -43,10 +39,6 @@ module.exports = (sequelize, DataTypes) => {
       lastMessageId: {
         type: DataTypes.INTEGER,
         allowNull: true,
-        references: {
-          model: 'Messages',
-          key: 'id',
-        },
       },
       lastMessageAt: {
         type: DataTypes.DATE,
@@ -83,7 +75,8 @@ module.exports = (sequelize, DataTypes) => {
       }
     },
     {
-      tableName: 'chats',
+      tableName: 'chats',                   // Preserved: matches existing table
+      modelName: 'Chats',                    // Explicit model name
       timestamps: true,
       underscored: false,
       freezeTableName: true,
@@ -94,11 +87,14 @@ module.exports = (sequelize, DataTypes) => {
         {
           fields: ['lastMessageAt'],
         },
+        {
+          fields: ['createdBy'],
+        },
       ],
     }
   );
 
-  // Instance methods
+  // Instance methods (PRESERVED)
   Chats.prototype.updateLastMessage = async function (messageId) {
     this.lastMessageId = messageId;
     this.lastMessageAt = new Date();
@@ -117,7 +113,7 @@ module.exports = (sequelize, DataTypes) => {
     return participants.map(p => p.userId);
   };
 
-  // Static methods
+  // Static methods (PRESERVED)
   Chats.getDirectChat = async function (userId1, userId2) {
     if (!this.sequelize.models.ChatParticipant) {
       return null;
@@ -130,7 +126,7 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.ChatParticipant,
-          as: 'chatParticipants',
+          as: 'chatParticipantsList',        // FIXED: Unique alias
           where: {
             userId: [userId1, userId2],
           },
@@ -149,7 +145,7 @@ module.exports = (sequelize, DataTypes) => {
     const include = [
       {
         model: this.sequelize.models.ChatParticipant,
-        as: 'chatParticipants',
+        as: 'chatParticipantsList',          // FIXED: Unique alias
         where: { userId: userId },
         required: true,
         attributes: [],
@@ -159,7 +155,7 @@ module.exports = (sequelize, DataTypes) => {
     if (this.sequelize.models.Messages) {
       include.push({
         model: this.sequelize.models.Messages,
-        as: 'chatMessages',
+        as: 'chatMessagesList',              // FIXED: Unique alias
         attributes: ['id', 'content', 'type', 'createdAt'],
         required: false,
         limit: 1,
@@ -167,7 +163,7 @@ module.exports = (sequelize, DataTypes) => {
         include: this.sequelize.models.Users ? [
           {
             model: this.sequelize.models.Users,
-            as: 'messageSender',
+            as: 'messageSenderDetails',      // FIXED: Unique alias
             attributes: ['id', 'username', 'avatar'],
           },
         ] : undefined,
@@ -183,36 +179,45 @@ module.exports = (sequelize, DataTypes) => {
     });
   };
 
+  // FIXED: Associations with unique aliases
   Chats.associate = function (models) {
     if (models.Messages) {
       Chats.hasMany(models.Messages, {
         foreignKey: 'chatId',
-        as: 'chatMessages',
+        as: 'chatMessagesList',               // FIXED: Unique alias
         constraints: false,
+        onDelete: 'CASCADE',
+        onUpdate: 'CASCADE',
       });
     }
 
     if (models.ChatParticipant) {
       Chats.hasMany(models.ChatParticipant, {
         foreignKey: 'chatId',
-        as: 'chatParticipants',
+        as: 'chatParticipantsList',           // FIXED: Unique alias
         constraints: false,
+        onDelete: 'CASCADE',
+        onUpdate: 'CASCADE',
       });
     }
 
     if (models.Users) {
       Chats.belongsTo(models.Users, {
         foreignKey: 'createdBy',
-        as: 'chatCreator',
+        as: 'chatCreatorUser',                 // FIXED: Unique alias
         constraints: false,
+        onDelete: 'SET NULL',
+        onUpdate: 'CASCADE',
       });
     }
 
     if (models.Messages) {
       Chats.belongsTo(models.Messages, {
         foreignKey: 'lastMessageId',
-        as: 'chatLastMessage',
+        as: 'chatLastMessageDetails',          // FIXED: Unique alias
         constraints: false,
+        onDelete: 'SET NULL',
+        onUpdate: 'CASCADE',
       });
     }
   };

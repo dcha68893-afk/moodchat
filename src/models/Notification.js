@@ -13,10 +13,6 @@ module.exports = (sequelize, DataTypes) => {
       userId: {
         type: DataTypes.INTEGER,
         allowNull: false,
-        references: {
-          model: 'Users',
-          key: 'id',
-        },
       },
       type: {
         type: DataTypes.ENUM(
@@ -99,7 +95,8 @@ module.exports = (sequelize, DataTypes) => {
       },
     },
     {
-      tableName: 'notifications',
+      tableName: 'notifications',            // Standardized: lowercase table name
+      modelName: 'Notification',              // Explicit model name
       timestamps: true,
       underscored: true,
       freezeTableName: true,
@@ -123,7 +120,7 @@ module.exports = (sequelize, DataTypes) => {
     }
   );
 
-  // Instance methods
+  // Instance methods (PRESERVED)
   Notification.prototype.markAsRead = async function () {
     this.isRead = true;
     return await this.save();
@@ -144,7 +141,7 @@ module.exports = (sequelize, DataTypes) => {
     return await this.save();
   };
 
-  // Static methods
+  // Static methods (PRESERVED)
   Notification.getUserNotifications = async function (userId, options = {}) {
     const where = {
       userId: userId,
@@ -227,12 +224,15 @@ module.exports = (sequelize, DataTypes) => {
     });
   };
 
+  // FIXED: Associations with unique aliases
   Notification.associate = function(models) {
     if (models.Users) {
       Notification.belongsTo(models.Users, {
         foreignKey: 'userId',
-        as: 'notificationRecipient',
+        as: 'notificationRecipientUser',      // FIXED: Unique alias
         constraints: false,
+        onDelete: 'CASCADE',
+        onUpdate: 'CASCADE',
       });
     }
   };

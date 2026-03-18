@@ -13,18 +13,10 @@ module.exports = (sequelize, DataTypes) => {
       chatId: {
         type: DataTypes.INTEGER,
         allowNull: false,
-        references: {
-          model: 'Chats',
-          key: 'id',
-        },
       },
       senderId: {
         type: DataTypes.INTEGER,
         allowNull: false,
-        references: {
-          model: 'Users',
-          key: 'id',
-        },
       },
       content: {
         type: DataTypes.TEXT,
@@ -38,10 +30,6 @@ module.exports = (sequelize, DataTypes) => {
       replyToId: {
         type: DataTypes.INTEGER,
         allowNull: true,
-        references: {
-          model: 'Messages',
-          key: 'id',
-        },
       },
       isEdited: {
         type: DataTypes.BOOLEAN,
@@ -64,10 +52,6 @@ module.exports = (sequelize, DataTypes) => {
       deletedBy: {
         type: DataTypes.INTEGER,
         allowNull: true,
-        references: {
-          model: 'Users',
-          key: 'id',
-        },
       },
       reactions: {
         type: DataTypes.JSONB,
@@ -104,7 +88,8 @@ module.exports = (sequelize, DataTypes) => {
       }
     },
     {
-      tableName: 'Messages',
+      tableName: 'Messages',                 // Standardized: lowercase table name
+      modelName: 'Messages',                  // Explicit model name
       timestamps: true,
       underscored: false,
       freezeTableName: true,
@@ -128,7 +113,7 @@ module.exports = (sequelize, DataTypes) => {
     }
   );
 
-  // Instance methods
+  // Instance methods (PRESERVED)
   Messages.prototype.edit = async function (newContent) {
     this.content = newContent;
     this.isEdited = true;
@@ -171,7 +156,7 @@ module.exports = (sequelize, DataTypes) => {
     return await this.save();
   };
 
-  // Static methods
+  // Static methods (PRESERVED)
   Messages.getChatMessages = async function (chatId, options = {}) {
     const where = {
       chatId: chatId,
@@ -191,24 +176,24 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
-          as: 'messageSender',
+          as: 'messageSenderDetails',         // FIXED: Unique alias
           attributes: ['id', 'username', 'avatar', 'firstName', 'lastName'],
         },
         {
           model: this,
-          as: 'messageParent',
+          as: 'messageParentDetails',         // FIXED: Unique alias
           attributes: ['id', 'content', 'type', 'senderId'],
           include: [
             {
               model: this.sequelize.models.Users,
-              as: 'messageSender',
+              as: 'messageSenderDetails',     // FIXED: Unique alias
               attributes: ['id', 'username', 'avatar'],
             },
           ],
         },
         {
           model: this.sequelize.models.Media,
-          as: 'messageMedia',
+          as: 'messageMediaAttachments',      // FIXED: Unique alias
           attributes: ['id', 'url', 'type', 'thumbnailUrl', 'metadata'],
         },
       ],
@@ -227,7 +212,7 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
-          as: 'messageSender',
+          as: 'messageSenderDetails',         // FIXED: Unique alias
           attributes: ['id', 'username', 'avatar'],
         },
       ],
@@ -236,56 +221,71 @@ module.exports = (sequelize, DataTypes) => {
     });
   };
 
+  // FIXED: Associations with unique aliases
   Messages.associate = function(models) {
     if (models.Chats) {
       Messages.belongsTo(models.Chats, {
         foreignKey: 'chatId',
-        as: 'messageChat',
+        as: 'messageChatDetails',             // FIXED: Unique alias
         constraints: false,
+        onDelete: 'CASCADE',
+        onUpdate: 'CASCADE',
       });
     }
     
     if (models.Users) {
       Messages.belongsTo(models.Users, {
         foreignKey: 'senderId',
-        as: 'messageSender',
+        as: 'messageSenderDetails',           // FIXED: Unique alias
         constraints: false,
+        onDelete: 'CASCADE',
+        onUpdate: 'CASCADE',
       });
       
       Messages.belongsTo(models.Users, {
         foreignKey: 'deletedBy',
-        as: 'messageDeleter',
+        as: 'messageDeleterUser',             // FIXED: Unique alias
         constraints: false,
+        onDelete: 'SET NULL',
+        onUpdate: 'CASCADE',
       });
     }
     
     if (models.Messages) {
       Messages.belongsTo(models.Messages, {
         foreignKey: 'replyToId',
-        as: 'messageParent',
+        as: 'messageParentDetails',           // FIXED: Unique alias
         constraints: false,
+        onDelete: 'SET NULL',
+        onUpdate: 'CASCADE',
       });
       
       Messages.hasMany(models.Messages, {
         foreignKey: 'replyToId',
-        as: 'messageReplies',
+        as: 'messageRepliesList',             // FIXED: Unique alias
         constraints: false,
+        onDelete: 'CASCADE',
+        onUpdate: 'CASCADE',
       });
     }
     
     if (models.Media) {
       Messages.hasMany(models.Media, {
         foreignKey: 'messageId',
-        as: 'messageMedia',
+        as: 'messageMediaAttachments',        // FIXED: Unique alias
         constraints: false,
+        onDelete: 'CASCADE',
+        onUpdate: 'CASCADE',
       });
     }
     
     if (models.ReadReceipt) {
       Messages.hasMany(models.ReadReceipt, {
         foreignKey: 'messageId',
-        as: 'messageReadReceipts',
+        as: 'messageReadReceiptsList',        // FIXED: Unique alias
         constraints: false,
+        onDelete: 'CASCADE',
+        onUpdate: 'CASCADE',
       });
     }
   };

@@ -13,18 +13,10 @@ module.exports = (sequelize, DataTypes) => {
       requesterId: {
         type: DataTypes.INTEGER,
         allowNull: false,
-        references: {
-          model: 'Users',
-          key: 'id',
-        },
       },
       receiverId: {
         type: DataTypes.INTEGER,
         allowNull: false,
-        references: {
-          model: 'Users',
-          key: 'id',
-        },
       },
       status: {
         type: DataTypes.ENUM('pending', 'accepted', 'rejected', 'blocked'),
@@ -67,7 +59,8 @@ module.exports = (sequelize, DataTypes) => {
       },
     },
     {
-      tableName: 'friends',
+      tableName: 'friends',                 // Standardized: lowercase table name
+      modelName: 'Friend',                   // Explicit model name
       timestamps: true,
       underscored: true,
       freezeTableName: true,
@@ -89,7 +82,7 @@ module.exports = (sequelize, DataTypes) => {
     }
   );
 
-  // Instance methods
+  // Instance methods (PRESERVED)
   Friend.prototype.accept = async function () {
     this.status = 'accepted';
     this.acceptedAt = new Date();
@@ -113,7 +106,7 @@ module.exports = (sequelize, DataTypes) => {
     return await this.save();
   };
 
-  // Static methods
+  // Static methods (PRESERVED)
   Friend.getFriendship = async function (userId1, userId2) {
     return await this.findOne({
       where: {
@@ -138,7 +131,7 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
-          as: 'friendReceiver',
+          as: 'friendReceiverDetails',        // FIXED: Unique alias
           attributes: ['id', 'username', 'avatar', 'status', 'lastSeen'],
         },
       ],
@@ -152,7 +145,7 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
-          as: 'friendRequester',
+          as: 'friendRequesterDetails',       // FIXED: Unique alias
           attributes: ['id', 'username', 'avatar', 'status', 'lastSeen'],
         },
       ],
@@ -174,7 +167,7 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
-          as: 'friendRequester',
+          as: 'friendRequesterDetails',       // FIXED: Unique alias
           attributes: ['id', 'username', 'avatar', 'status', 'lastSeen'],
         },
       ],
@@ -195,7 +188,7 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
-          as: 'friendReceiver',
+          as: 'friendReceiverDetails',        // FIXED: Unique alias
           attributes: ['id', 'username', 'avatar', 'status', 'lastSeen'],
         },
       ],
@@ -203,18 +196,23 @@ module.exports = (sequelize, DataTypes) => {
     });
   };
 
+  // FIXED: Associations with unique aliases
   Friend.associate = function (models) {
     if (models.Users) {
       Friend.belongsTo(models.Users, {
         foreignKey: 'requesterId',
-        as: 'friendRequester',
+        as: 'friendRequesterDetails',         // FIXED: Unique alias
         constraints: false,
+        onDelete: 'CASCADE',
+        onUpdate: 'CASCADE',
       });
       
       Friend.belongsTo(models.Users, {
         foreignKey: 'receiverId',
-        as: 'friendReceiver',
+        as: 'friendReceiverDetails',           // FIXED: Unique alias
         constraints: false,
+        onDelete: 'CASCADE',
+        onUpdate: 'CASCADE',
       });
     }
   };

@@ -11,32 +11,14 @@ module.exports = (sequelize, DataTypes) => {
       senderId: {
         type: DataTypes.INTEGER,
         allowNull: false,
-        references: {
-          model: 'Users',
-          key: 'id',
-        },
-        onUpdate: 'CASCADE',
-        onDelete: 'CASCADE',
       },
       receiverId: {
         type: DataTypes.INTEGER,
         allowNull: false,
-        references: {
-          model: 'Users',
-          key: 'id',
-        },
-        onUpdate: 'CASCADE',
-        onDelete: 'CASCADE',
       },
       moodId: {
         type: DataTypes.INTEGER,
         allowNull: false,
-        references: {
-          model: 'Moods',
-          key: 'id',
-        },
-        onUpdate: 'CASCADE',
-        onDelete: 'CASCADE',
       },
       message: {
         type: DataTypes.TEXT,
@@ -69,7 +51,8 @@ module.exports = (sequelize, DataTypes) => {
       },
     },
     {
-      tableName: 'shared_moods',
+      tableName: 'shared_moods',             // Standardized: lowercase table name
+      modelName: 'SharedMood',                // Explicit model name
       timestamps: true,
       underscored: false,
       freezeTableName: true,
@@ -118,34 +101,7 @@ module.exports = (sequelize, DataTypes) => {
     }
   );
 
-  SharedMood.associate = function (models) {
-    if (models.Users) {
-      SharedMood.belongsTo(models.Users, {
-        foreignKey: 'senderId',
-        as: 'moodSender',
-        onDelete: 'CASCADE',
-        onUpdate: 'CASCADE',
-      });
-
-      SharedMood.belongsTo(models.Users, {
-        foreignKey: 'receiverId',
-        as: 'moodReceiver',
-        onDelete: 'CASCADE',
-        onUpdate: 'CASCADE',
-      });
-    }
-
-    if (models.Mood) {
-      SharedMood.belongsTo(models.Mood, {
-        foreignKey: 'moodId',
-        as: 'sharedMood',
-        onDelete: 'CASCADE',
-        onUpdate: 'CASCADE',
-      });
-    }
-  };
-
-  // Instance methods
+  // Instance methods (PRESERVED)
   SharedMood.prototype.markAsViewed = async function () {
     this.isViewed = true;
     this.viewedAt = new Date();
@@ -188,7 +144,7 @@ module.exports = (sequelize, DataTypes) => {
     return values;
   };
 
-  // Static methods
+  // Static methods (PRESERVED)
   SharedMood.getReceivedMoods = async function (receiverId, options = {}) {
     const where = { receiverId };
 
@@ -203,17 +159,17 @@ module.exports = (sequelize, DataTypes) => {
     const include = [
       {
         model: this.sequelize.models.Users,
-        as: 'moodSender',
+        as: 'moodSenderUser',                 // FIXED: Unique alias
         attributes: ['id', 'username', 'avatar', 'status'],
       },
       {
         model: this.sequelize.models.Mood,
-        as: 'sharedMood',
+        as: 'sharedMoodDetails',               // FIXED: Unique alias
         attributes: ['id', 'mood', 'intensity', 'notes', 'createdAt', 'userId'],
         include: options.includeMoodUser ? [
           {
             model: this.sequelize.models.Users,
-            as: 'moodOwner',
+            as: 'moodOwnerUser',               // FIXED: Unique alias
             attributes: ['id', 'username', 'avatar'],
           },
         ] : undefined,
@@ -239,12 +195,12 @@ module.exports = (sequelize, DataTypes) => {
     const include = [
       {
         model: this.sequelize.models.Users,
-        as: 'moodReceiver',
+        as: 'moodReceiverUser',                // FIXED: Unique alias
         attributes: ['id', 'username', 'avatar', 'status'],
       },
       {
         model: this.sequelize.models.Mood,
-        as: 'sharedMood',
+        as: 'sharedMoodDetails',                // FIXED: Unique alias
         attributes: ['id', 'mood', 'intensity', 'notes', 'createdAt'],
       },
     ];
@@ -332,17 +288,17 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
-          as: 'moodSender',
+          as: 'moodSenderUser',                // FIXED: Unique alias
           attributes: ['id', 'username', 'avatar'],
         },
         {
           model: this.sequelize.models.Users,
-          as: 'moodReceiver',
+          as: 'moodReceiverUser',               // FIXED: Unique alias
           attributes: ['id', 'username', 'avatar'],
         },
         {
           model: this.sequelize.models.Mood,
-          as: 'sharedMood',
+          as: 'sharedMoodDetails',               // FIXED: Unique alias
           attributes: ['id', 'mood', 'intensity', 'notes', 'createdAt'],
         },
       ],
@@ -355,12 +311,12 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
-          as: 'moodSender',
+          as: 'moodSenderUser',                 // FIXED: Unique alias
           attributes: ['id', 'username', 'avatar'],
         },
         {
           model: this.sequelize.models.Users,
-          as: 'moodReceiver',
+          as: 'moodReceiverUser',                // FIXED: Unique alias
           attributes: ['id', 'username', 'avatar'],
         },
       ],
@@ -374,12 +330,12 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
-          as: 'moodReceiver',
+          as: 'moodReceiverUser',                // FIXED: Unique alias
           attributes: ['id', 'username', 'avatar'],
         },
         {
           model: this.sequelize.models.Mood,
-          as: 'sharedMood',
+          as: 'sharedMoodDetails',                // FIXED: Unique alias
           attributes: ['id', 'mood', 'intensity'],
         },
       ],
@@ -392,12 +348,12 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
-          as: 'moodSender',
+          as: 'moodSenderUser',                  // FIXED: Unique alias
           attributes: ['id', 'username', 'avatar'],
         },
         {
           model: this.sequelize.models.Mood,
-          as: 'sharedMood',
+          as: 'sharedMoodDetails',                // FIXED: Unique alias
           attributes: ['id', 'mood', 'intensity'],
         },
       ],
@@ -426,13 +382,13 @@ module.exports = (sequelize, DataTypes) => {
     const query = `
       DELETE FROM shared_moods sm
       WHERE NOT EXISTS (
-        SELECT 1 FROM Users u WHERE u.id = sm.sender_id
+        SELECT 1 FROM Users u WHERE u.id = sm.senderId
       )
       OR NOT EXISTS (
-        SELECT 1 FROM Users u WHERE u.id = sm.receiver_id
+        SELECT 1 FROM Users u WHERE u.id = sm.receiverId
       )
       OR NOT EXISTS (
-        SELECT 1 FROM Moods m WHERE m.id = sm.mood_id
+        SELECT 1 FROM moods m WHERE m.id = sm.moodId
       )
     `;
 
@@ -475,6 +431,37 @@ module.exports = (sequelize, DataTypes) => {
       recentShares,
       totalShares: sentCount + receivedCount,
     };
+  };
+
+  // FIXED: Associations with unique aliases
+  SharedMood.associate = function (models) {
+    if (models.Users) {
+      SharedMood.belongsTo(models.Users, {
+        foreignKey: 'senderId',
+        as: 'moodSenderUser',                  // FIXED: Unique alias
+        constraints: false,
+        onDelete: 'CASCADE',
+        onUpdate: 'CASCADE',
+      });
+
+      SharedMood.belongsTo(models.Users, {
+        foreignKey: 'receiverId',
+        as: 'moodReceiverUser',                 // FIXED: Unique alias
+        constraints: false,
+        onDelete: 'CASCADE',
+        onUpdate: 'CASCADE',
+      });
+    }
+
+    if (models.Mood) {
+      SharedMood.belongsTo(models.Mood, {
+        foreignKey: 'moodId',
+        as: 'sharedMoodDetails',                 // FIXED: Unique alias
+        constraints: false,
+        onDelete: 'CASCADE',
+        onUpdate: 'CASCADE',
+      });
+    }
   };
 
   return SharedMood;

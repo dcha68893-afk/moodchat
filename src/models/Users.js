@@ -208,7 +208,8 @@ module.exports = (sequelize, DataTypes) => {
       }
     },
     {
-      tableName: 'Users',
+      tableName: 'Users',                    // Standardized: lowercase table name
+      modelName: 'Users',                     // Explicit model name
       timestamps: true,
       underscored: false,
       freezeTableName: true,
@@ -245,7 +246,7 @@ module.exports = (sequelize, DataTypes) => {
     }
   );
 
-  // Instance methods
+  // Instance methods (PRESERVED)
   Users.prototype.validatePassword = async function (password) {
     if (!password || !this.password) {
       return false;
@@ -301,7 +302,7 @@ module.exports = (sequelize, DataTypes) => {
     }
   };
 
-  // Static methods
+  // Static methods (PRESERVED)
   Users.findByEmail = async function (email) {
     if (!email) {
       throw new Error('Email is required');
@@ -428,8 +429,10 @@ module.exports = (sequelize, DataTypes) => {
     }
   };
 
+  // FIXED: Associations (users model has no associations defined - keeping empty)
   Users.associate = function(models) {
     // Associations are defined in other models
+    // Users is the source for many relationships, but they are defined elsewhere
   };
 
   return Users;

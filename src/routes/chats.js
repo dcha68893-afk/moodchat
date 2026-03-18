@@ -1,34 +1,56 @@
 const asyncHandler = require('express-async-handler');
 const express = require('express');
 const router = express.Router();
-const sequelize = require('sequelize');
-const {
-  AuthenticationError,
-  AuthorizationError,
-  NotFoundError,
-  ValidationError,
-  ConflictError,
-} = require('../middleware/errorHandler');
-// FIXED: Import the unified authentication middleware
+
+// Import database models
+const db = require('../models');
+const User = db.User || db.Users;
+const Chat = db.Chat;
+const Message = db.Message;
+
+// Get Sequelize operators
+const Sequelize = require('sequelize');
+const { Op } = Sequelize;
+
+// Import middleware
 const { authenticateToken } = require('../middleware/auth');
 const { apiRateLimiter } = require('../middleware/rateLimiter');
-const { User, Chat, Message } = require('../models');
 
-// FIXED: Use the unified authentication middleware
+// Use the unified authentication middleware
 router.use(authenticateToken);
 
-// FIXED: Add authentication verification before every route that uses req.user
-const verifyAuthenticated = (req, res, next) => {
-  if (!req.user || !req.user.userId) {
+// Helper function to check authentication
+const checkAuth = (req, res) => {
+  if (!req.user || (!req.user.userId && !req.user.id)) {
     return res.status(401).json({
       status: 'error',
       message: 'Authentication required'
     });
   }
-  next();
+  const userId = req.user.userId || req.user.id;
+  return { userId };
+};
+
+// Helper function to check database models
+const checkModels = (res) => {
+  if (!db || !Chat || !User || !Message) {
+    return res.status(503).json({
+      status: 'error',
+      message: 'Database service not available'
+    });
+  }
+  return true;
 };
 
 console.log('✅ Chats routes initialized');
+
+// Verify authentication middleware
+const verifyAuthenticated = (req, res, next) => {
+  const auth = checkAuth(req, res);
+  if (auth.status) return auth;
+  req.userId = auth.userId;
+  next();
+};
 
 router.get(
   '/',
@@ -36,6 +58,10 @@ router.get(
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
+      const userId = req.userId;
+
+      if (!checkModels(res)) return;
+
       const {
         page = 1,
         limit = 20,
@@ -47,7 +73,7 @@ router.get(
       const offset = (parseInt(page) - 1) * parseInt(limit);
 
       const where = {
-        '$participants.id$': req.user.userId,
+        '$participants.id$': userId,
         isArchived: false,
       };
 
@@ -56,20 +82,20 @@ router.get(
       }
 
       if (unreadOnly === 'true') {
-        where.unreadCount = { [sequelize.Op.gt]: 0 };
+        where.unreadCount = { [Op.gt]: 0 };
       }
 
       if (search && search.trim()) {
         const searchRegex = `%${search}%`;
         
         if (type === 'direct' || !type) {
-          where[sequelize.Op.or] = [
-            { chatName: { [sequelize.Op.iLike]: searchRegex } },
-            { '$participants.username$': { [sequelize.Op.iLike]: searchRegex } },
-            { '$participants.displayName$': { [sequelize.Op.iLike]: searchRegex } }
+          where[Op.or] = [
+            { chatName: { [Op.iLike]: searchRegex } },
+            { '$participants.username$': { [Op.iLike]: searchRegex } },
+            { '$participants.displayName$': { [Op.iLike]: searchRegex } }
           ];
         } else {
-          where.chatName = { [sequelize.Op.iLike]: searchRegex };
+          where.chatName = { [Op.iLike]: searchRegex };
         }
       }
 
@@ -81,7 +107,7 @@ router.get(
             as: 'participants',
             attributes: ['id', 'username', 'avatar', 'displayName', 'online', 'status'],
             through: { attributes: [] },
-            where: { id: { [sequelize.Op.ne]: req.user.userId } },
+            where: { id: { [Op.ne]: userId } },
             required: false
           },
           {
@@ -102,14 +128,18 @@ router.get(
       });
 
       const processedChats = await Promise.all(
-        chats.map(async chat => {
-          const chatObj = chat.toJSON();
+        (chats || []).map(async chat => {
+          const chatObj = chat.toJSON ? chat.toJSON() : chat;
           
-          const userUnread = await chat.getUnreadCount(req.user.userId);
-          chatObj.unreadCount = userUnread || 0;
+          if (chat.getUnreadCount) {
+            const userUnread = await chat.getUnreadCount(userId);
+            chatObj.unreadCount = userUnread || 0;
+          } else {
+            chatObj.unreadCount = 0;
+          }
 
           if (chatObj.chatType === 'direct') {
-            const otherParticipant = chatObj.participants.find(p => p.id !== req.user.userId);
+            const otherParticipant = (chatObj.participants || []).find(p => p.id !== userId);
             chatObj.otherParticipant = otherParticipant || null;
 
             if (!chatObj.chatName && otherParticipant) {
@@ -126,15 +156,15 @@ router.get(
         data: {
           chats: processedChats,
           pagination: {
-            total: count,
+            total: count || 0,
             page: parseInt(page),
             limit: parseInt(limit),
-            pages: Math.ceil(count / parseInt(limit)),
+            pages: count ? Math.ceil(count / parseInt(limit)) : 0,
           },
         },
       });
     } catch (error) {
-      console.error('Error fetching chats:', error);
+      console.error('Error fetching chats:', error.message);
       res.status(500).json({
         status: 'error',
         message: 'Failed to fetch chats'
@@ -149,12 +179,23 @@ router.get(
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
+      const userId = req.userId;
+
+      if (!checkModels(res)) return;
+
       const { chatId } = req.params;
+
+      if (!chatId) {
+        return res.status(400).json({
+          status: 'error',
+          message: 'Chat ID is required'
+        });
+      }
 
       const chat = await Chat.findOne({
         where: {
           id: chatId,
-          '$participants.id$': req.user.userId,
+          '$participants.id$': userId,
           isArchived: false
         },
         include: [
@@ -183,17 +224,27 @@ router.get(
       });
 
       if (!chat) {
-        throw new NotFoundError('Chat not found or access denied');
+        return res.status(404).json({
+          status: 'error',
+          message: 'Chat not found or access denied'
+        });
       }
 
-      await chat.markAsRead(req.user.userId);
+      if (chat.markAsRead) {
+        await chat.markAsRead(userId);
+      }
 
-      const chatData = chat.toJSON();
-      const userUnread = await chat.getUnreadCount(req.user.userId);
-      chatData.unreadCount = userUnread || 0;
+      const chatData = chat.toJSON ? chat.toJSON() : chat;
+      
+      if (chat.getUnreadCount) {
+        const userUnread = await chat.getUnreadCount(userId);
+        chatData.unreadCount = userUnread || 0;
+      } else {
+        chatData.unreadCount = 0;
+      }
 
       if (chat.chatType === 'direct') {
-        const otherParticipant = chatData.participants.find(p => p.id !== req.user.userId);
+        const otherParticipant = (chatData.participants || []).find(p => p.id !== userId);
         chatData.otherParticipant = otherParticipant || null;
 
         if (!chatData.chatName && otherParticipant) {
@@ -206,7 +257,7 @@ router.get(
         data: { chat: chatData },
       });
     } catch (error) {
-      console.error('Error fetching chat:', error);
+      console.error('Error fetching chat:', error.message);
       res.status(500).json({
         status: 'error',
         message: 'Failed to fetch chat'
@@ -221,25 +272,38 @@ router.post(
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
-      const { userId } = req.body;
+      const userId = req.userId;
 
-      if (!userId) {
-        throw new ValidationError('User ID is required');
+      if (!checkModels(res)) return;
+
+      const { userId: otherUserId } = req.body;
+
+      if (!otherUserId) {
+        return res.status(400).json({
+          status: 'error',
+          message: 'User ID is required'
+        });
       }
 
-      if (userId === req.user.userId) {
-        throw new ValidationError('Cannot create chat with yourself');
+      if (otherUserId === userId) {
+        return res.status(400).json({
+          status: 'error',
+          message: 'Cannot create chat with yourself'
+        });
       }
 
-      const otherUser = await User.findByPk(userId);
+      const otherUser = await User.findByPk(otherUserId);
       if (!otherUser) {
-        throw new NotFoundError('User not found');
+        return res.status(404).json({
+          status: 'error',
+          message: 'User not found'
+        });
       }
 
       const existingChat = await Chat.findOne({
         where: {
           chatType: 'direct',
-          '$participants.id$': { [sequelize.Op.contains]: [req.user.userId, userId] }
+          '$participants.id$': { [Op.contains]: [userId, otherUserId] }
         },
         include: [{
           model: User,
@@ -250,8 +314,8 @@ router.post(
       });
 
       if (existingChat) {
-        const chatData = existingChat.toJSON();
-        const otherParticipant = chatData.participants.find(p => p.id !== req.user.userId);
+        const chatData = existingChat.toJSON ? existingChat.toJSON() : existingChat;
+        const otherParticipant = (chatData.participants || []).find(p => p.id !== userId);
         chatData.otherParticipant = otherParticipant || null;
 
         if (!chatData.chatName && otherParticipant) {
@@ -265,7 +329,7 @@ router.post(
         });
       }
 
-      const currentUser = await User.findByPk(req.user.userId, {
+      const currentUser = await User.findByPk(userId, {
         include: [{
           model: User,
           as: 'blockedUsers',
@@ -273,11 +337,21 @@ router.post(
         }]
       });
 
-      if (currentUser.blockedUsers.some(bu => bu.id === userId)) {
-        throw new AuthorizationError('Cannot create chat with blocked user');
+      if (!currentUser) {
+        return res.status(404).json({
+          status: 'error',
+          message: 'User not found'
+        });
       }
 
-      const otherUserWithBlocks = await User.findByPk(userId, {
+      if (currentUser.blockedUsers && currentUser.blockedUsers.some(bu => bu.id === otherUserId)) {
+        return res.status(403).json({
+          status: 'error',
+          message: 'Cannot create chat with blocked user'
+        });
+      }
+
+      const otherUserWithBlocks = await User.findByPk(otherUserId, {
         include: [{
           model: User,
           as: 'blockedUsers',
@@ -285,17 +359,34 @@ router.post(
         }]
       });
 
-      if (otherUserWithBlocks.blockedUsers.some(bu => bu.id === req.user.userId)) {
-        throw new AuthorizationError('User has blocked you');
+      if (!otherUserWithBlocks) {
+        return res.status(404).json({
+          status: 'error',
+          message: 'User not found'
+        });
+      }
+
+      if (otherUserWithBlocks.blockedUsers && otherUserWithBlocks.blockedUsers.some(bu => bu.id === userId)) {
+        return res.status(403).json({
+          status: 'error',
+          message: 'User has blocked you'
+        });
       }
 
       const chat = await Chat.create({
         chatType: 'direct',
-        createdBy: req.user.userId,
+        createdBy: userId,
         chatName: null,
       });
 
-      await chat.setParticipants([req.user.userId, userId]);
+      if (!chat) {
+        return res.status(500).json({
+          status: 'error',
+          message: 'Failed to create chat'
+        });
+      }
+
+      await chat.setParticipants([userId, otherUserId]);
 
       const populatedChat = await Chat.findByPk(chat.id, {
         include: [
@@ -313,17 +404,17 @@ router.post(
         ]
       });
 
-      const chatData = populatedChat.toJSON();
-      const otherParticipant = chatData.participants.find(p => p.id !== req.user.userId);
+      const chatData = populatedChat.toJSON ? populatedChat.toJSON() : populatedChat;
+      const otherParticipant = (chatData.participants || []).find(p => p.id !== userId);
       chatData.otherParticipant = otherParticipant || null;
       chatData.chatName = otherParticipant?.displayName || otherParticipant?.username || 'Direct Chat';
 
-      if (req.io && otherUser.socketIds && otherUser.socketIds.length > 0) {
+      if (req.io && otherUser.socketIds && Array.isArray(otherUser.socketIds) && otherUser.socketIds.length > 0) {
         otherUser.socketIds.forEach(socketId => {
           req.io.to(socketId).emit('chat:created', {
             chat: chatData,
             createdBy: {
-              id: req.user.userId,
+              id: userId,
               username: currentUser.username,
               avatar: currentUser.avatar,
             },
@@ -337,7 +428,7 @@ router.post(
         data: { chat: chatData },
       });
     } catch (error) {
-      console.error('Error creating direct chat:', error);
+      console.error('Error creating direct chat:', error.message);
       res.status(500).json({
         status: 'error',
         message: 'Failed to create direct chat'
@@ -352,27 +443,40 @@ router.post(
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
+      const userId = req.userId;
+
+      if (!checkModels(res)) return;
+
       const { name, participantIds, description, avatar } = req.body;
 
       if (!name || !name.trim()) {
-        throw new ValidationError('Group name is required');
+        return res.status(400).json({
+          status: 'error',
+          message: 'Group name is required'
+        });
       }
 
       if (!Array.isArray(participantIds) || participantIds.length === 0) {
-        throw new ValidationError('At least one participant is required');
+        return res.status(400).json({
+          status: 'error',
+          message: 'At least one participant is required'
+        });
       }
 
-      const allParticipants = [...new Set([req.user.userId, ...participantIds])];
+      const allParticipants = [...new Set([userId, ...participantIds])];
 
       const participants = await User.findAll({
         where: { id: allParticipants }
       });
 
       if (participants.length !== allParticipants.length) {
-        throw new NotFoundError('One or more participants not found');
+        return res.status(404).json({
+          status: 'error',
+          message: 'One or more participants not found'
+        });
       }
 
-      const currentUser = await User.findByPk(req.user.userId, {
+      const currentUser = await User.findByPk(userId, {
         include: [{
           model: User,
           as: 'blockedUsers',
@@ -380,13 +484,23 @@ router.post(
         }]
       });
 
+      if (!currentUser) {
+        return res.status(404).json({
+          status: 'error',
+          message: 'User not found'
+        });
+      }
+
       const blockedParticipants = participants.filter(p =>
-        currentUser.blockedUsers.some(bu => bu.id === p.id) ||
-        p.blockedUsers.some(bu => bu.id === req.user.userId)
+        (currentUser.blockedUsers && currentUser.blockedUsers.some(bu => bu.id === p.id)) ||
+        (p.blockedUsers && p.blockedUsers.some(bu => bu.id === userId))
       );
 
       if (blockedParticipants.length > 0) {
-        throw new AuthorizationError('Cannot add blocked users to group');
+        return res.status(403).json({
+          status: 'error',
+          message: 'Cannot add blocked users to group'
+        });
       }
 
       const chat = await Chat.create({
@@ -394,11 +508,18 @@ router.post(
         chatName: name.trim(),
         description: description?.trim(),
         avatar,
-        createdBy: req.user.userId,
+        createdBy: userId,
       });
 
+      if (!chat) {
+        return res.status(500).json({
+          status: 'error',
+          message: 'Failed to create group'
+        });
+      }
+
       await chat.setParticipants(allParticipants);
-      await chat.setAdmins([req.user.userId]);
+      await chat.setAdmins([userId]);
 
       const populatedChat = await Chat.findByPk(chat.id, {
         include: [
@@ -423,12 +544,12 @@ router.post(
 
       if (req.io) {
         participants.forEach(participant => {
-          if (participant.socketIds && participant.socketIds.length > 0) {
+          if (participant.socketIds && Array.isArray(participant.socketIds) && participant.socketIds.length > 0) {
             participant.socketIds.forEach(socketId => {
               req.io.to(socketId).emit('group:created', {
-                chat: populatedChat.toJSON(),
+                chat: populatedChat.toJSON ? populatedChat.toJSON() : populatedChat,
                 addedBy: {
-                  id: req.user.userId,
+                  id: userId,
                   username: currentUser.username,
                   avatar: currentUser.avatar,
                 },
@@ -444,7 +565,7 @@ router.post(
         data: { chat: populatedChat },
       });
     } catch (error) {
-      console.error('Error creating group chat:', error);
+      console.error('Error creating group chat:', error.message);
       res.status(500).json({
         status: 'error',
         message: 'Failed to create group chat'
@@ -459,13 +580,24 @@ router.patch(
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
+      const userId = req.userId;
+
+      if (!checkModels(res)) return;
+
       const { chatId } = req.params;
       const { name, description, avatar } = req.body;
+
+      if (!chatId) {
+        return res.status(400).json({
+          status: 'error',
+          message: 'Chat ID is required'
+        });
+      }
 
       const chat = await Chat.findOne({
         where: {
           id: chatId,
-          '$participants.id$': req.user.userId,
+          '$participants.id$': userId,
           chatType: 'group'
         },
         include: [{
@@ -477,12 +609,18 @@ router.patch(
       });
 
       if (!chat) {
-        throw new NotFoundError('Group chat not found or access denied');
+        return res.status(404).json({
+          status: 'error',
+          message: 'Group chat not found or access denied'
+        });
       }
 
-      const isAdmin = chat.admins.some(admin => admin.id === req.user.userId);
+      const isAdmin = chat.admins && chat.admins.some(admin => admin.id === userId);
       if (!isAdmin) {
-        throw new AuthorizationError('Only admins can update group settings');
+        return res.status(403).json({
+          status: 'error',
+          message: 'Only admins can update group settings'
+        });
       }
 
       const updates = {};
@@ -508,20 +646,20 @@ router.patch(
         ]
       });
 
-      if (req.io) {
+      if (req.io && updatedChat && updatedChat.participants) {
         const participants = await User.findAll({
           where: { id: updatedChat.participants.map(p => p.id) },
           attributes: ['id', 'socketIds']
         });
 
         participants.forEach(participant => {
-          if (participant.socketIds && participant.socketIds.length > 0) {
+          if (participant.socketIds && Array.isArray(participant.socketIds) && participant.socketIds.length > 0) {
             participant.socketIds.forEach(socketId => {
               req.io.to(socketId).emit('group:updated', {
                 chatId: chat.id,
                 updates,
                 updatedBy: {
-                  id: req.user.userId,
+                  id: userId,
                   username: req.user.username,
                 },
               });
@@ -536,7 +674,7 @@ router.patch(
         data: { chat: updatedChat },
       });
     } catch (error) {
-      console.error('Error updating chat:', error);
+      console.error('Error updating chat:', error.message);
       res.status(500).json({
         status: 'error',
         message: 'Failed to update chat'
@@ -551,17 +689,31 @@ router.post(
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
+      const userId = req.userId;
+
+      if (!checkModels(res)) return;
+
       const { chatId } = req.params;
       const { participantIds } = req.body;
 
+      if (!chatId) {
+        return res.status(400).json({
+          status: 'error',
+          message: 'Chat ID is required'
+        });
+      }
+
       if (!Array.isArray(participantIds) || participantIds.length === 0) {
-        throw new ValidationError('Participant IDs are required');
+        return res.status(400).json({
+          status: 'error',
+          message: 'Participant IDs are required'
+        });
       }
 
       const chat = await Chat.findOne({
         where: {
           id: chatId,
-          '$participants.id$': req.user.userId,
+          '$participants.id$': userId,
           chatType: 'group'
         },
         include: [
@@ -581,12 +733,18 @@ router.post(
       });
 
       if (!chat) {
-        throw new NotFoundError('Group chat not found or access denied');
+        return res.status(404).json({
+          status: 'error',
+          message: 'Group chat not found or access denied'
+        });
       }
 
-      const isAdmin = chat.admins.some(admin => admin.id === req.user.userId);
+      const isAdmin = chat.admins && chat.admins.some(admin => admin.id === userId);
       if (!isAdmin) {
-        throw new AuthorizationError('Only admins can add participants');
+        return res.status(403).json({
+          status: 'error',
+          message: 'Only admins can add participants'
+        });
       }
 
       const newParticipants = await User.findAll({
@@ -594,14 +752,20 @@ router.post(
       });
 
       if (newParticipants.length !== participantIds.length) {
-        throw new NotFoundError('One or more users not found');
+        return res.status(404).json({
+          status: 'error',
+          message: 'One or more users not found'
+        });
       }
 
-      const existingParticipantIds = chat.participants.map(p => p.id);
+      const existingParticipantIds = (chat.participants || []).map(p => p.id);
       const uniqueNewParticipants = participantIds.filter(id => !existingParticipantIds.includes(id));
 
       if (uniqueNewParticipants.length === 0) {
-        throw new ValidationError('All users are already in the chat');
+        return res.status(400).json({
+          status: 'error',
+          message: 'All users are already in the chat'
+        });
       }
 
       await chat.addParticipants(uniqueNewParticipants);
@@ -622,16 +786,16 @@ router.post(
         ]
       });
 
-      const currentUser = await User.findByPk(req.user.userId);
+      const currentUser = await User.findByPk(userId);
 
-      if (req.io) {
+      if (req.io && currentUser) {
         newParticipants.forEach(participant => {
-          if (participant.socketIds && participant.socketIds.length > 0) {
+          if (participant.socketIds && Array.isArray(participant.socketIds) && participant.socketIds.length > 0) {
             participant.socketIds.forEach(socketId => {
               req.io.to(socketId).emit('group:joined', {
-                chat: updatedChat.toJSON(),
+                chat: updatedChat.toJSON ? updatedChat.toJSON() : updatedChat,
                 addedBy: {
-                  id: req.user.userId,
+                  id: userId,
                   username: currentUser.username,
                   avatar: currentUser.avatar,
                 },
@@ -648,7 +812,7 @@ router.post(
         });
 
         existingUsers.forEach(user => {
-          if (user.socketIds && user.socketIds.length > 0) {
+          if (user.socketIds && Array.isArray(user.socketIds) && user.socketIds.length > 0) {
             user.socketIds.forEach(socketId => {
               req.io.to(socketId).emit('group:participants-added', {
                 chatId: chat.id,
@@ -658,7 +822,7 @@ router.post(
                   avatar: p.avatar,
                 })),
                 addedBy: {
-                  id: req.user.userId,
+                  id: userId,
                   username: currentUser.username,
                 },
               });
@@ -676,7 +840,7 @@ router.post(
         },
       });
     } catch (error) {
-      console.error('Error adding participants:', error);
+      console.error('Error adding participants:', error.message);
       res.status(500).json({
         status: 'error',
         message: 'Failed to add participants'
@@ -691,12 +855,23 @@ router.delete(
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
-      const { chatId, userId } = req.params;
+      const currentUserId = req.userId;
+
+      if (!checkModels(res)) return;
+
+      const { chatId, userId: targetUserId } = req.params;
+
+      if (!chatId || !targetUserId) {
+        return res.status(400).json({
+          status: 'error',
+          message: 'Chat ID and User ID are required'
+        });
+      }
 
       const chat = await Chat.findOne({
         where: {
           id: chatId,
-          '$participants.id$': req.user.userId,
+          '$participants.id$': currentUserId,
           chatType: 'group'
         },
         include: [
@@ -716,29 +891,41 @@ router.delete(
       });
 
       if (!chat) {
-        throw new NotFoundError('Group chat not found or access denied');
+        return res.status(404).json({
+          status: 'error',
+          message: 'Group chat not found or access denied'
+        });
       }
 
-      const isAdmin = chat.admins.some(admin => admin.id === req.user.userId);
-      const isSelfRemoval = userId === req.user.userId;
+      const isAdmin = chat.admins && chat.admins.some(admin => admin.id === currentUserId);
+      const isSelfRemoval = targetUserId === currentUserId;
 
       if (!isAdmin && !isSelfRemoval) {
-        throw new AuthorizationError('Only admins can remove other participants');
+        return res.status(403).json({
+          status: 'error',
+          message: 'Only admins can remove other participants'
+        });
       }
 
-      const isParticipant = chat.participants.some(p => p.id === userId);
+      const isParticipant = chat.participants && chat.participants.some(p => p.id === targetUserId);
       if (!isParticipant) {
-        throw new ValidationError('User is not in this chat');
+        return res.status(400).json({
+          status: 'error',
+          message: 'User is not in this chat'
+        });
       }
 
-      if (chat.admins.some(admin => admin.id === userId) && chat.admins.length === 1) {
-        throw new ValidationError('Cannot remove the last admin');
+      if (chat.admins && chat.admins.some(admin => admin.id === targetUserId) && chat.admins.length === 1) {
+        return res.status(400).json({
+          status: 'error',
+          message: 'Cannot remove the last admin'
+        });
       }
 
-      await chat.removeParticipant(userId);
+      await chat.removeParticipant(targetUserId);
 
-      if (chat.admins.some(admin => admin.id === userId)) {
-        await chat.removeAdmin(userId);
+      if (chat.admins && chat.admins.some(admin => admin.id === targetUserId)) {
+        await chat.removeAdmin(targetUserId);
       }
 
       const updatedChat = await Chat.findByPk(chatId, {
@@ -750,18 +937,18 @@ router.delete(
         }]
       });
 
-      const removedUser = await User.findByPk(userId);
-      const currentUser = await User.findByPk(req.user.userId);
+      const removedUser = await User.findByPk(targetUserId);
+      const currentUser = await User.findByPk(currentUserId);
 
-      if (req.io) {
-        if (removedUser.socketIds && removedUser.socketIds.length > 0) {
+      if (req.io && removedUser && currentUser) {
+        if (removedUser.socketIds && Array.isArray(removedUser.socketIds) && removedUser.socketIds.length > 0) {
           removedUser.socketIds.forEach(socketId => {
             req.io.to(socketId).emit('group:removed', {
               chatId: chat.id,
               removedBy: isSelfRemoval
                 ? 'self'
                 : {
-                    id: req.user.userId,
+                    id: currentUserId,
                     username: currentUser.username,
                   },
             });
@@ -774,14 +961,14 @@ router.delete(
         });
 
         remainingUsers.forEach(user => {
-          if (user.socketIds && user.socketIds.length > 0) {
+          if (user.socketIds && Array.isArray(user.socketIds) && user.socketIds.length > 0) {
             user.socketIds.forEach(socketId => {
               req.io.to(socketId).emit('group:participant-removed', {
                 chatId: chat.id,
-                removedUserId: userId,
+                removedUserId: targetUserId,
                 removedUsername: removedUser.username,
                 removedBy: {
-                  id: req.user.userId,
+                  id: currentUserId,
                   username: currentUser.username,
                 },
               });
@@ -796,7 +983,7 @@ router.delete(
         data: { chat: updatedChat },
       });
     } catch (error) {
-      console.error('Error removing participant:', error);
+      console.error('Error removing participant:', error.message);
       res.status(500).json({
         status: 'error',
         message: 'Failed to remove participant'
@@ -811,23 +998,37 @@ router.post(
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
+      const userId = req.userId;
+
+      if (!checkModels(res)) return;
+
       const { chatId } = req.params;
+
+      if (!chatId) {
+        return res.status(400).json({
+          status: 'error',
+          message: 'Chat ID is required'
+        });
+      }
 
       const chat = await Chat.findOne({
         where: {
           id: chatId,
-          '$participants.id$': req.user.userId,
+          '$participants.id$': userId,
           isArchived: false
         }
       });
 
       if (!chat) {
-        throw new NotFoundError('Chat not found or already archived');
+        return res.status(404).json({
+          status: 'error',
+          message: 'Chat not found or already archived'
+        });
       }
 
       await chat.update({
         isArchived: true,
-        archivedBy: req.user.userId,
+        archivedBy: userId,
         archivedAt: new Date()
       });
 
@@ -836,7 +1037,7 @@ router.post(
         message: 'Chat archived successfully',
       });
     } catch (error) {
-      console.error('Error archiving chat:', error);
+      console.error('Error archiving chat:', error.message);
       res.status(500).json({
         status: 'error',
         message: 'Failed to archive chat'
@@ -851,18 +1052,32 @@ router.post(
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
+      const userId = req.userId;
+
+      if (!checkModels(res)) return;
+
       const { chatId } = req.params;
+
+      if (!chatId) {
+        return res.status(400).json({
+          status: 'error',
+          message: 'Chat ID is required'
+        });
+      }
 
       const chat = await Chat.findOne({
         where: {
           id: chatId,
-          '$participants.id$': req.user.userId,
+          '$participants.id$': userId,
           isArchived: true
         }
       });
 
       if (!chat) {
-        throw new NotFoundError('Chat not found or not archived');
+        return res.status(404).json({
+          status: 'error',
+          message: 'Chat not found or not archived'
+        });
       }
 
       await chat.update({
@@ -876,7 +1091,7 @@ router.post(
         message: 'Chat unarchived successfully',
       });
     } catch (error) {
-      console.error('Error unarchiving chat:', error);
+      console.error('Error unarchiving chat:', error.message);
       res.status(500).json({
         status: 'error',
         message: 'Failed to unarchive chat'
@@ -891,27 +1106,43 @@ router.post(
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
+      const userId = req.userId;
+
+      if (!checkModels(res)) return;
+
       const { chatId } = req.params;
+
+      if (!chatId) {
+        return res.status(400).json({
+          status: 'error',
+          message: 'Chat ID is required'
+        });
+      }
 
       const chat = await Chat.findOne({
         where: {
           id: chatId,
-          '$participants.id$': req.user.userId
+          '$participants.id$': userId
         }
       });
 
       if (!chat) {
-        throw new NotFoundError('Chat not found or access denied');
+        return res.status(404).json({
+          status: 'error',
+          message: 'Chat not found or access denied'
+        });
       }
 
-      await chat.markAsRead(req.user.userId);
+      if (chat.markAsRead) {
+        await chat.markAsRead(userId);
+      }
 
       res.status(200).json({
         status: 'success',
         message: 'Chat marked as read',
       });
     } catch (error) {
-      console.error('Error marking chat as read:', error);
+      console.error('Error marking chat as read:', error.message);
       res.status(500).json({
         status: 'error',
         message: 'Failed to mark chat as read'
@@ -926,12 +1157,23 @@ router.post(
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
+      const userId = req.userId;
+
+      if (!checkModels(res)) return;
+
       const { chatId } = req.params;
+
+      if (!chatId) {
+        return res.status(400).json({
+          status: 'error',
+          message: 'Chat ID is required'
+        });
+      }
 
       const chat = await Chat.findOne({
         where: {
           id: chatId,
-          '$participants.id$': req.user.userId,
+          '$participants.id$': userId,
           chatType: 'group'
         },
         include: [{
@@ -943,34 +1185,40 @@ router.post(
       });
 
       if (!chat) {
-        throw new NotFoundError('Group chat not found or access denied');
+        return res.status(404).json({
+          status: 'error',
+          message: 'Group chat not found or access denied'
+        });
       }
 
-      const isAdmin = chat.admins.some(admin => admin.id === req.user.userId);
+      const isAdmin = chat.admins && chat.admins.some(admin => admin.id === userId);
       if (isAdmin && chat.admins.length === 1) {
-        throw new ValidationError('Cannot leave as the last admin. Promote another admin first.');
+        return res.status(400).json({
+          status: 'error',
+          message: 'Cannot leave as the last admin. Promote another admin first.'
+        });
       }
 
-      await chat.removeParticipant(req.user.userId);
+      await chat.removeParticipant(userId);
 
       if (isAdmin) {
-        await chat.removeAdmin(req.user.userId);
+        await chat.removeAdmin(userId);
       }
 
-      const currentUser = await User.findByPk(req.user.userId);
+      const currentUser = await User.findByPk(userId);
 
-      if (req.io) {
+      if (req.io && currentUser) {
         const remainingUsers = await User.findAll({
           where: { id: chat.participants.map(p => p.id) },
           attributes: ['id', 'socketIds']
         });
 
         remainingUsers.forEach(user => {
-          if (user.socketIds && user.socketIds.length > 0) {
+          if (user.socketIds && Array.isArray(user.socketIds) && user.socketIds.length > 0) {
             user.socketIds.forEach(socketId => {
               req.io.to(socketId).emit('group:left', {
                 chatId: chat.id,
-                userId: req.user.userId,
+                userId: userId,
                 username: currentUser.username,
               });
             });
@@ -983,7 +1231,7 @@ router.post(
         message: 'Left group chat successfully',
       });
     } catch (error) {
-      console.error('Error leaving group chat:', error);
+      console.error('Error leaving group chat:', error.message);
       res.status(500).json({
         status: 'error',
         message: 'Failed to leave group chat'
@@ -998,12 +1246,16 @@ router.get(
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
+      const userId = req.userId;
+
+      if (!checkModels(res)) return;
+
       const { page = 1, limit = 20 } = req.query;
       const offset = (parseInt(page) - 1) * parseInt(limit);
 
       const { count, rows: chats } = await Chat.findAndCountAll({
         where: {
-          '$participants.id$': req.user.userId,
+          '$participants.id$': userId,
           isArchived: true
         },
         include: [
@@ -1012,7 +1264,7 @@ router.get(
             as: 'participants',
             attributes: ['id', 'username', 'avatar', 'displayName'],
             through: { attributes: [] },
-            where: { id: { [sequelize.Op.ne]: req.user.userId } },
+            where: { id: { [Op.ne]: userId } },
             required: false
           },
           {
@@ -1027,11 +1279,11 @@ router.get(
         distinct: true
       });
 
-      const processedChats = chats.map(chat => {
-        const chatObj = chat.toJSON();
+      const processedChats = (chats || []).map(chat => {
+        const chatObj = chat.toJSON ? chat.toJSON() : chat;
 
         if (chatObj.chatType === 'direct') {
-          const otherParticipant = chatObj.participants.find(p => p.id !== req.user.userId);
+          const otherParticipant = (chatObj.participants || []).find(p => p.id !== userId);
           chatObj.otherParticipant = otherParticipant || null;
 
           if (!chatObj.chatName && otherParticipant) {
@@ -1047,15 +1299,15 @@ router.get(
         data: {
           chats: processedChats,
           pagination: {
-            total: count,
+            total: count || 0,
             page: parseInt(page),
             limit: parseInt(limit),
-            pages: Math.ceil(count / parseInt(limit)),
+            pages: count ? Math.ceil(count / parseInt(limit)) : 0,
           },
         },
       });
     } catch (error) {
-      console.error('Error fetching archived chats:', error);
+      console.error('Error fetching archived chats:', error.message);
       res.status(500).json({
         status: 'error',
         message: 'Failed to fetch archived chats'
