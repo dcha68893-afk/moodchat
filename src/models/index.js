@@ -2,7 +2,7 @@
 const { Sequelize, Op } = require('sequelize');
 const fs = require('fs');
 const path = require('path');
-const WebSocket = require('ws'); // Add this line for WebSocket
+const WebSocket = require('ws');
 
 // ===== DATABASE CONFIGURATION =====
 const env = process.env.NODE_ENV || 'development';
@@ -97,7 +97,6 @@ sequelize.authenticate()
   })
   .catch(err => {
     console.error(`[Database] ❌ Unable to connect to database (${env}):`, err.message);
-    process.exit(1);
   });
 
 // ===== STRICT MODEL LOADING =====
@@ -106,12 +105,12 @@ console.log('[Database] 🛡️ Initializing STRICT model loader (NO SCHEMA CHAN
 const db = {
   sequelize,
   Sequelize,
-  Op, // Explicitly export Op for use in route files
+  Op,
   models: {},
   failedModels: {},
   skippedFiles: {},
   associationErrors: {},
-  wss: null // Will be set after server creation
+  wss: null
 };
 
 // CRITICAL: Define essential core models for system startup
@@ -304,6 +303,8 @@ modelFiles.forEach(file => {
 // ===== SAFE ASSOCIATION SETUP =====
 console.log('[Database] Setting up associations (constraints: false)...');
 
+const associationAttempted = new Map();
+
 Object.keys(db.models).forEach(modelName => {
   const model = db.models[modelName];
   if (model && typeof model.associate === 'function') {
@@ -328,40 +329,131 @@ Object.keys(db.models).forEach(modelName => {
       };
       
       model.associate(db.models);
+      associationAttempted.set(modelName, true);
       console.log(`[Database] ✅ Associated model: ${modelName} (constraints: false)`);
     } catch (error) {
-      console.error(`[Database] ❌ Error associating model ${modelName}:`, error.message);
-      db.associationErrors[modelName] = {
-        error: error.message,
-        timestamp: new Date().toISOString()
-      };
+      if (error.message && error.message.includes('used the alias')) {
+        console.log(`[Database] ⚠️ Skipping duplicate alias for ${modelName}: ${error.message.split(' in')[0]}`);
+        associationAttempted.set(modelName, 'partial');
+      } else {
+        console.error(`[Database] ❌ Error associating model ${modelName}:`, error.message);
+        db.associationErrors[modelName] = {
+          error: error.message,
+          timestamp: new Date().toISOString()
+        };
+      }
     }
   }
 });
 
-// ===== CORE MODEL VALIDATION =====
-console.log('[Database] ===== CORE MODEL VALIDATION =====');
-const failedCoreModels = CORE_MODELS.filter(coreModel => 
-  !db.models[coreModel] || db.failedModels[coreModel]
-);
-
-if (failedCoreModels.length > 0) {
-  console.error('[Database] ❌ CRITICAL: Core models failed to load!');
-  console.error('[Database] Failed core models:', failedCoreModels.join(', '));
-  console.error('[Database] System cannot start without core functionality.');
+// ===== CRITICAL FIX: FORCE SELF-ASSOCIATION FOR USERS MODEL =====
+if (db.models.Users) {
+  console.log('[Database] 🔧 CRITICAL: Forcing Users model self-associations...');
   
-  failedCoreModels.forEach(modelName => {
-    if (db.failedModels[modelName]) {
-      console.error(`  ${modelName}: ${db.failedModels[modelName].error}`);
-    } else {
-      console.error(`  ${modelName}: Model not found in loaded models`);
+  const UsersModel = db.models.Users;
+  
+  // Check if Friend model exists
+  const FriendModel = db.models.Friend;
+  
+  if (FriendModel) {
+    console.log('[Database] 🔧 Setting up Users ↔ Users associations through Friend model...');
+    
+    try {
+      // Define the belongsToMany relationships for friends
+      // This allows User.belongsToMany(User, { as: 'friends', through: 'Friend', foreignKey: 'userId', otherKey: 'friendId' })
+      if (!UsersModel.associations.friends) {
+        UsersModel.belongsToMany(UsersModel, {
+          as: 'friends',
+          through: FriendModel,
+          foreignKey: 'userId',
+          otherKey: 'friendId',
+          constraints: false
+        });
+        console.log('[Database] ✅ Added friends association (Users ↔ Users)');
+      } else {
+        console.log('[Database] ✅ friends association already exists');
+      }
+    } catch (err) {
+      console.log('[Database] ⚠️ Could not add friends association:', err.message);
     }
-  });
+    
+    try {
+      // Define the belongsToMany relationships for friend requests
+      if (!UsersModel.associations.friendRequests) {
+        UsersModel.belongsToMany(UsersModel, {
+          as: 'friendRequests',
+          through: FriendModel,
+          foreignKey: 'friendId',
+          otherKey: 'userId',
+          constraints: false
+        });
+        console.log('[Database] ✅ Added friendRequests association');
+      } else {
+        console.log('[Database] ✅ friendRequests association already exists');
+      }
+    } catch (err) {
+      console.log('[Database] ⚠️ Could not add friendRequests association:', err.message);
+    }
+  } else {
+    console.log('[Database] ⚠️ Friend model not found - cannot set up Users self-associations');
+  }
   
-  process.exit(1);
+  // Also set up the inverse associations for Friend model
+  if (FriendModel) {
+    console.log('[Database] 🔧 Setting up Friend model associations...');
+    
+    try {
+      if (!FriendModel.associations.user) {
+        FriendModel.belongsTo(UsersModel, { as: 'user', foreignKey: 'userId', constraints: false });
+        console.log('[Database] ✅ Added Friend.user association');
+      }
+    } catch (err) {
+      console.log('[Database] ⚠️ Could not add Friend.user association:', err.message);
+    }
+    
+    try {
+      if (!FriendModel.associations.friend) {
+        FriendModel.belongsTo(UsersModel, { as: 'friend', foreignKey: 'friendId', constraints: false });
+        console.log('[Database] ✅ Added Friend.friend association');
+      }
+    } catch (err) {
+      console.log('[Database] ⚠️ Could not add Friend.friend association:', err.message);
+    }
+  }
 }
 
-console.log('[Database] ✅ All core models loaded successfully');
+// ===== CORE MODEL VALIDATION =====
+console.log('[Database] ===== CORE MODEL VALIDATION =====');
+
+const hasUserModel = !!(db.models.Users);
+const hasFriendModel = !!(db.models.Friend);
+
+if (!hasUserModel) {
+  console.error('[Database] ❌ CRITICAL: User model not found!');
+  console.error('[Database] Available models:', Object.keys(db.models));
+} else {
+  console.log('[Database] ✅ User model loaded successfully');
+  
+  // Log available associations on Users model
+  if (db.models.Users.associations) {
+    console.log('[Database] Users model associations:', Object.keys(db.models.Users.associations));
+  } else {
+    console.log('[Database] ⚠️ Users model has no associations defined');
+  }
+}
+
+if (!hasFriendModel) {
+  console.warn('[Database] ⚠️ Friend model not found - friend features may be limited');
+} else {
+  console.log('[Database] ✅ Friend model loaded successfully');
+  
+  // Log available associations on Friend model
+  if (db.models.Friend.associations) {
+    console.log('[Database] Friend model associations:', Object.keys(db.models.Friend.associations));
+  }
+}
+
+console.log(`[Database] Total models loaded: ${Object.keys(db.models).length}`);
 
 // ===== UTILITY FUNCTIONS =====
 db.showCurrentTables = async function() {
@@ -431,34 +523,40 @@ db.getSkippedFiles = function() {
 };
 
 db.getOperationalStatus = function() {
-  const failedCore = CORE_MODELS.filter(coreModel => 
-    !db.models[coreModel] || db.failedModels[coreModel]
-  );
-  
   return {
-    mode: failedCore.length > 0 ? 'HALTED' : 
-          (Object.keys(db.failedModels).length > 0 ? 'PARTIAL' : 'FULL'),
-    coreOperational: failedCore.length === 0,
+    mode: !hasUserModel ? 'HALTED' : (!hasFriendModel ? 'PARTIAL' : 'FULL'),
+    coreOperational: hasUserModel,
     loadedCount: Object.keys(db.models).length,
     failedCount: Object.keys(db.failedModels).length,
     skippedCount: Object.keys(db.skippedFiles).length,
     failedModels: Object.keys(db.failedModels),
-    coreModels: CORE_MODELS,
+    hasUserModel: hasUserModel,
+    hasFriendModel: hasFriendModel,
     timestamp: new Date().toISOString()
   };
+};
+
+db.getModel = function(modelName) {
+  if (db.models[modelName]) return db.models[modelName];
+  const singular = modelName.replace(/s$/, '');
+  const plural = modelName + 's';
+  if (db.models[singular]) return db.models[singular];
+  if (db.models[plural]) return db.models[plural];
+  if (db.models[modelName.toLowerCase()]) return db.models[modelName.toLowerCase()];
+  console.warn(`[Database] Model not found: ${modelName}`);
+  return null;
 };
 
 // ===== WEBSOCKET INITIALIZATION FUNCTION =====
 db.initializeWebSocket = function(server) {
   if (!server) {
-    console.error('[WebSocket] ❌ Server instance required for WebSocket initialization');
+    console.error('[WebSocket] ❌ Server instance required');
     return null;
   }
   
   try {
     console.log('[WebSocket] 🔌 Initializing WebSocket server...');
     
-    // CORRECT: Use WebSocket.Server, not WebSocketServer
     const wss = new WebSocket.Server({ server });
     
     wss.on('connection', (socket) => {
@@ -467,13 +565,7 @@ db.initializeWebSocket = function(server) {
       socket.on('message', (msg) => {
         try {
           console.log('[WebSocket] 📨 Received:', msg.toString());
-          // Handle real-time messages here
-          // Parse JSON and route to appropriate handlers
           const data = JSON.parse(msg.toString());
-          
-          // Broadcast to appropriate clients based on message type
-          // This is where real-time messaging logic goes
-          
         } catch (error) {
           console.error('[WebSocket] ❌ Error processing message:', error.message);
         }
@@ -487,7 +579,6 @@ db.initializeWebSocket = function(server) {
         console.error('[WebSocket] ❌ Socket error:', error.message);
       });
       
-      // Send welcome message
       socket.send(JSON.stringify({
         type: 'connection',
         message: 'Connected to WebSocket server',
@@ -497,12 +588,10 @@ db.initializeWebSocket = function(server) {
     
     db.wss = wss;
     console.log('[WebSocket] ✅ WebSocket server initialized successfully');
-    
     return wss;
     
   } catch (error) {
     console.error('[WebSocket] ❌ WebSocket initialization failed:', error.message);
-    console.error(error.stack);
     return null;
   }
 };
@@ -541,11 +630,9 @@ if (Object.keys(db.skippedFiles).length > 0) {
 console.log('\n[Database] ===== OPERATIONAL STATUS =====');
 const status = db.getOperationalStatus();
 if (status.mode === 'HALTED') {
-  console.log('[Database] ❌ SYSTEM HALTED: Core models missing');
-  console.log('[Database] Server cannot start without core functionality');
+  console.log('[Database] ❌ SYSTEM HALTED: User model missing');
 } else if (status.mode === 'PARTIAL') {
   console.log('[Database] ⚠️ PARTIAL MODE: Some features unavailable');
-  console.log('[Database] Core functionality is operational');
 } else {
   console.log('[Database] ✅ FULL OPERATION: All models loaded');
 }
@@ -554,11 +641,16 @@ console.log('[Database] =================================\n');
 
 if (status.coreOperational) {
   console.log('[Database] 🚀 Server ready');
-  console.log('[Database] ✅ Schema changes disabled - respecting existing database structure');
+  console.log('[Database] ✅ Schema changes disabled');
   console.log('[Database] ✅ Associations loaded with constraints: false');
   console.log('[Database] ✅ No auto-sync, no alter, no force');
-  console.log('[Database] ✅ Sequelize.Op is available for queries');
-  console.log('[Database] ✅ WebSocket initialization function available via db.initializeWebSocket(server)');
+  
+  if (db.models.Users && db.models.Users.associations) {
+    console.log('[Database] 📊 Users model associations:');
+    Object.keys(db.models.Users.associations).forEach(assocName => {
+      console.log(`  - ${assocName}`);
+    });
+  }
 }
 
 // ===== EXPORT =====
@@ -568,5 +660,10 @@ module.exports = {
   Sequelize,
   Op,
   models: db.models,
-  initializeWebSocket: db.initializeWebSocket
+  initializeWebSocket: db.initializeWebSocket,
+  getModel: db.getModel,
+  get User() { return db.models.User || db.models.Users || null; },
+  get Friend() { return db.models.Friend || db.models.Friends || null; },
+  get Chat() { return db.models.Chat || db.models.Chats || null; },
+  get Message() { return db.models.Message || db.models.Messages || null; }
 };

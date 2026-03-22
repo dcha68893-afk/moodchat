@@ -1067,48 +1067,48 @@ class ProfessionalLogger {
     
     // Table display methods
     table(title, headers, rows, options = {}) {
-  if (process.env.NODE_ENV === 'production' && options.hideInProduction) return;
-  
-  // Ensure rows is an array
-  if (!rows || !Array.isArray(rows)) {
-    console.log(`${this.colors.yellow}⚠ Cannot display table: rows is not an array${this.colors.reset}`);
-    return;
-  }
-  
-  console.log(`\n${this.colors.blue}${title}${this.colors.reset}`);
-  console.log(`${this.colors.blue}${'─'.repeat(80)}${this.colors.reset}`);
-  
-  // Headers
-  let headerStr = '';
-  headers.forEach((header, i) => {
-    const width = options.columnWidths?.[i] || 20;
-    headerStr += header.padEnd(width) + '  ';
-  });
-  console.log(`${this.colors.cyan}${headerStr}${this.colors.reset}`);
-  console.log(`${this.colors.blue}${'─'.repeat(80)}${this.colors.reset}`);
-  
-  // Rows - with safe iteration
-  try {
-    rows.forEach(row => {
-      // Ensure row is an array
-      if (!Array.isArray(row)) {
-        console.log(`${this.colors.yellow}⚠ Skipping invalid row: ${JSON.stringify(row)}${this.colors.reset}`);
-        return;
-      }
-      
-      let rowStr = '';
-      row.forEach((cell, i) => {
-        const width = options.columnWidths?.[i] || 20;
-        const cellText = String(cell || '').substring(0, width);
-        const color = this.getCellColor(cell, i, headers[i]);
-        rowStr += color + cellText.padEnd(width) + this.colors.reset + '  ';
-      });
-      console.log(rowStr);
-    });
-  } catch (error) {
-    console.log(`${this.colors.yellow}⚠ Error displaying table: ${error.message}${this.colors.reset}`);
-  }
-}
+        if (process.env.NODE_ENV === 'production' && options.hideInProduction) return;
+        
+        // Ensure rows is an array
+        if (!rows || !Array.isArray(rows)) {
+            console.log(`${this.colors.yellow}⚠ Cannot display table: rows is not an array${this.colors.reset}`);
+            return;
+        }
+        
+        console.log(`\n${this.colors.blue}${title}${this.colors.reset}`);
+        console.log(`${this.colors.blue}${'─'.repeat(80)}${this.colors.reset}`);
+        
+        // Headers
+        let headerStr = '';
+        headers.forEach((header, i) => {
+            const width = options.columnWidths?.[i] || 20;
+            headerStr += header.padEnd(width) + '  ';
+        });
+        console.log(`${this.colors.cyan}${headerStr}${this.colors.reset}`);
+        console.log(`${this.colors.blue}${'─'.repeat(80)}${this.colors.reset}`);
+        
+        // Rows - with safe iteration
+        try {
+            rows.forEach(row => {
+                // Ensure row is an array
+                if (!Array.isArray(row)) {
+                    console.log(`${this.colors.yellow}⚠ Skipping invalid row: ${JSON.stringify(row)}${this.colors.reset}`);
+                    return;
+                }
+                
+                let rowStr = '';
+                row.forEach((cell, i) => {
+                    const width = options.columnWidths?.[i] || 20;
+                    const cellText = String(cell || '').substring(0, width);
+                    const color = this.getCellColor(cell, i, headers[i]);
+                    rowStr += color + cellText.padEnd(width) + this.colors.reset + '  ';
+                });
+                console.log(rowStr);
+            });
+        } catch (error) {
+            console.log(`${this.colors.yellow}⚠ Error displaying table: ${error.message}${this.colors.reset}`);
+        }
+    }
     
     getCellColor(cell, index, header) {
         if (typeof cell === 'string') {
@@ -1145,34 +1145,34 @@ class ProfessionalLogger {
         this.table('STARTUP REPORT', ['Component', 'Status', 'Health'], rows);
     }
     
-displaySystemHealth() {
-  const services = [];
-  const connections = [];
-  
-  // Gather service states - ensure each is an array
-  for (const [name, service] of systemState.state.services.entries()) {
-    services.push([
-      name || 'Unknown',
-      service.healthy ? 'OK' : (service.degraded ? 'DEGRADED' : 'FAILED'),
-      service.status || 'Unknown',
-      service.details?.notes || ''
-    ]);
-  }
-  
-  // Gather connection states - ensure each is an array
-  for (const [name, conn] of systemState.state.connections.entries()) {
-    connections.push([
-      name || 'Unknown',
-      conn.connected ? 'CONNECTED' : (conn.degraded ? 'DEGRADED' : 'DISCONNECTED'),
-      conn.status || 'Unknown',
-      conn.details?.reason || ''
-    ]);
-  }
-  
-  // Display system health
-  this.table('SYSTEM HEALTH', ['Component', 'State', 'Mode', 'Notes'], 
-    [...services, ...connections]);
-}
+    displaySystemHealth() {
+        const services = [];
+        const connections = [];
+        
+        // Gather service states - ensure each is an array
+        for (const [name, service] of systemState.state.services.entries()) {
+            services.push([
+                name || 'Unknown',
+                service.healthy ? 'OK' : (service.degraded ? 'DEGRADED' : 'FAILED'),
+                service.status || 'Unknown',
+                service.details?.notes || ''
+            ]);
+        }
+        
+        // Gather connection states - ensure each is an array
+        for (const [name, conn] of systemState.state.connections.entries()) {
+            connections.push([
+                name || 'Unknown',
+                conn.connected ? 'CONNECTED' : (conn.degraded ? 'DEGRADED' : 'DISCONNECTED'),
+                conn.status || 'Unknown',
+                conn.details?.reason || ''
+            ]);
+        }
+        
+        // Display system health
+        this.table('SYSTEM HEALTH', ['Component', 'State', 'Mode', 'Notes'], 
+            [...services, ...connections]);
+    }
     
     displayRoutes() {
         const publicRoutes = [];
@@ -2717,9 +2717,15 @@ class AuthMiddlewareManager {
         }
         
         // Extract token (split on space and take second part)
-        const token = authHeader.split(" ")[1];
+        const parts = authHeader.split(" ");
+        if (parts.length !== 2) {
+            logger.debug('Invalid authorization header structure', 'AUTH');
+            return null;
+        }
         
-        if (!token || token.length === 0) {
+        const token = parts[1];
+        
+        if (!token || token.length === 0 || token.trim() === '') {
             logger.debug('Empty token in authorization header', 'AUTH');
             return null;
         }
@@ -2754,6 +2760,7 @@ class AuthMiddlewareManager {
             if (!token) {
                 logger.logAuthFailure(path, req.method, 'Missing or invalid authorization header');
                 systemState.incrementMetric('authFailures');
+                // CRITICAL: Ensure return to prevent double response
                 return res.status(401).json({
                     success: false,
                     message: 'Authorization header required for protected route',
@@ -2767,6 +2774,7 @@ class AuthMiddlewareManager {
                 if (!result.success) {
                     logger.logAuthFailure(path, req.method, result.message || 'Invalid or expired token');
                     systemState.incrementMetric('authFailures');
+                    // CRITICAL: Ensure return to prevent double response
                     return res.status(401).json({
                         success: false,
                         message: result.message || 'Invalid or expired token',
@@ -2782,10 +2790,11 @@ class AuthMiddlewareManager {
                 systemState.incrementMetric('protectedRouteAccess');
                 systemState.incrementMetric('authSuccesses');
                 
-                next();
+                return next();
             } catch (error) {
                 logger.logAuthFailure(path, req.method, 'Token verification error: ' + error.message);
                 systemState.incrementMetric('authFailures');
+                // CRITICAL: Ensure return to prevent double response
                 return res.status(401).json({
                     success: false,
                     message: 'Invalid or expired token',
@@ -4163,7 +4172,7 @@ class Application {
         this.app.get('/', (req, res) => {
             logger.logPublicRouteAccess(req.path, req.method);
             systemState.incrementMetric('publicRouteAccess');
-            res.json({
+            return res.json({
                 success: true,
                 message: 'MoodChat API Server',
                 version: config.get('API_VERSION'),
@@ -4198,9 +4207,9 @@ class Application {
             const health = systemState.getHealth();
             
             if (health.ready) {
-                res.json(health);
+                return res.json(health);
             } else {
-                res.status(503).json({
+                return res.status(503).json({
                     success: false,
                     message: 'Service unavailable',
                     code: 'SERVICE_UNAVAILABLE',
@@ -4215,7 +4224,7 @@ class Application {
             systemState.incrementMetric('publicRouteAccess');
             const isReady = systemState.isServerReady();
             
-            res.json({
+            return res.json({
                 success: true,
                 status: isReady ? 'operational' : 'degraded',
                 timestamp: new Date().toISOString(),
@@ -4254,7 +4263,7 @@ class Application {
             const isReady = systemState.isServerReady();
             const overallState = systemState.state.overall;
             
-            res.json({
+            return res.json({
                 success: true,
                 server: config.get('APP_NAME'),
                 status: overallState.toLowerCase(),
@@ -4286,7 +4295,7 @@ class Application {
         this.app.get('/api/info', (req, res) => {
             logger.logPublicRouteAccess(req.path, req.method);
             systemState.incrementMetric('publicRouteAccess');
-            res.json({
+            return res.json({
                 success: true,
                 app: config.get('APP_NAME'),
                 version: config.get('API_VERSION'),
@@ -4322,7 +4331,7 @@ class Application {
             const origin = req.headers.origin;
             const isAllowed = origin ? corsManager.isOriginAllowed(origin) : null;
             
-            res.json({
+            return res.json({
                 success: true,
                 origin: origin,
                 allowed: isAllowed,
@@ -4493,7 +4502,7 @@ class Application {
 </body>
 </html>
                 `;
-                res.send(html);
+                return res.send(html);
             });
             console.log('✅ WebSocket test page available at /ws-test.html');
         }
@@ -4505,9 +4514,9 @@ class Application {
             const isReady = systemState.isServerReady();
             
             if (isReady) {
-                res.status(200).json({ ready: true });
+                return res.status(200).json({ ready: true });
             } else {
-                res.status(503).json({ 
+                return res.status(503).json({ 
                     success: false,
                     ready: false,
                     message: 'Service not ready',
@@ -4520,7 +4529,7 @@ class Application {
         this.app.get('/live', (req, res) => {
             logger.logPublicRouteAccess(req.path, req.method);
             systemState.incrementMetric('publicRouteAccess');
-            res.status(200).json({ live: true });
+            return res.status(200).json({ live: true });
         });
         
         console.log('✅ Health endpoints setup complete with proper public access');
@@ -4529,8 +4538,12 @@ class Application {
     setupErrorHandling() {
         // 404 handler
         this.app.use((req, res) => {
+            // CRITICAL: Ensure no response already sent
+            if (res.headersSent) {
+                return;
+            }
             systemState.incrementMetric('errors');
-            res.status(404).json({
+            return res.status(404).json({
                 success: false,
                 message: `Route not found: ${req.method} ${req.path}`,
                 code: 'ROUTE_NOT_FOUND',
@@ -4540,8 +4553,14 @@ class Application {
             });
         });
         
-        // Global error handler
+        // Global error handler - MUST BE LAST
         this.app.use((err, req, res, next) => {
+            // CRITICAL: Check if headers already sent
+            if (res.headersSent) {
+                console.error('Error after headers sent:', err.message);
+                return next(err);
+            }
+            
             systemState.incrementMetric('errors');
             
             if (config.get('NODE_ENV') !== 'production') {
@@ -4554,7 +4573,7 @@ class Application {
             const message = status === 500 ? 'Internal server error' : err.message;
             const code = err.code || (status === 500 ? 'INTERNAL_SERVER_ERROR' : 'HTTP_ERROR');
             
-            res.status(status).json({
+            return res.status(status).json({
                 success: false,
                 message: message,
                 code: code,

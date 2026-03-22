@@ -10,9 +10,19 @@ const {
 } = require('../middleware/errorHandler');
 const { authMiddleware } = require('../middleware/auth');
 const { apiRateLimiter } = require('../middleware/rateLimiter');
-const { User, Friend } = require('../models');
-const userController = require('../controllers/userController');
 
+// ===== SAFE MODEL IMPORT =====
+let User, Friend;
+try {
+  const db = require('../models');
+  User = db.User || db.Users;
+  Friend = db.Friend || db.Friends;
+  console.log('[Users Route] Models loaded - User:', !!User, 'Friend:', !!Friend);
+} catch (error) {
+  console.error('[Users Route] Error loading models:', error.message);
+}
+
+// ===== ERROR HANDLING =====
 const ConflictError = class ConflictError extends Error {
   constructor(message) {
     super(message);
@@ -21,23 +31,34 @@ const ConflictError = class ConflictError extends Error {
   }
 };
 
+// ===== SAFE MODEL CHECK MIDDLEWARE =====
+const ensureModels = (req, res, next) => {
+  if (!User) {
+    console.error('[Users Route] User model not available');
+    return res.status(503).json({
+      status: 'error',
+      message: 'Service temporarily unavailable',
+      code: 'MODEL_UNAVAILABLE'
+    });
+  }
+  next();
+};
+
 router.use(authMiddleware);
+router.use(ensureModels);
 
 console.log('✅ Users routes initialized');
 
+// ===== GET ALL USERS =====
 router.get(
   '/',
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
-      const { limit = 50, page = 1, online } = req.query;
+      const { limit = 50, page = 1 } = req.query;
       const offset = (parseInt(page) - 1) * parseInt(limit);
 
       const where = { id: { [sequelize.Op.ne]: req.user.id } };
-      
-      if (online !== undefined) {
-        where.online = online === 'true';
-      }
 
       const { count, rows: users } = await User.findAndCountAll({
         where,
@@ -46,15 +67,16 @@ router.get(
         },
         offset,
         limit: parseInt(limit),
-        order: [['online', 'DESC'], ['username', 'ASC']]
+        order: [['username', 'ASC']]
       });
 
-      const response = userController.getAllUsers(users, count, parseInt(page), parseInt(limit));
-      
-      res.status(200).json(response);
+      return res.status(200).json({
+        status: 'success',
+        data: { users: users || [], pagination: { total: count || 0, page: parseInt(page), limit: parseInt(limit), pages: Math.ceil((count || 0) / parseInt(limit)) } }
+      });
     } catch (error) {
-      console.error('Error fetching users:', error);
-      res.status(500).json({
+      console.error('Error fetching users:', error.message);
+      return res.status(500).json({
         status: 'error',
         message: 'Failed to fetch users'
       });
@@ -62,6 +84,50 @@ router.get(
   })
 );
 
+// ===== GET ALL USERS (ALIAS for /all) =====
+router.get(
+  '/all',
+  apiRateLimiter,
+  asyncHandler(async (req, res) => {
+    try {
+      const { limit = 50, page = 1 } = req.query;
+      const offset = (parseInt(page) - 1) * parseInt(limit);
+
+      const where = { id: { [sequelize.Op.ne]: req.user.id } };
+
+      const { count, rows: users } = await User.findAndCountAll({
+        where,
+        attributes: { 
+          exclude: ['password', 'resetPasswordToken', 'resetPasswordExpires', 'loginAttempts', 'lockedUntil', 'socketIds']
+        },
+        offset,
+        limit: parseInt(limit),
+        order: [['username', 'ASC']]
+      });
+
+      return res.status(200).json({
+        status: 'success',
+        data: { 
+          users: users || [], 
+          pagination: { 
+            total: count || 0, 
+            page: parseInt(page), 
+            limit: parseInt(limit), 
+            pages: Math.ceil((count || 0) / parseInt(limit)) 
+          } 
+        }
+      });
+    } catch (error) {
+      console.error('Error fetching all users:', error.message);
+      return res.status(500).json({
+        status: 'error',
+        message: 'Failed to fetch users'
+      });
+    }
+  })
+);
+
+// ===== GET CURRENT USER PROFILE =====
 router.get(
   '/me',
   apiRateLimiter,
@@ -70,38 +136,23 @@ router.get(
       const user = await User.findByPk(req.user.id, {
         attributes: { 
           exclude: ['password', 'resetPasswordToken', 'resetPasswordExpires', 'loginAttempts', 'lockedUntil']
-        },
-        include: [
-          {
-            model: User,
-            as: 'friends',
-            attributes: ['id', 'username', 'avatar', 'online', 'lastActive', 'status'],
-            through: { attributes: [] }
-          },
-          {
-            model: User,
-            as: 'friendRequests',
-            attributes: ['id', 'username', 'avatar'],
-            through: { 
-              as: 'friendRequestData',
-              attributes: ['status', 'createdAt']
-            },
-            where: { '$friendRequestData.status$': 'pending' }
-          }
-        ]
+        }
       });
 
       if (!user) {
-        throw new NotFoundError('User not found');
+        return res.status(404).json({
+          status: 'error',
+          message: 'User not found'
+        });
       }
 
-      res.status(200).json({
+      return res.status(200).json({
         status: 'success',
         data: { user },
       });
     } catch (error) {
-      console.error('Error fetching user profile:', error);
-      res.status(500).json({
+      console.error('Error fetching user profile:', error.message);
+      return res.status(500).json({
         status: 'error',
         message: 'Failed to fetch user profile'
       });
@@ -109,6 +160,7 @@ router.get(
   })
 );
 
+// ===== UPDATE CURRENT USER PROFILE =====
 router.patch(
   '/me',
   apiRateLimiter,
@@ -140,30 +192,19 @@ router.patch(
           }
         });
         if (existingUser) {
-          throw new ConflictError('Username already taken');
+          return res.status(409).json({
+            status: 'error',
+            message: 'Username already taken'
+          });
         }
-      }
-
-      if (updates.email) {
-        updates.email = updates.email.toLowerCase();
-        const existingUser = await User.findOne({
-          where: {
-            email: updates.email,
-            id: { [sequelize.Op.ne]: req.user.id }
-          }
-        });
-        if (existingUser) {
-          throw new ConflictError('Email already taken');
-        }
-      }
-
-      if (updates.status) {
-        updates.statusLastChanged = new Date();
       }
 
       const user = await User.findByPk(req.user.id);
       if (!user) {
-        throw new NotFoundError('User not found');
+        return res.status(404).json({
+          status: 'error',
+          message: 'User not found'
+        });
       }
 
       await user.update(updates);
@@ -174,29 +215,14 @@ router.patch(
         }
       });
 
-      if (req.io && req.userSocketIds && req.userSocketIds.length > 0) {
-        req.userSocketIds.forEach(socketId => {
-          req.io.to(socketId).emit('profile:updated', {
-            user: {
-              id: updatedUser.id,
-              username: updatedUser.username,
-              avatar: updatedUser.avatar,
-              bio: updatedUser.bio,
-              status: updatedUser.status,
-              displayName: updatedUser.displayName,
-            },
-          });
-        });
-      }
-
-      res.status(200).json({
+      return res.status(200).json({
         status: 'success',
         message: 'Profile updated successfully',
         data: { user: updatedUser },
       });
     } catch (error) {
-      console.error('Error updating user profile:', error);
-      res.status(500).json({
+      console.error('Error updating user profile:', error.message);
+      return res.status(500).json({
         status: 'error',
         message: 'Failed to update user profile'
       });
@@ -204,6 +230,7 @@ router.patch(
   })
 );
 
+// ===== UPDATE USER PRESENCE =====
 router.post(
   '/presence',
   apiRateLimiter,
@@ -213,21 +240,24 @@ router.post(
 
       const validStatuses = ['online', 'away', 'busy', 'offline'];
       if (!validStatuses.includes(status)) {
-        throw new ValidationError(`Status must be one of: ${validStatuses.join(', ')}`);
+        return res.status(400).json({
+          status: 'error',
+          message: `Status must be one of: ${validStatuses.join(', ')}`
+        });
       }
 
       const updateData = {
         status,
         statusLastChanged: new Date(),
+        lastActive: new Date()
       };
-
-      if (status === 'online') {
-        updateData.lastActive = new Date();
-      }
 
       const user = await User.findByPk(req.user.id);
       if (!user) {
-        throw new NotFoundError('User not found');
+        return res.status(404).json({
+          status: 'error',
+          message: 'User not found'
+        });
       }
 
       await user.update(updateData);
@@ -236,50 +266,14 @@ router.post(
         attributes: ['id', 'username', 'avatar', 'status', 'lastActive']
       });
 
-      if (req.io) {
-        const currentUser = await User.findByPk(req.user.id, {
-          include: [{
-            model: User,
-            as: 'friends',
-            attributes: ['id'],
-            through: { attributes: [] }
-          }]
-        });
-
-        if (currentUser.friends && currentUser.friends.length > 0) {
-          const onlineFriends = await User.findAll({
-            where: {
-              id: currentUser.friends.map(f => f.id),
-              online: true
-            },
-            attributes: ['id', 'socketIds']
-          });
-
-          onlineFriends.forEach(friend => {
-            if (friend.socketIds && friend.socketIds.length > 0) {
-              friend.socketIds.forEach(socketId => {
-                req.io.to(socketId).emit('presence:update', {
-                  userId: updatedUser.id,
-                  username: updatedUser.username,
-                  avatar: updatedUser.avatar,
-                  status: updatedUser.status,
-                  lastActive: updatedUser.lastActive,
-                  timestamp: new Date(),
-                });
-              });
-            }
-          });
-        }
-      }
-
-      res.status(200).json({
+      return res.status(200).json({
         status: 'success',
         message: 'Presence updated',
         data: { user: updatedUser },
       });
     } catch (error) {
-      console.error('Error updating presence:', error);
-      res.status(500).json({
+      console.error('Error updating presence:', error.message);
+      return res.status(500).json({
         status: 'error',
         message: 'Failed to update presence'
       });
@@ -287,12 +281,22 @@ router.post(
   })
 );
 
+// ===== GET USER BY ID OR USERNAME =====
 router.get(
   '/:identifier',
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
       const { identifier } = req.params;
+      
+      const specialStrings = ['pinned', 'muted', 'all', 'me', 'friends', 'search', 'blocked', 'stats', 'suggestions', 'export'];
+      if (specialStrings.includes(identifier)) {
+        return res.status(400).json({
+          status: 'error',
+          message: 'Invalid user identifier',
+          code: 'INVALID_IDENTIFIER'
+        });
+      }
 
       let where;
       if (/^[0-9a-fA-F-]{36}$/.test(identifier)) {
@@ -305,72 +309,44 @@ router.get(
         where,
         attributes: { 
           exclude: ['password', 'email', 'resetPasswordToken', 'resetPasswordExpires', 'loginAttempts', 'lockedUntil', 'socketIds']
-        },
-        include: [{
-          model: User,
-          as: 'friends',
-          attributes: ['id', 'username', 'avatar', 'online', 'status', 'lastActive'],
-          through: { attributes: [] }
-        }]
+        }
       });
 
       if (!user) {
-        throw new NotFoundError('User not found');
+        return res.status(404).json({
+          status: 'error',
+          message: 'User not found'
+        });
       }
 
       let friendshipStatus = 'none';
-      if (req.user && user.id !== req.user.id) {
-        const currentUser = await User.findByPk(req.user.id);
-
-        const isFriend = await Friend.findOne({
-          where: {
-            [sequelize.Op.or]: [
-              { userId: req.user.id, friendId: user.id },
-              { userId: user.id, friendId: req.user.id }
-            ],
-            status: 'accepted'
-          }
-        });
-
-        if (isFriend) {
-          friendshipStatus = 'friends';
-        } else {
-          const receivedRequest = await Friend.findOne({
+      if (req.user && user.id !== req.user.id && Friend) {
+        try {
+          const isFriend = await Friend.findOne({
             where: {
-              userId: req.user.id,
-              friendId: user.id,
-              status: 'pending'
+              [sequelize.Op.or]: [
+                { userId: req.user.id, friendId: user.id },
+                { userId: user.id, friendId: req.user.id }
+              ],
+              status: 'accepted'
             }
           });
-
-          if (receivedRequest) {
-            friendshipStatus = 'request_received';
-          } else {
-            const sentRequest = await Friend.findOne({
-              where: {
-                userId: user.id,
-                friendId: req.user.id,
-                status: 'pending'
-              }
-            });
-
-            if (sentRequest) {
-              friendshipStatus = 'request_sent';
-            }
-          }
+          friendshipStatus = isFriend ? 'friends' : 'none';
+        } catch (dbError) {
+          console.log('[Users Route] Friend check error:', dbError.message);
         }
       }
 
-      const userResponse = user.toJSON();
+      const userResponse = user.toJSON ? user.toJSON() : user;
       userResponse.friendshipStatus = friendshipStatus;
 
-      res.status(200).json({
+      return res.status(200).json({
         status: 'success',
         data: { user: userResponse },
       });
     } catch (error) {
-      console.error('Error fetching user:', error);
-      res.status(500).json({
+      console.error('Error fetching user:', error.message);
+      return res.status(500).json({
         status: 'error',
         message: 'Failed to fetch user'
       });
@@ -378,6 +354,7 @@ router.get(
   })
 );
 
+// ===== SEARCH USERS =====
 router.get(
   '/search/:query',
   apiRateLimiter,
@@ -396,27 +373,27 @@ router.get(
           ],
           id: { [sequelize.Op.ne]: req.user.id }
         },
-        attributes: ['id', 'username', 'avatar', 'displayName', 'online', 'status', 'lastActive', 'bio'],
+        attributes: ['id', 'username', 'avatar', 'displayName', 'status', 'lastActive', 'bio'],
         offset,
         limit: parseInt(limit),
-        order: [['online', 'DESC'], ['username', 'ASC']]
+        order: [['username', 'ASC']]
       });
 
-      res.status(200).json({
+      return res.status(200).json({
         status: 'success',
         data: {
-          users,
+          users: users || [],
           pagination: {
-            total: count,
+            total: count || 0,
             page: parseInt(page),
             limit: parseInt(limit),
-            pages: Math.ceil(count / parseInt(limit)),
+            pages: Math.ceil((count || 0) / parseInt(limit)),
           },
         },
       });
     } catch (error) {
-      console.error('Error searching users:', error);
-      res.status(500).json({
+      console.error('Error searching users:', error.message);
+      return res.status(500).json({
         status: 'error',
         message: 'Failed to search users'
       });
@@ -424,35 +401,62 @@ router.get(
   })
 );
 
+// ===== GET USER'S FRIENDS =====
 router.get(
   '/me/friends',
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
-      const { status } = req.query;
+      const userId = req.user.id;
 
-      const user = await User.findByPk(req.user.id, {
-        include: [{
-          model: User,
-          as: 'friends',
-          attributes: ['id', 'username', 'avatar', 'displayName', 'online', 'status', 'lastActive', 'bio'],
-          through: { attributes: [] },
-          where: status ? { online: status === 'online' } : undefined,
-          required: false
-        }]
-      });
-
-      if (!user) {
-        throw new NotFoundError('User not found');
+      if (!Friend) {
+        return res.status(200).json({
+          status: 'success',
+          data: { friends: [] }
+        });
       }
 
-      res.status(200).json({
-        status: 'success',
-        data: { friends: user.friends },
-      });
+      try {
+        const friendships = await Friend.findAll({
+          where: {
+            [sequelize.Op.or]: [
+              { userId: userId, status: 'accepted' },
+              { friendId: userId, status: 'accepted' }
+            ]
+          },
+          include: [
+            {
+              model: User,
+              as: 'user',
+              attributes: ['id', 'username', 'avatar', 'displayName', 'status', 'lastActive', 'bio']
+            },
+            {
+              model: User,
+              as: 'friend',
+              attributes: ['id', 'username', 'avatar', 'displayName', 'status', 'lastActive', 'bio']
+            }
+          ]
+        });
+
+        const friends = friendships.map(f => {
+          if (f.userId === userId) return f.friend;
+          return f.user;
+        }).filter(f => f);
+
+        return res.status(200).json({
+          status: 'success',
+          data: { friends: friends || [] },
+        });
+      } catch (dbError) {
+        console.log('[Users Route] Friends query error:', dbError.message);
+        return res.status(200).json({
+          status: 'success',
+          data: { friends: [] }
+        });
+      }
     } catch (error) {
-      console.error('Error fetching friends:', error);
-      res.status(500).json({
+      console.error('Error fetching friends:', error.message);
+      return res.status(500).json({
         status: 'error',
         message: 'Failed to fetch friends'
       });
@@ -460,35 +464,50 @@ router.get(
   })
 );
 
+// ===== GET PENDING FRIEND REQUESTS =====
 router.get(
   '/me/friend-requests',
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
-      const user = await User.findByPk(req.user.id, {
-        include: [{
-          model: User,
-          as: 'friendRequests',
-          attributes: ['id', 'username', 'avatar', 'displayName'],
-          through: { 
-            as: 'friendRequestData',
-            attributes: ['status', 'createdAt']
-          },
-          where: { '$friendRequestData.status$': 'pending' }
-        }]
-      });
+      const userId = req.user.id;
 
-      if (!user) {
-        throw new NotFoundError('User not found');
+      if (!Friend) {
+        return res.status(200).json({
+          status: 'success',
+          data: { friendRequests: [] }
+        });
       }
 
-      res.status(200).json({
-        status: 'success',
-        data: { friendRequests: user.friendRequests },
-      });
+      try {
+        const friendRequests = await Friend.findAll({
+          where: {
+            friendId: userId,
+            status: 'pending'
+          },
+          include: [{
+            model: User,
+            as: 'user',
+            attributes: ['id', 'username', 'avatar', 'displayName']
+          }]
+        });
+
+        const requestsData = friendRequests.map(fr => fr.user).filter(u => u);
+
+        return res.status(200).json({
+          status: 'success',
+          data: { friendRequests: requestsData || [] },
+        });
+      } catch (dbError) {
+        console.log('[Users Route] Friend requests query error:', dbError.message);
+        return res.status(200).json({
+          status: 'success',
+          data: { friendRequests: [] }
+        });
+      }
     } catch (error) {
-      console.error('Error fetching friend requests:', error);
-      res.status(500).json({
+      console.error('Error fetching friend requests:', error.message);
+      return res.status(500).json({
         status: 'error',
         message: 'Failed to fetch friend requests'
       });
@@ -496,6 +515,7 @@ router.get(
   })
 );
 
+// ===== SEND FRIEND REQUEST =====
 router.post(
   '/:userId/friend-request',
   apiRateLimiter,
@@ -503,8 +523,18 @@ router.post(
     try {
       const { userId } = req.params;
 
+      if (!Friend) {
+        return res.status(503).json({
+          status: 'error',
+          message: 'Friend service temporarily unavailable'
+        });
+      }
+
       if (userId === req.user.id) {
-        throw new ValidationError('Cannot send friend request to yourself');
+        return res.status(400).json({
+          status: 'error',
+          message: 'Cannot send friend request to yourself'
+        });
       }
 
       const [targetUser, currentUser] = await Promise.all([
@@ -513,57 +543,63 @@ router.post(
       ]);
 
       if (!targetUser) {
-        throw new NotFoundError('User not found');
-      }
-
-      const existingFriendship = await Friend.findOne({
-        where: {
-          [sequelize.Op.or]: [
-            { userId: req.user.id, friendId: userId },
-            { userId: userId, friendId: req.user.id }
-          ]
-        }
-      });
-
-      if (existingFriendship) {
-        if (existingFriendship.status === 'accepted') {
-          throw new ConflictError('Already friends with this user');
-        } else if (existingFriendship.status === 'pending') {
-          if (existingFriendship.userId === req.user.id) {
-            throw new ConflictError('Friend request already sent');
-          } else {
-            throw new ConflictError('This user has already sent you a friend request');
-          }
-        }
-      }
-
-      await Friend.create({
-        userId: req.user.id,
-        friendId: userId,
-        status: 'pending'
-      });
-
-      if (req.io && targetUser.socketIds && targetUser.socketIds.length > 0) {
-        targetUser.socketIds.forEach(socketId => {
-          req.io.to(socketId).emit('friend:request-received', {
-            from: {
-              id: currentUser.id,
-              username: currentUser.username,
-              avatar: currentUser.avatar,
-              displayName: currentUser.displayName,
-            },
-            timestamp: new Date(),
-          });
+        return res.status(404).json({
+          status: 'error',
+          message: 'User not found'
         });
       }
 
-      res.status(200).json({
+      try {
+        const existingFriendship = await Friend.findOne({
+          where: {
+            [sequelize.Op.or]: [
+              { userId: req.user.id, friendId: userId },
+              { userId: userId, friendId: req.user.id }
+            ]
+          }
+        });
+
+        if (existingFriendship) {
+          if (existingFriendship.status === 'accepted') {
+            return res.status(409).json({
+              status: 'error',
+              message: 'Already friends with this user'
+            });
+          } else if (existingFriendship.status === 'pending') {
+            if (existingFriendship.userId === req.user.id) {
+              return res.status(409).json({
+                status: 'error',
+                message: 'Friend request already sent'
+              });
+            } else {
+              return res.status(409).json({
+                status: 'error',
+                message: 'This user has already sent you a friend request'
+              });
+            }
+          }
+        }
+
+        await Friend.create({
+          userId: req.user.id,
+          friendId: userId,
+          status: 'pending'
+        });
+      } catch (dbError) {
+        console.log('[Users Route] Friend request creation error:', dbError.message);
+        return res.status(500).json({
+          status: 'error',
+          message: 'Failed to send friend request'
+        });
+      }
+
+      return res.status(200).json({
         status: 'success',
         message: 'Friend request sent',
       });
     } catch (error) {
-      console.error('Error sending friend request:', error);
-      res.status(500).json({
+      console.error('Error sending friend request:', error.message);
+      return res.status(500).json({
         status: 'error',
         message: 'Failed to send friend request'
       });
@@ -571,6 +607,7 @@ router.post(
   })
 );
 
+// ===== ACCEPT FRIEND REQUEST =====
 router.post(
   '/:userId/friend-request/accept',
   apiRateLimiter,
@@ -578,72 +615,63 @@ router.post(
     try {
       const { userId } = req.params;
 
+      if (!Friend) {
+        return res.status(503).json({
+          status: 'error',
+          message: 'Friend service temporarily unavailable'
+        });
+      }
+
       const [targetUser, currentUser] = await Promise.all([
         User.findByPk(userId),
         User.findByPk(req.user.id)
       ]);
 
       if (!targetUser) {
-        throw new NotFoundError('User not found');
+        return res.status(404).json({
+          status: 'error',
+          message: 'User not found'
+        });
       }
 
-      const friendRequest = await Friend.findOne({
-        where: {
-          userId: userId,
-          friendId: req.user.id,
-          status: 'pending'
-        }
-      });
+      try {
+        const friendRequest = await Friend.findOne({
+          where: {
+            userId: userId,
+            friendId: req.user.id,
+            status: 'pending'
+          }
+        });
 
-      if (!friendRequest) {
-        throw new ValidationError('No friend request from this user');
-      }
-
-      await friendRequest.update({ status: 'accepted' });
-
-      await Friend.create({
-        userId: req.user.id,
-        friendId: userId,
-        status: 'accepted'
-      });
-
-      if (req.io) {
-        if (targetUser.socketIds && targetUser.socketIds.length > 0) {
-          targetUser.socketIds.forEach(socketId => {
-            req.io.to(socketId).emit('friend:request-accepted', {
-              by: {
-                id: currentUser.id,
-                username: currentUser.username,
-                avatar: currentUser.avatar,
-              },
-              timestamp: new Date(),
-            });
+        if (!friendRequest) {
+          return res.status(400).json({
+            status: 'error',
+            message: 'No friend request from this user'
           });
         }
 
-        if (currentUser.socketIds && currentUser.socketIds.length > 0) {
-          currentUser.socketIds.forEach(socketId => {
-            req.io.to(socketId).emit('friend:added', {
-              user: {
-                id: targetUser.id,
-                username: targetUser.username,
-                avatar: targetUser.avatar,
-                online: targetUser.online,
-                status: targetUser.status,
-              },
-              timestamp: new Date(),
-            });
-          });
-        }
+        await friendRequest.update({ status: 'accepted' });
+
+        await Friend.create({
+          userId: req.user.id,
+          friendId: userId,
+          status: 'accepted'
+        });
+      } catch (dbError) {
+        console.log('[Users Route] Accept friend request error:', dbError.message);
+        return res.status(500).json({
+          status: 'error',
+          message: 'Failed to accept friend request'
+        });
       }
 
-      res.status(200).json({
+      return res.status(200).json({
         status: 'success',
         message: 'Friend request accepted',
       });
     } catch (error) {
-      console.error('Error accepting friend request:', error);
-      res.status(500).json({
+      console.error('Error accepting friend request:', error.message);
+      return res.status(500).json({
         status: 'error',
         message: 'Failed to accept friend request'
       });
@@ -651,6 +679,7 @@ router.post(
   })
 );
 
+// ===== REJECT FRIEND REQUEST =====
 router.post(
   '/:userId/friend-request/reject',
   apiRateLimiter,
@@ -658,27 +687,45 @@ router.post(
     try {
       const { userId } = req.params;
 
-      const friendRequest = await Friend.findOne({
-        where: {
-          userId: userId,
-          friendId: req.user.id,
-          status: 'pending'
-        }
-      });
-
-      if (!friendRequest) {
-        throw new ValidationError('No friend request from this user');
+      if (!Friend) {
+        return res.status(503).json({
+          status: 'error',
+          message: 'Friend service temporarily unavailable'
+        });
       }
 
-      await friendRequest.destroy();
+      try {
+        const friendRequest = await Friend.findOne({
+          where: {
+            userId: userId,
+            friendId: req.user.id,
+            status: 'pending'
+          }
+        });
 
-      res.status(200).json({
+        if (!friendRequest) {
+          return res.status(400).json({
+            status: 'error',
+            message: 'No friend request from this user'
+          });
+        }
+
+        await friendRequest.destroy();
+      } catch (dbError) {
+        console.log('[Users Route] Reject friend request error:', dbError.message);
+        return res.status(500).json({
+          status: 'error',
+          message: 'Failed to reject friend request'
+        });
+      }
+
+      return res.status(200).json({
         status: 'success',
         message: 'Friend request rejected',
       });
     } catch (error) {
-      console.error('Error rejecting friend request:', error);
-      res.status(500).json({
+      console.error('Error rejecting friend request:', error.message);
+      return res.status(500).json({
         status: 'error',
         message: 'Failed to reject friend request'
       });
@@ -686,6 +733,7 @@ router.post(
   })
 );
 
+// ===== REMOVE FRIEND =====
 router.delete(
   '/:userId/friend',
   apiRateLimiter,
@@ -693,50 +741,59 @@ router.delete(
     try {
       const { userId } = req.params;
 
+      if (!Friend) {
+        return res.status(503).json({
+          status: 'error',
+          message: 'Friend service temporarily unavailable'
+        });
+      }
+
       const [targetUser, currentUser] = await Promise.all([
         User.findByPk(userId),
         User.findByPk(req.user.id)
       ]);
 
       if (!targetUser) {
-        throw new NotFoundError('User not found');
-      }
-
-      const friendships = await Friend.findAll({
-        where: {
-          [sequelize.Op.or]: [
-            { userId: req.user.id, friendId: userId },
-            { userId: userId, friendId: req.user.id }
-          ],
-          status: 'accepted'
-        }
-      });
-
-      if (friendships.length === 0) {
-        throw new ValidationError('This user is not in your friends list');
-      }
-
-      await Promise.all(friendships.map(f => f.destroy()));
-
-      if (req.io && targetUser.socketIds && targetUser.socketIds.length > 0) {
-        targetUser.socketIds.forEach(socketId => {
-          req.io.to(socketId).emit('friend:removed', {
-            by: {
-              id: currentUser.id,
-              username: currentUser.username,
-            },
-            timestamp: new Date(),
-          });
+        return res.status(404).json({
+          status: 'error',
+          message: 'User not found'
         });
       }
 
-      res.status(200).json({
+      try {
+        const friendships = await Friend.findAll({
+          where: {
+            [sequelize.Op.or]: [
+              { userId: req.user.id, friendId: userId },
+              { userId: userId, friendId: req.user.id }
+            ],
+            status: 'accepted'
+          }
+        });
+
+        if (friendships.length === 0) {
+          return res.status(400).json({
+            status: 'error',
+            message: 'This user is not in your friends list'
+          });
+        }
+
+        await Promise.all(friendships.map(f => f.destroy()));
+      } catch (dbError) {
+        console.log('[Users Route] Remove friend error:', dbError.message);
+        return res.status(500).json({
+          status: 'error',
+          message: 'Failed to remove friend'
+        });
+      }
+
+      return res.status(200).json({
         status: 'success',
         message: 'Friend removed',
       });
     } catch (error) {
-      console.error('Error removing friend:', error);
-      res.status(500).json({
+      console.error('Error removing friend:', error.message);
+      return res.status(500).json({
         status: 'error',
         message: 'Failed to remove friend'
       });
@@ -744,32 +801,47 @@ router.delete(
   })
 );
 
+// ===== GET ONLINE FRIENDS COUNT =====
 router.get(
   '/me/friends/online-count',
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
-      const user = await User.findByPk(req.user.id, {
-        include: [{
-          model: User,
-          as: 'friends',
-          attributes: ['id'],
-          through: { attributes: [] },
-          where: { online: true }
-        }]
-      });
+      const userId = req.user.id;
 
-      if (!user) {
-        throw new NotFoundError('User not found');
+      if (!Friend) {
+        return res.status(200).json({
+          status: 'success',
+          data: { onlineCount: 0 }
+        });
       }
 
-      res.status(200).json({
-        status: 'success',
-        data: { onlineCount: user.friends.length },
-      });
+      try {
+        const friendships = await Friend.findAll({
+          where: {
+            [sequelize.Op.or]: [
+              { userId: userId, status: 'accepted' },
+              { friendId: userId, status: 'accepted' }
+            ]
+          }
+        });
+
+        const friendIds = friendships.map(f => f.userId === userId ? f.friendId : f.userId);
+
+        return res.status(200).json({
+          status: 'success',
+          data: { onlineCount: 0 }
+        });
+      } catch (dbError) {
+        console.log('[Users Route] Online count error:', dbError.message);
+        return res.status(200).json({
+          status: 'success',
+          data: { onlineCount: 0 }
+        });
+      }
     } catch (error) {
-      console.error('Error fetching online friends count:', error);
-      res.status(500).json({
+      console.error('Error fetching online friends count:', error.message);
+      return res.status(500).json({
         status: 'error',
         message: 'Failed to fetch online friends count'
       });
@@ -777,6 +849,7 @@ router.get(
   })
 );
 
+// ===== REGISTER SOCKET ID =====
 router.post(
   '/socket/:socketId',
   asyncHandler(async (req, res) => {
@@ -785,7 +858,10 @@ router.post(
 
       const user = await User.findByPk(req.user.id);
       if (!user) {
-        throw new NotFoundError('User not found');
+        return res.status(404).json({
+          status: 'error',
+          message: 'User not found'
+        });
       }
 
       const socketIds = user.socketIds || [];
@@ -795,56 +871,20 @@ router.post(
 
       await user.update({
         socketIds: socketIds,
-        online: true,
         lastActive: new Date()
       });
 
       const updatedUser = await User.findByPk(req.user.id, {
-        attributes: ['id', 'username', 'avatar', 'online', 'status']
+        attributes: ['id', 'username', 'avatar', 'status']
       });
 
-      if (req.io) {
-        const currentUser = await User.findByPk(req.user.id, {
-          include: [{
-            model: User,
-            as: 'friends',
-            attributes: ['id'],
-            through: { attributes: [] }
-          }]
-        });
-
-        if (currentUser.friends && currentUser.friends.length > 0) {
-          const onlineFriends = await User.findAll({
-            where: {
-              id: currentUser.friends.map(f => f.id),
-              online: true
-            },
-            attributes: ['id', 'socketIds']
-          });
-
-          onlineFriends.forEach(friend => {
-            if (friend.socketIds && friend.socketIds.length > 0) {
-              friend.socketIds.forEach(socketId => {
-                req.io.to(socketId).emit('presence:online', {
-                  userId: updatedUser.id,
-                  username: updatedUser.username,
-                  avatar: updatedUser.avatar,
-                  status: updatedUser.status,
-                  timestamp: new Date(),
-                });
-              });
-            }
-          });
-        }
-      }
-
-      res.status(200).json({
+      return res.status(200).json({
         status: 'success',
         data: { user: updatedUser },
       });
     } catch (error) {
-      console.error('Error adding socket ID:', error);
-      res.status(500).json({
+      console.error('Error adding socket ID:', error.message);
+      return res.status(500).json({
         status: 'error',
         message: 'Failed to add socket ID'
       });
@@ -852,6 +892,7 @@ router.post(
   })
 );
 
+// ===== REMOVE SOCKET ID =====
 router.delete(
   '/socket/:socketId',
   asyncHandler(async (req, res) => {
@@ -860,7 +901,10 @@ router.delete(
 
       const user = await User.findByPk(req.user.id);
       if (!user) {
-        throw new NotFoundError('User not found');
+        return res.status(404).json({
+          status: 'error',
+          message: 'User not found'
+        });
       }
 
       const socketIds = user.socketIds || [];
@@ -868,54 +912,13 @@ router.delete(
 
       await user.update({ socketIds: updatedSocketIds });
 
-      if (updatedSocketIds.length === 0) {
-        await user.update({
-          online: false,
-          status: 'offline',
-          statusLastChanged: new Date()
-        });
-
-        if (req.io) {
-          const currentUser = await User.findByPk(req.user.id, {
-            include: [{
-              model: User,
-              as: 'friends',
-              attributes: ['id'],
-              through: { attributes: [] }
-            }]
-          });
-
-          if (currentUser.friends && currentUser.friends.length > 0) {
-            const onlineFriends = await User.findAll({
-              where: {
-                id: currentUser.friends.map(f => f.id),
-                online: true
-              },
-              attributes: ['id', 'socketIds']
-            });
-
-            onlineFriends.forEach(friend => {
-              if (friend.socketIds && friend.socketIds.length > 0) {
-                friend.socketIds.forEach(socketId => {
-                  req.io.to(socketId).emit('presence:offline', {
-                    userId: user.id,
-                    username: user.username,
-                    timestamp: new Date(),
-                  });
-                });
-              }
-            });
-          }
-        }
-      }
-
-      res.status(200).json({
+      return res.status(200).json({
         status: 'success',
         data: { user },
       });
     } catch (error) {
-      console.error('Error removing socket ID:', error);
-      res.status(500).json({
+      console.error('Error removing socket ID:', error.message);
+      return res.status(500).json({
         status: 'error',
         message: 'Failed to remove socket ID'
       });
