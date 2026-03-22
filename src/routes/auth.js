@@ -5,8 +5,54 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const asyncHandler = require('express-async-handler');
 
-// Import the shared auth middleware
-const { authenticateToken } = require('../middleware/auth');
+// CRITICAL FIX: Import the shared auth middleware with proper path
+let authenticateToken;
+try {
+  authenticateToken = require('../middleware/auth').authenticateToken;
+} catch (error) {
+  console.warn('⚠️ Shared auth middleware not found, using local version');
+  // Define local middleware as fallback
+  authenticateToken = (req, res, next) => {
+    try {
+      const authHeader = req.headers.authorization;
+      const token = authHeader && authHeader.split(' ')[1];
+      
+      if (!token) {
+        return res.status(401).json({ 
+          success: false, 
+          message: 'Access token required',
+          errorCode: 'TOKEN_REQUIRED'
+        });
+      }
+
+      jwt.verify(token, JWT_SECRET, (err, decoded) => {
+        if (err) {
+          return res.status(401).json({ 
+            success: false, 
+            message: err.name === 'TokenExpiredError' ? 'Token expired' : 'Invalid token',
+            errorCode: err.name === 'TokenExpiredError' ? 'TOKEN_EXPIRED' : 'INVALID_TOKEN'
+          });
+        }
+        
+        req.user = {
+          userId: decoded.userId || decoded.id || decoded.sub,
+          id: decoded.userId || decoded.id || decoded.sub,
+          email: decoded.email || null,
+          username: decoded.username || null,
+          role: decoded.role || 'user'
+        };
+        
+        next();
+      });
+    } catch (error) {
+      return res.status(500).json({
+        success: false,
+        message: 'Authentication failed',
+        errorCode: 'INTERNAL_ERROR'
+      });
+    }
+  };
+}
 
 // Create router
 const router = express.Router();
@@ -17,8 +63,8 @@ const Users = db.User || db.Users;
 
 console.log('✅ Auth ROUTER initialized (NOT a Sequelize model)');
 
-// JWT configuration from .env
-const JWT_SECRET = process.env.JWT_SECRET || '3e78ab2d6cb698f95b3b8d510614058c';
+// CRITICAL FIX: Use consistent JWT secret with env var priority
+const JWT_SECRET = process.env.JWT_SECRET || process.env.JWT_ACCESS_SECRET || '3e78ab2d6cb698f95b3b8d510614058c';
 const JWT_ACCESS_EXPIRES_IN = process.env.JWT_ACCESS_EXPIRES_IN || '24h';
 const JWT_REFRESH_EXPIRES_IN = process.env.JWT_REFRESH_EXPIRES_IN || '7d';
 
@@ -58,6 +104,21 @@ function validatePassword(password) {
   }
   
   return errors;
+}
+
+// Helper to generate token (consistent with controller)
+function generateToken(user) {
+  return jwt.sign(
+    { 
+      userId: user.id, 
+      id: user.id,
+      email: user.email, 
+      username: user.username,
+      role: user.role || 'user'
+    },
+    JWT_SECRET,
+    { expiresIn: JWT_ACCESS_EXPIRES_IN }
+  );
 }
 
 // ===== HEALTH ENDPOINT =====
@@ -254,17 +315,7 @@ router.post(
       // 10. Generate JWT token
       let token;
       try {
-        token = jwt.sign(
-          { 
-            userId: user.id, 
-            id: user.id,
-            email: user.email, 
-            username: user.username,
-            role: user.role
-          },
-          JWT_SECRET,
-          { expiresIn: '24h' }
-        );
+        token = generateToken(user);
       } catch (jwtError) {
         console.error('🔧 [AUTH] JWT generation error:', jwtError.message);
         return res.status(500).json({
@@ -275,17 +326,11 @@ router.post(
         });
       }
 
-      // 11. Return success response
+      // 11. Return success response with consistent format
       return res.status(201).json({
         success: true,
         message: 'User registered successfully',
-        userId: user.id,
-        token,
-        clientInstructions: {
-          localStorageKeys: ['moodchat_token', 'accessToken'],
-          globalVariables: ['window.accessToken', 'window.currentUser'],
-          nextSteps: 'Call /auth/me endpoint to fetch user data'
-        },
+        token: token, // Direct token for frontend
         user: {
           id: user.id,
           email: user.email,
@@ -296,8 +341,7 @@ router.post(
           isVerified: user.isVerified,
           createdAt: user.createdAt
         },
-        timestamp: new Date().toISOString(),
-        storage: 'PostgreSQL (Permanent)'
+        timestamp: new Date().toISOString()
       });
       
     } catch (error) {
@@ -453,17 +497,7 @@ router.post(
       let token;
       try {
         console.log('🔧 [AUTH] Generating JWT token for user:', user.id);
-        token = jwt.sign(
-          { 
-            userId: user.id, 
-            id: user.id,
-            email: user.email, 
-            username: user.username,
-            role: user.role
-          },
-          JWT_SECRET,
-          { expiresIn: '24h' }
-        );
+        token = generateToken(user);
       } catch (jwtError) {
         console.error('🔧 [AUTH] JWT generation error during login:', jwtError.message);
         return res.status(500).json({
@@ -486,7 +520,7 @@ router.post(
         // Continue even if update fails
       }
 
-      // 9. Return success response
+      // 9. Return success response with consistent format
       console.log('🔧 [AUTH] Login successful for user:', user.id);
       
       const userResponse = {
@@ -505,15 +539,9 @@ router.post(
       return res.status(200).json({
         success: true,
         message: 'Login successful',
-        token: token,
-        clientInstructions: {
-          localStorageKeys: ['moodchat_token', 'accessToken'],
-          globalVariables: ['window.accessToken', 'window.currentUser'],
-          nextSteps: 'Call /auth/me endpoint to fetch user data'
-        },
+        token: token, // Direct token for frontend
         user: userResponse,
-        timestamp: new Date().toISOString(),
-        storage: 'PostgreSQL (Permanent)'
+        timestamp: new Date().toISOString()
       });
       
     } catch (error) {
@@ -576,7 +604,8 @@ router.get(
             id: userId,
             email: req.user.email || null,
             username: req.user.username || null,
-            role: req.user.role || 'user'
+            role: req.user.role || 'user',
+            status: 'online'
           },
           timestamp: new Date().toISOString(),
           authValidated: true,
@@ -610,7 +639,8 @@ router.get(
             id: userId,
             email: req.user.email || null,
             username: req.user.username || null,
-            role: req.user.role || 'user'
+            role: req.user.role || 'user',
+            status: 'online'
           },
           timestamp: new Date().toISOString(),
           authValidated: true,
@@ -689,78 +719,6 @@ router.get(
     }
   })
 );
-
-// ===== AUTHENTICATION MIDDLEWARE FOR ROUTER =====
-function authenticateTokenRouter(req, res, next) {
-  try {
-    console.log('🔧 [Auth Router Middleware] Checking authentication for:', req.method, req.path);
-    
-    const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
-    
-    if (!token) {
-      console.log('🔧 [Auth Router Middleware] No token provided');
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Access token required',
-        errorCode: 'TOKEN_REQUIRED',
-        timestamp: new Date().toISOString()
-      });
-    }
-
-    jwt.verify(token, JWT_SECRET, (err, decoded) => {
-      if (err) {
-        console.error('🔧 [Auth Router Middleware] JWT Verification Error:', err.message);
-        
-        if (err.name === 'TokenExpiredError') {
-          return res.status(401).json({ 
-            success: false, 
-            message: 'Token expired',
-            errorCode: 'TOKEN_EXPIRED',
-            timestamp: new Date().toISOString()
-          });
-        }
-        
-        if (err.name === 'JsonWebTokenError') {
-          return res.status(401).json({ 
-            success: false, 
-            message: 'Invalid token',
-            errorCode: 'INVALID_TOKEN',
-            timestamp: new Date().toISOString()
-          });
-        }
-        
-        return res.status(403).json({ 
-          success: false, 
-          message: 'Invalid or expired token',
-          errorCode: 'TOKEN_ERROR',
-          timestamp: new Date().toISOString()
-        });
-      }
-      
-      req.user = {
-        userId: decoded.userId || decoded.id || decoded.sub,
-        id: decoded.userId || decoded.id || decoded.sub,
-        email: decoded.email || null,
-        username: decoded.username || null,
-        role: decoded.role || 'user',
-        tokenIssuedAt: decoded.iat ? new Date(decoded.iat * 1000) : null,
-        tokenExpiresAt: decoded.exp ? new Date(decoded.exp * 1000) : null
-      };
-      
-      console.log('🔧 [Auth Router Middleware] Authentication successful for user:', req.user.userId);
-      next();
-    });
-  } catch (error) {
-    console.error('🔧 [Auth Router Middleware] Unexpected error:', error.message);
-    return res.status(500).json({
-      success: false,
-      message: 'Authentication failed',
-      errorCode: 'INTERNAL_ERROR',
-      timestamp: new Date().toISOString()
-    });
-  }
-}
 
 // ===== REFRESH TOKEN ENDPOINT =====
 router.post(
@@ -847,17 +805,7 @@ router.post(
       }
 
       // Generate new access token
-      const newAccessToken = jwt.sign(
-        { 
-          userId: user.id, 
-          id: user.id,
-          username: user.username, 
-          email: user.email,
-          role: user.role
-        },
-        JWT_SECRET,
-        { expiresIn: JWT_ACCESS_EXPIRES_IN }
-      );
+      const newAccessToken = generateToken(user);
 
       // Generate new refresh token
       const newRefreshToken = jwt.sign(
@@ -883,14 +831,8 @@ router.post(
       res.status(200).json({
         success: true,
         message: 'Token refreshed successfully',
-        clientInstructions: {
-          localStorageKeys: ['moodchat_token', 'accessToken'],
-          globalVariables: ['window.accessToken', 'window.currentUser']
-        },
-        data: {
-          accessToken: newAccessToken,
-          refreshToken: newRefreshToken,
-        },
+        token: newAccessToken,
+        refreshToken: newRefreshToken,
         timestamp: new Date().toISOString()
       });
     } catch (error) {
@@ -920,7 +862,7 @@ router.post(
 // ===== LOGOUT ENDPOINT =====
 router.post(
   '/logout',
-  authenticateTokenRouter,
+  authenticateToken,
   asyncHandler(async (req, res) => {
     try {
       const { refreshToken } = req.cookies || req.body;
@@ -961,11 +903,6 @@ router.post(
       res.status(200).json({
         success: true,
         message: 'Logged out successfully',
-        clientInstructions: {
-          localStorageKeys: ['moodchat_token', 'accessToken'],
-          globalVariables: ['window.accessToken', 'window.currentUser'],
-          clearInstructions: 'Clear all localStorage entries and global variables'
-        },
         timestamp: new Date().toISOString()
       });
     } catch (error) {
@@ -1110,7 +1047,7 @@ router.post('/verify-token', asyncHandler(async (req, res) => {
 // ===== CHANGE PASSWORD ENDPOINT =====
 router.post(
   '/change-password',
-  authenticateTokenRouter,
+  authenticateToken,
   asyncHandler(async (req, res) => {
     try {
       const { currentPassword, newPassword } = req.body;
@@ -1189,7 +1126,7 @@ router.post(
 );
 
 // ===== DEBUG ENDPOINT TO CHECK AUTH STATUS =====
-router.get('/debug-auth', authenticateTokenRouter, asyncHandler(async (req, res) => {
+router.get('/debug-auth', authenticateToken, asyncHandler(async (req, res) => {
   try {
     let userData = null;
     if (db && Users && req.user && req.user.userId) {
@@ -1203,7 +1140,7 @@ router.get('/debug-auth', authenticateTokenRouter, asyncHandler(async (req, res)
       message: 'Auth debug information',
       debug: {
         tokenValid: true,
-        middlewareUsed: 'authenticateTokenRouter',
+        middlewareUsed: 'authenticateToken',
         reqUser: req.user,
         databaseModelsAvailable: !!db,
         userModelAvailable: !!(db && Users),

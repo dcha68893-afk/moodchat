@@ -1,15 +1,25 @@
 const jwt = require('jsonwebtoken');
 
-const JWT_SECRET = process.env.JWT_SECRET || '3e78ab2d6cb698f95b3b8d510614058c';
+// Load JWT secret from environment with fallback (but warn in production)
+const JWT_SECRET = process.env.JWT_SECRET || process.env.JWT_ACCESS_SECRET || '3e78ab2d6cb698f95b3b8d510614058c';
 
-// Public paths that don't require authentication
+// Public paths that don't require authentication - EXPANDED for clarity
 const PUBLIC_PATHS = [
   '/',
   '/api/status',
   '/api/health',
   '/api/auth/login',
   '/api/auth/register',
-  '/api/auth/refresh'
+  '/api/auth/refresh',
+  '/api/auth/forgot-password',
+  '/api/auth/reset-password',
+  '/api/auth/validate-token',
+  '/api/info',
+  '/api/cors-info',
+  '/health',
+  '/live',
+  '/ready',
+  '/ws-test.html'
 ];
 
 // Check if path is public
@@ -22,90 +32,112 @@ const isPublicPath = (path) => {
   });
 };
 
-// FIXED: Unified authentication middleware for all protected backend routes
+// ===== CRITICAL FIX 1: STANDARDIZED TOKEN EXTRACTION =====
+const extractToken = (req) => {
+  // CRITICAL: Check both lowercase and uppercase header variants
+  const authHeader = req.headers.authorization || req.headers.Authorization;
+  
+  if (!authHeader) {
+    console.log('[Auth] ❌ No authorization header found');
+    return null;
+  }
+  
+  // CRITICAL: Strict Bearer token format check (case-insensitive)
+  if (!authHeader.toLowerCase().startsWith('bearer ')) {
+    console.log('[Auth] ❌ Authorization header does not start with Bearer');
+    return null;
+  }
+  
+  // CRITICAL: Extract token using split method (most reliable)
+  const parts = authHeader.split(' ');
+  if (parts.length !== 2) {
+    console.log('[Auth] ❌ Invalid Authorization header format. Expected: Bearer <token>');
+    return null;
+  }
+  
+  const token = parts[1];
+  
+  if (!token || token.trim() === '') {
+    console.log('[Auth] ❌ Empty token after Bearer prefix');
+    return null;
+  }
+  
+  console.log(`[Auth] ✅ Token extracted successfully, length: ${token.length} chars`);
+  return token;
+};
+
+// ===== CRITICAL FIX 2: UNIFIED AUTHENTICATION MIDDLEWARE =====
 const authenticateToken = (req, res, next) => {
   try {
     const requestPath = req.path;
     
-    // Step 1: Check if path is public
+    // Step 1: Check if path is public (skip auth)
     if (isPublicPath(requestPath)) {
-      // Skip authentication for public paths
+      console.log(`[Auth] 🔓 Public path accessed: ${req.method} ${requestPath}`);
       return next();
     }
     
-    console.log(`[Auth] 🔐 Authentication required for: ${req.method} ${requestPath}`);
+    console.log(`[Auth] 🔒 Protected route accessed: ${req.method} ${requestPath}`);
     
-    // Step 2: Check if already authenticated (prevent double verification)
+    // ===== DEBUG LOGGING (COMMENT OUT IN PRODUCTION) =====
+    // console.log('[Auth DEBUG]', {
+    //   path: requestPath,
+    //   hasAuthHeader: !!(req.headers.authorization || req.headers.Authorization),
+    //   headerValue: req.headers.authorization ? 
+    //     `${req.headers.authorization.substring(0, 20)}...` : 
+    //     req.headers.Authorization ? 
+    //       `${req.headers.Authorization.substring(0, 20)}...` : 'none'
+    // });
+    
+    // Step 2: Skip if already authenticated (prevent double verification)
     if (req.user && req.user._verified) {
       console.log('[Auth] ⏭️ Request already authenticated, skipping verification');
       return next();
     }
     
-    // FIXED: Step 3 - STANDARDIZED TOKEN EXTRACTION
-    // Support both Bearer token and x-access-token header
-    let token = null;
-    const authHeader = req.headers['authorization'];
-    const xAccessToken = req.headers['x-access-token'];
+    // Step 3: Extract token using standardized function
+    const token = extractToken(req);
     
-    // Priority 1: Authorization Bearer header
-    if (authHeader) {
-      if (authHeader.startsWith('Bearer ')) {
-        token = authHeader.substring(7); // Remove 'Bearer ' prefix
-        console.log('[Auth] Token extracted from Authorization Bearer header');
-      } else {
-        // Handle case where header exists but doesn't start with Bearer
-        console.log('[Auth] Authorization header present but not Bearer format');
-      }
-    } 
-    // Priority 2: x-access-token header (fallback)
-    else if (xAccessToken) {
-      token = xAccessToken;
-      console.log('[Auth] Token extracted from x-access-token header');
-    }
-    
-    // FIXED: Step 4 - STRICT TOKEN VALIDATION - NEVER assume token exists
-    if (!token || token.trim() === '') {
-      console.log('[Auth] ❌ No token found in request headers');
+    if (!token) {
+      console.log('[Auth] ❌ Authentication required - no valid token found');
       return res.status(401).json({
         success: false,
-        message: 'Authentication required. Access token missing.',
-        error: 'NO_TOKEN',
+        message: 'Authorization header required with Bearer token',
+        errorCode: 'MISSING_AUTH_HEADER',
+        code: 'MISSING_AUTH_HEADER',
         path: requestPath,
         method: req.method,
         timestamp: new Date().toISOString()
       });
     }
     
-    console.log(`[Auth] Token extracted, length: ${token.length} characters`);
-    
-    // FIXED: Step 5 - SAFE TOKEN VERIFICATION WITH PROPER ERROR HANDLING
+    // Step 4: Verify JWT token
     let decoded;
     try {
       decoded = jwt.verify(token, JWT_SECRET);
       console.log('[Auth] ✅ Token verified successfully');
     } catch (jwtError) {
-      // Handle specific JWT errors with appropriate HTTP status codes
       console.error('[Auth] ❌ Token verification failed:', jwtError.name, jwtError.message);
       
-      // Token expired - return 401 for graceful handling (frontend can refresh)
+      // Token expired
       if (jwtError.name === 'TokenExpiredError') {
         return res.status(401).json({
           success: false,
-          message: 'Your session has expired. Please refresh or log in again.',
-          error: 'TOKEN_EXPIRED',
-          code: 'SESSION_EXPIRED',
+          message: 'Your session has expired. Please log in again.',
+          errorCode: 'TOKEN_EXPIRED',
+          code: 'TOKEN_EXPIRED',
           timestamp: new Date().toISOString(),
           expiredAt: jwtError.expiredAt
         });
       }
       
-      // Invalid token - return 401 (not 403 for consistency)
+      // Invalid token
       if (jwtError.name === 'JsonWebTokenError') {
         return res.status(401).json({
           success: false,
           message: 'Invalid authentication token.',
-          error: 'INVALID_TOKEN',
-          code: 'TOKEN_INVALID',
+          errorCode: 'INVALID_TOKEN',
+          code: 'INVALID_TOKEN',
           timestamp: new Date().toISOString()
         });
       }
@@ -114,55 +146,53 @@ const authenticateToken = (req, res, next) => {
       return res.status(401).json({
         success: false,
         message: 'Authentication failed.',
-        error: 'AUTH_FAILED',
-        code: 'AUTH_ERROR',
+        errorCode: 'AUTH_FAILED',
+        code: 'AUTH_FAILED',
         timestamp: new Date().toISOString()
       });
     }
     
-    // FIXED: Step 6 - Validate decoded payload structure
+    // Step 5: Validate decoded payload structure
     if (!decoded || typeof decoded !== 'object') {
       console.error('[Auth] ❌ Token verification returned invalid payload');
       return res.status(401).json({
         success: false,
         message: 'Invalid token payload.',
-        error: 'INVALID_PAYLOAD',
+        errorCode: 'INVALID_PAYLOAD',
+        code: 'INVALID_PAYLOAD',
         timestamp: new Date().toISOString()
       });
     }
     
-    // FIXED: Step 7 - NORMALIZED USER IDENTIFIER EXTRACTION
-    // Support multiple possible field names for user ID
+    // Step 6: Extract user ID with multiple fallbacks
     const userId = decoded.userId || decoded.id || decoded.sub;
     if (!userId) {
-      console.error('[Auth] ❌ No user identifier found in token. Token payload:', Object.keys(decoded));
+      console.error('[Auth] ❌ No user identifier found in token. Token payload keys:', Object.keys(decoded));
       return res.status(401).json({
         success: false,
         message: 'Invalid user information in token.',
-        error: 'NO_USER_ID',
+        errorCode: 'NO_USER_ID',
+        code: 'NO_USER_ID',
         timestamp: new Date().toISOString()
       });
     }
     
-    // Step 8: Check for multi-device login conflicts
-    // Extract device/session ID if present in token
+    // Step 7: Extract session info if present
     const sessionId = decoded.sessionId || decoded.jti;
     if (sessionId) {
-      // Store session info for potential session management
       req.sessionId = sessionId;
     }
     
-    // FIXED: Step 9 - ALWAYS ATTACH req.user WITH NORMALIZED FIELDS
-    // This is MANDATORY - NEVER skip this step
+    // Step 8: ATTACH NORMALIZED USER OBJECT TO REQUEST
     req.user = {
       // Verification flag to prevent double verification
       _verified: true,
       
-      // FIXED: Normalized user identification (BOTH id and userId for compatibility)
+      // Normalized user identification (BOTH id and userId for compatibility)
       userId: userId,
-      id: userId,  // CRITICAL: Always set both id and userId
+      id: userId,  // CRITICAL: Always set both
       
-      // User details from token (with safe defaults)
+      // User details from token
       email: decoded.email || null,
       username: decoded.username || null,
       role: decoded.role || 'user',
@@ -175,40 +205,36 @@ const authenticateToken = (req, res, next) => {
       tokenIssuedAt: decoded.iat ? new Date(decoded.iat * 1000) : null,
       tokenExpiresAt: decoded.exp ? new Date(decoded.exp * 1000) : null,
       
-      // Store original token hash (truncated for logging safety)
+      // Store original token hash (truncated for logging)
       _tokenHash: token.substring(0, 10) + '...' + token.substring(token.length - 5)
     };
     
-    // FIXED: Step 10 - HARD VALIDATION AFTER ATTACH
-    // Double-check that req.user.id exists (should never fail, but safety check)
+    // Step 9: Final validation
     if (!req.user || !req.user.id) {
       console.error('[Auth] ❌ CRITICAL: Failed to attach user ID to request');
       return res.status(401).json({
         success: false,
         message: 'Authentication failed - user context error.',
-        error: 'USER_CONTEXT_MISSING',
+        errorCode: 'USER_CONTEXT_MISSING',
+        code: 'USER_CONTEXT_MISSING',
         timestamp: new Date().toISOString()
       });
     }
     
-    // Step 11: Log successful authentication (without sensitive data)
+    // Step 10: Log successful authentication
     console.log(`[Auth] ✅ User authenticated: ${req.user.id} (${req.user.email || 'no email'}) [Session: ${sessionId || 'none'}]`);
     
-    // FIXED: Step 12 - ENSURE next() EXECUTES EXACTLY ONCE
-    // Return next() to prevent any accidental double-calls
     return next();
     
   } catch (error) {
-    // FIXED: Catch any unexpected errors in the middleware
-    // NEVER crash - always return a proper response
+    // Catch any unexpected errors
     console.error('[Auth] 🚨 Unexpected authentication error:', error.message);
     console.error('[Auth] Stack trace:', error.stack);
     
-    // Return 401 for authentication failures (not 500 to avoid exposing internals)
-    return res.status(401).json({
+    return res.status(500).json({
       success: false,
       message: 'Authentication failed due to server error.',
-      error: 'AUTH_MIDDLEWARE_ERROR',
+      errorCode: 'AUTH_MIDDLEWARE_ERROR',
       code: 'SERVER_ERROR',
       timestamp: new Date().toISOString()
     });
@@ -226,7 +252,8 @@ const authorize = (...roles) => {
         return res.status(401).json({
           success: false,
           message: 'Authentication required before authorization.',
-          error: 'NO_USER_CONTEXT',
+          errorCode: 'NO_USER_CONTEXT',
+          code: 'NO_USER_CONTEXT',
           timestamp: new Date().toISOString()
         });
       }
@@ -244,7 +271,8 @@ const authorize = (...roles) => {
         return res.status(403).json({
           success: false,
           message: 'User role not defined.',
-          error: 'NO_ROLE',
+          errorCode: 'NO_ROLE',
+          code: 'NO_ROLE',
           timestamp: new Date().toISOString()
         });
       }
@@ -254,7 +282,8 @@ const authorize = (...roles) => {
         return res.status(403).json({
           success: false,
           message: 'Insufficient permissions to access this resource.',
-          error: 'INSUFFICIENT_PERMISSIONS',
+          errorCode: 'INSUFFICIENT_PERMISSIONS',
+          code: 'INSUFFICIENT_PERMISSIONS',
           requiredRoles: roles,
           userRole: userRole,
           timestamp: new Date().toISOString()
@@ -269,7 +298,8 @@ const authorize = (...roles) => {
       return res.status(500).json({
         success: false,
         message: 'Authorization failed due to server error.',
-        error: 'AUTHORIZATION_ERROR',
+        errorCode: 'AUTHORIZATION_ERROR',
+        code: 'AUTHORIZATION_ERROR',
         timestamp: new Date().toISOString()
       });
     }
@@ -281,21 +311,26 @@ const socketAuthenticate = async (socket, next) => {
   try {
     console.log('[Auth] 🔌 Socket.io authentication middleware invoked');
     
-    // FIXED: Standardized token extraction for Socket.io
+    // Standardized token extraction for Socket.io
     let token = null;
     
     // Check multiple possible locations for token
-    const authHeader = socket.handshake.headers.authorization;
+    const authHeader = socket.handshake.headers.authorization || socket.handshake.headers.Authorization;
     const xAccessToken = socket.handshake.headers['x-access-token'];
     
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-      token = authHeader.substring(7);
-      console.log('[Auth] Socket token extracted from Authorization Bearer header');
+    if (authHeader) {
+      // Check Bearer format
+      if (authHeader.toLowerCase().startsWith('bearer ')) {
+        const parts = authHeader.split(' ');
+        if (parts.length === 2) {
+          token = parts[1];
+          console.log('[Auth] Socket token extracted from Authorization Bearer header');
+        }
+      }
     } else if (xAccessToken) {
       token = xAccessToken;
       console.log('[Auth] Socket token extracted from x-access-token header');
     } else if (socket.handshake.auth && socket.handshake.auth.token) {
-      // Some Socket.io clients send token in auth object
       token = socket.handshake.auth.token;
       console.log('[Auth] Socket token extracted from handshake auth');
     }
@@ -307,7 +342,7 @@ const socketAuthenticate = async (socket, next) => {
       return next(new Error('Authentication error: No token provided'));
     }
     
-    // FIXED: Safe token verification
+    // Safe token verification
     let decoded;
     try {
       decoded = jwt.verify(token, JWT_SECRET);
@@ -326,7 +361,7 @@ const socketAuthenticate = async (socket, next) => {
       return next(new Error('Authentication error: Invalid token'));
     }
     
-    // FIXED: Normalized user ID extraction
+    // Normalized user ID extraction
     const userId = decoded.userId || decoded.id || decoded.sub;
     if (!userId) {
       console.error('[Auth] ❌ No user identifier in socket token');
@@ -336,7 +371,7 @@ const socketAuthenticate = async (socket, next) => {
     // Check for existing socket connection for this user/session
     const sessionId = decoded.sessionId || decoded.jti;
     
-    // FIXED: Attach normalized user info to socket
+    // Attach normalized user info to socket
     socket.userId = userId;
     socket.user = {
       id: userId,                    // Normalized field
@@ -361,11 +396,11 @@ const socketAuthenticate = async (socket, next) => {
   }
 };
 
-// Alias for compatibility (UNCHANGED)
+// Alias for compatibility
 const authenticate = authenticateToken;
 const authMiddleware = authenticateToken;
 
-// Token refresh validation (for refresh endpoint) - FIXED error handling
+// Token refresh validation (for refresh endpoint)
 const validateRefreshToken = (req, res, next) => {
   try {
     console.log('[Auth] 🔄 Refresh token validation');
@@ -377,12 +412,13 @@ const validateRefreshToken = (req, res, next) => {
       return res.status(401).json({
         success: false,
         message: 'Refresh token required.',
-        error: 'NO_REFRESH_TOKEN',
+        errorCode: 'NO_REFRESH_TOKEN',
+        code: 'NO_REFRESH_TOKEN',
         timestamp: new Date().toISOString()
       });
     }
     
-    // Verify refresh token (can use same or different secret)
+    // Verify refresh token
     const decoded = jwt.verify(refreshToken, JWT_SECRET);
     
     // Store in request for later use
@@ -398,7 +434,8 @@ const validateRefreshToken = (req, res, next) => {
       return res.status(401).json({
         success: false,
         message: 'Refresh token expired. Please log in again.',
-        error: 'REFRESH_TOKEN_EXPIRED',
+        errorCode: 'REFRESH_TOKEN_EXPIRED',
+        code: 'REFRESH_TOKEN_EXPIRED',
         timestamp: new Date().toISOString()
       });
     }
@@ -407,7 +444,8 @@ const validateRefreshToken = (req, res, next) => {
       return res.status(401).json({
         success: false,
         message: 'Invalid refresh token.',
-        error: 'INVALID_REFRESH_TOKEN',
+        errorCode: 'INVALID_REFRESH_TOKEN',
+        code: 'INVALID_REFRESH_TOKEN',
         timestamp: new Date().toISOString()
       });
     }
@@ -415,18 +453,19 @@ const validateRefreshToken = (req, res, next) => {
     return res.status(401).json({
       success: false,
       message: 'Refresh token validation failed.',
-      error: 'REFRESH_TOKEN_ERROR',
+      errorCode: 'REFRESH_TOKEN_ERROR',
+      code: 'REFRESH_TOKEN_ERROR',
       timestamp: new Date().toISOString()
     });
   }
 };
 
-// Validate JWT secret on module load (UNCHANGED)
+// Validate JWT secret on module load
 (function validateJwtSecret() {
   console.log('[Auth] 🔐 JWT_SECRET from .env:', process.env.JWT_SECRET ? 'Loaded' : 'Not loaded');
   console.log('[Auth] 🔐 Using JWT_SECRET prefix:', JWT_SECRET.substring(0, 10) + '...');
   
-  if (!process.env.JWT_SECRET) {
+  if (!process.env.JWT_SECRET && !process.env.JWT_ACCESS_SECRET) {
     console.warn('[Auth] ⚠️ WARNING: JWT_SECRET environment variable is not set!');
     console.warn('[Auth] Using fallback secret. This is INSECURE for production!');
     console.warn('[Auth] Set JWT_SECRET environment variable in production.');
@@ -435,7 +474,7 @@ const validateRefreshToken = (req, res, next) => {
   }
 })();
 
-// FIXED: Utility functions with proper error handling
+// Utility functions
 module.exports = {
   authenticateToken,
   authenticate,
@@ -444,26 +483,8 @@ module.exports = {
   socketAuthenticate,
   validateRefreshToken,
   
-  // FIXED: Utility functions with better error handling
-  extractToken: (req) => {
-    try {
-      // Check multiple header locations
-      const authHeader = req.headers['authorization'];
-      if (authHeader && authHeader.startsWith('Bearer ')) {
-        return authHeader.substring(7);
-      }
-      
-      const xAccessToken = req.headers['x-access-token'];
-      if (xAccessToken) {
-        return xAccessToken;
-      }
-      
-      return null;
-    } catch (error) {
-      console.error('[Auth] Error extracting token:', error.message);
-      return null;
-    }
-  },
+  // FIXED: Standardized token extraction utility
+  extractToken: extractToken,
   
   decodeToken: (token) => {
     try {
@@ -474,13 +495,13 @@ module.exports = {
     }
   },
   
-  // Safe token logging utility (UNCHANGED)
+  // Safe token logging utility
   safeTokenLog: (token) => {
     if (!token || token.length < 15) return '[Invalid Token]';
     return `${token.substring(0, 6)}...${token.substring(token.length - 6)}`;
   },
   
-  // Public paths checker (exported for testing/other middleware)
+  // Public paths checker
   isPublicPath,
   PUBLIC_PATHS,
   

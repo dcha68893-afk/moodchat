@@ -1,5 +1,7 @@
 ﻿﻿// src/server.js - ADVANCED PRODUCTION SERVER WITH OPTIMIZED MIDDLEWARE ORDER
 // Complete implementation with FIXED middleware order and WebSocket
+// PATCHED: Fixed authentication handling, token extraction, and middleware consistency
+// CRITICAL FIX: Standardized token response format, fixed public route detection
 // =========================================================================
 
 // ========== BOOTSTRAP & ENVIRONMENT ==========
@@ -291,7 +293,7 @@ class DynamicCorsManager {
         console.log('='.repeat(80) + '\n');
     }
     
-    // Get CORS options for Express middleware
+    // Get CORS options for Express middleware - CRITICAL FIX: Properly handle Authorization header
     getCorsOptions() {
         return {
             origin: (origin, callback) => {
@@ -301,7 +303,8 @@ class DynamicCorsManager {
             methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS', 'HEAD'],
             allowedHeaders: [
                 'Content-Type', 
-                'Authorization', 
+                'Authorization',      // CRITICAL FIX: Standard capitalization
+                'authorization',      // CRITICAL FIX: Also allow lowercase for compatibility
                 'X-Requested-With', 
                 'Accept', 
                 'Origin', 
@@ -1355,10 +1358,10 @@ class ConfigurationManager {
         this.set('API_VERSION', process.env.API_VERSION || '1.0.0');
         this.set('APP_NAME', process.env.APP_NAME || 'MoodChat');
         
-        // Security
-        this.set('JWT_SECRET', process.env.JWT_SECRET || process.env.JWT_ACCESS_SECRET);
-        this.set('JWT_ACCESS_SECRET', process.env.JWT_ACCESS_SECRET);
-        this.set('JWT_REFRESH_SECRET', process.env.JWT_REFRESH_SECRET);
+        // CRITICAL FIX: Unified JWT secret handling
+        this.set('JWT_SECRET', process.env.JWT_SECRET || process.env.JWT_ACCESS_SECRET || '3e78ab2d6cb698f95b3b8d510614058c');
+        this.set('JWT_ACCESS_SECRET', process.env.JWT_ACCESS_SECRET || this.get('JWT_SECRET'));
+        this.set('JWT_REFRESH_SECRET', process.env.JWT_REFRESH_SECRET || this.get('JWT_SECRET'));
         this.set('JWT_EXPIRES_IN', process.env.JWT_EXPIRES_IN || '24h');
         this.set('BCRYPT_ROUNDS', parseInt(process.env.BCRYPT_ROUNDS, 10) || 10);
         
@@ -1416,7 +1419,8 @@ class ConfigurationManager {
         
         // Warn if using default JWT secret
         if (this.get('JWT_SECRET') === 'your_jwt_secret_key_here_change_me' || 
-            this.get('JWT_SECRET') === 'super_secret_jwt_key_change_in_production') {
+            this.get('JWT_SECRET') === 'super_secret_jwt_key_change_in_production' ||
+            this.get('JWT_SECRET') === '3e78ab2d6cb698f95b3b8d510614058c') {
             logger.warn('Using default JWT_SECRET - CHANGE THIS IN PRODUCTION', 'SECURITY');
         }
         
@@ -1844,7 +1848,8 @@ class DatabaseService {
 class AuthService {
     constructor(databaseService) {
         this.db = databaseService;
-        this.jwtSecret = config.get('JWT_SECRET') || config.get('JWT_ACCESS_SECRET');
+        // CRITICAL FIX: Use unified JWT secret
+        this.jwtSecret = config.get('JWT_SECRET');
         this.jwtRefreshSecret = config.get('JWT_REFRESH_SECRET') || this.jwtSecret;
         
         if (!this.jwtSecret && config.get('NODE_ENV') === 'production') {
@@ -1864,7 +1869,8 @@ class AuthService {
             'your_jwt_secret_key_here_change_me',
             'super_secret_jwt_key_change_in_production',
             'secret',
-            'test'
+            'test',
+            '3e78ab2d6cb698f95b3b8d510614058c'
         ];
         
         if (defaultSecrets.includes(this.jwtSecret)) {
@@ -1997,7 +2003,7 @@ class AuthService {
             
             return {
                 success: true,
-                accessToken,
+                accessToken,  // Keep as accessToken internally
                 refreshToken,
                 user: userData,
                 expiresIn: config.get('JWT_EXPIRES_IN')
@@ -2123,7 +2129,7 @@ class AuthService {
             
             return {
                 success: true,
-                accessToken,
+                accessToken,  // Keep as accessToken internally
                 refreshToken,
                 user: userResponse,
                 expiresIn: config.get('JWT_EXPIRES_IN')
@@ -2687,30 +2693,66 @@ class RedisService {
     }
 }
 
-// ========== AUTH MIDDLEWARE MANAGER ==========
+// ========== FIXED AUTH MIDDLEWARE MANAGER ==========
 class AuthMiddlewareManager {
     constructor(authService) {
         this.authService = authService;
         this.rateLimitStore = new Map();
     }
     
-    // Create authentication middleware with proper error handling
+    // CRITICAL FIX: Improved token extraction with case-insensitive header detection
+    extractToken(req) {
+        // CRITICAL FIX: Check both possible header casings and normalize
+        const authHeader = req.headers.authorization || req.headers.Authorization;
+        
+        if (!authHeader) {
+            logger.debug('No authorization header found', 'AUTH');
+            return null;
+        }
+        
+        // Handle both "Bearer " and "bearer " prefixes (case insensitive)
+        if (!authHeader.toLowerCase().startsWith("bearer ")) {
+            logger.debug('Invalid authorization header format', 'AUTH');
+            return null;
+        }
+        
+        // Extract token (split on space and take second part)
+        const token = authHeader.split(" ")[1];
+        
+        if (!token || token.length === 0) {
+            logger.debug('Empty token in authorization header', 'AUTH');
+            return null;
+        }
+        
+        // Debug logging
+        if (config.get('NODE_ENV') === 'development') {
+            console.log("[AUTH DEBUG]", {
+                path: req.path,
+                hasHeader: true,
+                tokenPreview: token.substring(0, 20) + "..."
+            });
+        }
+        
+        return token;
+    }
+    
+    // CRITICAL FIX: Strict auth middleware with proper public route detection
     createAuthMiddleware() {
         return (req, res, next) => {
             const path = req.path;
             
-            // Check if route is public (skip auth) - EXACT MATCH FIRST
+            // Check if route is public (skip auth)
             if (this.isPublicRoute(path)) {
                 logger.logPublicRouteAccess(path, req.method);
                 systemState.incrementMetric('publicRouteAccess');
                 return next();
             }
             
-            // Route requires authentication - check JWT
-            const authHeader = req.headers['authorization'];
+            // Extract token using improved method
+            const token = this.extractToken(req);
             
-            if (!authHeader) {
-                logger.logAuthFailure(path, req.method, 'No authorization header');
+            if (!token) {
+                logger.logAuthFailure(path, req.method, 'Missing or invalid authorization header');
                 systemState.incrementMetric('authFailures');
                 return res.status(401).json({
                     success: false,
@@ -2719,39 +2761,32 @@ class AuthMiddlewareManager {
                 });
             }
             
-            const [scheme, token] = authHeader.split(' ');
-            
-            if (!token || scheme.toLowerCase() !== 'bearer') {
-                logger.logAuthFailure(path, req.method, 'Invalid authorization format');
-                systemState.incrementMetric('authFailures');
-                return res.status(401).json({
-                    success: false,
-                    message: 'Invalid authorization format. Use: Bearer <token>',
-                    code: 'INVALID_AUTH_FORMAT'
-                });
-            }
-            
             try {
                 const result = this.authService.verifyToken(token);
+                
                 if (!result.success) {
-                    logger.logAuthFailure(path, req.method, 'Invalid or expired token');
+                    logger.logAuthFailure(path, req.method, result.message || 'Invalid or expired token');
                     systemState.incrementMetric('authFailures');
-                    return res.status(403).json({
+                    return res.status(401).json({
                         success: false,
-                        message: 'Invalid or expired token',
+                        message: result.message || 'Invalid or expired token',
                         code: result.code || 'INVALID_TOKEN'
                     });
                 }
                 
+                // Attach user and token to request
                 req.user = result.data;
+                req.token = token;
+                
                 logger.logRouteAccess(path, req.method, false, true);
                 systemState.incrementMetric('protectedRouteAccess');
                 systemState.incrementMetric('authSuccesses');
+                
                 next();
             } catch (error) {
-                logger.logAuthFailure(path, req.method, 'Token verification error');
+                logger.logAuthFailure(path, req.method, 'Token verification error: ' + error.message);
                 systemState.incrementMetric('authFailures');
-                return res.status(403).json({
+                return res.status(401).json({
                     success: false,
                     message: 'Invalid or expired token',
                     code: 'TOKEN_VERIFICATION_ERROR'
@@ -2760,9 +2795,9 @@ class AuthMiddlewareManager {
         };
     }
     
-    // Check if a route is public
+    // CRITICAL FIX: Check if a route is public - ensure auth endpoints are public
     isPublicRoute(path) {
-        // Exact matches for public routes
+        // Exact matches for public routes - CRITICAL FIX: Include all auth endpoints
         const publicRoutes = [
             '/',
             '/health',
@@ -2772,8 +2807,8 @@ class AuthMiddlewareManager {
             '/api/status',
             '/api/info',
             '/api/cors-info',
-            '/api/auth/login',
-            '/api/auth/register',
+            '/api/auth/login',        // CRITICAL FIX: Explicitly public
+            '/api/auth/register',      // CRITICAL FIX: Explicitly public
             '/api/auth/refresh',
             '/api/auth/forgot-password',
             '/api/auth/reset-password',
@@ -2846,7 +2881,7 @@ class RouterManager {
         this.authService = null;
         this.authMiddlewareManager = null;
         
-        // Define public routes (NO JWT required)
+        // CRITICAL FIX: Define public routes (NO JWT required) - ensure auth endpoints are public
         this.publicRoutes = [
             // Root and health endpoints - MUST BE PUBLIC
             '/',
@@ -2858,22 +2893,22 @@ class RouterManager {
             '/api/info',
             '/api/cors-info',
             
-            // Auth endpoints that need to be public
-            '/api/auth/login',
-            '/api/auth/register',
-            '/api/auth/refresh',
-            '/api/auth/forgot-password',
-            '/api/auth/reset-password',
-            '/api/auth/validate-token',
+            // Auth endpoints that need to be public - CRITICAL FIX
+            '/api/auth/login',        // MUST be public
+            '/api/auth/register',     // MUST be public
+            '/api/auth/refresh',      // Public for token refresh
+            '/api/auth/forgot-password', // Public
+            '/api/auth/reset-password',  // Public
+            '/api/auth/validate-token',  // Public for token validation
             
             // Public API endpoints (if any)
             '/api/public'
         ];
         
-        // Define protected routes (JWT REQUIRED)
+        // CRITICAL FIX: Define protected routes (JWT REQUIRED)
         this.protectedRoutes = [
-            '/api/auth/me',
-            '/api/auth/logout',
+            '/api/auth/me',           // Protected
+            '/api/auth/logout',        // Protected
             '/api/users',
             '/api/messages',
             '/api/chats',
@@ -3054,7 +3089,7 @@ class RouterManager {
         }
     }
     
-    // WORKING LOGIN HANDLER
+    // CRITICAL FIX: WORKING LOGIN HANDLER with token field for frontend
     createLoginHandler() {
         return async (req, res) => {
             console.log('🔐 LOGIN REQUEST received');
@@ -3083,10 +3118,11 @@ class RouterManager {
                 
                 if (result.success) {
                     console.log(`✅ Login successful for: ${identifier}`);
+                    // CRITICAL FIX: Return token directly, not accessToken
                     return res.json({
                         success: true,
                         message: 'Login successful',
-                        accessToken: result.accessToken,
+                        token: result.accessToken, // Changed from accessToken to token
                         refreshToken: result.refreshToken,
                         user: result.user,
                         expiresIn: result.expiresIn
@@ -3111,7 +3147,7 @@ class RouterManager {
         };
     }
     
-    // WORKING REGISTER HANDLER
+    // CRITICAL FIX: WORKING REGISTER HANDLER with token field for frontend
     createRegisterHandler() {
         return async (req, res) => {
             console.log('📝 REGISTER REQUEST received');
@@ -3164,10 +3200,11 @@ class RouterManager {
                 
                 if (result.success) {
                     console.log(`✅ Registration successful for: ${email}`);
+                    // CRITICAL FIX: Return token directly, not accessToken
                     return res.status(201).json({
                         success: true,
                         message: 'Registration successful',
-                        accessToken: result.accessToken,
+                        token: result.accessToken, // Changed from accessToken to token
                         refreshToken: result.refreshToken,
                         user: result.user,
                         expiresIn: result.expiresIn
@@ -3281,10 +3318,13 @@ class RouterManager {
         };
     }
     
+    // Improved /api/auth/me handler
     createMeHandler() {
         return async (req, res) => {
             try {
                 const userId = req.user.userId;
+                console.log(`👤 GET /api/auth/me for user: ${userId}`);
+                
                 const result = await this.authService.getCurrentUser(userId);
                 
                 if (result.success) {
@@ -3539,7 +3579,7 @@ class RouterManager {
         }
     }
     
-    // UPDATED: Mount routers with selective auth middleware
+    // Mount routers with selective auth middleware
     async mountRoutersSelective(loadedRouters) {
         for (const routerInfo of loadedRouters) {
             try {
@@ -3633,8 +3673,8 @@ class RouterManager {
             /^\/api\/media/,
             /^\/api\/notifications/,
             /^\/api\/typingIndicator/,
-            /^\/api\/auth\/me/,
-            /^\/api\/auth\/logout/
+            /^\/api\/auth\/me/,      // Ensure /api/auth/me is protected
+            /^\/api\/auth\/logout/    // Ensure /api/auth/logout is protected
         ];
         
         for (const pattern of protectedPatterns) {
@@ -4016,7 +4056,7 @@ class Application {
         }
     }
     
-    // UPDATED: Setup middleware WITH CORRECT ORDER
+    // CRITICAL FIX: Setup middleware WITH CORRECT ORDER and proper preflight handling
     setupMiddleware() {
         console.log('🔄 Setting up middleware with correct order...');
         
@@ -4026,11 +4066,16 @@ class Application {
         // 1. CORS middleware - FIRST (CRITICAL)
         this.app.use(cors(corsOptions));
         
-        // 2. Handle preflight requests - FIXED
+        // 2. Handle preflight requests - CRITICAL FIX: Properly handle Authorization header
         this.app.options('*', (req, res) => {
-            // Set ALL required CORS headers for preflight
-            res.header('Access-Control-Allow-Origin', req.headers.origin || 'http://127.0.0.1:5500');
-            res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+            // CRITICAL FIX: Set ALL required CORS headers for preflight
+            const origin = req.headers.origin;
+            if (origin && corsManager.isOriginAllowed(origin)) {
+                res.header('Access-Control-Allow-Origin', origin);
+            } else {
+                res.header('Access-Control-Allow-Origin', 'http://127.0.0.1:5500');
+            }
+            res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
             res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
             res.header('Access-Control-Allow-Credentials', 'true');
             res.header('Access-Control-Max-Age', '86400'); // 24 hours
@@ -4202,7 +4247,7 @@ class Application {
             });
         });
         
-        // Status endpoint (public)
+        // Status endpoint (public) - Ensure it's explicitly public
         this.app.get('/api/status', (req, res) => {
             logger.logPublicRouteAccess(req.path, req.method);
             systemState.incrementMetric('publicRouteAccess');
@@ -4609,7 +4654,7 @@ class Application {
                 console.log(`   • /api/auth/validate-token   - Token validation`);
                 console.log(`   • /ws-test.html              - WebSocket test page`);
                 console.log(`🔒 PROTECTED ROUTES (JWT required):`);
-                console.log(`   • /api/auth/me               - Current user info`);
+                console.log(`   • /api/auth/me               - Current user info ✅`);
                 console.log(`   • /api/auth/logout           - User logout`);
                 console.log(`   • /api/users/*               - User management`);
                 console.log(`   • /api/messages/*            - Message handling`);
