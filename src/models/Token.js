@@ -102,8 +102,8 @@ module.exports = (sequelize, DataTypes) => {
       },
     },
     {
-      tableName: 'tokens',                   // Standardized: lowercase table name
-      modelName: 'Token',                     // Explicit model name
+      tableName: 'tokens',
+      modelName: 'Token',
       timestamps: true,
       underscored: true,
       freezeTableName: true,
@@ -193,7 +193,7 @@ module.exports = (sequelize, DataTypes) => {
       options.include = [
         {
           model: this.sequelize.models.Users,
-          as: 'tokenOwnerUser',                 // FIXED: Unique alias
+          as: 'tokenOwner',
           attributes: ['id', 'username', 'email', 'isActive', 'isVerified'],
         },
       ];
@@ -222,7 +222,7 @@ module.exports = (sequelize, DataTypes) => {
       where: where,
       include: [{
         model: this.sequelize.models.Users,
-        as: 'tokenOwnerUser',                   // FIXED: Unique alias
+        as: 'tokenOwner',
         attributes: ['id', 'username', 'email', 'isActive', 'isVerified'],
       }],
       order: [['createdAt', 'DESC']],
@@ -349,7 +349,7 @@ module.exports = (sequelize, DataTypes) => {
       },
       include: [{
         model: this.sequelize.models.Users,
-        as: 'tokenOwnerUser',                  // FIXED: Unique alias
+        as: 'tokenOwner',
         attributes: ['id', 'username', 'email', 'isActive', 'isVerified'],
       }]
     });
@@ -439,7 +439,7 @@ module.exports = (sequelize, DataTypes) => {
     if (models.Users) {
       Token.belongsTo(models.Users, {
         foreignKey: 'userId',
-        as: 'tokenOwnerUser',                  // FIXED: Unique alias
+        as: 'tokenOwner',
         constraints: false,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',

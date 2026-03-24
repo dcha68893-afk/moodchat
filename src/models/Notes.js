@@ -71,8 +71,8 @@ module.exports = (sequelize, DataTypes) => {
       }
     },
     {
-      tableName: 'notes',                   // Standardized: lowercase table name
-      modelName: 'Notes',                    // Explicit model name
+      tableName: 'notes',
+      modelName: 'Notes',
       timestamps: true,
       underscored: true,
       freezeTableName: true,
@@ -155,7 +155,7 @@ module.exports = (sequelize, DataTypes) => {
     if (models.Users) {
       Notes.belongsTo(models.Users, {
         foreignKey: 'createdBy',
-        as: 'noteAuthorUser',                 // FIXED: Unique alias
+        as: 'noteAuthor',
         constraints: false,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
@@ -165,7 +165,7 @@ module.exports = (sequelize, DataTypes) => {
     if (models.File) {
       Notes.hasMany(models.File, {
         foreignKey: 'noteId',
-        as: 'noteAttachmentsList',            // FIXED: Unique alias
+        as: 'noteAttachments',
         constraints: false,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',

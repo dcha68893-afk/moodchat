@@ -75,8 +75,8 @@ module.exports = (sequelize, DataTypes) => {
       }
     },
     {
-      tableName: 'chats',                   // Preserved: matches existing table
-      modelName: 'Chats',                    // Explicit model name
+      tableName: 'chats',
+      modelName: 'Chats',
       timestamps: true,
       underscored: false,
       freezeTableName: true,
@@ -126,7 +126,7 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.ChatParticipant,
-          as: 'chatParticipantsList',        // FIXED: Unique alias
+          as: 'chatParticipants',
           where: {
             userId: [userId1, userId2],
           },
@@ -145,7 +145,7 @@ module.exports = (sequelize, DataTypes) => {
     const include = [
       {
         model: this.sequelize.models.ChatParticipant,
-        as: 'chatParticipantsList',          // FIXED: Unique alias
+        as: 'chatParticipants',
         where: { userId: userId },
         required: true,
         attributes: [],
@@ -155,7 +155,7 @@ module.exports = (sequelize, DataTypes) => {
     if (this.sequelize.models.Messages) {
       include.push({
         model: this.sequelize.models.Messages,
-        as: 'chatMessagesList',              // FIXED: Unique alias
+        as: 'chatMessages',
         attributes: ['id', 'content', 'type', 'createdAt'],
         required: false,
         limit: 1,
@@ -163,7 +163,7 @@ module.exports = (sequelize, DataTypes) => {
         include: this.sequelize.models.Users ? [
           {
             model: this.sequelize.models.Users,
-            as: 'messageSenderDetails',      // FIXED: Unique alias
+            as: 'messageSender',
             attributes: ['id', 'username', 'avatar'],
           },
         ] : undefined,
@@ -184,7 +184,7 @@ module.exports = (sequelize, DataTypes) => {
     if (models.Messages) {
       Chats.hasMany(models.Messages, {
         foreignKey: 'chatId',
-        as: 'chatMessagesList',               // FIXED: Unique alias
+        as: 'chatMessages',
         constraints: false,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
@@ -194,7 +194,7 @@ module.exports = (sequelize, DataTypes) => {
     if (models.ChatParticipant) {
       Chats.hasMany(models.ChatParticipant, {
         foreignKey: 'chatId',
-        as: 'chatParticipantsList',           // FIXED: Unique alias
+        as: 'chatParticipants',
         constraints: false,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
@@ -204,7 +204,7 @@ module.exports = (sequelize, DataTypes) => {
     if (models.Users) {
       Chats.belongsTo(models.Users, {
         foreignKey: 'createdBy',
-        as: 'chatCreatorUser',                 // FIXED: Unique alias
+        as: 'chatCreator',
         constraints: false,
         onDelete: 'SET NULL',
         onUpdate: 'CASCADE',
@@ -214,7 +214,7 @@ module.exports = (sequelize, DataTypes) => {
     if (models.Messages) {
       Chats.belongsTo(models.Messages, {
         foreignKey: 'lastMessageId',
-        as: 'chatLastMessageDetails',          // FIXED: Unique alias
+        as: 'chatLastMessage',
         constraints: false,
         onDelete: 'SET NULL',
         onUpdate: 'CASCADE',

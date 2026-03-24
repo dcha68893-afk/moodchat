@@ -89,8 +89,8 @@ module.exports = (sequelize, DataTypes) => {
       }
     },
     {
-      tableName: 'files',                   // Standardized: lowercase table name
-      modelName: 'File',                     // Explicit model name
+      tableName: 'files',
+      modelName: 'File',
       timestamps: true,
       underscored: true,
       freezeTableName: true,
@@ -179,7 +179,7 @@ module.exports = (sequelize, DataTypes) => {
     if (models.Users) {
       File.belongsTo(models.Users, {
         foreignKey: 'uploadedBy',
-        as: 'fileUploaderUser',              // FIXED: Unique alias
+        as: 'fileUploader',
         constraints: false,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
@@ -189,7 +189,7 @@ module.exports = (sequelize, DataTypes) => {
     if (models.Notes) {
       File.belongsTo(models.Notes, {
         foreignKey: 'noteId',
-        as: 'fileNoteDetails',                // FIXED: Unique alias
+        as: 'fileNote',
         constraints: false,
         onDelete: 'SET NULL',
         onUpdate: 'CASCADE',

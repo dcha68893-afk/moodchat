@@ -59,8 +59,8 @@ module.exports = (sequelize, DataTypes) => {
       },
     },
     {
-      tableName: 'friends',                 // Standardized: lowercase table name
-      modelName: 'Friend',                   // Explicit model name
+      tableName: 'friends',
+      modelName: 'Friend',
       timestamps: true,
       underscored: true,
       freezeTableName: true,
@@ -131,7 +131,7 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
-          as: 'friendReceiverDetails',        // FIXED: Unique alias
+          as: 'friendReceiver',
           attributes: ['id', 'username', 'avatar', 'status', 'lastSeen'],
         },
       ],
@@ -145,7 +145,7 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
-          as: 'friendRequesterDetails',       // FIXED: Unique alias
+          as: 'friendRequester',
           attributes: ['id', 'username', 'avatar', 'status', 'lastSeen'],
         },
       ],
@@ -167,7 +167,7 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
-          as: 'friendRequesterDetails',       // FIXED: Unique alias
+          as: 'friendRequester',
           attributes: ['id', 'username', 'avatar', 'status', 'lastSeen'],
         },
       ],
@@ -188,7 +188,7 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
-          as: 'friendReceiverDetails',        // FIXED: Unique alias
+          as: 'friendReceiver',
           attributes: ['id', 'username', 'avatar', 'status', 'lastSeen'],
         },
       ],
@@ -201,7 +201,7 @@ module.exports = (sequelize, DataTypes) => {
     if (models.Users) {
       Friend.belongsTo(models.Users, {
         foreignKey: 'requesterId',
-        as: 'friendRequesterDetails',         // FIXED: Unique alias
+        as: 'friendRequester',
         constraints: false,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
@@ -209,7 +209,7 @@ module.exports = (sequelize, DataTypes) => {
       
       Friend.belongsTo(models.Users, {
         foreignKey: 'receiverId',
-        as: 'friendReceiverDetails',           // FIXED: Unique alias
+        as: 'friendReceiver',
         constraints: false,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',

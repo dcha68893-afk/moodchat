@@ -100,8 +100,7 @@ class AuthController {
       }
 
       // Hash password with bcrypt
-      const hashedPassword = await bcrypt.hash(password, 10);
-
+      
       // Create avatar URL
       const avatar = `https://ui-avatars.com/api/?name=${encodeURIComponent(username)}&background=random&color=fff`;
 
@@ -342,7 +341,7 @@ class AuthController {
           await user.update({
             status: 'online',
             lastSeen: new Date(),
-            lastLogin: new Date()
+            lastSeen: new Date()
           });
         } catch (updateError) {
           console.error('User status update error:', updateError.message);

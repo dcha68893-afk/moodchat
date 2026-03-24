@@ -1,4 +1,5 @@
 // --- MODEL: Users.js ---
+// SINGLE SOURCE OF TRUTH FOR USER MODEL
 const bcrypt = require('bcryptjs');
 
 module.exports = (sequelize, DataTypes) => {
@@ -67,11 +68,8 @@ module.exports = (sequelize, DataTypes) => {
           },
           notEmpty: {
             msg: 'Password cannot be empty'
-          },
-          len: {
-            args: [6, 100],
-            msg: 'Password must be at least 6 characters'
           }
+          // NO LENGTH VALIDATION HERE - we handle in service
         }
       },
       avatar: {
@@ -208,35 +206,44 @@ module.exports = (sequelize, DataTypes) => {
       }
     },
     {
-      tableName: 'Users',                    // Standardized: lowercase table name
-      modelName: 'Users',                     // Explicit model name
+      tableName: 'Users',
+      modelName: 'Users',
       timestamps: true,
       underscored: false,
       freezeTableName: true,
       hooks: {
         beforeCreate: async (user) => {
-          if (user.password && user.password.length > 0) {
+          // CRITICAL: ONLY hash if password is NOT already hashed
+          if (user.password && user.password.length > 0 && !user.password.startsWith('$2b$')) {
             try {
+              console.log('🔧 [MODEL] Hashing password in beforeCreate');
               user.password = await bcrypt.hash(user.password, 10);
             } catch (error) {
               throw new Error(`Password hashing failed: ${error.message}`);
             }
+          } else if (user.password && user.password.startsWith('$2b$')) {
+            console.log('⚠️ [MODEL] Password already hashed - skipping');
           } else {
             throw new Error('Password is required');
           }
           
+          // Generate avatar if not provided
           if (!user.avatar || user.avatar === 'https://ui-avatars.com/api/?name=User&background=random&color=fff') {
             user.avatar = `https://ui-avatars.com/api/?name=${encodeURIComponent(user.username)}&background=random&color=fff`;
           }
         },
         beforeUpdate: async (user) => {
+          // Only hash if password changed and not already hashed
           if (user.changed('password')) {
-            if (user.password && user.password.length > 0) {
+            if (user.password && user.password.length > 0 && !user.password.startsWith('$2b$')) {
               try {
+                console.log('🔧 [MODEL] Hashing password in beforeUpdate');
                 user.password = await bcrypt.hash(user.password, 10);
               } catch (error) {
                 throw new Error(`Password hashing failed: ${error.message}`);
               }
+            } else if (user.password && user.password.startsWith('$2b$')) {
+              console.log('⚠️ [MODEL] Password already hashed - skipping beforeUpdate hash');
             } else {
               throw new Error('Password cannot be empty');
             }
@@ -246,27 +253,33 @@ module.exports = (sequelize, DataTypes) => {
     }
   );
 
-  // Instance methods (PRESERVED)
-  Users.prototype.validatePassword = async function (password) {
+Users.prototype.validatePassword = async function (password) {
     if (!password || !this.password) {
-      return false;
+        console.log('[MODEL] validatePassword: Missing password or hash');
+        return false;
     }
+    
     try {
-      return await bcrypt.compare(password, this.password);
+        console.log(`[MODEL] Validating password for user ${this.id}`);
+        const isValid = await bcrypt.compare(password, this.password);
+        console.log(`[MODEL] Password validation result: ${isValid ? '✅ VALID' : '❌ INVALID'}`);
+        return isValid;
     } catch (error) {
-      console.error('Password validation error:', error);
-      return false;
+        console.error('[MODEL] Password validation error:', error.message);
+        return false;
     }
-  };
+};
 
   Users.prototype.toJSON = function () {
     const values = Object.assign({}, this.get());
     delete values.password;
+    delete values.resetToken;
+    delete values.resetTokenExpiry;
     return values;
   };
 
   Users.prototype.getPublicProfile = function () {
-    const { id, username, firstName, lastName, avatar, bio, status, lastSeen } = this;
+    const { id, username, firstName, lastName, avatar, bio, status, lastSeen, isOnline } = this;
     return { 
       id, 
       username, 
@@ -302,7 +315,7 @@ module.exports = (sequelize, DataTypes) => {
     }
   };
 
-  // Static methods (PRESERVED)
+  // Static methods
   Users.findByEmail = async function (email) {
     if (!email) {
       throw new Error('Email is required');
@@ -429,10 +442,25 @@ module.exports = (sequelize, DataTypes) => {
     }
   };
 
-  // FIXED: Associations (users model has no associations defined - keeping empty)
+  // Associations
   Users.associate = function(models) {
-    // Associations are defined in other models
-    // Users is the source for many relationships, but they are defined elsewhere
+    if (models.Friend) {
+      Users.belongsToMany(Users, {
+        through: models.Friend,
+        as: 'friends',
+        foreignKey: 'requesterId',
+        otherKey: 'receiverId',
+        constraints: false
+      });
+      
+      Users.belongsToMany(Users, {
+        through: models.Friend,
+        as: 'friendRequests',
+        foreignKey: 'receiverId',
+        otherKey: 'requesterId',
+        constraints: false
+      });
+    }
   };
 
   return Users;

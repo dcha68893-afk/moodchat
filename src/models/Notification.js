@@ -95,8 +95,8 @@ module.exports = (sequelize, DataTypes) => {
       },
     },
     {
-      tableName: 'notifications',            // Standardized: lowercase table name
-      modelName: 'Notification',              // Explicit model name
+      tableName: 'notifications',
+      modelName: 'Notification',
       timestamps: true,
       underscored: true,
       freezeTableName: true,
@@ -229,7 +229,7 @@ module.exports = (sequelize, DataTypes) => {
     if (models.Users) {
       Notification.belongsTo(models.Users, {
         foreignKey: 'userId',
-        as: 'notificationRecipientUser',      // FIXED: Unique alias
+        as: 'notificationRecipient',
         constraints: false,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',

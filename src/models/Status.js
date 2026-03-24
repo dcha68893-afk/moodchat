@@ -170,8 +170,8 @@ module.exports = (sequelize, DataTypes) => {
       },
     },
     {
-      tableName: 'statuses',                 // Standardized: lowercase table name
-      modelName: 'Status',                    // Explicit model name
+      tableName: 'statuses',
+      modelName: 'Status',
       timestamps: true,
       underscored: false,
       freezeTableName: true,
@@ -378,7 +378,7 @@ module.exports = (sequelize, DataTypes) => {
     if (options.includeUser) {
       include.push({
         model: this.sequelize.models.Users,
-        as: 'statusUserDetails',              // FIXED: Unique alias
+        as: 'statusUser',
         attributes: ['id', 'username', 'avatar', 'status'],
       });
     }
@@ -386,13 +386,13 @@ module.exports = (sequelize, DataTypes) => {
     if (options.includeLikes) {
       include.push({
         model: this.sequelize.models.StatusLike,
-        as: 'statusLikesList',                 // FIXED: Unique alias
+        as: 'statusLikes',
         attributes: ['id', 'userId', 'createdAt'],
         limit: 5,
         include: [
           {
             model: this.sequelize.models.Users,
-            as: 'likeUserDetails',             // FIXED: Unique alias
+            as: 'likeUser',
             attributes: ['id', 'username', 'avatar'],
           },
         ],
@@ -402,14 +402,14 @@ module.exports = (sequelize, DataTypes) => {
     if (options.includeComments) {
       include.push({
         model: this.sequelize.models.StatusComment,
-        as: 'statusCommentsList',               // FIXED: Unique alias
+        as: 'statusComments',
         attributes: ['id', 'userId', 'content', 'createdAt'],
         limit: 5,
         order: [['createdAt', 'DESC']],
         include: [
           {
             model: this.sequelize.models.Users,
-            as: 'commentUserDetails',            // FIXED: Unique alias
+            as: 'commentUser',
             attributes: ['id', 'username', 'avatar'],
           },
         ],
@@ -451,7 +451,7 @@ module.exports = (sequelize, DataTypes) => {
     const include = [
       {
         model: this.sequelize.models.Users,
-        as: 'statusUserDetails',                // FIXED: Unique alias
+        as: 'statusUser',
         attributes: ['id', 'username', 'avatar', 'status'],
       },
     ];
@@ -484,7 +484,7 @@ module.exports = (sequelize, DataTypes) => {
     const include = [
       {
         model: this.sequelize.models.Users,
-        as: 'statusUserDetails',                // FIXED: Unique alias
+        as: 'statusUser',
         attributes: ['id', 'username', 'avatar', 'status'],
       },
     ];
@@ -492,7 +492,7 @@ module.exports = (sequelize, DataTypes) => {
     if (options.includeStats) {
       include.push({
         model: this.sequelize.models.StatusLike,
-        as: 'statusLikesList',                   // FIXED: Unique alias
+        as: 'statusLikes',
         attributes: ['id'],
         required: false,
       });
@@ -553,7 +553,7 @@ module.exports = (sequelize, DataTypes) => {
     if (options.includeUser) {
       include.push({
         model: this.sequelize.models.Users,
-        as: 'statusUserDetails',                // FIXED: Unique alias
+        as: 'statusUser',
         attributes: ['id', 'username', 'avatar', 'status'],
       });
     }
@@ -561,12 +561,12 @@ module.exports = (sequelize, DataTypes) => {
     if (options.includeLikes) {
       include.push({
         model: this.sequelize.models.StatusLike,
-        as: 'statusLikesList',                   // FIXED: Unique alias
+        as: 'statusLikes',
         attributes: ['id', 'userId', 'createdAt'],
         include: [
           {
             model: this.sequelize.models.Users,
-            as: 'likeUserDetails',                // FIXED: Unique alias
+            as: 'likeUser',
             attributes: ['id', 'username', 'avatar'],
           },
         ],
@@ -576,12 +576,12 @@ module.exports = (sequelize, DataTypes) => {
     if (options.includeComments) {
       include.push({
         model: this.sequelize.models.StatusComment,
-        as: 'statusCommentsList',                 // FIXED: Unique alias
+        as: 'statusComments',
         attributes: ['id', 'userId', 'content', 'createdAt'],
         include: [
           {
             model: this.sequelize.models.Users,
-            as: 'commentUserDetails',              // FIXED: Unique alias
+            as: 'commentUser',
             attributes: ['id', 'username', 'avatar'],
           },
         ],
@@ -613,7 +613,7 @@ module.exports = (sequelize, DataTypes) => {
     const include = [
       {
         model: this.sequelize.models.Users,
-        as: 'statusUserDetails',                 // FIXED: Unique alias
+        as: 'statusUser',
         attributes: ['id', 'username', 'avatar', 'status'],
       },
     ];
@@ -644,7 +644,7 @@ module.exports = (sequelize, DataTypes) => {
     const include = [
       {
         model: this.sequelize.models.Users,
-        as: 'statusUserDetails',                  // FIXED: Unique alias
+        as: 'statusUser',
         attributes: ['id', 'username', 'avatar', 'status'],
       },
     ];
@@ -678,7 +678,7 @@ module.exports = (sequelize, DataTypes) => {
     const include = [
       {
         model: this.sequelize.models.Users,
-        as: 'statusUserDetails',                  // FIXED: Unique alias
+        as: 'statusUser',
         attributes: ['id', 'username', 'avatar', 'status'],
       },
     ];
@@ -772,7 +772,7 @@ module.exports = (sequelize, DataTypes) => {
     if (models.Users) {
       Status.belongsTo(models.Users, {
         foreignKey: 'userId',
-        as: 'statusUserDetails',                // FIXED: Unique alias
+        as: 'statusUser',
         constraints: false,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
@@ -782,7 +782,7 @@ module.exports = (sequelize, DataTypes) => {
     if (models.StatusLike) {
       Status.hasMany(models.StatusLike, {
         foreignKey: 'statusId',
-        as: 'statusLikesList',                   // FIXED: Unique alias
+        as: 'statusLikes',
         constraints: false,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
@@ -792,7 +792,7 @@ module.exports = (sequelize, DataTypes) => {
     if (models.StatusComment) {
       Status.hasMany(models.StatusComment, {
         foreignKey: 'statusId',
-        as: 'statusCommentsList',                 // FIXED: Unique alias
+        as: 'statusComments',
         constraints: false,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
@@ -802,7 +802,7 @@ module.exports = (sequelize, DataTypes) => {
     if (models.StatusView) {
       Status.hasMany(models.StatusView, {
         foreignKey: 'statusId',
-        as: 'statusViewsList',                    // FIXED: Unique alias
+        as: 'statusViews',
         constraints: false,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',

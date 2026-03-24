@@ -2,23 +2,42 @@ const { Op } = require('sequelize');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
-const { User, Profile } = require('../models');
-const logger = require('../utils/logger');
 
 class AuthService {
-  // In-memory storage for development (replace with Redis in production)
+  // In-memory storage for development (fallback when database is unavailable)
   static tokenStore = new Map();
   static verificationStore = new Map();
   static resetStore = new Map();
   static blacklistStore = new Map();
 
-  async register(userData) {
+  constructor() {
+    this.db = null;
+    this.User = null;
+    this.initialized = false;
+  }
+
+  setDatabase(databaseService) {
+    if (!databaseService) {
+      console.warn('⚠️ [AuthService] No database service provided');
+      return;
+    }
+
+    this.db = databaseService;
+    this.User = databaseService.getUserModel();
+    
+    if (this.User) {
+      this.initialized = true;
+      console.log('✅ [AuthService] Connected to database User model');
+    } else {
+      console.warn('⚠️ [AuthService] User model not found in database');
+    }
+  }
+
+  async register(userData, deviceInfo = {}) {
     try {
       console.log("🔧 [AuthService] Register called with:", { 
         username: userData.username, 
-        email: userData.email,
-        hasFirstName: !!userData.firstName,
-        hasLastName: !!userData.lastName 
+        email: userData.email
       });
 
       // Validate required fields
@@ -26,135 +45,100 @@ class AuthService {
         throw new Error('Username, email, and password are required');
       }
 
-      // Validate password is not empty
-      if (!userData.password || userData.password.trim() === '') {
-        throw new Error('Password cannot be empty');
-      }
-
-      // Check if user already exists
-      const existingUser = await User.findOne({
-        where: {
-          [Op.or]: [
-            { email: userData.email.toLowerCase().trim() }, 
-            { username: userData.username.trim() }
-          ],
-        },
-      });
-
-      if (existingUser) {
-        const errorMsg = existingUser.email === userData.email.toLowerCase().trim()
-          ? 'Email already registered'
-          : 'Username already taken';
-        console.log("❌ [AuthService] User exists:", errorMsg);
-        throw new Error(errorMsg);
-      }
-
-      // Create user
-      console.log("🔧 [AuthService] Creating user...");
-      const user = await User.create({
-        username: userData.username.trim(),
-        email: userData.email.toLowerCase().trim(),
-        password: userData.password,
-        firstName: userData.firstName || null,
-        lastName: userData.lastName || null,
-        isActive: true,
-        isVerified: process.env.NODE_ENV === 'development', // Auto-verify in dev
-      });
-
-      console.log("✅ [AuthService] User created with ID:", user.id);
-
-      // Skip Profile creation if model doesn't exist
-      try {
-        if (userData.profile) {
-          await Profile.create({
-            userId: user.id,
-            ...userData.profile,
-          });
-          console.log("✅ [AuthService] Profile created");
-        }
-      } catch (profileError) {
-        console.log("⚠️ [AuthService] Profile not created:", profileError.message);
-        // Continue without profile - it's optional
-      }
-
-      // Generate verification token (store in memory for dev)
-      const verificationToken = crypto.randomBytes(32).toString('hex');
-      AuthService.verificationStore.set(verificationToken, {
-        userId: user.id,
-        expires: Date.now() + 24 * 60 * 60 * 1000 // 24 hours
-      });
-
-      console.log("🔧 [AuthService] Verification token generated");
-
-      // Skip email sending in development
-      if (process.env.NODE_ENV !== 'development') {
+      // Check if database is available
+      if (this.User) {
         try {
-          const { sendEmail } = require('../utils/helpers');
-          await sendEmail({
-            to: user.email,
-            subject: 'Verify your MoodChat account',
-            template: 'verification',
-            context: {
-              name: user.username,
-              verificationLink: `${process.env.FRONTEND_URL || 'http://localhost:5500'}/verify-email?token=${verificationToken}`,
-            },
+          // Check if user already exists in database
+          const existingUser = await this.User.findOne({
+            where: {
+              [Op.or]: [
+                { email: userData.email.toLowerCase().trim() },
+                { username: userData.username.trim() }
+              ]
+            }
           });
-          console.log("✅ [AuthService] Verification email sent");
-        } catch (emailError) {
-          console.log("⚠️ [AuthService] Email not sent:", emailError.message);
+
+          if (existingUser) {
+            const errorMsg = existingUser.email === userData.email.toLowerCase().trim()
+              ? 'Email already registered'
+              : 'Username already taken';
+            throw new Error(errorMsg);
+          }
+
+          // Create user in database - pass plain password, model will hash it
+          const user = await this.User.create({
+            username: userData.username.trim(),
+            email: userData.email.toLowerCase().trim(),
+            password: userData.password, // Model hook will hash it
+            firstName: userData.firstName || null,
+            lastName: userData.lastName || null,
+            isActive: true,
+            isVerified: process.env.NODE_ENV === 'development',
+            status: 'online',
+            avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(userData.username)}&background=random&color=fff`
+          });
+
+          console.log("✅ [AuthService] User created in database with ID:", user.id);
+
+          // Generate tokens
+          const tokens = this.generateTokens(user.id);
+
+          // Store refresh token
+          AuthService.tokenStore.set(tokens.refreshToken, {
+            userId: user.id,
+            expires: Date.now() + 7 * 24 * 60 * 60 * 1000
+          });
+
+          const userWithoutPassword = user.toJSON();
+          delete userWithoutPassword.password;
+
+          return {
+            success: true,
+            user: userWithoutPassword,
+            tokens: {
+              accessToken: tokens.accessToken,
+              refreshToken: tokens.refreshToken,
+              tokenType: tokens.tokenType,
+              expiresIn: tokens.expiresIn
+            }
+          };
+        } catch (dbError) {
+          console.error('❌ Database error during registration:', dbError.message);
+          throw dbError;
         }
+      } else {
+        throw new Error('Database not available - User model not initialized');
       }
-
-      // Generate tokens
-      const tokens = this.generateTokens(user.id);
-      console.log("✅ [AuthService] Tokens generated");
-
-      // Store refresh token in memory
-      AuthService.tokenStore.set(tokens.refreshToken, {
-        userId: user.id,
-        expires: Date.now() + 7 * 24 * 60 * 60 * 1000 // 7 days
-      });
-
-      // Clean old tokens periodically
-      this.cleanupOldTokens();
-
-      // Extract password from user object
-      const userWithoutPassword = user.toJSON();
-      delete userWithoutPassword.password;
-
-      return {
-        user: userWithoutPassword,
-        tokens: {
-          accessToken: tokens.accessToken,
-          refreshToken: tokens.refreshToken,
-          tokenType: tokens.tokenType,
-          expiresIn: tokens.expiresIn
-        },
-        verificationToken: process.env.NODE_ENV === 'development' ? verificationToken : undefined
-      };
     } catch (error) {
       console.error('❌ [AuthService] Registration error:', error.message);
-      console.error('Stack:', error.stack);
       throw error;
     }
   }
 
-  async login(email, password) {
+  async login(identifier, password, deviceInfo = {}) {
     try {
-      console.log("🔧 [AuthService] Login attempt for email:", email);
+      console.log("🔧 [AuthService] Login attempt for:", identifier);
 
-      // Find user by email or username
+      // Check if database is available
+      if (!this.User) {
+        console.error('❌ [AuthService] User model not available');
+        throw new Error('Service temporarily unavailable');
+      }
+
+      // Find user
       let user;
-      if (email.includes('@')) {
-        user = await User.findOne({ 
+      if (identifier.includes('@')) {
+        user = await this.User.findOne({ 
           where: { 
-            email: email.toLowerCase().trim() 
+            email: identifier.toLowerCase().trim(),
+            isActive: true
           } 
         });
       } else {
-        user = await User.findOne({ 
+        user = await this.User.findOne({ 
           where: { 
-            username: email.trim() 
+            username: identifier.trim(),
+            isActive: true
           } 
         });
       }
@@ -166,46 +150,42 @@ class AuthService {
 
       console.log("✅ [AuthService] User found:", user.id);
 
-      // Check password using User model's validatePassword method
+      // Validate password using model method
       const isValidPassword = await user.validatePassword(password);
+      
       if (!isValidPassword) {
         console.log("❌ [AuthService] Invalid password");
         throw new Error('Invalid credentials');
       }
 
-      // Check if user is active
-      if (!user.isActive) {
-        console.log("❌ [AuthService] Account deactivated");
-        throw new Error('Account is deactivated');
-      }
-
-      // Update last seen
-      user.lastSeen = new Date();
-      await user.save();
+      // Update last seen and status
+      await user.update({
+        lastSeen: new Date(),
+        status: 'online'
+      });
 
       // Generate tokens
       const tokens = this.generateTokens(user.id);
 
-      // Store refresh token in memory
+      // Store refresh token
       AuthService.tokenStore.set(tokens.refreshToken, {
         userId: user.id,
-        expires: Date.now() + 7 * 24 * 60 * 60 * 1000 // 7 days
+        expires: Date.now() + 7 * 24 * 60 * 60 * 1000
       });
 
-      console.log("✅ [AuthService] Login successful for user:", user.id);
-
-      // Extract password from user object
+      // Prepare response
       const userWithoutPassword = user.toJSON();
       delete userWithoutPassword.password;
 
       return {
+        success: true,
         user: userWithoutPassword,
         tokens: {
           accessToken: tokens.accessToken,
           refreshToken: tokens.refreshToken,
           tokenType: tokens.tokenType,
           expiresIn: tokens.expiresIn
-        },
+        }
       };
     } catch (error) {
       console.error('❌ [AuthService] Login error:', error.message);
@@ -213,312 +193,194 @@ class AuthService {
     }
   }
 
-  async refreshToken(refreshToken) {
-    try {
-      console.log("🔧 [AuthService] Refreshing token");
-
-      // Check if refresh token exists
-      const tokenData = AuthService.tokenStore.get(refreshToken);
-      if (!tokenData || tokenData.expires < Date.now()) {
-        throw new Error('Invalid or expired refresh token');
-      }
-
-      // Verify JWT
-      let decoded;
-      try {
-        decoded = jwt.verify(refreshToken, process.env.JWT_SECRET || 'dev-secret');
-      } catch (jwtError) {
-        throw new Error('Invalid refresh token');
-      }
-
-      // Get user
-      const user = await User.findByPk(decoded.userId, {
-        attributes: { exclude: ['password'] },
-      });
-
-      if (!user || !user.isActive) {
-        throw new Error('User not found or inactive');
-      }
-
-      // Generate new tokens
-      const tokens = this.generateTokens(user.id);
-
-      // Delete old refresh token
-      AuthService.tokenStore.delete(refreshToken);
-
-      // Store new refresh token
-      AuthService.tokenStore.set(tokens.refreshToken, {
-        userId: user.id,
-        expires: Date.now() + 7 * 24 * 60 * 60 * 1000
-      });
-
-      return {
-        user: user.toJSON(),
-        tokens: {
-          accessToken: tokens.accessToken,
-          refreshToken: tokens.refreshToken,
-          tokenType: tokens.tokenType,
-          expiresIn: tokens.expiresIn
-        },
-      };
-    } catch (error) {
-      console.error('❌ [AuthService] Refresh token error:', error.message);
-      throw error;
-    }
-  }
-
-  async logout(accessToken, refreshToken) {
-    try {
-      console.log("🔧 [AuthService] Logout");
-
-      // Add access token to blacklist
-      if (accessToken) {
-        let decoded;
-        try {
-          decoded = jwt.decode(accessToken);
-        } catch (e) {
-          decoded = null;
-        }
-        
-        if (decoded && decoded.exp) {
-          const ttl = decoded.exp * 1000 - Date.now();
-          if (ttl > 0) {
-            AuthService.blacklistStore.set(accessToken, {
-              expires: Date.now() + ttl
-            });
-          }
-        }
-      }
-
-      // Remove refresh token
-      if (refreshToken) {
-        AuthService.tokenStore.delete(refreshToken);
-      }
-
-      return true;
-    } catch (error) {
-      console.error('❌ [AuthService] Logout error:', error.message);
-      throw error;
-    }
-  }
-
-  async verifyEmail(token) {
-    try {
-      console.log("🔧 [AuthService] Verifying email with token");
-
-      // Get from memory store
-      const tokenData = AuthService.verificationStore.get(token);
-      if (!tokenData || tokenData.expires < Date.now()) {
-        throw new Error('Invalid or expired verification token');
-      }
-
-      // Update user
-      const user = await User.findByPk(tokenData.userId);
-      if (!user) {
-        throw new Error('User not found');
-      }
-
-      if (user.isVerified) {
-        return user.toJSON();
-      }
-
-      user.isVerified = true;
-      await user.save();
-
-      // Delete verification token
-      AuthService.verificationStore.delete(token);
-
-      return user.toJSON();
-    } catch (error) {
-      console.error('❌ [AuthService] Email verification error:', error.message);
-      throw error;
-    }
-  }
-
-  async requestPasswordReset(email) {
-    try {
-      console.log("🔧 [AuthService] Password reset requested for:", email);
-
-      const user = await User.findOne({ 
-        where: { 
-          email: email.toLowerCase().trim() 
-        } 
-      });
-      
-      if (!user) {
-        // Don't reveal that user doesn't exist for security
-        return true;
-      }
-
-      // Generate reset token
-      const resetToken = crypto.randomBytes(32).toString('hex');
-
-      // Store in memory
-      AuthService.resetStore.set(resetToken, {
-        userId: user.id,
-        expires: Date.now() + 60 * 60 * 1000 // 1 hour
-      });
-
-      // In development, log the token instead of emailing
-      if (process.env.NODE_ENV === 'development') {
-        console.log(`📧 [DEV] Password reset token for ${user.email}: ${resetToken}`);
-        console.log(`🔗 Reset link: http://localhost:5500/reset-password?token=${resetToken}`);
-      } else {
-        try {
-          const { sendEmail } = require('../utils/helpers');
-          await sendEmail({
-            to: user.email,
-            subject: 'Reset your MoodChat password',
-            template: 'password-reset',
-            context: {
-              name: user.username,
-              resetLink: `${process.env.FRONTEND_URL}/reset-password?token=${resetToken}`,
-            },
-          });
-        } catch (emailError) {
-          console.log("⚠️ [AuthService] Email not sent:", emailError.message);
-        }
-      }
-
-      return true;
-    } catch (error) {
-      console.error('❌ [AuthService] Password reset request error:', error.message);
-      throw error;
-    }
-  }
-
-  async resetPassword(token, newPassword) {
-    try {
-      console.log("🔧 [AuthService] Resetting password");
-
-      // Get from memory store
-      const tokenData = AuthService.resetStore.get(token);
-      if (!tokenData || tokenData.expires < Date.now()) {
-        throw new Error('Invalid or expired reset token');
-      }
-
-      // Update user password
-      const user = await User.findByPk(tokenData.userId);
-      if (!user) {
-        throw new Error('User not found');
-      }
-
-      user.password = newPassword;
-      await user.save();
-
-      // Delete reset token
-      AuthService.resetStore.delete(token);
-
-      return user.toJSON();
-    } catch (error) {
-      console.error('❌ [AuthService] Password reset error:', error.message);
-      throw error;
-    }
-  }
-
   generateTokens(userId) {
     console.log("🔧 [AuthService] Generating tokens for user:", userId);
     
-    const secret = process.env.JWT_SECRET || 'dev-secret-change-in-production';
-    const issuer = process.env.JWT_ISSUER || 'moodchat-backend';
-    const audience = process.env.JWT_AUDIENCE || 'moodchat-client';
+    const secret = process.env.JWT_SECRET || process.env.JWT_ACCESS_SECRET || 'dev-secret-change-in-production';
+    const expiresIn = process.env.JWT_EXPIRES_IN || '24h';
 
     const accessToken = jwt.sign(
       { 
         userId, 
-        type: 'access',
-        iat: Math.floor(Date.now() / 1000)
+        id: userId,
+        type: 'access'
       }, 
       secret,
-      {
-        expiresIn: process.env.JWT_ACCESS_EXPIRES || '15m',
-        issuer,
-        audience,
-      }
+      { expiresIn }
     );
 
     const refreshToken = jwt.sign(
       { 
         userId, 
-        type: 'refresh',
-        iat: Math.floor(Date.now() / 1000)
+        id: userId,
+        type: 'refresh'
       }, 
       secret,
-      {
-        expiresIn: process.env.JWT_REFRESH_EXPIRES || '7d',
-        issuer,
-        audience,
-      }
+      { expiresIn: '7d' }
     );
 
     return { 
       accessToken, 
       refreshToken,
       tokenType: 'Bearer',
-      expiresIn: 15 * 60 // 15 minutes in seconds
+      expiresIn: 24 * 60 * 60 // 24 hours in seconds
     };
   }
 
-  async validateToken(token) {
+  async verifyToken(token) {
     try {
-      console.log("🔧 [AuthService] Validating token");
-
-      // Check blacklist
-      if (AuthService.blacklistStore.has(token)) {
-        throw new Error('Token has been invalidated');
-      }
-
-      const secret = process.env.JWT_SECRET || 'dev-secret-change-in-production';
-      const decoded = jwt.verify(token, secret, {
-        issuer: process.env.JWT_ISSUER || 'moodchat-backend',
-        audience: process.env.JWT_AUDIENCE || 'moodchat-client',
-      });
-
-      return decoded;
+      const secret = process.env.JWT_SECRET || process.env.JWT_ACCESS_SECRET || 'dev-secret-change-in-production';
+      const decoded = jwt.verify(token, secret);
+      return { success: true, data: decoded };
     } catch (error) {
-      console.error('❌ [AuthService] Token validation error:', error.message);
-      throw error;
+      console.error('Token verification error:', error.message);
+      return { success: false, message: error.message };
     }
   }
 
-  // Cleanup old tokens from memory stores
-  cleanupOldTokens() {
-    const now = Date.now();
-    
-    // Clean token store
-    for (const [token, data] of AuthService.tokenStore.entries()) {
-      if (data.expires < now) {
-        AuthService.tokenStore.delete(token);
+  async refreshToken(refreshToken) {
+    try {
+      const tokenData = AuthService.tokenStore.get(refreshToken);
+      if (!tokenData || tokenData.expires < Date.now()) {
+        throw new Error('Invalid or expired refresh token');
       }
+
+      const secret = process.env.JWT_SECRET || process.env.JWT_ACCESS_SECRET || 'dev-secret-change-in-production';
+      const decoded = jwt.verify(refreshToken, secret);
+      
+      // Generate new tokens
+      const tokens = this.generateTokens(decoded.userId);
+
+      // Delete old refresh token
+      AuthService.tokenStore.delete(refreshToken);
+
+      // Store new refresh token
+      AuthService.tokenStore.set(tokens.refreshToken, {
+        userId: decoded.userId,
+        expires: Date.now() + 7 * 24 * 60 * 60 * 1000
+      });
+
+      return {
+        success: true,
+        accessToken: tokens.accessToken,
+        refreshToken: tokens.refreshToken,
+        expiresIn: tokens.expiresIn
+      };
+    } catch (error) {
+      console.error('Refresh token error:', error.message);
+      return { success: false, message: error.message };
     }
-    
-    // Clean verification store
-    for (const [token, data] of AuthService.verificationStore.entries()) {
-      if (data.expires < now) {
-        AuthService.verificationStore.delete(token);
+  }
+
+  async logout(userId) {
+    try {
+      console.log('Logout for user:', userId);
+      return { success: true };
+    } catch (error) {
+      console.error('Logout error:', error.message);
+      return { success: false, message: error.message };
+    }
+  }
+
+  async getCurrentUser(userId) {
+    try {
+      if (!this.User) {
+        throw new Error('User model not available');
       }
-    }
-    
-    // Clean reset store
-    for (const [token, data] of AuthService.resetStore.entries()) {
-      if (data.expires < now) {
-        AuthService.resetStore.delete(token);
+
+      const user = await this.User.findByPk(userId, {
+        attributes: { exclude: ['password'] }
+      });
+      
+      if (user) {
+        return { success: true, user: user.toJSON() };
       }
+
+      return { success: false, message: 'User not found' };
+    } catch (error) {
+      console.error('Get current user error:', error.message);
+      return { success: false, message: error.message };
     }
-    
-    // Clean blacklist store
-    for (const [token, data] of AuthService.blacklistStore.entries()) {
-      if (data.expires < now) {
-        AuthService.blacklistStore.delete(token);
+  }
+
+  async forgotPassword(email) {
+    try {
+      if (!this.User) {
+        throw new Error('User model not available');
       }
+
+      const user = await this.User.findOne({ 
+        where: { email: email.toLowerCase().trim() } 
+      });
+      
+      if (!user) {
+        // Don't reveal that user doesn't exist for security
+        return { success: true, message: 'If an account exists, a reset email has been sent' };
+      }
+
+      // Generate reset token
+      const resetToken = crypto.randomBytes(32).toString('hex');
+      const resetTokenExpiry = new Date(Date.now() + 3600000); // 1 hour
+
+      await user.update({
+        resetToken: resetToken,
+        resetTokenExpiry: resetTokenExpiry
+      });
+
+      console.log(`📧 Password reset token for ${email}: ${resetToken}`);
+
+      return { 
+        success: true, 
+        message: 'Password reset email sent',
+        resetToken: process.env.NODE_ENV === 'development' ? resetToken : undefined
+      };
+    } catch (error) {
+      console.error('Forgot password error:', error.message);
+      return { success: false, message: error.message };
     }
+  }
+
+  async resetPassword(token, newPassword) {
+    try {
+      if (!this.User) {
+        throw new Error('User model not available');
+      }
+
+      const user = await this.User.findOne({
+        where: {
+          resetToken: token,
+          resetTokenExpiry: { [Op.gt]: new Date() }
+        }
+      });
+
+      if (!user) {
+        throw new Error('Invalid or expired reset token');
+      }
+
+      // Update password - model hook will hash it
+      await user.update({
+        password: newPassword,
+        resetToken: null,
+        resetTokenExpiry: null
+      });
+
+      return { success: true, message: 'Password reset successful' };
+    } catch (error) {
+      console.error('Reset password error:', error.message);
+      return { success: false, message: error.message };
+    }
+  }
+
+  validateJWTConfig() {
+    const secret = process.env.JWT_SECRET || process.env.JWT_ACCESS_SECRET;
+    if (!secret || secret === 'dev-secret-change-in-production' || secret === '3e78ab2d6cb698f95b3b8d510614058c') {
+      console.warn('⚠️ JWT_SECRET not properly configured');
+      return false;
+    }
+    return true;
   }
 }
 
-// Run cleanup every hour
-setInterval(() => {
-  const instance = new AuthService();
-  instance.cleanupOldTokens();
-}, 60 * 60 * 1000);
-
-module.exports = new AuthService();
+// Create and export a single instance
+const authServiceInstance = new AuthService();
+module.exports = authServiceInstance;

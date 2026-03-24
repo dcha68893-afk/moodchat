@@ -102,8 +102,8 @@ module.exports = (sequelize, DataTypes) => {
       },
     },
     {
-      tableName: 'moods',                   // Standardized: lowercase table name
-      modelName: 'Mood',                     // Explicit model name
+      tableName: 'moods',
+      modelName: 'Mood',
       timestamps: true,
       underscored: true,
       freezeTableName: true,
@@ -230,7 +230,7 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
-          as: 'moodOwnerUser',                 // FIXED: Unique alias
+          as: 'moodOwner',
           attributes: ['id', 'username', 'avatar'],
         },
       ],
@@ -243,7 +243,7 @@ module.exports = (sequelize, DataTypes) => {
     if (models.Users) {
       Mood.belongsTo(models.Users, {
         foreignKey: 'userId',
-        as: 'moodOwnerUser',                   // FIXED: Unique alias
+        as: 'moodOwner',
         constraints: false,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
@@ -253,7 +253,7 @@ module.exports = (sequelize, DataTypes) => {
     if (models.SharedMood) {
       Mood.hasMany(models.SharedMood, {
         foreignKey: 'moodId',
-        as: 'moodSharesList',                   // FIXED: Unique alias
+        as: 'moodShares',
         constraints: false,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',

@@ -43,8 +43,8 @@ module.exports = (sequelize, DataTypes) => {
       },
     },
     {
-      tableName: 'chat_participants',      // Preserved: matches existing table
-      modelName: 'ChatParticipant',         // Explicit model name
+      tableName: 'chat_participants',
+      modelName: 'ChatParticipant',
       timestamps: true,
       underscored: false,
       freezeTableName: true,
@@ -130,7 +130,7 @@ module.exports = (sequelize, DataTypes) => {
     if (options.includeUser) {
       include.push({
         model: this.sequelize.models.Users,
-        as: 'participantUserDetails',       // FIXED: Unique alias
+        as: 'chatParticipantUser',
         attributes: ['id', 'username', 'avatar', 'status', 'lastSeen'],
       });
     }
@@ -168,7 +168,7 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
-          as: 'participantUserDetails',      // FIXED: Unique alias
+          as: 'chatParticipantUser',
           attributes: ['id', 'username', 'avatar', 'email'],
         },
       ],
@@ -298,7 +298,7 @@ module.exports = (sequelize, DataTypes) => {
     if (models.Users) {
       ChatParticipant.belongsTo(models.Users, {
         foreignKey: 'userId',
-        as: 'participantUserDetails',        // FIXED: Unique alias
+        as: 'chatParticipantUser',
         constraints: false,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
@@ -308,7 +308,7 @@ module.exports = (sequelize, DataTypes) => {
     if (models.Chats) {
       ChatParticipant.belongsTo(models.Chats, {
         foreignKey: 'chatId',
-        as: 'participantChatDetails',        // FIXED: Unique alias
+        as: 'chatParticipantChat',
         constraints: false,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',

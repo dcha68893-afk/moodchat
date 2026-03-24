@@ -132,8 +132,8 @@ module.exports = (sequelize, DataTypes) => {
       },
     },
     {
-      tableName: 'Templates',                // Standardized: lowercase table name
-      modelName: 'Template',                  // Explicit model name
+      tableName: 'Templates',
+      modelName: 'Template',
       timestamps: true,
       underscored: false,
       freezeTableName: true,
@@ -232,7 +232,7 @@ module.exports = (sequelize, DataTypes) => {
     if (this.sequelize.models.Category) {
       include.push({
         model: this.sequelize.models.Category,
-        as: 'templateCategoryDetails',         // FIXED: Unique alias
+        as: 'templateCategory',
         attributes: ['id', 'name', 'slug'],
       });
     }
@@ -240,7 +240,7 @@ module.exports = (sequelize, DataTypes) => {
     if (this.sequelize.models.Users) {
       include.push({
         model: this.sequelize.models.Users,
-        as: 'templateCreatorUser',              // FIXED: Unique alias
+        as: 'templateCreator',
         foreignKey: 'createdBy',
         attributes: ['id', 'username', 'avatar'],
       });
@@ -273,7 +273,7 @@ module.exports = (sequelize, DataTypes) => {
     if (this.sequelize.models.Category) {
       include.push({
         model: this.sequelize.models.Category,
-        as: 'templateCategoryDetails',         // FIXED: Unique alias
+        as: 'templateCategory',
         attributes: ['id', 'name', 'slug'],
       });
     }
@@ -296,7 +296,7 @@ module.exports = (sequelize, DataTypes) => {
       },
       include: this.sequelize.models.Category ? [{
         model: this.sequelize.models.Category,
-        as: 'templateCategoryDetails',          // FIXED: Unique alias
+        as: 'templateCategory',
         attributes: ['id', 'name', 'slug'],
       }] : undefined,
       order: [['favoritesCount', 'DESC']],
@@ -310,12 +310,12 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         this.sequelize.models.Category ? {
           model: this.sequelize.models.Category,
-          as: 'templateCategoryDetails',        // FIXED: Unique alias
+          as: 'templateCategory',
           attributes: ['id', 'name', 'slug'],
         } : undefined,
         this.sequelize.models.Users ? {
           model: this.sequelize.models.Users,
-          as: 'templateCreatorUser',            // FIXED: Unique alias
+          as: 'templateCreator',
           foreignKey: 'createdBy',
           attributes: ['id', 'username', 'avatar'],
         } : undefined,
@@ -328,7 +328,7 @@ module.exports = (sequelize, DataTypes) => {
     if (models.Category) {
       Template.belongsTo(models.Category, {
         foreignKey: 'categoryId',
-        as: 'templateCategoryDetails',          // FIXED: Unique alias
+        as: 'templateCategory',
         constraints: false,
         onDelete: 'SET NULL',
         onUpdate: 'CASCADE',
@@ -337,7 +337,7 @@ module.exports = (sequelize, DataTypes) => {
     
     if (models.Users) {
       Template.belongsTo(models.Users, {
-        as: 'templateCreatorUser',               // FIXED: Unique alias
+        as: 'templateCreator',
         foreignKey: 'createdBy',
         constraints: false,
         onDelete: 'SET NULL',
@@ -345,7 +345,7 @@ module.exports = (sequelize, DataTypes) => {
       });
       
       Template.belongsTo(models.Users, {
-        as: 'templateUpdaterUser',               // FIXED: Unique alias
+        as: 'templateUpdater',
         foreignKey: 'updatedBy',
         constraints: false,
         onDelete: 'SET NULL',

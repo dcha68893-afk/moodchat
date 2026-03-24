@@ -88,8 +88,8 @@ module.exports = (sequelize, DataTypes) => {
       },
     },
     {
-      tableName: 'profiles',                 // Standardized: lowercase table name
-      modelName: 'Profile',                   // Explicit model name
+      tableName: 'profiles',
+      modelName: 'Profile',
       timestamps: true,
       underscored: true,
       freezeTableName: true,
@@ -130,7 +130,7 @@ module.exports = (sequelize, DataTypes) => {
     if (models.Users) {
       Profile.belongsTo(models.Users, {
         foreignKey: 'userId',
-        as: 'profileOwnerUser',               // FIXED: Unique alias
+        as: 'profileOwner',
         constraints: false,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',

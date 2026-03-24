@@ -329,6 +329,8 @@ process.on('beforeExit', async () => {
   await closeDatabaseConnection();
 });
 
+
+
 // Export everything
 module.exports = {
   getSequelizeInstance,

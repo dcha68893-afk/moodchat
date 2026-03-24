@@ -95,8 +95,8 @@ module.exports = (sequelize, DataTypes) => {
       }
     },
     {
-      tableName: 'features',                // Standardized: lowercase table name
-      modelName: 'Features',                 // Explicit model name
+      tableName: 'features',
+      modelName: 'Features',
       timestamps: true,
       underscored: true,
       freezeTableName: true,
@@ -183,7 +183,7 @@ module.exports = (sequelize, DataTypes) => {
     if (models.Users) {
       Features.belongsTo(models.Users, {
         foreignKey: 'createdBy',
-        as: 'featureCreatorUser',            // FIXED: Unique alias
+        as: 'featureCreator',
         constraints: false,
         onDelete: 'SET NULL',
         onUpdate: 'CASCADE',

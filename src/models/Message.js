@@ -88,8 +88,8 @@ module.exports = (sequelize, DataTypes) => {
       }
     },
     {
-      tableName: 'Messages',                 // Standardized: lowercase table name
-      modelName: 'Messages',                  // Explicit model name
+      tableName: 'Messages',
+      modelName: 'Messages',
       timestamps: true,
       underscored: false,
       freezeTableName: true,
@@ -176,24 +176,24 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
-          as: 'messageSenderDetails',         // FIXED: Unique alias
+          as: 'messageSender',
           attributes: ['id', 'username', 'avatar', 'firstName', 'lastName'],
         },
         {
           model: this,
-          as: 'messageParentDetails',         // FIXED: Unique alias
+          as: 'messageParent',
           attributes: ['id', 'content', 'type', 'senderId'],
           include: [
             {
               model: this.sequelize.models.Users,
-              as: 'messageSenderDetails',     // FIXED: Unique alias
+              as: 'messageSender',
               attributes: ['id', 'username', 'avatar'],
             },
           ],
         },
         {
           model: this.sequelize.models.Media,
-          as: 'messageMediaAttachments',      // FIXED: Unique alias
+          as: 'messageMediaAttachments',
           attributes: ['id', 'url', 'type', 'thumbnailUrl', 'metadata'],
         },
       ],
@@ -212,7 +212,7 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
-          as: 'messageSenderDetails',         // FIXED: Unique alias
+          as: 'messageSender',
           attributes: ['id', 'username', 'avatar'],
         },
       ],
@@ -226,7 +226,7 @@ module.exports = (sequelize, DataTypes) => {
     if (models.Chats) {
       Messages.belongsTo(models.Chats, {
         foreignKey: 'chatId',
-        as: 'messageChatDetails',             // FIXED: Unique alias
+        as: 'messageChat',
         constraints: false,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
@@ -236,7 +236,7 @@ module.exports = (sequelize, DataTypes) => {
     if (models.Users) {
       Messages.belongsTo(models.Users, {
         foreignKey: 'senderId',
-        as: 'messageSenderDetails',           // FIXED: Unique alias
+        as: 'messageSender',
         constraints: false,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
@@ -244,7 +244,7 @@ module.exports = (sequelize, DataTypes) => {
       
       Messages.belongsTo(models.Users, {
         foreignKey: 'deletedBy',
-        as: 'messageDeleterUser',             // FIXED: Unique alias
+        as: 'messageDeleter',
         constraints: false,
         onDelete: 'SET NULL',
         onUpdate: 'CASCADE',
@@ -254,7 +254,7 @@ module.exports = (sequelize, DataTypes) => {
     if (models.Messages) {
       Messages.belongsTo(models.Messages, {
         foreignKey: 'replyToId',
-        as: 'messageParentDetails',           // FIXED: Unique alias
+        as: 'messageParent',
         constraints: false,
         onDelete: 'SET NULL',
         onUpdate: 'CASCADE',
@@ -262,7 +262,7 @@ module.exports = (sequelize, DataTypes) => {
       
       Messages.hasMany(models.Messages, {
         foreignKey: 'replyToId',
-        as: 'messageRepliesList',             // FIXED: Unique alias
+        as: 'messageReplies',
         constraints: false,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
@@ -272,7 +272,7 @@ module.exports = (sequelize, DataTypes) => {
     if (models.Media) {
       Messages.hasMany(models.Media, {
         foreignKey: 'messageId',
-        as: 'messageMediaAttachments',        // FIXED: Unique alias
+        as: 'messageMediaAttachments',
         constraints: false,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
@@ -282,7 +282,7 @@ module.exports = (sequelize, DataTypes) => {
     if (models.ReadReceipt) {
       Messages.hasMany(models.ReadReceipt, {
         foreignKey: 'messageId',
-        as: 'messageReadReceiptsList',        // FIXED: Unique alias
+        as: 'messageReadReceipts',
         constraints: false,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',

@@ -84,8 +84,8 @@ module.exports = (sequelize, DataTypes) => {
       },
     },
     {
-      tableName: 'Categories',            // Standardized: lowercase table name
-      modelName: 'Category',               // Explicit model name
+      tableName: 'Categories',
+      modelName: 'Category',
       timestamps: true,
       underscored: false,
       freezeTableName: true,
@@ -234,7 +234,7 @@ module.exports = (sequelize, DataTypes) => {
   Category.associate = function (models) {
     // Self-referential relationship for parent-child categories
     Category.belongsTo(models.Category, {
-      as: 'parentCategoryDetails',         // FIXED: Unique alias
+      as: 'parentCategory',
       foreignKey: 'parentId',
       constraints: false,
       onDelete: 'SET NULL',
@@ -242,7 +242,7 @@ module.exports = (sequelize, DataTypes) => {
     });
 
     Category.hasMany(models.Category, {
-      as: 'childCategoriesList',           // FIXED: Unique alias
+      as: 'childCategories',
       foreignKey: 'parentId',
       constraints: false,
       onDelete: 'CASCADE',
@@ -252,7 +252,7 @@ module.exports = (sequelize, DataTypes) => {
     if (models.Template) {
       Category.hasMany(models.Template, {
         foreignKey: 'categoryId',
-        as: 'categoryTemplatesCollection',  // FIXED: Unique alias
+        as: 'categoryTemplates',
         constraints: false,
         onDelete: 'SET NULL',
         onUpdate: 'CASCADE',
@@ -261,7 +261,7 @@ module.exports = (sequelize, DataTypes) => {
     
     if (models.Users) {
       Category.belongsTo(models.Users, {
-        as: 'categoryCreatorUser',          // FIXED: Unique alias
+        as: 'categoryCreator',
         foreignKey: 'createdBy',
         constraints: false,
         onDelete: 'SET NULL',
@@ -269,7 +269,7 @@ module.exports = (sequelize, DataTypes) => {
       });
       
       Category.belongsTo(models.Users, {
-        as: 'categoryUpdaterUser',          // FIXED: Unique alias
+        as: 'categoryUpdater',
         foreignKey: 'updatedBy',
         constraints: false,
         onDelete: 'SET NULL',

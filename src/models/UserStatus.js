@@ -68,8 +68,8 @@ module.exports = (sequelize, DataTypes) => {
       },
     },
     {
-      tableName: 'user_statuses',            // Standardized: lowercase table name
-      modelName: 'UserStatus',                // Explicit model name
+      tableName: 'user_statuses',
+      modelName: 'UserStatus',
       timestamps: true,
       underscored: true,
       freezeTableName: true,
@@ -206,7 +206,7 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
-          as: 'userStatusOwnerDetails',        // FIXED: Unique alias
+          as: 'userStatusOwner',
           attributes: ['id', 'username', 'avatar'],
         },
       ],
@@ -223,7 +223,7 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
-          as: 'userStatusOwnerDetails',        // FIXED: Unique alias
+          as: 'userStatusOwner',
           attributes: ['id', 'username', 'avatar'],
         },
       ],
@@ -242,7 +242,7 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
-          as: 'userStatusOwnerDetails',        // FIXED: Unique alias
+          as: 'userStatusOwner',
           attributes: ['id', 'username', 'avatar'],
         },
       ],
@@ -274,7 +274,7 @@ module.exports = (sequelize, DataTypes) => {
     if (models.Users) {
       UserStatus.belongsTo(models.Users, {
         foreignKey: 'userId',
-        as: 'userStatusOwnerDetails',          // FIXED: Unique alias
+        as: 'userStatusOwner',
         constraints: false,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
@@ -284,7 +284,7 @@ module.exports = (sequelize, DataTypes) => {
     if (models.Chats) {
       UserStatus.belongsTo(models.Chats, {
         foreignKey: 'isTypingIn',
-        as: 'userTypingChatDetails',           // FIXED: Unique alias
+        as: 'userTypingChat',
         constraints: false,
         onDelete: 'SET NULL',
         onUpdate: 'CASCADE',

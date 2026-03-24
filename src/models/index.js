@@ -653,6 +653,57 @@ if (status.coreOperational) {
   }
 }
 
+// Add this at the end of models/index.js, right before module.exports
+
+// ===== ONE-TIME TABLE CREATION CHECK =====
+db.createTablesIfNeeded = async function() {
+    try {
+        console.log('[Database] Checking if tables exist...');
+        
+        const queryInterface = sequelize.getQueryInterface();
+        const tables = await queryInterface.showAllTables();
+        
+        console.log(`[Database] Found ${tables.length} existing tables`);
+        
+        if (tables.length === 0) {
+            console.log('[Database] 🔧 No tables found - creating all tables...');
+            await sequelize.sync({ 
+                force: false,
+                alter: true,
+                logging: (msg) => console.log(`  [SQL] ${msg}`)
+            });
+            console.log('[Database] ✅ Tables created successfully');
+            
+            // Verify tables were created
+            const newTables = await queryInterface.showAllTables();
+            console.log(`[Database] ✅ ${newTables.length} tables now exist`);
+            newTables.forEach(table => console.log(`  - ${table}`));
+            
+            return true;
+        } else {
+            console.log('[Database] ✅ Tables already exist');
+            return false;
+        }
+    } catch (error) {
+        console.error('[Database] Error checking tables:', error.message);
+        console.log('[Database] Attempting to create tables anyway...');
+        try {
+            await sequelize.sync({ force: false });
+            console.log('[Database] ✅ Tables created');
+            return true;
+        } catch (syncError) {
+            console.error('[Database] Failed to create tables:', syncError.message);
+            return false;
+        }
+    }
+};
+
+// Auto-create tables if environment variable is set
+if (process.env.CREATE_TABLES === 'true' || process.env.DB_SYNC_FORCE === 'true') {
+    console.log('[Database] 🔧 CREATE_TABLES mode enabled');
+    db.createTablesIfNeeded().catch(console.error);
+}
+
 // ===== EXPORT =====
 module.exports = {
   ...db,

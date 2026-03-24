@@ -52,8 +52,8 @@ module.exports = (sequelize, DataTypes) => {
       }
     },
     {
-      tableName: 'GroupMembers',             // Standardized: lowercase table name
-      modelName: 'GroupMembers',              // Explicit model name
+      tableName: 'GroupMembers',
+      modelName: 'GroupMembers',
       timestamps: true,
       underscored: false,
       freezeTableName: true,
@@ -101,7 +101,7 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
-          as: 'groupMemberUserDetails',        // FIXED: Unique alias
+          as: 'groupMemberUser',
           attributes: ['id', 'username', 'avatar', 'email'],
         },
       ],
@@ -117,11 +117,11 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Groups,
-          as: 'userGroupDetails',              // FIXED: Unique alias
+          as: 'userGroup',
           include: [
             {
               model: this.sequelize.models.Chats,
-              as: 'groupChatDetails',          // FIXED: Unique alias
+              as: 'groupChat',
               attributes: ['id', 'name', 'avatar', 'type'],
             },
           ],
@@ -135,7 +135,7 @@ module.exports = (sequelize, DataTypes) => {
     if (models.Groups) {
       GroupMembers.belongsTo(models.Groups, {
         foreignKey: 'groupId',
-        as: 'userGroupDetails',                // FIXED: Unique alias
+        as: 'userGroup',
         constraints: false,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
@@ -145,7 +145,7 @@ module.exports = (sequelize, DataTypes) => {
     if (models.Users) {
       GroupMembers.belongsTo(models.Users, {
         foreignKey: 'userId',
-        as: 'groupMemberUserDetails',          // FIXED: Unique alias
+        as: 'groupMemberUser',
         constraints: false,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',

@@ -50,8 +50,8 @@ module.exports = (sequelize, DataTypes) => {
       },
     },
     {
-      tableName: 'typing_indicators',        // Standardized: lowercase table name
-      modelName: 'TypingIndicator',           // Explicit model name
+      tableName: 'typing_indicators',
+      modelName: 'TypingIndicator',
       timestamps: true,
       underscored: true,
       freezeTableName: true,
@@ -142,7 +142,7 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
-          as: 'indicatorUserDetails',          // FIXED: Unique alias
+          as: 'indicatorUser',
           attributes: ['id', 'username', 'avatar'],
         },
       ],
@@ -155,7 +155,7 @@ module.exports = (sequelize, DataTypes) => {
     if (models.Chats) {
       TypingIndicator.belongsTo(models.Chats, {
         foreignKey: 'chatId',
-        as: 'indicatorChatDetails',            // FIXED: Unique alias
+        as: 'indicatorChat',
         constraints: false,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
@@ -165,7 +165,7 @@ module.exports = (sequelize, DataTypes) => {
     if (models.Users) {
       TypingIndicator.belongsTo(models.Users, {
         foreignKey: 'userId',
-        as: 'indicatorUserDetails',            // FIXED: Unique alias
+        as: 'indicatorUser',
         constraints: false,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',

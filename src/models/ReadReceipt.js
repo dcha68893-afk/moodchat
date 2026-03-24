@@ -43,8 +43,8 @@ module.exports = (sequelize, DataTypes) => {
       },
     },
     {
-      tableName: 'read_receipts',            // Standardized: lowercase table name
-      modelName: 'ReadReceipt',               // Explicit model name
+      tableName: 'read_receipts',
+      modelName: 'ReadReceipt',
       timestamps: true,
       underscored: true,
       freezeTableName: true,
@@ -134,7 +134,7 @@ module.exports = (sequelize, DataTypes) => {
     if (models.Messages) {
       ReadReceipt.belongsTo(models.Messages, {
         foreignKey: 'messageId',
-        as: 'readMessageDetails',             // FIXED: Unique alias
+        as: 'readMessage',
         constraints: false,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
@@ -144,7 +144,7 @@ module.exports = (sequelize, DataTypes) => {
     if (models.Users) {
       ReadReceipt.belongsTo(models.Users, {
         foreignKey: 'userId',
-        as: 'readUserDetails',                // FIXED: Unique alias
+        as: 'readUser',
         constraints: false,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',

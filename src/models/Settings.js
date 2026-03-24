@@ -101,8 +101,8 @@ module.exports = (sequelize, DataTypes) => {
       }
     },
     {
-      tableName: 'settings',                 // Standardized: lowercase table name
-      modelName: 'Settings',                  // Explicit model name
+      tableName: 'settings',
+      modelName: 'Settings',
       timestamps: true,
       underscored: true,
       freezeTableName: true,
@@ -168,7 +168,7 @@ module.exports = (sequelize, DataTypes) => {
     if (models.Users) {
       Settings.belongsTo(models.Users, {
         foreignKey: 'userId',
-        as: 'settingOwnerUser',               // FIXED: Unique alias
+        as: 'settingOwner',
         constraints: false,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',

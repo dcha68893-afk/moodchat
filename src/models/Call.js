@@ -117,8 +117,8 @@ module.exports = (sequelize, DataTypes) => {
       }
     },
     {
-      tableName: 'Calls',               // Standardized: lowercase table name
-      modelName: 'Calls',                // Explicit model name
+      tableName: 'Calls',
+      modelName: 'Calls',
       timestamps: true,
       underscored: false,
       freezeTableName: true,
@@ -209,7 +209,7 @@ module.exports = (sequelize, DataTypes) => {
     if (this.sequelize.models.Chats) {
       include.push({
         model: this.sequelize.models.Chats,
-        as: 'callChatDetails',            // FIXED: Unique alias
+        as: 'callChatDetails',
         attributes: ['id', 'name', 'type'],
       });
     }
@@ -217,13 +217,13 @@ module.exports = (sequelize, DataTypes) => {
     if (this.sequelize.models.Users) {
       include.push({
         model: this.sequelize.models.Users,
-        as: 'callInitiator',               // FIXED: Unique alias
+        as: 'callInitiatorUser',
         attributes: ['id', 'username', 'avatar'],
       });
       
       include.push({
         model: this.sequelize.models.Users,
-        as: 'callTarget',                   // FIXED: Unique alias
+        as: 'callTargetUser',
         attributes: ['id', 'username', 'avatar'],
       });
     }
@@ -264,13 +264,13 @@ module.exports = (sequelize, DataTypes) => {
     if (this.sequelize.models.Users) {
       include.push({
         model: this.sequelize.models.Users,
-        as: 'callInitiator',
+        as: 'callInitiatorUser',
         attributes: ['id', 'username', 'avatar'],
       });
       
       include.push({
         model: this.sequelize.models.Users,
-        as: 'callTarget',
+        as: 'callTargetUser',
         attributes: ['id', 'username', 'avatar'],
       });
     }
@@ -297,8 +297,8 @@ module.exports = (sequelize, DataTypes) => {
   Calls.associate = function (models) {
     if (models.Chats) {
       Calls.belongsTo(models.Chats, {
-        foreignKey: 'chatId',              // Explicit foreign key
-        as: 'callChatDetails',              // FIXED: Unique alias
+        foreignKey: 'chatId',
+        as: 'callChatDetails',
         constraints: false,
         onDelete: 'SET NULL',
         onUpdate: 'CASCADE',
@@ -308,7 +308,7 @@ module.exports = (sequelize, DataTypes) => {
     if (models.Users) {
       Calls.belongsTo(models.Users, {
         foreignKey: 'callerId',
-        as: 'callInitiator',                 // FIXED: Unique alias
+        as: 'callInitiatorUser',
         constraints: false,
         onDelete: 'SET NULL',
         onUpdate: 'CASCADE',
@@ -316,7 +316,7 @@ module.exports = (sequelize, DataTypes) => {
       
       Calls.belongsTo(models.Users, {
         foreignKey: 'receiverId',
-        as: 'callTarget',                     // FIXED: Unique alias
+        as: 'callTargetUser',
         constraints: false,
         onDelete: 'SET NULL',
         onUpdate: 'CASCADE',
@@ -326,7 +326,7 @@ module.exports = (sequelize, DataTypes) => {
     if (models.Groups) {
       Calls.belongsTo(models.Groups, {
         foreignKey: 'groupId',
-        as: 'callGroupDetails',                // FIXED: Unique alias
+        as: 'callGroupDetails',
         constraints: false,
         onDelete: 'SET NULL',
         onUpdate: 'CASCADE',

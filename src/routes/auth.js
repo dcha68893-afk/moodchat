@@ -3,6 +3,8 @@ require('dotenv').config();
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const authService = require('../services/authService');  // ← ADD THIS
+
 const asyncHandler = require('express-async-handler');
 
 // CRITICAL FIX: Import the shared auth middleware with proper path
@@ -275,31 +277,21 @@ router.post(
         }
       }
 
-      // 8. Hash password
-      let hashedPassword;
-      try {
-        hashedPassword = await bcrypt.hash(password, 10);
-      } catch (hashError) {
-        console.error('🔧 [AUTH] Password hashing error:', hashError.message);
-        return res.status(500).json({
-          success: false,
-          message: 'Password processing failed',
-          errorCode: 'HASHING_ERROR',
-          timestamp: new Date().toISOString()
-        });
-      }
+   
+// 8. Do NOT hash - let model hook handle it
+// const hashedPassword = await bcrypt.hash(password, 10); // ← DON'T do this
 
-      // 9. Create user
-      const user = await Users.create({
-        email: email.toLowerCase(),
-        username: username,
-        password: hashedPassword,
-        avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(username)}&background=random&color=fff`,
-        status: 'offline',
-        isActive: true,
-        isVerified: false,
-        role: 'user'
-      });
+// 9. Create user with plain password
+const user = await Users.create({
+  email: email.toLowerCase(),
+  username: username,
+  password: password,  // Pass plain text - model will hash
+  avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(username)}&background=random&color=fff`,
+  status: 'offline',
+  isActive: true,
+  isVerified: false,
+  role: 'user'
+});
 
       if (!user) {
         return res.status(500).json({

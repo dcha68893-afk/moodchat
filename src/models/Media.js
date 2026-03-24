@@ -110,8 +110,8 @@ module.exports = (sequelize, DataTypes) => {
       },
     },
     {
-      tableName: 'media',                   // Standardized: lowercase table name
-      modelName: 'Media',                    // Explicit model name
+      tableName: 'media',
+      modelName: 'Media',
       timestamps: true,
       underscored: true,
       freezeTableName: true,
@@ -182,7 +182,7 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Messages,
-          as: 'mediaMessageDetails',          // FIXED: Unique alias
+          as: 'mediaMessage',
           where: {
             chatId: chatId,
             isDeleted: false,
@@ -235,7 +235,7 @@ module.exports = (sequelize, DataTypes) => {
     if (models.Users) {
       Media.belongsTo(models.Users, {
         foreignKey: 'userId',
-        as: 'mediaOwnerUser',                 // FIXED: Unique alias
+        as: 'mediaOwner',
         constraints: false,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
@@ -245,7 +245,7 @@ module.exports = (sequelize, DataTypes) => {
     if (models.Messages) {
       Media.belongsTo(models.Messages, {
         foreignKey: 'messageId',
-        as: 'mediaMessageDetails',             // FIXED: Unique alias
+        as: 'mediaMessage',
         constraints: false,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',

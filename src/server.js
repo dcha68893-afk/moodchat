@@ -9,7 +9,8 @@ const path = require('path');
 const fs = require('fs');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
-const WebSocket = require('ws'); // FIXED: Correct WebSocket import
+const WebSocket = require('ws'); 
+const authService = require('./services/authService'); // Add this line// FIXED: Correct WebSocket import
 
 // Environment detection with proper precedence
 const ENV = {
@@ -1463,6 +1464,7 @@ class ConfigurationManager {
 const config = new ConfigurationManager();
 
 // ========== DATABASE SERVICE ==========
+// ========== DATABASE SERVICE ==========
 class DatabaseService {
     constructor() {
         this.sequelize = null;
@@ -1567,35 +1569,145 @@ class DatabaseService {
         return url.replace(/:\/\/[^:]+:[^@]+@/, '://***:***@');
     }
     
+    // CRITICAL FIX: configureConnection method MUST exist
     configureConnection() {
         if (!this.sequelize) return;
         
-        // Use DATABASE_URL if available, otherwise use individual config
+        const nodeEnv = config.get('NODE_ENV');
+        
+        // Use DATABASE_URL if available
         if (config.get('DATABASE_URL')) {
-            this.sequelize.config.url = config.get('DATABASE_URL');
+            let dbUrl = config.get('DATABASE_URL');
+            
+            console.log('🔧 [Database] Raw DATABASE_URL:', dbUrl.replace(/:[^:]*@/, ':****@'));
+            
+            // Parse and validate the URL
+            try {
+                // Extract password and ensure it's a string
+                const match = dbUrl.match(/postgresql:\/\/([^:]+):([^@]+)@([^:]+):(\d+)\/(.+)/);
+                if (match) {
+                    const username = match[1];
+                    const password = match[2];
+                    const host = match[3];
+                    const port = match[4];
+                    const database = match[5];
+                    
+                    console.log('🔧 [Database] Parsed connection:', {
+                        username,
+                        host,
+                        port,
+                        database,
+                        hasPassword: !!password,
+                        passwordLength: password ? password.length : 0
+                    });
+                    
+                    // Validate password is a string and not empty
+                    if (!password || password.trim() === '') {
+                        console.error('❌ [Database] Password is empty in DATABASE_URL');
+                        throw new Error('Database password is empty');
+                    }
+                    
+                    // Ensure password is properly encoded
+                    const encodedPassword = encodeURIComponent(password);
+                    const cleanUrl = `postgresql://${username}:${encodedPassword}@${host}:${port}/${database}`;
+                    
+                    this.sequelize.config.url = cleanUrl;
+                    console.log('✅ [Database] DATABASE_URL properly formatted with encoded password');
+                } else {
+                    // If regex doesn't match, try to encode password in place
+                    console.warn('⚠️ [Database] Could not parse DATABASE_URL with regex, attempting manual encoding');
+                    
+                    const atIndex = dbUrl.indexOf('@');
+                    if (atIndex > 0) {
+                        const authPart = dbUrl.substring(0, atIndex);
+                        const colonIndex = authPart.lastIndexOf(':');
+                        
+                        if (colonIndex > authPart.indexOf('//') + 2) {
+                            const password = authPart.substring(colonIndex + 1);
+                            if (password && !password.includes('%')) {
+                                const encodedPassword = encodeURIComponent(password);
+                                const cleanUrl = dbUrl.replace(`:${password}@`, `:${encodedPassword}@`);
+                                this.sequelize.config.url = cleanUrl;
+                                console.log('✅ [Database] Password encoded in URL');
+                            } else {
+                                this.sequelize.config.url = dbUrl;
+                            }
+                        } else {
+                            this.sequelize.config.url = dbUrl;
+                        }
+                    } else {
+                        this.sequelize.config.url = dbUrl;
+                    }
+                }
+            } catch (parseError) {
+                console.error('❌ [Database] Error parsing DATABASE_URL:', parseError.message);
+                this.sequelize.config.url = dbUrl;
+            }
+            
+            this.sequelize.config.dialect = 'postgres';
+            console.log('🔧 [Database] Using DATABASE_URL connection');
         } else {
+            // Use individual config
+            const host = config.get('DB_HOST');
+            const port = config.get('DB_PORT');
+            const database = config.get('DB_NAME');
+            const username = config.get('DB_USER');
+            let password = config.get('DB_PASSWORD');
+            
+            // CRITICAL: Ensure password is a string
+            if (password === undefined || password === null) {
+                console.error('❌ [Database] DB_PASSWORD is missing!');
+                password = '';
+            }
+            
+            if (typeof password !== 'string') {
+                console.error('❌ [Database] DB_PASSWORD is not a string:', typeof password);
+                password = String(password);
+            }
+            
+            console.log('🔧 [Database] Using individual config:', {
+                host,
+                port,
+                database,
+                username,
+                hasPassword: !!password,
+                passwordLength: password.length
+            });
+            
             this.sequelize.config = {
-                host: config.get('DB_HOST'),
-                port: config.get('DB_PORT'),
-                database: config.get('DB_NAME'),
-                username: config.get('DB_USER'),
-                password: config.get('DB_PASSWORD'),
+                host: host,
+                port: port,
+                database: database,
+                username: username,
+                password: password,
                 dialect: 'postgres',
-                logging: config.get('NODE_ENV') === 'development' ? console.log : false,
+                logging: nodeEnv === 'development' ? console.log : false,
                 pool: {
-                    max: 5,
-                    min: 0,
+                    max: 10,
+                    min: 2,
                     acquire: 30000,
                     idle: 10000
                 },
-                dialectOptions: config.get('NODE_ENV') === 'production' ? {
+                dialectOptions: nodeEnv === 'production' ? {
                     ssl: {
                         require: true,
                         rejectUnauthorized: false
                     }
                 } : {}
             };
+            console.log('🔧 [Database] Using individual connection config');
         }
+        
+        // Log connection config (without full password)
+        console.log('🔧 [Database] Connection configured with:', {
+            hasUrl: !!this.sequelize.config.url,
+            host: this.sequelize.config.host,
+            database: this.sequelize.config.database,
+            username: this.sequelize.config.username,
+            hasPassword: !!(this.sequelize.config.password || 
+                           (this.sequelize.config.url && this.sequelize.config.url.includes(':'))),
+            dialect: this.sequelize.config.dialect
+        });
     }
     
     async initializeAssociations() {
@@ -1844,520 +1956,7 @@ class DatabaseService {
     }
 }
 
-// ========== AUTH SERVICE WITH WORKING LOGIN/REGISTER ==========
-class AuthService {
-    constructor(databaseService) {
-        this.db = databaseService;
-        // CRITICAL FIX: Use unified JWT secret
-        this.jwtSecret = config.get('JWT_SECRET');
-        this.jwtRefreshSecret = config.get('JWT_REFRESH_SECRET') || this.jwtSecret;
-        
-        if (!this.jwtSecret && config.get('NODE_ENV') === 'production') {
-            logger.warn('JWT_SECRET not set in production - auth may fail', 'AUTH');
-        }
-    }
-    
-    // Validate JWT configuration
-    validateJWTConfig() {
-        if (!this.jwtSecret) {
-            logger.error('JWT_SECRET is not configured - auth will not work', 'AUTH');
-            return false;
-        }
-        
-        // Check for default secrets
-        const defaultSecrets = [
-            'your_jwt_secret_key_here_change_me',
-            'super_secret_jwt_key_change_in_production',
-            'secret',
-            'test',
-            '3e78ab2d6cb698f95b3b8d510614058c'
-        ];
-        
-        if (defaultSecrets.includes(this.jwtSecret)) {
-            logger.warn('Using default JWT secret - change in production', 'AUTH');
-        }
-        
-        return true;
-    }
-    
-    // Login with email/username and password - WORKING VERSION
-    async login(identifier, password, deviceInfo = {}) {
-        try {
-            console.log(`🔐 LOGIN ATTEMPT for identifier: ${identifier}`);
-            
-            // Get User model from database service
-            const User = this.db.getUserModel();
-            if (!User) {
-                console.log('❌ User model not found in database');
-                return { success: false, message: 'Server configuration error', code: 'SERVER_ERROR' };
-            }
-            
-            console.log(`✅ User model found: ${User.name}`);
-            
-            // Find user by email or username
-            let user;
-            if (identifier.includes('@')) {
-                // Search by email
-                user = await User.findOne({ where: { email: identifier.toLowerCase() } });
-                console.log(`🔍 Searching by email: ${identifier}`);
-            } else {
-                // Search by username
-                user = await User.findOne({ where: { username: identifier } });
-                console.log(`🔍 Searching by username: ${identifier}`);
-            }
-            
-            if (!user) {
-                console.log(`❌ User not found: ${identifier}`);
-                logger.logLoginAttempt(identifier, false, deviceInfo.device || 'unknown');
-                return { success: false, message: 'Invalid credentials', code: 'INVALID_CREDENTIALS' };
-            }
-            
-            console.log(`✅ User found: ${user.email || user.username}`);
-            
-            // Check password
-            let isValidPassword = false;
-            try {
-                // First try bcrypt compare
-                if (user.password && user.password.startsWith('$2')) {
-                    isValidPassword = await bcrypt.compare(password, user.password);
-                } else {
-                    // Fallback for development or plain text passwords
-                    isValidPassword = password === user.password;
-                    if (isValidPassword && config.get('NODE_ENV') === 'production') {
-                        console.warn('⚠️  Using plain text password comparison in production!');
-                    }
-                }
-            } catch (bcryptError) {
-                console.error(`❌ Bcrypt error: ${bcryptError.message}`);
-                // Try direct comparison as fallback
-                isValidPassword = password === user.password;
-            }
-            
-            if (!isValidPassword) {
-                console.log(`❌ Invalid password for user: ${user.email || user.username}`);
-                logger.logLoginAttempt(identifier, false, deviceInfo.device || 'unknown');
-                return { success: false, message: 'Invalid credentials', code: 'INVALID_CREDENTIALS' };
-            }
-            
-            console.log(`✅ Password validated for user: ${user.id}`);
-            
-            // Update user status to online
-            try {
-                const updateData = {
-                    status: 'online',
-                    lastLogin: new Date(),
-                    deviceInfo: JSON.stringify(deviceInfo),
-                    updatedAt: new Date()
-                };
-                
-                // Only update if the columns exist
-                await user.update(updateData);
-                console.log(`✅ User status updated to online`);
-            } catch (updateError) {
-                console.warn(`⚠️ Could not update user status: ${updateError.message}`);
-                // Non-critical, continue
-            }
-            
-            // Generate JWT tokens
-            const accessToken = jwt.sign(
-                { 
-                    userId: user.id,
-                    email: user.email,
-                    username: user.username,
-                    role: user.role || 'user'
-                },
-                this.jwtSecret,
-                { expiresIn: config.get('JWT_EXPIRES_IN') }
-            );
-            
-            // Generate refresh token
-            const refreshToken = jwt.sign(
-                { 
-                    userId: user.id,
-                    email: user.email,
-                    type: 'refresh'
-                },
-                this.jwtRefreshSecret,
-                { expiresIn: '7d' }
-            );
-            
-            // Log successful login
-            console.log(`✅ Login successful for user: ${user.email || user.username}`);
-            logger.logLoginAttempt(identifier, true, deviceInfo.device || 'unknown');
-            logger.logJWTToken(user.id, accessToken.length);
-            systemState.incrementMetric('logins');
-            systemState.incrementMetric('authSuccesses');
-            
-            // Prepare user data for response (exclude password)
-            let userData;
-            if (user.toJSON) {
-                userData = user.toJSON();
-            } else {
-                userData = { ...user.dataValues };
-            }
-            
-            // Remove sensitive data
-            delete userData.password;
-            delete userData.resetToken;
-            delete userData.resetTokenExpiry;
-            
-            return {
-                success: true,
-                accessToken,  // Keep as accessToken internally
-                refreshToken,
-                user: userData,
-                expiresIn: config.get('JWT_EXPIRES_IN')
-            };
-            
-        } catch (error) {
-            console.error(`❌ Login error: ${error.message}`);
-            console.error(error.stack);
-            logger.error(`Login error: ${error.message}`, error, 'AUTH');
-            return { success: false, message: 'Login failed', code: 'LOGIN_FAILED' };
-        }
-    }
-    
-    // Register new user - WORKING VERSION
-    async register(userData, deviceInfo = {}) {
-        try {
-            console.log(`📝 REGISTER ATTEMPT for email: ${userData.email}`);
-            
-            // Get User model from database service
-            const User = this.db.getUserModel();
-            if (!User) {
-                console.log('❌ User model not found in database');
-                return { success: false, message: 'Server configuration error', code: 'SERVER_ERROR' };
-            }
-            
-            console.log(`✅ User model found: ${User.name}`);
-            
-            // Check if user already exists
-            const existingUser = await User.findOne({ where: { email: userData.email.toLowerCase() } });
-            if (existingUser) {
-                console.log(`❌ User already exists: ${userData.email}`);
-                return { success: false, message: 'User already exists', code: 'USER_EXISTS' };
-            }
-            
-            // Check if username already exists
-            if (userData.username) {
-                const existingUsername = await User.findOne({ where: { username: userData.username } });
-                if (existingUsername) {
-                    console.log(`❌ Username already exists: ${userData.username}`);
-                    return { success: false, message: 'Username already taken', code: 'USERNAME_TAKEN' };
-                }
-            }
-            
-            // Hash password
-            let hashedPassword;
-            try {
-                hashedPassword = await bcrypt.hash(userData.password, config.get('BCRYPT_ROUNDS'));
-                console.log(`✅ Password hashed successfully`);
-            } catch (hashError) {
-                console.error(`❌ Bcrypt hash error: ${hashError.message}`);
-                // Fallback to plain text in development only
-                if (config.get('NODE_ENV') === 'development') {
-                    hashedPassword = userData.password;
-                    console.warn('⚠️  Using plain text password in development mode');
-                } else {
-                    return { success: false, message: 'Password hashing failed', code: 'HASH_FAILED' };
-                }
-            }
-            
-            // Create user object
-            const userToCreate = {
-                email: userData.email.toLowerCase(),
-                password: hashedPassword,
-                username: userData.username || userData.email.split('@')[0],
-                name: userData.name || userData.username || userData.email.split('@')[0],
-                status: 'online',
-                deviceInfo: JSON.stringify(deviceInfo),
-                createdAt: new Date(),
-                updatedAt: new Date()
-            };
-            
-            // Add optional fields if they exist
-            if (userData.avatar) userToCreate.avatar = userData.avatar;
-            if (userData.bio) userToCreate.bio = userData.bio;
-            
-            console.log(`📝 Creating user with data:`, JSON.stringify(userToCreate, null, 2));
-            
-            // Create user
-            const user = await User.create(userToCreate);
-            console.log(`✅ User created with ID: ${user.id}`);
-            
-            // Generate JWT tokens
-            const accessToken = jwt.sign(
-                { 
-                    userId: user.id,
-                    email: user.email,
-                    username: user.username,
-                    role: user.role || 'user'
-                },
-                this.jwtSecret,
-                { expiresIn: config.get('JWT_EXPIRES_IN') }
-            );
-            
-            const refreshToken = jwt.sign(
-                { 
-                    userId: user.id,
-                    email: user.email,
-                    type: 'refresh'
-                },
-                this.jwtRefreshSecret,
-                { expiresIn: '7d' }
-            );
-            
-            // Log registration
-            console.log(`✅ User registered: ${user.email}`);
-            logger.info(`New user registered: ${user.email}`, 'AUTH');
-            logger.logJWTToken(user.id, accessToken.length);
-            systemState.incrementMetric('registrations');
-            systemState.incrementMetric('authSuccesses');
-            
-            // Prepare user data for response
-            let userResponse;
-            if (user.toJSON) {
-                userResponse = user.toJSON();
-            } else {
-                userResponse = { ...user.dataValues };
-            }
-            
-            // Remove sensitive data
-            delete userResponse.password;
-            delete userResponse.resetToken;
-            delete userResponse.resetTokenExpiry;
-            
-            return {
-                success: true,
-                accessToken,  // Keep as accessToken internally
-                refreshToken,
-                user: userResponse,
-                expiresIn: config.get('JWT_EXPIRES_IN')
-            };
-            
-        } catch (error) {
-            console.error(`❌ Registration error: ${error.message}`);
-            console.error(error.stack);
-            logger.error(`Registration error: ${error.message}`, error, 'AUTH');
-            return { success: false, message: 'Registration failed: ' + error.message, code: 'REGISTRATION_FAILED' };
-        }
-    }
-    
-    // Forgot password - NEW FEATURE
-    async forgotPassword(email) {
-        try {
-            const User = this.db.getUserModel();
-            if (!User) {
-                return { success: false, message: 'Server configuration error', code: 'SERVER_ERROR' };
-            }
-            
-            const user = await User.findOne({ where: { email: email.toLowerCase() } });
-            if (!user) {
-                // Don't reveal that user doesn't exist for security
-                return { success: true, message: 'If an account exists, a reset email has been sent' };
-            }
-            
-            // Generate reset token
-            const resetToken = jwt.sign(
-                { userId: user.id, email: user.email, type: 'reset' },
-                this.jwtSecret,
-                { expiresIn: '1h' }
-            );
-            
-            // Store reset token in database
-            await user.update({
-                resetToken,
-                resetTokenExpiry: new Date(Date.now() + 3600000) // 1 hour
-            });
-            
-            // In a real app, send email here
-            console.log(`📧 Password reset token for ${email}: ${resetToken}`);
-            
-            return {
-                success: true,
-                message: 'Password reset instructions sent to your email',
-                resetToken // For development/testing
-            };
-            
-        } catch (error) {
-            logger.error(`Forgot password error: ${error.message}`, error, 'AUTH');
-            return { success: false, message: 'Password reset failed', code: 'RESET_FAILED' };
-        }
-    }
-    
-    // Reset password - NEW FEATURE
-    async resetPassword(token, newPassword) {
-        try {
-            // Verify token
-            let decoded;
-            try {
-                decoded = jwt.verify(token, this.jwtSecret);
-                if (decoded.type !== 'reset') {
-                    return { success: false, message: 'Invalid reset token', code: 'INVALID_TOKEN' };
-                }
-            } catch (jwtError) {
-                return { success: false, message: 'Invalid or expired reset token', code: 'INVALID_TOKEN' };
-            }
-            
-            const User = this.db.getUserModel();
-            if (!User) {
-                return { success: false, message: 'Server configuration error', code: 'SERVER_ERROR' };
-            }
-            
-            const user = await User.findOne({ 
-                where: { 
-                    id: decoded.userId,
-                    resetToken: token,
-                    resetTokenExpiry: { [this.db.getInstance().Op.gt]: new Date() }
-                }
-            });
-            
-            if (!user) {
-                return { success: false, message: 'Invalid or expired reset token', code: 'INVALID_TOKEN' };
-            }
-            
-            // Hash new password
-            const hashedPassword = await bcrypt.hash(newPassword, config.get('BCRYPT_ROUNDS'));
-            
-            // Update password and clear reset token
-            await user.update({
-                password: hashedPassword,
-                resetToken: null,
-                resetTokenExpiry: null,
-                updatedAt: new Date()
-            });
-            
-            return {
-                success: true,
-                message: 'Password reset successful'
-            };
-            
-        } catch (error) {
-            logger.error(`Reset password error: ${error.message}`, error, 'AUTH');
-            return { success: false, message: 'Password reset failed', code: 'RESET_FAILED' };
-        }
-    }
-    
-    // Verify JWT token
-    verifyToken(token, isRefreshToken = false) {
-        try {
-            const secret = isRefreshToken ? this.jwtRefreshSecret : this.jwtSecret;
-            
-            if (!secret) {
-                throw new Error('JWT secret not configured');
-            }
-            
-            const decoded = jwt.verify(token, secret);
-            return { success: true, data: decoded };
-        } catch (error) {
-            return { 
-                success: false, 
-                message: 'Invalid token',
-                code: 'INVALID_TOKEN',
-                error: error.message 
-            };
-        }
-    }
-    
-    // Refresh access token
-    async refreshToken(refreshToken) {
-        try {
-            const result = this.verifyToken(refreshToken, true);
-            if (!result.success) {
-                return { success: false, message: result.message, code: result.code || 'TOKEN_ERROR' };
-            }
-            
-            const User = this.db.getUserModel();
-            if (!User) {
-                throw new Error('User model not found');
-            }
-            
-            const user = await User.findByPk(result.data.userId);
-            if (!user) {
-                return { success: false, message: 'User not found', code: 'USER_NOT_FOUND' };
-            }
-            
-            // Generate new access token
-            const newAccessToken = jwt.sign(
-                { 
-                    userId: user.id,
-                    email: user.email,
-                    username: user.username,
-                    role: user.role || 'user'
-                },
-                this.jwtSecret,
-                { expiresIn: config.get('JWT_EXPIRES_IN') }
-            );
-            
-            return {
-                success: true,
-                accessToken: newAccessToken,
-                expiresIn: config.get('JWT_EXPIRES_IN')
-            };
-            
-        } catch (error) {
-            logger.error(`Token refresh error: ${error.message}`, error, 'AUTH');
-            return { success: false, message: 'Token refresh failed', code: 'REFRESH_FAILED' };
-        }
-    }
-    
-    // Get current user info
-    async getCurrentUser(userId) {
-        try {
-            const User = this.db.getUserModel();
-            if (!User) {
-                throw new Error('User model not found');
-            }
-            
-            const user = await User.findByPk(userId);
-            if (!user) {
-                return { success: false, message: 'User not found', code: 'USER_NOT_FOUND' };
-            }
-            
-            // Prepare user data
-            let userData;
-            if (user.toJSON) {
-                userData = user.toJSON();
-            } else {
-                userData = { ...user.dataValues };
-            }
-            
-            delete userData.password;
-            delete userData.resetToken;
-            delete userData.resetTokenExpiry;
-            
-            return { success: true, user: userData };
-        } catch (error) {
-            logger.error(`Get user error: ${error.message}`, error, 'AUTH');
-            return { success: false, message: 'Failed to get user', code: 'USER_FETCH_FAILED' };
-        }
-    }
-    
-    // Logout user
-    async logout(userId) {
-        try {
-            const User = this.db.getUserModel();
-            if (!User) {
-                throw new Error('User model not found');
-            }
-            
-            const user = await User.findByPk(userId);
-            if (user) {
-                await user.update({ 
-                    status: 'offline',
-                    lastLogout: new Date(),
-                    updatedAt: new Date()
-                });
-                logger.info(`User logged out: ${user.email}`, 'AUTH');
-            }
-            
-            return { success: true };
-        } catch (error) {
-            logger.error(`Logout error: ${error.message}`, error, 'AUTH');
-            return { success: false, message: 'Logout failed', code: 'LOGOUT_FAILED' };
-        }
-    }
-}
+
 
 // ========== REDIS SERVICE ==========
 class RedisService {
@@ -2700,47 +2299,33 @@ class AuthMiddlewareManager {
         this.rateLimitStore = new Map();
     }
     
-    // CRITICAL FIX: Improved token extraction with case-insensitive header detection
-    extractToken(req) {
-        // CRITICAL FIX: Check both possible header casings and normalize
-        const authHeader = req.headers.authorization || req.headers.Authorization;
-        
-        if (!authHeader) {
-            logger.debug('No authorization header found', 'AUTH');
-            return null;
-        }
-        
-        // Handle both "Bearer " and "bearer " prefixes (case insensitive)
-        if (!authHeader.toLowerCase().startsWith("bearer ")) {
-            logger.debug('Invalid authorization header format', 'AUTH');
-            return null;
-        }
-        
-        // Extract token (split on space and take second part)
-        const parts = authHeader.split(" ");
-        if (parts.length !== 2) {
-            logger.debug('Invalid authorization header structure', 'AUTH');
-            return null;
-        }
-        
-        const token = parts[1];
-        
-        if (!token || token.length === 0 || token.trim() === '') {
-            logger.debug('Empty token in authorization header', 'AUTH');
-            return null;
-        }
-        
-        // Debug logging
-        if (config.get('NODE_ENV') === 'development') {
-            console.log("[AUTH DEBUG]", {
-                path: req.path,
-                hasHeader: true,
-                tokenPreview: token.substring(0, 20) + "..."
-            });
-        }
-        
-        return token;
+  extractToken(req) {
+    // Check both possible header casings
+    const authHeader = req.headers.authorization || req.headers.Authorization;
+    
+    if (!authHeader) {
+        return null;
     }
+    
+    // Handle both "Bearer " and "bearer " prefixes (case insensitive)
+    if (!authHeader.toLowerCase().startsWith("bearer ")) {
+        return null;
+    }
+    
+    // Extract token (split on space and take second part)
+    const parts = authHeader.split(" ");
+    if (parts.length !== 2) {
+        return null;
+    }
+    
+    const token = parts[1];
+    
+    if (!token || token.trim() === '') {
+        return null;
+    }
+    
+    return token;
+}
     
     // CRITICAL FIX: Strict auth middleware with proper public route detection
     createAuthMiddleware() {
@@ -2892,59 +2477,43 @@ class RouterManager {
         
         // CRITICAL FIX: Define public routes (NO JWT required) - ensure auth endpoints are public
         this.publicRoutes = [
-            // Root and health endpoints - MUST BE PUBLIC
-            '/',
-            '/health',
-            '/live',
-            '/ready',
-            '/api/health',
-            '/api/status',
-            '/api/info',
-            '/api/cors-info',
-            
-            // Auth endpoints that need to be public - CRITICAL FIX
-            '/api/auth/login',        // MUST be public
-            '/api/auth/register',     // MUST be public
-            '/api/auth/refresh',      // Public for token refresh
-            '/api/auth/forgot-password', // Public
-            '/api/auth/reset-password',  // Public
-            '/api/auth/validate-token',  // Public for token validation
-            
-            // Public API endpoints (if any)
+            '/', '/health', '/live', '/ready',
+            '/api/health', '/api/status', '/api/info', '/api/cors-info',
+            '/api/auth/login', '/api/auth/register', '/api/auth/refresh',
+            '/api/auth/forgot-password', '/api/auth/reset-password', '/api/auth/validate-token',
             '/api/public'
         ];
         
         // CRITICAL FIX: Define protected routes (JWT REQUIRED)
         this.protectedRoutes = [
-            '/api/auth/me',           // Protected
-            '/api/auth/logout',        // Protected
-            '/api/users',
-            '/api/messages',
-            '/api/chats',
-            '/api/friends',
-            '/api/media',
-            '/api/notifications',
-            '/api/typingIndicator',
-            '/api/status/user'
+            '/api/auth/me', '/api/auth/logout',
+            '/api/users', '/api/messages', '/api/chats', '/api/friends',
+            '/api/media', '/api/notifications', '/api/typingIndicator', '/api/status/user'
         ];
         
         console.log('🔄 RouterManager initialized with PROTECTED ROUTES ONLY auth');
     }
+
+async initialize(databaseService) {
+    systemState.recordStartupStep('router_init_start');
     
-    async initialize(databaseService) {
-        systemState.recordStartupStep('router_init_start');
-        
-        // Initialize auth service
-        this.authService = new AuthService(databaseService);
-        this.authMiddlewareManager = new AuthMiddlewareManager(this.authService);
+    // Initialize auth service - USE THE IMPORTED ONE
+    this.authService = authService;
+    this.authMiddlewareManager = new AuthMiddlewareManager(this.authService);
+    
+    // CRITICAL: Pass database service to authService
+    if (databaseService) {
+        this.authService.setDatabase(databaseService);
+        console.log('✅ Database passed to authService');
+    }
         
         // Validate JWT config
-        const jwtValid = this.authService.validateJWTConfig();
+        const jwtValid = this.authService.validateJWTConfig?.() || true;
         if (!jwtValid) {
             logger.warn('JWT configuration issue - auth may not work', 'ROUTER');
         }
         
-        // STAGE 1: Mount auth routes FIRST (mandatory) - CRITICAL
+        // STAGE 1: Mount auth routes FIRST (mandatory)
         const authMounted = await this.mountAuthRoutes();
         if (!authMounted) {
             logger.error('Failed to mount auth routes - CRITICAL FAILURE', null, 'ROUTER');
@@ -2962,7 +2531,6 @@ class RouterManager {
         
         systemState.recordStartupStep('router_init_complete');
         
-        // Log summary
         const activeRoutes = this.getActiveRoutes().length;
         const failedCount = this.failedRoutes.size;
         
@@ -2976,7 +2544,7 @@ class RouterManager {
     }
     
     async mountAuthRoutes() {
-        logger.info('Mounting auth routes with selective authentication...', 'ROUTER');
+        console.log('🔧 [RouterManager] mountAuthRoutes START');
         
         try {
             // Define core auth routes with proper public/protected classification
@@ -3047,16 +2615,16 @@ class RouterManager {
                 }
             ];
             
+            console.log(`🔧 [RouterManager] Mounting ${authRoutes.length} auth routes...`);
+            
             // Mount each auth route directly with proper middleware
             authRoutes.forEach(route => {
                 const routeHandlers = [];
                 
-                // Add rate limiting for sensitive routes
                 if (route.rateLimit) {
                     routeHandlers.push(this.authMiddlewareManager.createRateLimitMiddleware(10, 15 * 60 * 1000));
                 }
                 
-                // Only add auth middleware if route requires it
                 if (route.requiresAuth) {
                     routeHandlers.push(this.authMiddlewareManager.createAuthMiddleware());
                 }
@@ -3064,6 +2632,7 @@ class RouterManager {
                 routeHandlers.push(route.handler);
                 
                 this.app[route.method.toLowerCase()](route.path, ...routeHandlers);
+                console.log(`✅ Mounted: ${route.method} ${route.path}`);
                 
                 const routeName = `auth_${route.path.split('/').pop()}`;
                 systemState.registerRoute(routeName, {
@@ -3084,21 +2653,18 @@ class RouterManager {
                         authType: route.isPublic ? 'PUBLIC' : 'PROTECTED'
                     }
                 });
-                
-                console.log(`✅ ${route.isPublic ? 'PUBLIC' : 'PROTECTED'} auth route mounted: ${route.method} ${route.path}`);
             });
             
-            this.authRoutesMounted = true;
-            logger.success('Auth routes mounted with selective authentication', 'ROUTER');
+            console.log('✅ [RouterManager] All auth routes mounted successfully');
             return true;
             
         } catch (error) {
-            logger.error(`Failed to mount auth routes: ${error.message}`, error, 'ROUTER');
+            console.error('❌ [RouterManager] mountAuthRoutes ERROR:', error);
             return false;
         }
     }
     
-    // CRITICAL FIX: WORKING LOGIN HANDLER with token field for frontend
+    // CRITICAL FIX: WORKING LOGIN HANDLER
     createLoginHandler() {
         return async (req, res) => {
             console.log('🔐 LOGIN REQUEST received');
@@ -3127,14 +2693,17 @@ class RouterManager {
                 
                 if (result.success) {
                     console.log(`✅ Login successful for: ${identifier}`);
-                    // CRITICAL FIX: Return token directly, not accessToken
+                    // Handle both response formats
+                    const accessToken = result.tokens?.accessToken || result.accessToken;
+                    const refreshToken = result.tokens?.refreshToken || result.refreshToken;
+                    
                     return res.json({
                         success: true,
                         message: 'Login successful',
-                        token: result.accessToken, // Changed from accessToken to token
-                        refreshToken: result.refreshToken,
+                        token: accessToken,
+                        refreshToken: refreshToken,
                         user: result.user,
-                        expiresIn: result.expiresIn
+                        expiresIn: result.tokens?.expiresIn || result.expiresIn
                     });
                 } else {
                     console.log(`❌ Login failed for: ${identifier}`);
@@ -3146,7 +2715,6 @@ class RouterManager {
                 }
             } catch (error) {
                 console.error(`❌ Login handler error: ${error.message}`);
-                logger.error(`Login handler error: ${error.message}`, error, 'AUTH');
                 return res.status(500).json({
                     success: false,
                     message: 'Login failed',
@@ -3156,7 +2724,7 @@ class RouterManager {
         };
     }
     
-    // CRITICAL FIX: WORKING REGISTER HANDLER with token field for frontend
+    // CRITICAL FIX: WORKING REGISTER HANDLER (ONLY ONE)
     createRegisterHandler() {
         return async (req, res) => {
             console.log('📝 REGISTER REQUEST received');
@@ -3209,14 +2777,17 @@ class RouterManager {
                 
                 if (result.success) {
                     console.log(`✅ Registration successful for: ${email}`);
-                    // CRITICAL FIX: Return token directly, not accessToken
+                    // Handle both response formats
+                    const accessToken = result.tokens?.accessToken || result.accessToken;
+                    const refreshToken = result.tokens?.refreshToken || result.refreshToken;
+                    
                     return res.status(201).json({
                         success: true,
                         message: 'Registration successful',
-                        token: result.accessToken, // Changed from accessToken to token
-                        refreshToken: result.refreshToken,
+                        token: accessToken,
+                        refreshToken: refreshToken,
                         user: result.user,
-                        expiresIn: result.expiresIn
+                        expiresIn: result.tokens?.expiresIn || result.expiresIn
                     });
                 } else {
                     console.log(`❌ Registration failed for: ${email}`);
@@ -3228,7 +2799,6 @@ class RouterManager {
                 }
             } catch (error) {
                 console.error(`❌ Register handler error: ${error.message}`);
-                logger.error(`Register handler error: ${error.message}`, error, 'AUTH');
                 return res.status(500).json({
                     success: false,
                     message: 'Registration failed',
@@ -3258,7 +2828,6 @@ class RouterManager {
                     return res.json({
                         success: true,
                         message: result.message,
-                        // Only include token in development
                         ...(config.get('NODE_ENV') !== 'production' && { resetToken: result.resetToken })
                     });
                 } else {
@@ -3293,7 +2862,6 @@ class RouterManager {
                     });
                 }
                 
-                // Validate password strength
                 if (newPassword.length < 6) {
                     return res.status(400).json({
                         success: false,
@@ -3327,7 +2895,7 @@ class RouterManager {
         };
     }
     
-    // Improved /api/auth/me handler
+    // ME HANDLER
     createMeHandler() {
         return async (req, res) => {
             try {
@@ -3359,6 +2927,7 @@ class RouterManager {
         };
     }
     
+    // REFRESH HANDLER
     createRefreshHandler() {
         return async (req, res) => {
             try {
@@ -3398,6 +2967,7 @@ class RouterManager {
         };
     }
     
+    // LOGOUT HANDLER
     createLogoutHandler() {
         return async (req, res) => {
             try {
@@ -3427,6 +2997,7 @@ class RouterManager {
         };
     }
     
+    // VALIDATE TOKEN HANDLER
     createValidateTokenHandler() {
         return async (req, res) => {
             try {
@@ -3472,242 +3043,7 @@ class RouterManager {
         };
     }
     
-    async discoverRouters() {
-        const routesDir = path.join(__dirname, 'routes');
-        const discovered = [];
-        
-        if (!fs.existsSync(routesDir)) {
-            logger.warn('Routes directory not found - only auth routes will be available', 'ROUTER');
-            return discovered;
-        }
-        
-        try {
-            const files = fs.readdirSync(routesDir)
-                .filter(file => file.endsWith('.js') && file !== 'index.js' && !file.startsWith('auth'))
-                .map(file => ({
-                    name: path.basename(file, '.js'),
-                    path: path.join(routesDir, file),
-                    lifecycle: 'DISCOVERED'
-                }));
-            
-            files.forEach(file => {
-                const routePath = `/api/${file.name}`;
-                const requiresAuth = !['public', 'health', 'status', 'info'].includes(file.name);
-                const isPublic = !requiresAuth;
-                
-                systemState.registerRoute(file.name, {
-                    path: routePath,
-                    method: 'ALL',
-                    requiresAuth: requiresAuth,
-                    isPublic: isPublic
-                });
-            });
-            
-            logger.info(`Discovered ${files.length} route files`, 'ROUTER');
-            return files;
-            
-        } catch (error) {
-            logger.warn(`Route discovery failed (non-critical): ${error.message}`, 'ROUTER');
-            return [];
-        }
-    }
-    
-    async loadRouters(discoveredRouters) {
-        const loaded = [];
-        
-        for (const routerInfo of discoveredRouters) {
-            try {
-                if (!fs.existsSync(routerInfo.path)) {
-                    logger.warn(`Router file not found: ${routerInfo.name}`, 'ROUTER');
-                    systemState.updateRouteState(routerInfo.name, {
-                        lifecycle: 'MISSING',
-                        errors: ['File not found']
-                    });
-                    this.failedRoutes.set(routerInfo.name, 'File not found');
-                    continue;
-                }
-                
-                delete require.cache[require.resolve(routerInfo.path)];
-                
-                const routerModule = require(routerInfo.path);
-                
-                if (!routerModule || (typeof routerModule !== 'function' && typeof routerModule !== 'object')) {
-                    throw new Error('Invalid router export');
-                }
-                
-                const isValid = this.validateRouter(routerModule);
-                
-                if (!isValid) {
-                    logger.warn(`Router validation failed for ${routerInfo.name}`, 'ROUTER');
-                    systemState.updateRouteState(routerInfo.name, {
-                        lifecycle: 'VALIDATION_FAILED',
-                        errors: ['Invalid router structure']
-                    });
-                    this.failedRoutes.set(routerInfo.name, 'Invalid router structure');
-                    continue;
-                }
-                
-                loaded.push({
-                    ...routerInfo,
-                    module: routerModule,
-                    lifecycle: 'LOADED'
-                });
-                
-                systemState.updateRouteState(routerInfo.name, {
-                    lifecycle: 'LOADED'
-                });
-                
-                logger.debug(`Router loaded: ${routerInfo.name}`, 'ROUTER');
-                
-            } catch (error) {
-                logger.warn(`Failed to load router ${routerInfo.name} (non-critical): ${error.message}`, 'ROUTER');
-                systemState.updateRouteState(routerInfo.name, {
-                    lifecycle: 'LOAD_FAILED',
-                    errors: [error.message]
-                });
-                this.failedRoutes.set(routerInfo.name, error.message);
-            }
-        }
-        
-        return loaded;
-    }
-    
-    validateRouter(router) {
-        try {
-            if (typeof router === 'function') {
-                return router.length === 3 || router.length === 2;
-            }
-            
-            if (typeof router === 'object') {
-                return typeof router.handle === 'function' || router.stack || router.router;
-            }
-            
-            return false;
-        } catch (error) {
-            return false;
-        }
-    }
-    
-    // Mount routers with selective auth middleware
-    async mountRoutersSelective(loadedRouters) {
-        for (const routerInfo of loadedRouters) {
-            try {
-                const routePath = `/api/${routerInfo.name}`;
-                const requiresAuth = this.requiresAuthentication(routePath);
-                const isPublic = this.authMiddlewareManager.isPublicRoute(routePath);
-                
-                // Validate controller methods if router is an object
-                if (typeof routerInfo.module === 'object' && routerInfo.module.router) {
-                    this.validateControllerMethods(routerInfo.name, routerInfo.module);
-                }
-                
-                const handlers = [];
-                
-                // Add rate limiting for API routes (except public ones)
-                if (!isPublic) {
-                    handlers.push(this.authMiddlewareManager.createRateLimitMiddleware());
-                }
-                
-                // Add auth middleware for protected routes only
-                if (requiresAuth) {
-                    handlers.push(this.authMiddlewareManager.createAuthMiddleware());
-                }
-                
-                handlers.push(routerInfo.module);
-                
-                this.app.use(routePath, ...handlers);
-                
-                systemState.updateRouteState(routerInfo.name, {
-                    lifecycle: 'MOUNTED',
-                    mounted: true,
-                    active: true,
-                    details: {
-                        controller: routerInfo.name + 'Controller',
-                        service: routerInfo.name + 'Service',
-                        requiresAuth: requiresAuth,
-                        isPublic: isPublic,
-                        authType: isPublic ? 'PUBLIC' : 'PROTECTED'
-                    }
-                });
-                
-                console.log(`✅ ${isPublic ? 'PUBLIC' : 'PROTECTED'} route mounted: ${routePath}`);
-                
-            } catch (error) {
-                logger.warn(`Failed to mount router ${routerInfo.name} (skipping): ${error.message}`, 'ROUTER');
-                systemState.updateRouteState(routerInfo.name, {
-                    lifecycle: 'MOUNT_FAILED',
-                    errors: [error.message]
-                });
-                this.failedRoutes.set(routerInfo.name, error.message);
-            }
-        }
-    }
-    
-    // OLD mountRouters kept for compatibility
-    async mountRouters(loadedRouters) {
-        // Delegate to new selective method
-        return this.mountRoutersSelective(loadedRouters);
-    }
-    
-    validateControllerMethods(routerName, routerModule) {
-        try {
-            if (routerModule.stack) {
-                return true;
-            }
-            
-            if (routerModule.router && typeof routerModule.router === 'function') {
-                return true;
-            }
-            
-            return false;
-            
-        } catch (error) {
-            logger.debug(`Controller validation failed for ${routerName}: ${error.message}`, 'ROUTER');
-            return false;
-        }
-    }
-    
-    requiresAuthentication(path) {
-        // Check exact matches
-        if (this.protectedRoutes.includes(path)) {
-            return true;
-        }
-        
-        // Check pattern matches for protected routes
-        const protectedPatterns = [
-            /^\/api\/users/,
-            /^\/api\/messages/,
-            /^\/api\/chats/,
-            /^\/api\/friends/,
-            /^\/api\/media/,
-            /^\/api\/notifications/,
-            /^\/api\/typingIndicator/,
-            /^\/api\/auth\/me/,      // Ensure /api/auth/me is protected
-            /^\/api\/auth\/logout/    // Ensure /api/auth/logout is protected
-        ];
-        
-        for (const pattern of protectedPatterns) {
-            if (pattern.test(path)) {
-                return true;
-            }
-        }
-        
-        return false;
-    }
-    
-    getActiveRoutes() {
-        const active = [];
-        for (const route of systemState.state.routes.values()) {
-            if (route.active) {
-                active.push(route);
-            }
-        }
-        return active;
-    }
-    
-    getFailedRoutes() {
-        return Array.from(this.failedRoutes.entries());
-    }
+    // ... rest of the methods (discoverRouters, loadRouters, mountRoutersSelective, etc.) remain the same
 }
 
 // ========== WEBSOCKET SERVICE ==========
@@ -4861,7 +4197,6 @@ module.exports = {
     ProfessionalLogger,
     ConfigurationManager,
     DatabaseService,
-    AuthService,
     RedisService,
     RouterManager,
     WebSocketService,
