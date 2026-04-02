@@ -96,12 +96,12 @@ class DynamicCorsManager {
     loadOrigins() {
         // Always allow the server itself for API self-calls
         this.addServerOrigins();
-        
-        if (this.environment === 'production') {
-            this.loadProductionOrigins();
-        } else {
-            this.loadDevelopmentOrigins();
-        }
+        // AFTER
+if (this.environment === 'production' || this.isRender) {
+    this.loadProductionOrigins();
+} else {
+    this.loadDevelopmentOrigins();
+}
         
         // Add any custom origins from environment
         this.addCustomOrigins();
@@ -396,11 +396,11 @@ class DynamicCorsManager {
     
     // Check for pattern matching (e.g., subdomains)
     checkPatternMatch(origin) {
-        // Check for Render subdomains
-        if (origin.includes('.onrender.com') && this.environment === 'production') {
-            console.log(`🌐 CORS: Allowing Render subdomain: ${origin}`);
-            return true;
-        }
+        // AFTER — works regardless of NODE_ENV, uses isRender flag as backup
+if (origin.includes('.onrender.com') && (this.environment === 'production' || this.isRender)) {
+    console.log(`🌐 CORS: Allowing Render subdomain: ${origin}`);
+    return true;
+}
         
         // Check for localhost with any port in development
         if (this.environment !== 'production') {
