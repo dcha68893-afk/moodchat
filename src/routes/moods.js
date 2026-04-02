@@ -1,4 +1,4 @@
-
+const path = require('path');
 const express = require('express');
 const router = express.Router();
 const asyncHandler = require('express-async-handler');
@@ -7,11 +7,10 @@ const {
   ValidationError,
   AuthorizationError,
 } = require('../middleware/errorHandler');
-const { authenticate } = require('../middleware/auth');
 const { apiRateLimiter } = require('../middleware/rateLimiter');
 const { Mood, SharedMood, User } = require('../models');
 
-router.use(authenticate);
+// All routes are protected by parent auth middleware in server.js
 
 console.log('✅ Moods routes initialized');
 

@@ -1,12 +1,13 @@
+const path = require('path');
 const express = require('express');
 const router = express.Router();
 const groupMembersController = require('../controllers/groupMembersController');
 // FIXED: Import the unified authentication middleware
-const { authenticateToken } = require('../middleware/auth');
+const { authenticateToken } = require(path.join(__dirname, '../middleware/auth'));
 const { apiRateLimiter } = require('../middleware/rateLimiter');
 
 // FIXED: Use the unified authentication middleware
-router.use(authenticateToken);
+
 
 console.log('✅ Group Members routes initialized');
 

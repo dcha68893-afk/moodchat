@@ -1,10 +1,9 @@
-
+const path = require('path');
 const asyncHandler = require('express-async-handler');
 const express = require('express');
 const router = express.Router();
 const { Op, fn, col, literal } = require('sequelize');
 const multer = require('multer');
-const path = require('path');
 const fs = require('fs').promises;
 const {
   AuthenticationError,
@@ -13,9 +12,10 @@ const {
   ValidationError,
   ConflictError,
 } = require('../middleware/errorHandler');
-const { authenticate } = require('../middleware/auth');
 const { apiRateLimiter } = require('../middleware/rateLimiter');
 const { User, Chat, Message, Reaction } = require('../models');
+
+// All routes are protected by parent auth middleware in server.js
 
 const MAX_FILE_SIZE = parseInt(process.env.MAX_FILE_SIZE) || 10 * 1024 * 1024;
 const ALLOWED_FILE_TYPES = (
@@ -62,8 +62,6 @@ const upload = multer({
 const createMessageRateLimiter = () => {
   return apiRateLimiter; // Use the existing rate limiter for now
 };
-
-router.use(authenticate);
 
 console.log('✅ Messages routes initialized');
 
@@ -138,7 +136,7 @@ router.get(
             as: 'reactions',
             include: [{
               model: User,
-              as: 'user',
+              as: 'requester',
               attributes: ['id', 'username', 'avatar']
             }]
           }
@@ -694,7 +692,7 @@ router.post(
             as: 'reactions',
             include: [{
               model: User,
-              as: 'user',
+              as: 'requester',
               attributes: ['id', 'username', 'avatar']
             }]
           }

@@ -21,33 +21,25 @@ const PUBLIC_PATHS = [
   '/ws-test.html'
 ];
 
-const isPublicPath = (req) => {
-  // Get the full path (including mount prefix)
-  const fullPath = req.originalUrl || req.url;
-  
-  console.log('[Auth] Checking if public:', fullPath);
-  
+const isPublicPath = (path) => {
   // Root path is public (only exact match)
-  if (fullPath === '/' || fullPath === '') {
+  if (path === '/' || path === '') {
     return true;
   }
   
-  // Check exact matches
-  if (PUBLIC_PATHS.includes(fullPath)) {
+  // Exact match
+  if (PUBLIC_PATHS.includes(path)) {
     return true;
   }
   
-  // Check if path starts with any public path
+  // Check if path starts with any public path (but NOT '/')
   for (const publicPath of PUBLIC_PATHS) {
-    if (fullPath.startsWith(publicPath + '/') || fullPath === publicPath) {
+    if (publicPath !== '/' && path.startsWith(publicPath + '/')) {
       return true;
     }
-  }
-  
-  // Specifically allow health and status endpoints
-  if (fullPath === '/health' || fullPath === '/api/health' || 
-      fullPath === '/status' || fullPath === '/api/status') {
-    return true;
+    if (publicPath !== '/' && path === publicPath) {
+      return true;
+    }
   }
   
   return false;
@@ -80,11 +72,11 @@ const extractToken = (req) => {
 
 const authenticateToken = (req, res, next) => {
   console.log('[Auth] =========================================');
-  console.log('[Auth] Checking authentication for:', req.method, req.originalUrl || req.url);
+  console.log('[Auth] Checking authentication for:', req.method, req.path);
   
-  // Skip auth for public paths - PASS THE REQUEST OBJECT
-  if (isPublicPath(req)) {
-    console.log('[Auth] ✓ Public path, skipping authentication:', req.originalUrl || req.url);
+  // Skip auth for public paths
+  if (isPublicPath(req.path)) {
+    console.log('[Auth] âœ… Public path, skipping authentication:', req.path);
     console.log('[Auth] =========================================');
     return next();
   }
@@ -289,6 +281,5 @@ module.exports = {
   PUBLIC_PATHS,
   JWT_SECRET
 };
-
 
 

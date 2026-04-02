@@ -1,3 +1,4 @@
+const path = require('path');
 const express = require('express');
 const router = express.Router();
 const { authenticate } = require('../middleware/auth');
@@ -5,7 +6,7 @@ const { apiRateLimiter } = require('../middleware/rateLimiter');
 const toolsController = require('../controllers/toolsController');
 
 // Apply authentication to all routes
-router.use(authenticate);
+
 
 // File upload routes
 router.post('/upload/image', apiRateLimiter, toolsController.uploadImage);

@@ -1,3 +1,4 @@
+const path = require('path');
 
 const express = require('express');
 const router = express.Router();
@@ -6,7 +7,7 @@ const { authenticate } = require('../middleware/auth');
 const { apiRateLimiter } = require('../middleware/rateLimiter');
 
 // Apply authentication to all routes
-router.use(authenticate);
+
 
 // Mark message as read
 router.post('/mark-read', apiRateLimiter, readReceiptController.markAsRead);

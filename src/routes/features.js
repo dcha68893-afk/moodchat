@@ -1,12 +1,13 @@
+const path = require('path');
 const asyncHandler = require('express-async-handler');
 const express = require('express');
 const router = express.Router();
-const { authenticateToken } = require('../middleware/auth');
+const { authenticateToken } = require(path.join(__dirname, '../middleware/auth'));
 const { apiRateLimiter } = require('../middleware/rateLimiter');
 const { User, FeatureFlag, UserFeaturePreference, Chat, Group } = require('../models');
 const { Op } = require('sequelize');
 
-router.use(authenticateToken);
+
 
 console.log('✅ Features routes initialized');
 

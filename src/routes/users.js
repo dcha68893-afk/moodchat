@@ -1,3 +1,4 @@
+﻿const path = require('path');
 const express = require('express');
 const router = express.Router();
 const sequelize = require('sequelize');
@@ -8,8 +9,10 @@ const {
   NotFoundError,
   ValidationError,
 } = require('../middleware/errorHandler');
-const { authMiddleware } = require('../middleware/auth');
 const { apiRateLimiter } = require('../middleware/rateLimiter');
+
+// All routes are protected by parent auth middleware in server.js
+// No need for router.use(authMiddleware) as parent handles it
 
 // ===== SAFE MODEL IMPORT =====
 let User, Friend;
@@ -44,10 +47,9 @@ const ensureModels = (req, res, next) => {
   next();
 };
 
-router.use(authMiddleware);
 router.use(ensureModels);
 
-console.log('✅ Users routes initialized');
+console.log('âœ… Users routes initialized');
 
 // ===== GET ALL USERS =====
 router.get(
@@ -171,7 +173,7 @@ router.patch(
         'avatar',
         'bio',
         'status',
-        'displayName',
+        'firstName', 'lastName',
         'emailNotifications',
         'pushNotifications',
       ];
@@ -263,7 +265,7 @@ router.post(
       await user.update(updateData);
 
       const updatedUser = await User.findByPk(req.user.id, {
-        attributes: ['id', 'username', 'avatar', 'status', 'lastActive']
+        attributes: ['id', 'username', 'avatar', 'status', 'lastSeen']
       });
 
       return res.status(200).json({
@@ -373,7 +375,7 @@ router.get(
           ],
           id: { [sequelize.Op.ne]: req.user.id }
         },
-        attributes: ['id', 'username', 'avatar', 'displayName', 'status', 'lastActive', 'bio'],
+        attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'bio'],
         offset,
         limit: parseInt(limit),
         order: [['username', 'ASC']]
@@ -420,20 +422,20 @@ router.get(
         const friendships = await Friend.findAll({
           where: {
             [sequelize.Op.or]: [
-              { userId: userId, status: 'accepted' },
-              { friendId: userId, status: 'accepted' }
+             { requester_id: userId, status: 'accepted' },
+             { receiver_id: userId, status: 'accepted' }
             ]
           },
           include: [
             {
               model: User,
-              as: 'user',
-              attributes: ['id', 'username', 'avatar', 'displayName', 'status', 'lastActive', 'bio']
+              as: 'requester',
+              attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'bio', 'status', 'lastSeen']
             },
             {
               model: User,
-              as: 'friend',
-              attributes: ['id', 'username', 'avatar', 'displayName', 'status', 'lastActive', 'bio']
+               as: 'receiver',
+              attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'bio', 'status', 'lastSeen']
             }
           ]
         });
@@ -487,8 +489,8 @@ router.get(
           },
           include: [{
             model: User,
-            as: 'user',
-            attributes: ['id', 'username', 'avatar', 'displayName']
+            as: 'requester',
+            attributes: ['id', 'username', 'avatar', 'firstName', 'lastName']
           }]
         });
 
@@ -820,8 +822,8 @@ router.get(
         const friendships = await Friend.findAll({
           where: {
             [sequelize.Op.or]: [
-              { userId: userId, status: 'accepted' },
-              { friendId: userId, status: 'accepted' }
+             { requester_id: userId, status: 'accepted' },
+             { receiver_id: userId, status: 'accepted' }
             ]
           }
         });
@@ -844,6 +846,50 @@ router.get(
       return res.status(500).json({
         status: 'error',
         message: 'Failed to fetch online friends count'
+      });
+    }
+  })
+);
+
+// ===== GET BLOCKED USERS =====
+router.get(
+  '/blocked',
+  apiRateLimiter,
+  asyncHandler(async (req, res) => {
+    try {
+      const userId = req.user.id;
+
+      const user = await User.findByPk(userId, {
+        include: [{
+          model: User,
+          as: 'blockedUsers',
+          attributes: ['id', 'username', 'avatar', 'status']
+        }]
+      });
+
+      if (!user) {
+        return res.status(404).json({
+          status: 'error',
+          message: 'User not found'
+        });
+      }
+
+      const blockedUsers = user.blockedUsers || [];
+
+      res.status(200).json({
+        status: 'success',
+        data: blockedUsers.map(blocked => ({
+          id: blocked.id,
+          username: blocked.username,
+          avatar: blocked.avatar,
+          status: blocked.status
+        }))
+      });
+    } catch (error) {
+      console.error('Error fetching blocked users:', error.message);
+      res.status(500).json({
+        status: 'error',
+        message: 'Failed to fetch blocked users'
       });
     }
   })

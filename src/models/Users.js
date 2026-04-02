@@ -69,7 +69,6 @@ module.exports = (sequelize, DataTypes) => {
           notEmpty: {
             msg: 'Password cannot be empty'
           }
-          // NO LENGTH VALIDATION HERE - we handle in service
         }
       },
       avatar: {
@@ -167,6 +166,16 @@ module.exports = (sequelize, DataTypes) => {
           }
         }
       },
+      theme: {
+        type: DataTypes.STRING(20),
+        defaultValue: 'light',
+        allowNull: false,
+      },
+      language: {
+        type: DataTypes.STRING(10),
+        defaultValue: 'en',
+        allowNull: false,
+      },
       settings: {
         type: DataTypes.JSONB,
         defaultValue: {
@@ -253,22 +262,22 @@ module.exports = (sequelize, DataTypes) => {
     }
   );
 
-Users.prototype.validatePassword = async function (password) {
+  Users.prototype.validatePassword = async function (password) {
     if (!password || !this.password) {
-        console.log('[MODEL] validatePassword: Missing password or hash');
-        return false;
+      console.log('[MODEL] validatePassword: Missing password or hash');
+      return false;
     }
     
     try {
-        console.log(`[MODEL] Validating password for user ${this.id}`);
-        const isValid = await bcrypt.compare(password, this.password);
-        console.log(`[MODEL] Password validation result: ${isValid ? '✅ VALID' : '❌ INVALID'}`);
-        return isValid;
+      console.log(`[MODEL] Validating password for user ${this.id}`);
+      const isValid = await bcrypt.compare(password, this.password);
+      console.log(`[MODEL] Password validation result: ${isValid ? '✅ VALID' : '❌ INVALID'}`);
+      return isValid;
     } catch (error) {
-        console.error('[MODEL] Password validation error:', error.message);
-        return false;
+      console.error('[MODEL] Password validation error:', error.message);
+      return false;
     }
-};
+  };
 
   Users.prototype.toJSON = function () {
     const values = Object.assign({}, this.get());
@@ -279,7 +288,7 @@ Users.prototype.validatePassword = async function (password) {
   };
 
   Users.prototype.getPublicProfile = function () {
-    const { id, username, firstName, lastName, avatar, bio, status, lastSeen, isOnline } = this;
+    const { id, username, firstName, lastName, avatar, bio, status, lastSeen, theme, language } = this;
     return { 
       id, 
       username, 
@@ -289,6 +298,8 @@ Users.prototype.validatePassword = async function (password) {
       bio, 
       status, 
       lastSeen,
+      theme,
+      language,
       displayName: `${firstName || ''} ${lastName || ''}`.trim() || username,
       isOnline: status === 'online'
     };

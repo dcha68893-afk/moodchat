@@ -1,0 +1,1030 @@
+﻿
+// Helper function to format user data
+const formatUser = (user) => {
+    if (!user) return null;
+    const userData = user.toJSON ? user.toJSON() : user;
+    const displayName = [userData.firstName, userData.lastName].filter(Boolean).join(' ').trim() || userData.username;
+    return {
+        id: userData.id,
+        username: userData.username,
+        avatar: userData.avatar,
+        displayName: displayName,
+        firstName: userData.firstName,
+        lastName: userData.lastName,
+        bio: userData.bio,
+        status: userData.status,
+        lastActive: userData.lastSeen
+    };
+};
+const path = require('path');
+const { authenticateToken } = require(path.join(__dirname, '../middleware/auth'));
+
+const express = require('express');
+const router = express.Router();
+
+// ===== SAFE MODEL IMPORT =====
+let db, User, Friend, Chat, Message, Call;
+try {
+  db = require('../models');
+  User = db.User || db.Users;
+  Friend = db.Friend || db.Friends;
+  Chat = db.Chat || db.Chats;
+  Message = db.Message || db.Messages;
+  Call = db.Call || db.Calls;
+  console.log('[Friends Route] Models loaded - User:', !!User, 'Friend:', !!Friend);
+} catch (error) {
+  console.error('[Friends Route] Error loading models:', error.message);
+  db = null;
+}
+
+// Get Sequelize operators
+const Sequelize = require('sequelize');
+const { Op } = Sequelize;
+
+const asyncHandler = require('express-async-handler');
+const { apiRateLimiter } = require('../middleware/rateLimiter');
+
+console.log('âœ… Friends routes initialized');
+
+// Helper function to get user ID (simplified since authenticateToken already sets req.user)
+const getUserId = (req) => {
+  return req.user.userId || req.user.id;
+};
+
+// ===== SAFE MODEL CHECK MIDDLEWARE =====
+const ensureModels = (req, res, next) => {
+  if (!User) {
+    console.error('[Friends Route] User model not available');
+    return res.status(503).json({
+      status: 'error',
+      message: 'Service temporarily unavailable',
+      code: 'MODEL_UNAVAILABLE'
+    });
+  }
+  next();
+};
+
+router.use(ensureModels);
+
+// ===== GET FRIENDS LIST (ALIAS) =====
+router.get(
+  '/list',
+  authenticateToken,
+  apiRateLimiter,
+  asyncHandler(async (req, res) => {
+    try {
+      const userId = getUserId(req);
+      
+      if (!Friend) {
+        return res.status(200).json({
+          success: true,
+          friends: []
+        });
+      }
+      
+      try {
+        const friendships = await Friend.findAll({
+          where: {
+            [Op.or]: [
+              { userId: userId, status: 'accepted' },
+              { friendId: userId, status: 'accepted' }
+            ]
+          },
+          include: [
+            {
+              model: User,
+              as: 'user',
+              attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen']
+            },
+            {
+              model: User,
+              as: 'friend',
+              attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen']
+            }
+          ]
+        });
+        
+        const friends = (friendships || []).map(f => {
+          if (f.userId === userId) {
+            return f.friend;
+          }
+          return f.user;
+        }).filter(f => f);
+        
+        return res.json({
+          success: true,
+          friends: friends || []
+        });
+      } catch (dbError) {
+        console.log('[Friends Route] Friend table may not exist:', dbError.message);
+        return res.json({
+          success: true,
+          friends: []
+        });
+      }
+    } catch (error) {
+      console.error('Error in friends list endpoint:', error.message);
+      return res.status(500).json({
+        status: 'error',
+        message: 'Failed to fetch friends list'
+      });
+    }
+  })
+);
+
+// ===== PING ENDPOINT (PUBLIC) =====
+router.get(
+  '/ping',
+  apiRateLimiter,
+  asyncHandler(async (req, res) => {
+    try {
+      return res.json({ ok: true, route: "friends", timestamp: new Date().toISOString() });
+    } catch (error) {
+      console.error('Ping error:', error.message);
+      return res.status(500).json({ ok: false, error: error.message });
+    }
+  })
+);
+
+// ===== GET ALL FRIENDS =====
+// In friends.js, replace the main GET / endpoint:
+router.get(
+    '/',
+    authenticateToken,
+    apiRateLimiter,
+    asyncHandler(async (req, res) => {
+        try {
+            const userId = getUserId(req);
+            
+            console.log('[Friends] Fetching friends for user:', userId);
+
+            // Return empty array if Friend model doesn't exist
+            if (!Friend) {
+                return res.status(200).json({
+                    status: 'success',
+                    data: { friends: [] }
+                });
+            }
+
+            try {
+                // Get all friendships
+                const friendships = await Friend.findAll({
+                    where: {
+                        [Op.or]: [
+                            { userId: userId, status: 'accepted' },
+                            { friendId: userId, status: 'accepted' }
+                        ]
+                    }
+                });
+                
+                const friendIds = friendships.map(f => f.userId === userId ? f.friendId : f.userId);
+                
+                if (friendIds.length === 0) {
+                    return res.status(200).json({
+                        status: 'success',
+                        data: { friends: [] }
+                    });
+                }
+                
+                // Get friend details with only existing fields
+                const friends = await User.findAll({
+                    where: { id: { [Op.in]: friendIds } },
+                    attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen']
+                });
+
+                // Format friends
+                const formattedFriends = friends.map(friend => {
+                    const displayName = [friend.firstName, friend.lastName].filter(Boolean).join(' ').trim() || friend.username;
+                    return {
+                        id: friend.id,
+                        username: friend.username,
+                        avatar: friend.avatar,
+                        displayName: displayName,
+                        status: friend.status || 'offline',
+                        lastActive: friend.lastSeen
+                    };
+                });
+
+                return res.status(200).json({
+                    status: 'success',
+                    data: { friends: formattedFriends }
+                });
+            } catch (dbError) {
+                console.error('[Friends] Database error:', dbError.message);
+                return res.status(200).json({
+                    status: 'success',
+                    data: { friends: [] }
+                });
+            }
+        } catch (error) {
+            console.error('[Friends] Error fetching friends:', error.message);
+            return res.status(500).json({
+                status: 'error',
+                message: 'Failed to fetch friends: ' + error.message
+            });
+        }
+    })
+);
+
+// ===== GET INCOMING FRIEND REQUESTS =====
+router.get(
+  '/incoming',
+  authenticateToken,
+  apiRateLimiter,
+  asyncHandler(async (req, res) => {
+    try {
+      const userId = getUserId(req);
+      
+      if (!Friend) {
+        return res.status(200).json({
+          status: 'success',
+          data: { requests: [] }
+        });
+      }
+
+      try {
+        const requests = await Friend.findAll({
+          where: {
+            friendId: userId,
+            status: 'pending'
+          },
+          include: [{
+            model: User,
+            as: 'user',
+            attributes: ['id', 'username', 'avatar', 'firstName', 'lastName']
+          }]
+        });
+
+        const formattedRequests = requests.map(req => ({
+          id: req.id,
+          user: req.user,
+          status: req.status,
+          createdAt: req.createdAt
+        }));
+
+        return res.status(200).json({
+          status: 'success',
+          data: { requests: formattedRequests || [] }
+        });
+      } catch (dbError) {
+        console.log('[Friends Route] Friend table may not exist:', dbError.message);
+        return res.status(200).json({
+          status: 'success',
+          data: { requests: [] }
+        });
+      }
+    } catch (error) {
+      console.error('Error fetching incoming friend requests:', error.message);
+      return res.status(200).json({
+        status: 'success',
+        data: { requests: [] }
+      });
+    }
+  })
+);
+
+// ===== GET SENT FRIEND REQUESTS =====
+router.get(
+  '/sent',
+  authenticateToken,
+  apiRateLimiter,
+  asyncHandler(async (req, res) => {
+    try {
+      const userId = getUserId(req);
+      
+      if (!Friend) {
+        return res.status(200).json({
+          status: 'success',
+          data: { requests: [] }
+        });
+      }
+
+      try {
+        const requests = await Friend.findAll({
+          where: {
+            userId: userId,
+            status: 'pending'
+          },
+          include: [{
+            model: User,
+            as: 'friend',
+            attributes: ['id', 'username', 'avatar', 'firstName', 'lastName']
+          }]
+        });
+
+        const formattedRequests = requests.map(req => ({
+          id: req.id,
+          user: req.friend,
+          status: req.status,
+          createdAt: req.createdAt
+        }));
+
+        return res.status(200).json({
+          status: 'success',
+          data: { requests: formattedRequests || [] }
+        });
+      } catch (dbError) {
+        console.log('[Friends Route] Friend table may not exist:', dbError.message);
+        return res.status(200).json({
+          status: 'success',
+          data: { requests: [] }
+        });
+      }
+    } catch (error) {
+      console.error('Error fetching sent friend requests:', error.message);
+      return res.status(200).json({
+        status: 'success',
+        data: { requests: [] }
+      });
+    }
+  })
+);
+
+// ===== GET PINNED FRIENDS =====
+router.get(
+  '/pinned',
+  authenticateToken,
+  apiRateLimiter,
+  asyncHandler(async (req, res) => {
+    try {
+      const userId = getUserId(req);
+      
+      if (!Friend) {
+        return res.status(200).json({
+          status: 'success',
+          data: { friends: [] }
+        });
+      }
+
+      try {
+        const friendships = await Friend.findAll({
+          where: {
+            [Op.or]: [
+              { userId: userId, status: 'accepted' },
+              { friendId: userId, status: 'accepted' }
+            ],
+            isPinned: true
+          },
+          include: [
+            {
+              model: User,
+              as: 'user',
+              attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'bio', 'status', 'lastSeen']
+            },
+            {
+              model: User,
+              as: 'friend',
+              attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'bio', 'status', 'lastSeen']
+            }
+          ]
+        });
+
+        const friends = friendships.map(f => {
+          if (f.userId === userId) return f.friend;
+          return f.user;
+        }).filter(f => f);
+
+        return res.status(200).json({
+          status: 'success',
+          data: { friends: friends || [] }
+        });
+      } catch (dbError) {
+        console.log('[Friends Route] Pinned friends query error:', dbError.message);
+        return res.status(200).json({
+          status: 'success',
+          data: { friends: [] }
+        });
+      }
+    } catch (error) {
+      console.error('Error fetching pinned friends:', error.message);
+      return res.status(200).json({
+        status: 'success',
+        data: { friends: [] }
+      });
+    }
+  })
+);
+
+// ===== GET MUTED FRIENDS =====
+router.get(
+  '/muted',
+  authenticateToken,
+  apiRateLimiter,
+  asyncHandler(async (req, res) => {
+    try {
+      const userId = getUserId(req);
+      
+      if (!Friend) {
+        return res.status(200).json({
+          status: 'success',
+          data: { friends: [] }
+        });
+      }
+
+      try {
+        const friendships = await Friend.findAll({
+          where: {
+            [Op.or]: [
+              { userId: userId, status: 'accepted' },
+              { friendId: userId, status: 'accepted' }
+            ],
+            isMuted: true
+          },
+          include: [
+            {
+              model: User,
+              as: 'user',
+              attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'bio', 'status', 'lastSeen']
+            },
+            {
+              model: User,
+              as: 'friend',
+              attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'bio', 'status', 'lastSeen']
+            }
+          ]
+        });
+
+        const friends = friendships.map(f => {
+          if (f.userId === userId) return f.friend;
+          return f.user;
+        }).filter(f => f);
+
+        return res.status(200).json({
+          status: 'success',
+          data: { friends: friends || [] }
+        });
+      } catch (dbError) {
+        console.log('[Friends Route] Muted friends query error:', dbError.message);
+        return res.status(200).json({
+          status: 'success',
+          data: { friends: [] }
+        });
+      }
+    } catch (error) {
+      console.error('Error fetching muted friends:', error.message);
+      return res.status(200).json({
+        status: 'success',
+        data: { friends: [] }
+      });
+    }
+  })
+);
+
+// ===== GET CONTACTS SYNCED =====
+router.get(
+  '/synced',
+  authenticateToken,
+  apiRateLimiter,
+  asyncHandler(async (req, res) => {
+    try {
+      const userId = getUserId(req);
+      
+      if (!Friend) {
+        return res.status(200).json({
+          status: 'success',
+          data: { synced: false, contacts: [] }
+        });
+      }
+
+      try {
+        const friendships = await Friend.findAll({
+          where: {
+            [Op.or]: [
+              { userId: userId, status: 'accepted' },
+              { friendId: userId, status: 'accepted' }
+            ]
+          },
+          include: [
+            {
+              model: User,
+              as: 'user',
+              attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'bio', 'status', 'lastSeen']
+            },
+            {
+              model: User,
+              as: 'friend',
+              attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'bio', 'status', 'lastSeen']
+            }
+          ]
+        });
+
+        const contacts = friendships.map(f => {
+          if (f.userId === userId) return f.friend;
+          return f.user;
+        }).filter(f => f);
+
+        return res.status(200).json({
+          status: 'success',
+          data: { synced: true, contacts: contacts || [] }
+        });
+      } catch (dbError) {
+        console.log('[Friends Route] Synced contacts query error:', dbError.message);
+        return res.status(200).json({
+          status: 'success',
+          data: { synced: false, contacts: [] }
+        });
+      }
+    } catch (error) {
+      console.error('Error syncing contacts:', error.message);
+      return res.status(200).json({
+        status: 'success',
+        data: { synced: false, contacts: [] }
+      });
+    }
+  })
+);
+
+// ===== GET FRIEND DETAILS =====
+router.get(
+  '/:friendId',
+  authenticateToken,
+  apiRateLimiter,
+  asyncHandler(async (req, res) => {
+    try {
+      const userId = getUserId(req);
+
+      const { friendId } = req.params;
+      
+      const specialStrings = ['pinned', 'muted', 'list', 'ping', 'stats', 'suggestions', 'export', 'blocked', 'search', 'incoming', 'sent', 'synced'];
+      if (specialStrings.includes(friendId)) {
+        return res.status(400).json({
+          status: 'error',
+          message: 'Invalid friend ID'
+        });
+      }
+
+      if (!friendId) {
+        return res.status(400).json({
+          status: 'error',
+          message: 'Friend ID is required'
+        });
+      }
+
+      const [user, friend] = await Promise.all([
+        User.findByPk(userId),
+        User.findByPk(friendId, {
+          attributes: { exclude: ['password', 'email', 'resetPasswordToken', 'resetPasswordExpires', 'loginAttempts', 'lockedUntil', 'socketIds'] }
+        })
+      ]);
+
+      if (!user || !friend) {
+        return res.status(404).json({
+          status: 'error',
+          message: 'User or friend not found'
+        });
+      }
+
+      let isFriend = false;
+      if (Friend) {
+        try {
+          const friendship = await Friend.findOne({
+            where: {
+              [Op.or]: [
+                { userId: userId, friendId: friend.id },
+                { userId: friend.id, friendId: userId }
+              ],
+              status: 'accepted'
+            }
+          });
+          isFriend = !!friendship;
+        } catch (dbError) {
+          console.log('[Friends Route] Friend check error:', dbError.message);
+          isFriend = false;
+        }
+      }
+
+      if (!isFriend) {
+        return res.status(400).json({
+          status: 'error',
+          message: 'This user is not in your friends list'
+        });
+      }
+
+      const friendData = {
+        ...(friend.toJSON ? friend.toJSON() : friend),
+        isBlocked: false,
+      };
+
+      return res.status(200).json({
+        status: 'success',
+        data: { friend: friendData },
+      });
+    } catch (error) {
+      console.error('Error fetching friend details:', error.message);
+      return res.status(500).json({
+        status: 'error',
+        message: 'Failed to fetch friend details'
+      });
+    }
+  })
+);
+
+// ===== REMOVE FRIEND =====
+router.delete(
+  '/:friendId',
+  authenticateToken,
+  apiRateLimiter,
+  asyncHandler(async (req, res) => {
+    try {
+      const userId = getUserId(req);
+
+      if (!Friend) {
+        return res.status(503).json({
+          status: 'error',
+          message: 'Friend service temporarily unavailable'
+        });
+      }
+
+      const { friendId } = req.params;
+
+      if (!friendId) {
+        return res.status(400).json({
+          status: 'error',
+          message: 'Friend ID is required'
+        });
+      }
+
+      const [user, friend] = await Promise.all([
+        User.findByPk(userId),
+        User.findByPk(friendId)
+      ]);
+
+      if (!user || !friend) {
+        return res.status(404).json({
+          status: 'error',
+          message: 'User or friend not found'
+        });
+      }
+
+      try {
+        const friendships = await Friend.findAll({
+          where: {
+            [Op.or]: [
+              { userId: userId, friendId: friend.id },
+              { userId: friend.id, friendId: userId }
+            ],
+            status: 'accepted'
+          }
+        });
+
+        if (friendships.length === 0) {
+          return res.status(400).json({
+            status: 'error',
+            message: 'This user is not in your friends list'
+          });
+        }
+
+        await Promise.all(friendships.map(f => f.destroy()));
+      } catch (dbError) {
+        console.log('[Friends Route] Remove friend error:', dbError.message);
+        return res.status(400).json({
+          status: 'error',
+          message: 'Friend relationship not found'
+        });
+      }
+
+      return res.status(200).json({
+        status: 'success',
+        message: 'Friend removed successfully',
+      });
+    } catch (error) {
+      console.error('Error removing friend:', error.message);
+      return res.status(500).json({
+        status: 'error',
+        message: 'Failed to remove friend'
+      });
+    }
+  })
+);
+
+// ===== GET FRIEND STATISTICS =====
+router.get(
+  '/stats',
+  authenticateToken,
+  apiRateLimiter,
+  asyncHandler(async (req, res) => {
+    try {
+      const userId = getUserId(req);
+
+      if (!Friend) {
+        return res.status(200).json({
+          status: 'success',
+          data: { total: 0, online: 0, offline: 0, recentlyActive: 0 }
+        });
+      }
+
+      try {
+        const friendships = await Friend.findAll({
+          where: {
+            [Op.or]: [
+              { userId: userId, status: 'accepted' },
+              { friendId: userId, status: 'accepted' }
+            ]
+          }
+        });
+        
+        const friendIds = friendships.map(f => f.userId === userId ? f.friendId : f.userId);
+        
+        const friends = await User.findAll({
+          where: { id: { [Op.in]: friendIds } },
+          attributes: ['id', 'lastSeen']
+        });
+
+        return res.status(200).json({
+          status: 'success',
+          data: {
+            total: friendIds.length,
+            online: 0,
+            offline: friendIds.length,
+            recentlyActive: friends.filter(f => f.lastActive).length,
+          },
+        });
+      } catch (dbError) {
+        console.log('[Friends Route] Stats query error:', dbError.message);
+        return res.status(200).json({
+          status: 'success',
+          data: { total: 0, online: 0, offline: 0, recentlyActive: 0 }
+        });
+      }
+    } catch (error) {
+      console.error('Error fetching friend statistics:', error.message);
+      return res.status(500).json({
+        status: 'error',
+        message: 'Failed to fetch friend statistics'
+      });
+    }
+  })
+);
+
+// ===== GET SUGGESTIONS =====
+router.get(
+  '/suggestions',
+  authenticateToken,
+  apiRateLimiter,
+  asyncHandler(async (req, res) => {
+    try {
+      const userId = getUserId(req);
+
+      const { limit = 10 } = req.query;
+
+      let excludedIds = [userId];
+      
+      if (Friend) {
+        try {
+          const friendships = await Friend.findAll({
+            where: {
+              [Op.or]: [
+                { userId: userId },
+                { friendId: userId }
+              ]
+            }
+          });
+          const friendIds = friendships.map(f => f.userId === userId ? f.friendId : f.userId);
+          excludedIds = [...excludedIds, ...friendIds];
+        } catch (dbError) {
+          console.log('[Friends Route] Suggestions friend query error:', dbError.message);
+        }
+      }
+
+      const suggestions = await User.findAll({
+        where: {
+          id: {
+            [Op.notIn]: excludedIds
+          }
+        },
+        attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'bio'],
+        limit: parseInt(limit),
+        order: [['createdAt', 'DESC']]
+      });
+
+      return res.status(200).json({
+        status: 'success',
+        data: { suggestions: suggestions || [] },
+      });
+    } catch (error) {
+      console.error('Error fetching friend suggestions:', error.message);
+      return res.status(500).json({
+        status: 'error',
+        message: 'Failed to fetch friend suggestions'
+      });
+    }
+  })
+);
+
+// ===== GET CONTACTS (ALIAS FOR FRIENDS) =====
+router.get(
+  '/contacts',
+  authenticateToken,
+  apiRateLimiter,
+  asyncHandler(async (req, res) => {
+    try {
+      const userId = getUserId(req);
+
+      if (!Friend) {
+        return res.status(200).json({
+          success: true,
+          data: { contacts: [] }
+        });
+      }
+
+      try {
+        const friendships = await Friend.findAll({
+          where: {
+            [Op.or]: [
+              { userId: userId, status: 'accepted' },
+              { friendId: userId, status: 'accepted' }
+            ]
+          },
+          include: [
+            {
+              model: User,
+              as: 'user',
+              attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen']
+            },
+            {
+              model: User,
+              as: 'friend',
+              attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen']
+            }
+          ]
+        });
+
+        const contacts = friendships.map(f => {
+          if (f.userId === userId) return f.friend;
+          return f.user;
+        }).filter(f => f);
+
+        return res.status(200).json({
+          success: true,
+          data: { contacts: contacts || [] }
+        });
+      } catch (dbError) {
+        console.log('[Friends Route] Contacts query error:', dbError.message);
+        return res.status(200).json({
+          success: true,
+          data: { contacts: [] }
+        });
+      }
+    } catch (error) {
+      console.error('Error fetching contacts:', error.message);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to fetch contacts'
+      });
+    }
+  })
+);
+
+// ===== SEARCH NEW USERS =====
+router.get(
+  '/search/new',
+  authenticateToken,
+  apiRateLimiter,
+  asyncHandler(async (req, res) => {
+    try {
+      const userId = getUserId(req);
+
+      const { query, page = 1, limit = 20 } = req.query;
+
+      if (!query || query.trim().length < 2) {
+        return res.status(400).json({
+          status: 'error',
+          message: 'Search query must be at least 2 characters'
+        });
+      }
+
+      const offset = (parseInt(page) - 1) * parseInt(limit);
+      
+      let excludedIds = [userId];
+      
+      if (Friend) {
+        try {
+          const friendships = await Friend.findAll({
+            where: {
+              [Op.or]: [
+                { userId: userId },
+                { friendId: userId }
+              ]
+            }
+          });
+          const friendIds = friendships.map(f => f.userId === userId ? f.friendId : f.userId);
+          excludedIds = [...excludedIds, ...friendIds];
+        } catch (dbError) {
+          console.log('[Friends Route] Search friend query error:', dbError.message);
+        }
+      }
+
+      const searchRegex = `%${query}%`;
+
+      const { count, rows: users } = await User.findAndCountAll({
+        where: {
+          id: { [Op.notIn]: excludedIds },
+          [Op.or]: [
+            { username: { [Op.iLike]: searchRegex } },
+            { displayName: { [Op.iLike]: searchRegex } }
+          ]
+        },
+        attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'bio'],
+        order: [['username', 'ASC']],
+        offset,
+        limit: parseInt(limit)
+      });
+
+      return res.status(200).json({
+        status: 'success',
+        data: {
+          users: users || [],
+          pagination: {
+            total: count || 0,
+            page: parseInt(page),
+            limit: parseInt(limit),
+            pages: count ? Math.ceil(count / parseInt(limit)) : 0,
+          },
+        },
+      });
+    } catch (error) {
+      console.error('Error searching users:', error.message);
+      return res.status(500).json({
+        status: 'error',
+        message: 'Failed to search users'
+      });
+    }
+  })
+);
+
+// ===== EXPORT FRIENDS =====
+router.get(
+  '/export',
+  authenticateToken,
+  apiRateLimiter,
+  asyncHandler(async (req, res) => {
+    try {
+      const userId = getUserId(req);
+
+      const { format = 'json' } = req.query;
+
+      let friendsData = [];
+
+      if (Friend) {
+        try {
+          const friendships = await Friend.findAll({
+            where: {
+              [Op.or]: [
+                { userId: userId, status: 'accepted' },
+                { friendId: userId, status: 'accepted' }
+              ]
+            },
+            include: [
+              { model: User, as: 'user', attributes: ['id', 'username', 'firstName', 'lastName', 'avatar', 'status', 'lastSeen', 'bio'] },
+              { model: User, as: 'friend', attributes: ['id', 'username', 'firstName', 'lastName', 'avatar', 'status', 'lastSeen', 'bio'] }
+            ]
+          });
+
+          friendsData = friendships.map(f => {
+            const friend = f.userId === userId ? f.friend : f.user;
+            return {
+              username: friend?.username,
+              displayName: friend?.username,
+              status: friend?.status,
+              lastActive: friend?.lastActive,
+              bio: friend?.bio,
+            };
+          }).filter(f => f.username);
+        } catch (dbError) {
+          console.log('[Friends Route] Export query error:', dbError.message);
+        }
+      }
+
+      if (format === 'csv') {
+        const fields = ['username', 'firstName', 'lastName', 'status', 'lastSeen', 'bio'];
+        const csv = [
+          fields.join(','),
+          ...friendsData.map(friend =>
+            fields.map(field => `"${(friend[field] || '').toString().replace(/"/g, '""')}"`).join(',')
+          ),
+        ].join('\n');
+
+        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Disposition', 'attachment; filename=friends.csv');
+        return res.send(csv);
+      }
+
+      return res.status(200).json({
+        status: 'success',
+        data: {
+          exportedAt: new Date(),
+          count: friendsData.length,
+          friends: friendsData,
+        },
+      });
+    } catch (error) {
+      console.error('Error exporting friends:', error.message);
+      return res.status(500).json({
+        status: 'error',
+        message: 'Failed to export friends'
+      });
+    }
+  })
+);
+
+module.exports = router;

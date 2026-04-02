@@ -57,4 +57,12 @@ module.exports = {
   passwordResetToken: {
     expiresIn: '1h',
   },
+  
+  // Add tokenService configuration
+  tokenService: {
+    accessSecret: process.env.JWT_ACCESS_SECRET || process.env.JWT_SECRET,
+    refreshSecret: process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET,
+    accessExpiresIn: process.env.JWT_ACCESS_EXPIRES_IN || '24h',
+    refreshExpiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '7d'
+  }
 };

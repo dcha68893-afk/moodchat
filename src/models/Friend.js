@@ -13,10 +13,12 @@ module.exports = (sequelize, DataTypes) => {
       requesterId: {
         type: DataTypes.INTEGER,
         allowNull: false,
+        field: 'requester_id',
       },
       receiverId: {
         type: DataTypes.INTEGER,
         allowNull: false,
+        field: 'receiver_id',
       },
       status: {
         type: DataTypes.ENUM('pending', 'accepted', 'rejected', 'blocked'),
@@ -36,10 +38,12 @@ module.exports = (sequelize, DataTypes) => {
       acceptedAt: {
         type: DataTypes.DATE,
         allowNull: true,
+        field: 'accepted_at',
       },
       blockedAt: {
         type: DataTypes.DATE,
         allowNull: true,
+        field: 'blocked_at',
       },
       notes: {
         type: DataTypes.STRING(200),
@@ -52,28 +56,39 @@ module.exports = (sequelize, DataTypes) => {
       closenessLevel: {
         type: DataTypes.INTEGER,
         defaultValue: 0,
+        field: 'closeness_level',
         validate: {
           min: 0,
           max: 10,
         },
+      },
+      isPinned: {
+        type: DataTypes.BOOLEAN,
+        defaultValue: false,
+        field: 'is_pinned',
+      },
+      isMuted: {
+        type: DataTypes.BOOLEAN,
+        defaultValue: false,
+        field: 'is_muted',
       },
     },
     {
       tableName: 'friends',
       modelName: 'Friend',
       timestamps: true,
-      underscored: true,
+      underscored: false,
       freezeTableName: true,
       indexes: [
         {
-          fields: ['requesterId', 'receiverId'],
+          fields: ['requester_id', 'receiver_id'],
           unique: true,
         },
         {
-          fields: ['requesterId'],
+          fields: ['requester_id'],
         },
         {
-          fields: ['receiverId'],
+          fields: ['receiver_id'],
         },
         {
           fields: ['status'],
@@ -82,7 +97,7 @@ module.exports = (sequelize, DataTypes) => {
     }
   );
 
-  // Instance methods (PRESERVED)
+  // Instance methods
   Friend.prototype.accept = async function () {
     this.status = 'accepted';
     this.acceptedAt = new Date();
@@ -106,7 +121,7 @@ module.exports = (sequelize, DataTypes) => {
     return await this.save();
   };
 
-  // Static methods (PRESERVED)
+  // Static methods
   Friend.getFriendship = async function (userId1, userId2) {
     return await this.findOne({
       where: {
@@ -131,7 +146,7 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
-          as: 'friendReceiver',
+          as: 'friendReceiverUser',
           attributes: ['id', 'username', 'avatar', 'status', 'lastSeen'],
         },
       ],
@@ -145,7 +160,7 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
-          as: 'friendRequester',
+          as: 'friendRequesterUser',
           attributes: ['id', 'username', 'avatar', 'status', 'lastSeen'],
         },
       ],
@@ -167,7 +182,7 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
-          as: 'friendRequester',
+          as: 'friendRequesterUser',
           attributes: ['id', 'username', 'avatar', 'status', 'lastSeen'],
         },
       ],
@@ -188,7 +203,7 @@ module.exports = (sequelize, DataTypes) => {
       include: [
         {
           model: this.sequelize.models.Users,
-          as: 'friendReceiver',
+          as: 'friendReceiverUser',
           attributes: ['id', 'username', 'avatar', 'status', 'lastSeen'],
         },
       ],
@@ -196,12 +211,12 @@ module.exports = (sequelize, DataTypes) => {
     });
   };
 
-  // FIXED: Associations with unique aliases
+  // Associations
   Friend.associate = function (models) {
     if (models.Users) {
       Friend.belongsTo(models.Users, {
         foreignKey: 'requesterId',
-        as: 'friendRequester',
+        as: 'friendRequesterUser',
         constraints: false,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
@@ -209,7 +224,7 @@ module.exports = (sequelize, DataTypes) => {
       
       Friend.belongsTo(models.Users, {
         foreignKey: 'receiverId',
-        as: 'friendReceiver',
+        as: 'friendReceiverUser',
         constraints: false,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',

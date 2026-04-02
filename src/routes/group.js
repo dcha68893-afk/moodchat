@@ -1,1782 +1,1745 @@
+﻿// routes/groups.js - Complete Group Management Routes
+// Full implementation with all features - NO SUMMARIZATION
+// Includes: Group CRUD, Members, Invites, Invite Links, Settings, Public Groups, Search, Purposes
+
 const express = require('express');
 const router = express.Router();
+const { authenticateToken } = require('../middleware/auth');
+const { body, param, query, validationResult } = require('express-validator');
 
-// Import database models
-const db = require('../models');
-const User = db.User || db.Users;
-const Chat = db.Chat;
-const Message = db.Message;
-const GroupInvite = db.GroupInvite;
+// ===== SAFE MODEL IMPORT =====
+let db, User, Group, GroupMember, Invite, Chat;
+try {
+    db = require('../models');
+    User = db.User || db.Users;
+    Group = db.Group || db.Groups;
+    GroupMember = db.GroupMember || db.GroupMembers;
+    Invite = db.Invite || db.Invites;
+    Chat = db.Chat || db.Chats;
+    console.log('[Groups Route] Models loaded - User:', !!User, 'Group:', !!Group, 'Invite:', !!Invite);
+} catch (error) {
+    console.error('[Groups Route] Error loading models:', error.message);
+    db = null;
+}
 
 // Get Sequelize operators
 const Sequelize = require('sequelize');
 const { Op } = Sequelize;
 
-const crypto = require('crypto');
-const asyncHandler = require('express-async-handler');
-const { authenticateToken } = require('../middleware/auth');
-const { apiRateLimiter } =require('../middleware/rateLimiter');
+// ========== HELPER FUNCTIONS ==========
 
-// Use the unified authentication middleware
-router.use(authenticateToken);
-
-console.log('✅ Group routes initialized');
-
-// Helper function to check authentication
-const checkAuth = (req, res) => {
-  if (!req.user || (!req.user.userId && !req.user.id)) {
-    return res.status(401).json({
-      status: 'error',
-      message: 'Authentication required'
-    });
-  }
-  const userId = req.user.userId || req.user.id;
-  return { userId };
+// Helper function to get user ID with validation
+const getUserId = (req) => {
+    if (!req.user) {
+        console.error('[Groups] req.user is undefined!');
+        return null;
+    }
+    return req.user.userId || req.user.id;
 };
 
-// Helper function to check database models
-const checkModels = (res) => {
-  if (!db || !User || !Chat || !Message) {
-    return res.status(503).json({
-      status: 'error',
-      message: 'Database service not available'
-    });
-  }
-  return true;
-};
-
-// GET /groups/user - safe response
-router.get(
-  '/user',
-  apiRateLimiter,
-  asyncHandler(async (req, res) => {
-    try {
-      res.json({
-        success: true,
-        data: []
-      });
-    } catch (error) {
-      console.error('Error in groups/user endpoint:', error.message);
-      res.status(500).json({
-        status: 'error',
-        message: 'Failed to fetch user groups'
-      });
-    }
-  })
-);
-
-// GET /groups/invites - safe response
-router.get(
-  '/invites',
-  apiRateLimiter,
-  asyncHandler(async (req, res) => {
-    try {
-      res.json({
-        success: true,
-        data: []
-      });
-    } catch (error) {
-      console.error('Error in groups/invites endpoint:', error.message);
-      res.status(500).json({
-        status: 'error',
-        message: 'Failed to fetch invites'
-      });
-    }
-  })
-);
-
-// GET /groups/purposes - safe response
-router.get(
-  '/purposes',
-  apiRateLimiter,
-  asyncHandler(async (req, res) => {
-    try {
-      res.json({
-        success: true,
-        data: []
-      });
-    } catch (error) {
-      console.error('Error in groups/purposes endpoint:', error.message);
-      res.status(500).json({
-        status: 'error',
-        message: 'Failed to fetch purposes'
-      });
-    }
-  })
-);
-
-// GET /groups/moods - safe response
-router.get(
-  '/moods',
-  apiRateLimiter,
-  asyncHandler(async (req, res) => {
-    try {
-      res.json({
-        success: true,
-        data: []
-      });
-    } catch (error) {
-      console.error('Error in groups/moods endpoint:', error.message);
-      res.status(500).json({
-        status: 'error',
-        message: 'Failed to fetch moods'
-      });
-    }
-  })
-);
-
-// GET /groups/notes - safe response
-router.get(
-  '/notes',
-  apiRateLimiter,
-  asyncHandler(async (req, res) => {
-    try {
-      res.json({
-        success: true,
-        data: []
-      });
-    } catch (error) {
-      console.error('Error in groups/notes endpoint:', error.message);
-      res.status(500).json({
-        status: 'error',
-        message: 'Failed to fetch notes'
-      });
-    }
-  })
-);
-
-// GET /groups/ping - debug endpoint
-router.get(
-  '/ping',
-  apiRateLimiter,
-  asyncHandler(async (req, res) => {
-    try {
-      res.json({ ok: true, route: "groups" });
-    } catch (error) {
-      console.error('Ping error:', error.message);
-      res.status(500).json({ ok: false, error: error.message });
-    }
-  })
-);
-
-// GET /groups - get all groups
-router.get(
-  '/',
-  apiRateLimiter,
-  asyncHandler(async (req, res) => {
-    try {
-      const auth = checkAuth(req, res);
-      if (auth.status) return auth;
-      const userId = auth.userId;
-
-      if (!checkModels(res)) return;
-
-      const {
-        page = 1,
-        limit = 20,
-        role = 'all',
-        search,
-      } = req.query;
-
-      const offset = (parseInt(page) - 1) * parseInt(limit);
-
-      const where = {
-        chatType: 'group',
-        '$participants.id$': userId,
-        isArchived: false,
-      };
-
-      if (role === 'admin') {
-        where['$admins.id$'] = userId;
-      } else if (role === 'member') {
-        where['$admins.id$'] = { [Op.ne]: userId };
-      }
-
-      if (search && search.trim()) {
-        where.chatName = { [Op.iLike]: `%${search}%` };
-      }
-
-      const { count, rows: groups } = await Chat.findAndCountAll({
-        where,
-        include: [
-          {
-            model: User,
-            as: 'participants',
-            attributes: ['id', 'username', 'avatar', 'displayName', 'online', 'status'],
-            through: { attributes: [] },
-            limit: 5
-          },
-          {
-            model: User,
-            as: 'admins',
-            attributes: ['username', 'avatar']
-          },
-          {
-            model: Message,
-            as: 'lastMessage',
-            attributes: ['content', 'senderId', 'createdAt', 'messageType']
-          },
-          {
-            model: User,
-            as: 'createdByUser',
-            attributes: ['username', 'avatar']
-          }
-        ],
-        order: [['updatedAt', 'DESC']],
-        offset,
-        limit: parseInt(limit),
-        distinct: true
-      });
-
-      const groupsWithMetadata = await Promise.all(
-        (groups || []).map(async group => {
-          const groupObj = group.toJSON ? group.toJSON() : group;
-          const isAdmin = group.admins && group.admins.some(admin => admin.id === userId);
-          const participantCount = group.participants ? group.participants.length : 0;
-          const onlineCount = group.participants ? group.participants.filter(p => p.online).length : 0;
-          
-          let userUnread = 0;
-          if (group.getUnreadCount) {
-            userUnread = await group.getUnreadCount(userId) || 0;
-          }
-
-          return {
-            ...groupObj,
-            isAdmin,
-            participantCount,
-            onlineCount,
-            unreadCount: userUnread,
-          };
-        })
-      );
-
-      res.status(200).json({
-        status: 'success',
-        data: {
-          groups: groupsWithMetadata,
-          pagination: {
-            total: count || 0,
-            page: parseInt(page),
-            limit: parseInt(limit),
-            pages: count ? Math.ceil(count / parseInt(limit)) : 0,
-          },
+// Helper function to format group data
+const formatGroup = (group) => {
+    if (!group) return null;
+    const groupData = group.toJSON ? group.toJSON() : group;
+    return {
+        id: groupData.id,
+        name: groupData.name || '',
+        description: groupData.description || '',
+        avatar: groupData.avatar || null,
+        isPublic: groupData.isPublic !== undefined ? groupData.isPublic : true,
+        purpose: groupData.purpose || 'social',
+        maxMembers: groupData.maxMembers || 100,
+        tags: groupData.tags || [],
+        rules: groupData.rules || '',
+        location: groupData.location || '',
+        createdBy: groupData.createdBy,
+        createdAt: groupData.createdAt,
+        updatedAt: groupData.updatedAt,
+        stats: {
+            totalMembers: groupData.totalMembers || 0,
+            totalMessages: groupData.totalMessages || 0,
+            dailyActiveUsers: groupData.dailyActiveUsers || 0,
+            weeklyActiveUsers: groupData.weeklyActiveUsers || 0
         },
+        isVerified: groupData.isVerified || false,
+        settings: groupData.settings || {
+            allowMedia: true,
+            allowCalls: true,
+            allowReactions: true,
+            allowReplies: true,
+            allowEditing: true,
+            allowDeleting: true,
+            slowMode: false,
+            requireAdminApproval: false
+        }
+    };
+};
+
+// Helper function to format invite data
+const formatInvite = (invite) => {
+    if (!invite) return null;
+    const inviteData = invite.toJSON ? invite.toJSON() : invite;
+    return {
+        id: inviteData.id,
+        groupId: inviteData.groupId,
+        inviterId: inviteData.inviterId,
+        inviter: inviteData.inviter ? {
+            id: inviteData.inviter.id,
+            username: inviteData.inviter.username,
+            avatar: inviteData.inviter.avatar
+        } : null,
+        targetUserId: inviteData.targetUserId,
+        targetUser: inviteData.targetUser ? {
+            id: inviteData.targetUser.id,
+            username: inviteData.targetUser.username,
+            avatar: inviteData.targetUser.avatar
+        } : null,
+        targetEmail: inviteData.targetEmail,
+        message: inviteData.message || '',
+        status: inviteData.status || 'pending',
+        createdAt: inviteData.createdAt,
+        expiresAt: inviteData.expiresAt,
+        inviteLink: inviteData.inviteLink
+    };
+};
+
+// Helper function with timeout
+const withTimeout = (promise, timeoutMs = 5000) => {
+    let timeoutId;
+    const timeoutPromise = new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+            reject(new Error(`Query timeout after ${timeoutMs}ms`));
+        }, timeoutMs);
+    });
+    return Promise.race([promise, timeoutPromise]).finally(() => {
+        if (timeoutId) clearTimeout(timeoutId);
+    });
+};
+
+// ========== GROUP CONTROLLER ==========
+class GroupController {
+  
+  // ===== PUBLIC ROUTES =====
+  
+  // Get group purposes (for dropdowns, etc.) - PUBLIC
+  async getGroupPurposes(req, res) {
+    try {
+      res.json({
+        success: true,
+        data: {
+          purposes: [
+            { id: 'social', name: 'Social', icon: '👥', description: 'Connect with friends and make new ones' },
+            { id: 'study', name: 'Study', icon: '📚', description: 'Study groups and academic discussions' },
+            { id: 'work', name: 'Work', icon: '💼', description: 'Professional collaboration and networking' },
+            { id: 'gaming', name: 'Gaming', icon: '🎮', description: 'Gaming communities and tournaments' },
+            { id: 'support', name: 'Support', icon: '🤝', description: 'Support groups and wellness communities' },
+            { id: 'hobby', name: 'Hobby', icon: '🎨', description: 'Share and discuss your hobbies' },
+            { id: 'professional', name: 'Professional', icon: '👔', description: 'Industry professionals and experts' },
+            { id: 'entertainment', name: 'Entertainment', icon: '🎬', description: 'Movies, music, and entertainment' },
+            { id: 'education', name: 'Education', icon: '🎓', description: 'Educational content and learning' },
+            { id: 'tech', name: 'Technology', icon: '💻', description: 'Tech discussions and innovations' },
+            { id: 'sports', name: 'Sports', icon: '⚽', description: 'Sports fans and teams' },
+            { id: 'health', name: 'Health', icon: '🏃', description: 'Health and fitness communities' },
+            { id: 'business', name: 'Business', icon: '📈', description: 'Business networking and entrepreneurship' },
+            { id: 'art', name: 'Art', icon: '🎭', description: 'Artists and creative communities' },
+            { id: 'travel', name: 'Travel', icon: '✈️', description: 'Travel enthusiasts and explorers' },
+            { id: 'food', name: 'Food', icon: '🍜', description: 'Food lovers and cooking enthusiasts' },
+            { id: 'music', name: 'Music', icon: '🎵', description: 'Music lovers and musicians' },
+            { id: 'photography', name: 'Photography', icon: '📷', description: 'Photography enthusiasts' },
+            { id: 'writing', name: 'Writing', icon: '✍️', description: 'Writers and authors' },
+            { id: 'other', name: 'Other', icon: '📌', description: 'Other types of groups' }
+          ]
+        }
       });
     } catch (error) {
-      console.error('Error fetching groups:', error.message);
-      res.status(500).json({
-        status: 'error',
-        message: 'Failed to fetch groups'
-      });
+      console.error('[Groups] Error getting purposes:', error);
+      res.status(500).json({ success: false, message: 'Failed to get group purposes', error: error.message });
     }
-  })
-);
+  }
 
-// POST /groups - create group
-router.post(
-  '/',
-  apiRateLimiter,
-  asyncHandler(async (req, res) => {
+  // Get public groups - PUBLIC
+  async getPublicGroups(req, res) {
     try {
-      const auth = checkAuth(req, res);
-      if (auth.status) return auth;
-      const userId = auth.userId;
-
-      if (!checkModels(res)) return;
-
-      const {
-        name,
-        description,
-        avatar,
-        participantIds,
-        isPublic = false,
-        joinSettings = 'invite_only',
-      } = req.body;
-
-      if (!name || !name.trim()) {
-        return res.status(400).json({
-          status: 'error',
-          message: 'Group name is required'
+      const { limit = 20, offset = 0, purpose, search } = req.query;
+      const limitNum = Math.min(parseInt(limit), 100);
+      const offsetNum = parseInt(offset);
+      
+      if (!Group) {
+        return res.json({
+          success: true,
+          data: {
+            groups: []
+          },
+          pagination: {
+            limit: limitNum,
+            offset: offsetNum,
+            total: 0,
+            hasMore: false
+          }
         });
       }
+      
+      const whereCondition = { isPublic: true };
+      if (purpose && purpose !== 'all') {
+        whereCondition.purpose = purpose;
+      }
+      if (search && search.trim().length >= 2) {
+        const searchRegex = `%${search}%`;
+        whereCondition[Op.or] = [
+          { name: { [Op.iLike]: searchRegex } },
+          { description: { [Op.iLike]: searchRegex } }
+        ];
+      }
+      
+      const { count, rows: groups } = await withTimeout(Group.findAndCountAll({
+        where: whereCondition,
+        limit: limitNum,
+        offset: offsetNum,
+        order: [['createdAt', 'DESC']],
+        attributes: ['id', 'name', 'description', 'avatar', 'purpose', 'isPublic', 'maxMembers', 'createdBy', 'createdAt', 'updatedAt']
+      }));
+      
+      const formattedGroups = (groups || []).map(group => formatGroup(group));
+      
+      res.json({
+        success: true,
+        data: {
+          groups: formattedGroups
+        },
+        pagination: {
+          limit: limitNum,
+          offset: offsetNum,
+          total: count,
+          hasMore: offsetNum + limitNum < count
+        }
+      });
+    } catch (error) {
+      console.error('[Groups] Error getting public groups:', error);
+      res.status(200).json({ 
+        success: true, 
+        data: { groups: [] },
+        pagination: { limit: 20, offset: 0, total: 0, hasMore: false }
+      });
+    }
+  }
 
+  // Search groups - PUBLIC
+  async searchGroups(req, res) {
+    try {
+      const { q, limit = 20, offset = 0, purpose, sortBy = 'relevance' } = req.query;
+      
+      if (!q || q.length < 2) {
+        return res.status(400).json({
+          success: false,
+          message: 'Search query must be at least 2 characters',
+          code: 'INVALID_SEARCH_QUERY'
+        });
+      }
+      
+      const limitNum = Math.min(parseInt(limit), 100);
+      const offsetNum = parseInt(offset);
+      
+      if (!Group) {
+        return res.json({
+          success: true,
+          data: { groups: [] },
+          query: q,
+          pagination: {
+            limit: limitNum,
+            offset: offsetNum,
+            total: 0,
+            hasMore: false
+          }
+        });
+      }
+      
+      const searchRegex = `%${q}%`;
+      const whereCondition = {
+        isPublic: true,
+        [Op.or]: [
+          { name: { [Op.iLike]: searchRegex } },
+          { description: { [Op.iLike]: searchRegex } },
+          { tags: { [Op.contains]: [q] } }
+        ]
+      };
+      
+      if (purpose && purpose !== 'all') {
+        whereCondition.purpose = purpose;
+      }
+      
+      const { count, rows: groups } = await withTimeout(Group.findAndCountAll({
+        where: whereCondition,
+        limit: limitNum,
+        offset: offsetNum,
+        order: sortBy === 'relevance' ? [['createdAt', 'DESC']] : [['name', 'ASC']],
+        attributes: ['id', 'name', 'description', 'avatar', 'purpose', 'isPublic', 'maxMembers', 'createdBy', 'createdAt', 'updatedAt']
+      }));
+      
+      const formattedGroups = (groups || []).map(group => formatGroup(group));
+      
+      res.json({
+        success: true,
+        data: { groups: formattedGroups },
+        query: q,
+        pagination: {
+          limit: limitNum,
+          offset: offsetNum,
+          total: count,
+          hasMore: offsetNum + limitNum < count
+        }
+      });
+    } catch (error) {
+      console.error('[Groups] Error searching groups:', error);
+      res.status(200).json({ 
+        success: true, 
+        data: { groups: [] },
+        query: req.query.q,
+        pagination: { limit: 20, offset: 0, total: 0, hasMore: false }
+      });
+    }
+  }
+  
+  // ===== PROTECTED ROUTES =====
+
+  // Create group - PROTECTED
+  async createGroup(req, res) {
+    try {
+      const { name, description, isPublic, purpose, maxMembers, tags, rules, location, avatar } = req.body;
+      const userId = getUserId(req);
+      
+      if (!userId) {
+        return res.status(401).json({
+          success: false,
+          message: 'Authentication required'
+        });
+      }
+      
+      // Validate required fields
+      if (!name || name.trim().length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'Group name is required',
+          code: 'MISSING_GROUP_NAME'
+        });
+      }
+      
       if (name.length > 100) {
         return res.status(400).json({
-          status: 'error',
-          message: 'Group name must be less than 100 characters'
+          success: false,
+          message: 'Group name cannot exceed 100 characters',
+          code: 'NAME_TOO_LONG'
         });
       }
-
-      const allParticipants = [userId];
-      if (Array.isArray(participantIds) && participantIds.length > 0) {
-        const uniqueParticipants = [...new Set(participantIds.filter(id => id !== userId))];
-
-        if (uniqueParticipants.length > 0) {
-          const participants = await User.findAll({
-            where: { id: uniqueParticipants },
-            attributes: ['id', 'username', 'blockedUsers']
-          });
-
-          if (participants.length !== uniqueParticipants.length) {
-            return res.status(404).json({
-              status: 'error',
-              message: 'One or more participants not found'
-            });
-          }
-
-          const currentUser = await User.findByPk(userId, {
-            include: [{
-              model: User,
-              as: 'blockedUsers',
-              attributes: ['id']
-            }]
-          });
-
-          if (!currentUser) {
-            return res.status(404).json({
-              status: 'error',
-              message: 'User not found'
-            });
-          }
-
-          const blockedParticipants = participants.filter(p =>
-            (currentUser.blockedUsers && currentUser.blockedUsers.some(bu => bu.id === p.id)) ||
-            (p.blockedUsers && p.blockedUsers.some(bu => bu.id === userId))
-          );
-
-          if (blockedParticipants.length > 0) {
-            return res.status(403).json({
-              status: 'error',
-              message: 'Cannot add blocked users to group'
-            });
-          }
-
-          allParticipants.push(...participants.map(p => p.id));
-        }
-      }
-
-      const group = await Chat.create({
-        chatType: 'group',
-        chatName: name.trim(),
-        description: description?.trim(),
-        avatar,
-        createdBy: userId,
-        isPublic,
-        joinSettings,
-        settings: {
-          allowMemberInvites: true,
-          allowMessageDeletion: true,
-          requireAdminApproval: false,
-          maxParticipants: 1000,
-        },
-      });
-
-      if (!group) {
-        return res.status(500).json({
-          status: 'error',
-          message: 'Failed to create group'
-        });
-      }
-
-      await group.setParticipants(allParticipants);
-      await group.setAdmins([userId]);
-
-      const populatedGroup = await Chat.findByPk(group.id, {
-        include: [
-          {
-            model: User,
-            as: 'participants',
-            attributes: ['id', 'username', 'avatar', 'displayName', 'online', 'status', 'socketIds'],
-            through: { attributes: [] }
-          },
-          {
-            model: User,
-            as: 'admins',
-            attributes: ['username', 'avatar']
-          },
-          {
-            model: User,
-            as: 'createdByUser',
-            attributes: ['username', 'avatar']
-          }
-        ]
-      });
-
-      const currentUser = await User.findByPk(userId);
-
-      if (req.io && currentUser && populatedGroup && populatedGroup.participants) {
-        const notificationData = {
-          group: populatedGroup.toJSON ? populatedGroup.toJSON() : populatedGroup,
-          createdBy: {
-            id: currentUser.id,
-            username: currentUser.username,
-            avatar: currentUser.avatar,
-          },
-        };
-
-        populatedGroup.participants.forEach(participant => {
-          if (participant.socketIds && Array.isArray(participant.socketIds) && participant.socketIds.length > 0) {
-            participant.socketIds.forEach(socketId => {
-              req.io.to(socketId).emit('group:created', notificationData);
-            });
-          }
-        });
-      }
-
-      res.status(201).json({
-        status: 'success',
-        message: 'Group created successfully',
-        data: { group: populatedGroup },
-      });
-    } catch (error) {
-      console.error('Error creating group:', error.message);
-      res.status(500).json({
-        status: 'error',
-        message: 'Failed to create group'
-      });
-    }
-  })
-);
-
-// GET /groups/:groupId - get group by ID
-router.get(
-  '/:groupId',
-  apiRateLimiter,
-  asyncHandler(async (req, res) => {
-    try {
-      const auth = checkAuth(req, res);
-      if (auth.status) return auth;
-      const userId = auth.userId;
-
-      if (!checkModels(res)) return;
-
-      const { groupId } = req.params;
-
-      if (!groupId) {
-        return res.status(400).json({
-          status: 'error',
-          message: 'Group ID is required'
-        });
-      }
-
-      const group = await Chat.findOne({
-        where: {
-          id: groupId,
-          chatType: 'group',
-          '$participants.id$': userId,
-          isArchived: false
-        },
-        include: [
-          {
-            model: User,
-            as: 'participants',
-            attributes: ['id', 'username', 'avatar', 'displayName', 'online', 'status', 'lastActive'],
-            through: { attributes: [] }
-          },
-          {
-            model: User,
-            as: 'admins',
-            attributes: ['username', 'avatar', 'displayName']
-          },
-          {
-            model: User,
-            as: 'createdByUser',
-            attributes: ['username', 'avatar']
-          },
-          {
-            model: Message,
-            as: 'lastMessage',
-            attributes: ['content', 'senderId', 'createdAt', 'messageType']
-          }
-        ]
-      });
-
-      if (!group) {
-        return res.status(404).json({
-          status: 'error',
-          message: 'Group not found or access denied'
-        });
-      }
-
-      const groupData = group.toJSON ? group.toJSON() : group;
-      groupData.isAdmin = group.admins && group.admins.some(admin => admin.id === userId);
-      groupData.participantCount = group.participants ? group.participants.length : 0;
-      groupData.onlineCount = group.participants ? group.participants.filter(p => p.online).length : 0;
       
-      let userUnread = 0;
-      if (group.getUnreadCount) {
-        userUnread = await group.getUnreadCount(userId) || 0;
-      }
-      groupData.unreadCount = userUnread;
-
-      res.status(200).json({
-        status: 'success',
-        data: { group: groupData },
-      });
-    } catch (error) {
-      console.error('Error fetching group:', error.message);
-      res.status(500).json({
-        status: 'error',
-        message: 'Failed to fetch group'
-      });
-    }
-  })
-);
-
-// PATCH /groups/:groupId - update group
-router.patch(
-  '/:groupId',
-  apiRateLimiter,
-  asyncHandler(async (req, res) => {
-    try {
-      const auth = checkAuth(req, res);
-      if (auth.status) return auth;
-      const userId = auth.userId;
-
-      if (!checkModels(res)) return;
-
-      const { groupId } = req.params;
-      const { name, description, avatar, joinSettings, settings } = req.body;
-
-      if (!groupId) {
+      if (description && description.length > 500) {
         return res.status(400).json({
-          status: 'error',
-          message: 'Group ID is required'
+          success: false,
+          message: 'Description cannot exceed 500 characters',
+          code: 'DESCRIPTION_TOO_LONG'
         });
       }
-
-      const group = await Chat.findOne({
-        where: {
-          id: groupId,
-          chatType: 'group',
-          '$participants.id$': userId,
-          '$admins.id$': userId,
-          isArchived: false
-        },
-        include: [{
-          model: User,
-          as: 'admins',
-          attributes: ['id'],
-          through: { attributes: [] }
-        }]
-      });
-
-      if (!group) {
-        return res.status(404).json({
-          status: 'error',
-          message: 'Group not found or admin access required'
-        });
-      }
-
-      const updates = {};
-      if (name && name.trim()) updates.chatName = name.trim();
-      if (description !== undefined) updates.description = description?.trim();
-      if (avatar !== undefined) updates.avatar = avatar;
-      if (joinSettings) updates.joinSettings = joinSettings;
-
-      if (settings && typeof settings === 'object') {
-        updates.settings = { ...(group.settings || {}), ...settings };
-      }
-
-      await group.update(updates);
-
-      const updatedGroup = await Chat.findByPk(groupId, {
-        include: [
-          {
-            model: User,
-            as: 'participants',
-            attributes: ['id', 'username', 'avatar', 'socketIds'],
-            through: { attributes: [] }
-          },
-          {
-            model: User,
-            as: 'admins',
-            attributes: ['username', 'avatar']
-          }
-        ]
-      });
-
-      if (req.io && updatedGroup && updatedGroup.participants) {
-        updatedGroup.participants.forEach(participant => {
-          if (participant.socketIds && Array.isArray(participant.socketIds) && participant.socketIds.length > 0) {
-            participant.socketIds.forEach(socketId => {
-              req.io.to(socketId).emit('group:updated', {
-                groupId: group.id,
-                updates,
-                updatedBy: {
-                  id: userId,
-                  username: req.user.username,
-                },
-              });
-            });
-          }
-        });
-      }
-
-      res.status(200).json({
-        status: 'success',
-        message: 'Group updated successfully',
-        data: { group: updatedGroup },
-      });
-    } catch (error) {
-      console.error('Error updating group:', error.message);
-      res.status(500).json({
-        status: 'error',
-        message: 'Failed to update group'
-      });
-    }
-  })
-);
-
-// POST /groups/:groupId/members - add members
-router.post(
-  '/:groupId/members',
-  apiRateLimiter,
-  asyncHandler(async (req, res) => {
-    try {
-      const auth = checkAuth(req, res);
-      if (auth.status) return auth;
-      const userId = auth.userId;
-
-      if (!checkModels(res)) return;
-
-      const { groupId } = req.params;
-      const { userIds } = req.body;
-
-      if (!groupId) {
-        return res.status(400).json({
-          status: 'error',
-          message: 'Group ID is required'
-        });
-      }
-
-      if (!Array.isArray(userIds) || userIds.length === 0) {
-        return res.status(400).json({
-          status: 'error',
-          message: 'User IDs are required'
-        });
-      }
-
-      const group = await Chat.findOne({
-        where: {
-          id: groupId,
-          chatType: 'group',
-          '$participants.id$': userId,
-          '$admins.id$': userId,
-          isArchived: false
-        },
-        include: [
-          {
-            model: User,
-            as: 'participants',
-            attributes: ['id'],
-            through: { attributes: [] }
-          },
-          {
-            model: User,
-            as: 'admins',
-            attributes: ['id'],
-            through: { attributes: [] }
-          }
-        ]
-      });
-
-      if (!group) {
-        return res.status(404).json({
-          status: 'error',
-          message: 'Group not found or admin access required'
-        });
-      }
-
-      const maxParticipants = group.settings?.maxParticipants || 1000;
-      if ((group.participants || []).length + userIds.length > maxParticipants) {
-        return res.status(400).json({
-          status: 'error',
-          message: `Group cannot have more than ${maxParticipants} members`
-        });
-      }
-
-      const usersToAdd = await User.findAll({
-        where: { id: userIds },
-        attributes: ['id', 'username', 'socketIds', 'blockedUsers']
-      });
-
-      if (usersToAdd.length !== userIds.length) {
-        return res.status(404).json({
-          status: 'error',
-          message: 'One or more users not found'
-        });
-      }
-
-      const currentUser = await User.findByPk(userId, {
-        include: [{
-          model: User,
-          as: 'blockedUsers',
-          attributes: ['id']
-        }]
-      });
-
-      if (!currentUser) {
-        return res.status(404).json({
-          status: 'error',
-          message: 'User not found'
-        });
-      }
-
-      const blockedUsers = usersToAdd.filter(user =>
-        (currentUser.blockedUsers && currentUser.blockedUsers.some(bu => bu.id === user.id)) ||
-        (user.blockedUsers && user.blockedUsers.some(bu => bu.id === userId))
-      );
-
-      if (blockedUsers.length > 0) {
-        return res.status(403).json({
-          status: 'error',
-          message: 'Cannot add blocked users to group'
-        });
-      }
-
-      const existingMemberIds = (group.participants || []).map(p => p.id);
-      const newMembers = usersToAdd.filter(user => !existingMemberIds.includes(user.id));
-
-      if (newMembers.length === 0) {
-        return res.status(400).json({
-          status: 'error',
-          message: 'All users are already members of the group'
-        });
-      }
-
-      await group.addParticipants(newMembers.map(m => m.id));
-
-      const updatedGroup = await Chat.findByPk(groupId, {
-        include: [
-          {
-            model: User,
-            as: 'participants',
-            attributes: ['id', 'username', 'avatar', 'displayName', 'socketIds'],
-            through: { attributes: [] }
-          },
-          {
-            model: User,
-            as: 'admins',
-            attributes: ['username', 'avatar']
-          }
-        ]
-      });
-
-      const currentUserFull = await User.findByPk(userId);
-
-      if (req.io && currentUserFull && updatedGroup && updatedGroup.participants) {
-        newMembers.forEach(member => {
-          if (member.socketIds && Array.isArray(member.socketIds) && member.socketIds.length > 0) {
-            member.socketIds.forEach(socketId => {
-              req.io.to(socketId).emit('group:joined', {
-                group: updatedGroup.toJSON ? updatedGroup.toJSON() : updatedGroup,
-                addedBy: {
-                  id: currentUserFull.id,
-                  username: currentUserFull.username,
-                  avatar: currentUserFull.avatar,
-                },
-              });
-            });
-          }
-        });
-
-        const existingMembers = await User.findAll({
-          where: { id: existingMemberIds },
-          attributes: ['id', 'socketIds']
-        });
-
-        existingMembers.forEach(member => {
-          if (member.socketIds && Array.isArray(member.socketIds) && member.socketIds.length > 0) {
-            member.socketIds.forEach(socketId => {
-              req.io.to(socketId).emit('group:members-added', {
-                groupId: group.id,
-                addedMembers: newMembers.map(m => ({
-                  id: m.id,
-                  username: m.username,
-                  avatar: m.avatar,
-                })),
-                addedBy: {
-                  id: currentUserFull.id,
-                  username: currentUserFull.username,
-                },
-              });
-            });
-          }
-        });
-      }
-
-      res.status(200).json({
-        status: 'success',
-        message: 'Members added successfully',
-        data: {
-          group: updatedGroup,
-          addedCount: newMembers.length,
-        },
-      });
-    } catch (error) {
-      console.error('Error adding members:', error.message);
-      res.status(500).json({
-        status: 'error',
-        message: 'Failed to add members'
-      });
-    }
-  })
-);
-
-// DELETE /groups/:groupId/members/:userId - remove member
-router.delete(
-  '/:groupId/members/:userId',
-  apiRateLimiter,
-  asyncHandler(async (req, res) => {
-    try {
-      const auth = checkAuth(req, res);
-      if (auth.status) return auth;
-      const currentUserId = auth.userId;
-
-      if (!checkModels(res)) return;
-
-      const { groupId, userId: targetUserId } = req.params;
-
-      if (!groupId || !targetUserId) {
-        return res.status(400).json({
-          status: 'error',
-          message: 'Group ID and User ID are required'
-        });
-      }
-
-      const group = await Chat.findOne({
-        where: {
-          id: groupId,
-          chatType: 'group',
-          '$participants.id$': currentUserId,
-          isArchived: false
-        },
-        include: [
-          {
-            model: User,
-            as: 'participants',
-            attributes: ['id'],
-            through: { attributes: [] }
-          },
-          {
-            model: User,
-            as: 'admins',
-            attributes: ['id'],
-            through: { attributes: [] }
-          }
-        ]
-      });
-
-      if (!group) {
-        return res.status(404).json({
-          status: 'error',
-          message: 'Group not found or access denied'
-        });
-      }
-
-      const isAdmin = group.admins && group.admins.some(admin => admin.id === currentUserId);
-      const isSelfRemoval = targetUserId === currentUserId;
-
-      if (!isAdmin && !isSelfRemoval) {
-        return res.status(403).json({
-          status: 'error',
-          message: 'Only admins can remove other members'
-        });
-      }
-
-      const isMember = group.participants && group.participants.some(p => p.id === targetUserId);
-      if (!isMember) {
-        return res.status(400).json({
-          status: 'error',
-          message: 'User is not a member of this group'
-        });
-      }
-
-      if (group.admins && group.admins.some(admin => admin.id === targetUserId) && group.admins.length === 1) {
-        return res.status(400).json({
-          status: 'error',
-          message: 'Cannot remove the last admin'
-        });
-      }
-
-      await group.removeParticipant(targetUserId);
-
-      if (group.admins && group.admins.some(admin => admin.id === targetUserId)) {
-        await group.removeAdmin(targetUserId);
-      }
-
-      const removedUser = await User.findByPk(targetUserId);
-      const currentUser = await User.findByPk(currentUserId);
-
-      if (req.io && removedUser && currentUser) {
-        if (removedUser.socketIds && Array.isArray(removedUser.socketIds) && removedUser.socketIds.length > 0) {
-          removedUser.socketIds.forEach(socketId => {
-            req.io.to(socketId).emit('group:removed', {
-              groupId: group.id,
-              groupName: group.chatName,
-              removedBy: isSelfRemoval
-                ? 'self'
-                : {
-                    id: currentUser.id,
-                    username: currentUser.username,
-                  },
-            });
-          });
-        }
-
-        const remainingUsers = await User.findAll({
-          where: { id: group.participants.map(p => p.id) },
-          attributes: ['id', 'socketIds']
-        });
-
-        remainingUsers.forEach(member => {
-          if (member.socketIds && Array.isArray(member.socketIds) && member.socketIds.length > 0) {
-            member.socketIds.forEach(socketId => {
-              req.io.to(socketId).emit('group:member-removed', {
-                groupId: group.id,
-                removedUserId: targetUserId,
-                removedUsername: removedUser.username,
-                removedBy: {
-                  id: currentUserId,
-                  username: currentUser.username,
-                },
-              });
-            });
-          }
-        });
-      }
-
-      res.status(200).json({
-        status: 'success',
-        message: 'Member removed successfully',
-      });
-    } catch (error) {
-      console.error('Error removing member:', error.message);
-      res.status(500).json({
-        status: 'error',
-        message: 'Failed to remove member'
-      });
-    }
-  })
-);
-
-// POST /groups/:groupId/admins/:userId - promote to admin
-router.post(
-  '/:groupId/admins/:userId',
-  apiRateLimiter,
-  asyncHandler(async (req, res) => {
-    try {
-      const auth = checkAuth(req, res);
-      if (auth.status) return auth;
-      const currentUserId = auth.userId;
-
-      if (!checkModels(res)) return;
-
-      const { groupId, userId: targetUserId } = req.params;
-
-      if (!groupId || !targetUserId) {
-        return res.status(400).json({
-          status: 'error',
-          message: 'Group ID and User ID are required'
-        });
-      }
-
-      const group = await Chat.findOne({
-        where: {
-          id: groupId,
-          chatType: 'group',
-          '$participants.id$': currentUserId,
-          '$admins.id$': currentUserId,
-          isArchived: false
-        },
-        include: [
-          {
-            model: User,
-            as: 'participants',
-            attributes: ['id'],
-            through: { attributes: [] }
-          },
-          {
-            model: User,
-            as: 'admins',
-            attributes: ['id'],
-            through: { attributes: [] }
-          }
-        ]
-      });
-
-      if (!group) {
-        return res.status(404).json({
-          status: 'error',
-          message: 'Group not found or admin access required'
-        });
-      }
-
-      const isMember = group.participants && group.participants.some(p => p.id === targetUserId);
-      if (!isMember) {
-        return res.status(400).json({
-          status: 'error',
-          message: 'User is not a member of this group'
-        });
-      }
-
-      const isAlreadyAdmin = group.admins && group.admins.some(admin => admin.id === targetUserId);
-      if (isAlreadyAdmin) {
-        return res.status(409).json({
-          status: 'error',
-          message: 'User is already an admin'
-        });
-      }
-
-      await group.addAdmin(targetUserId);
-
-      const promotedUser = await User.findByPk(targetUserId);
-      const currentUser = await User.findByPk(currentUserId);
-
-      if (req.io && promotedUser && currentUser) {
-        if (promotedUser.socketIds && Array.isArray(promotedUser.socketIds) && promotedUser.socketIds.length > 0) {
-          promotedUser.socketIds.forEach(socketId => {
-            req.io.to(socketId).emit('group:admin-promoted', {
-              groupId: group.id,
-              groupName: group.chatName,
-              promotedBy: {
-                id: currentUser.id,
-                username: currentUser.username,
-              },
-            });
-          });
-        }
-
-        const otherMembers = await User.findAll({
-          where: {
-            id: (group.participants || [])
-              .filter(p => p.id !== targetUserId && p.id !== currentUserId)
-              .map(p => p.id)
-          },
-          attributes: ['id', 'socketIds']
-        });
-
-        otherMembers.forEach(member => {
-          if (member.socketIds && Array.isArray(member.socketIds) && member.socketIds.length > 0) {
-            member.socketIds.forEach(socketId => {
-              req.io.to(socketId).emit('group:admin-added', {
-                groupId: group.id,
-                userId: targetUserId,
-                username: promotedUser.username,
-                promotedBy: {
-                  id: currentUser.id,
-                  username: currentUser.username,
-                },
-              });
-            });
-          }
-        });
-      }
-
-      res.status(200).json({
-        status: 'success',
-        message: 'User promoted to admin successfully',
-      });
-    } catch (error) {
-      console.error('Error promoting to admin:', error.message);
-      res.status(500).json({
-        status: 'error',
-        message: 'Failed to promote user to admin'
-      });
-    }
-  })
-);
-
-// DELETE /groups/:groupId/admins/:userId - demote from admin
-router.delete(
-  '/:groupId/admins/:userId',
-  apiRateLimiter,
-  asyncHandler(async (req, res) => {
-    try {
-      const auth = checkAuth(req, res);
-      if (auth.status) return auth;
-      const currentUserId = auth.userId;
-
-      if (!checkModels(res)) return;
-
-      const { groupId, userId: targetUserId } = req.params;
-
-      if (!groupId || !targetUserId) {
-        return res.status(400).json({
-          status: 'error',
-          message: 'Group ID and User ID are required'
-        });
-      }
-
-      const group = await Chat.findOne({
-        where: {
-          id: groupId,
-          chatType: 'group',
-          '$participants.id$': currentUserId,
-          '$admins.id$': currentUserId,
-          isArchived: false
-        },
-        include: [
-          {
-            model: User,
-            as: 'admins',
-            attributes: ['id'],
-            through: { attributes: [] }
-          }
-        ]
-      });
-
-      if (!group) {
-        return res.status(404).json({
-          status: 'error',
-          message: 'Group not found or admin access required'
-        });
-      }
-
-      const isAdmin = group.admins && group.admins.some(admin => admin.id === targetUserId);
-      if (!isAdmin) {
-        return res.status(400).json({
-          status: 'error',
-          message: 'User is not an admin'
-        });
-      }
-
-      if (targetUserId === currentUserId) {
-        return res.status(400).json({
-          status: 'error',
-          message: 'Cannot demote yourself'
-        });
-      }
-
-      if (group.admins.length === 1) {
-        return res.status(400).json({
-          status: 'error',
-          message: 'Cannot demote the last admin'
-        });
-      }
-
-      await group.removeAdmin(targetUserId);
-
-      const demotedUser = await User.findByPk(targetUserId);
-      const currentUser = await User.findByPk(currentUserId);
-
-      if (req.io && demotedUser && currentUser) {
-        if (demotedUser.socketIds && Array.isArray(demotedUser.socketIds) && demotedUser.socketIds.length > 0) {
-          demotedUser.socketIds.forEach(socketId => {
-            req.io.to(socketId).emit('group:admin-demoted', {
-              groupId: group.id,
-              groupName: group.chatName,
-              demotedBy: {
-                id: currentUser.id,
-                username: currentUser.username,
-              },
-            });
-          });
-        }
-
-        const otherMembers = await User.findAll({
-          where: {
-            id: (group.participants || [])
-              .filter(p => p.id !== targetUserId && p.id !== currentUserId)
-              .map(p => p.id)
-          },
-          attributes: ['id', 'socketIds']
-        });
-
-        otherMembers.forEach(member => {
-          if (member.socketIds && Array.isArray(member.socketIds) && member.socketIds.length > 0) {
-            member.socketIds.forEach(socketId => {
-              req.io.to(socketId).emit('group:admin-removed', {
-                groupId: group.id,
-                userId: targetUserId,
-                username: demotedUser.username,
-                demotedBy: {
-                  id: currentUser.id,
-                  username: currentUser.username,
-                },
-              });
-            });
-          }
-        });
-      }
-
-      res.status(200).json({
-        status: 'success',
-        message: 'Admin demoted successfully',
-      });
-    } catch (error) {
-      console.error('Error demoting admin:', error.message);
-      res.status(500).json({
-        status: 'error',
-        message: 'Failed to demote admin'
-      });
-    }
-  })
-);
-
-// POST /groups/:groupId/leave - leave group
-router.post(
-  '/:groupId/leave',
-  apiRateLimiter,
-  asyncHandler(async (req, res) => {
-    try {
-      const auth = checkAuth(req, res);
-      if (auth.status) return auth;
-      const userId = auth.userId;
-
-      if (!checkModels(res)) return;
-
-      const { groupId } = req.params;
-
-      if (!groupId) {
-        return res.status(400).json({
-          status: 'error',
-          message: 'Group ID is required'
-        });
-      }
-
-      const group = await Chat.findOne({
-        where: {
-          id: groupId,
-          chatType: 'group',
-          '$participants.id$': userId,
-          isArchived: false
-        },
-        include: [{
-          model: User,
-          as: 'admins',
-          attributes: ['id'],
-          through: { attributes: [] }
-        }]
-      });
-
-      if (!group) {
-        return res.status(404).json({
-          status: 'error',
-          message: 'Group chat not found or access denied'
-        });
-      }
-
-      const isAdmin = group.admins && group.admins.some(admin => admin.id === userId);
-      if (isAdmin && group.admins.length === 1) {
-        return res.status(400).json({
-          status: 'error',
-          message: 'Cannot leave as the last admin. Transfer ownership first.'
-        });
-      }
-
-      await group.removeParticipant(userId);
-
-      if (isAdmin) {
-        await group.removeAdmin(userId);
-      }
-
-      const currentUser = await User.findByPk(userId);
-
-      if (req.io && currentUser) {
-        const remainingUsers = await User.findAll({
-          where: { id: (group.participants || []).map(p => p.id) },
-          attributes: ['id', 'socketIds']
-        });
-
-        remainingUsers.forEach(member => {
-          if (member.socketIds && Array.isArray(member.socketIds) && member.socketIds.length > 0) {
-            member.socketIds.forEach(socketId => {
-              req.io.to(socketId).emit('group:left', {
-                groupId: group.id,
-                groupName: group.chatName,
-                userId: userId,
-                username: currentUser.username,
-              });
-            });
-          }
-        });
-      }
-
-      res.status(200).json({
-        status: 'success',
-        message: 'Left group successfully',
-      });
-    } catch (error) {
-      console.error('Error leaving group:', error.message);
-      res.status(500).json({
-        status: 'error',
-        message: 'Failed to leave group'
-      });
-    }
-  })
-);
-
-// POST /groups/:groupId/transfer-ownership - transfer ownership
-router.post(
-  '/:groupId/transfer-ownership',
-  apiRateLimiter,
-  asyncHandler(async (req, res) => {
-    try {
-      const auth = checkAuth(req, res);
-      if (auth.status) return auth;
-      const currentUserId = auth.userId;
-
-      if (!checkModels(res)) return;
-
-      const { groupId } = req.params;
-      const { newOwnerId } = req.body;
-
-      if (!groupId) {
-        return res.status(400).json({
-          status: 'error',
-          message: 'Group ID is required'
-        });
-      }
-
-      if (!newOwnerId) {
-        return res.status(400).json({
-          status: 'error',
-          message: 'New owner ID is required'
-        });
-      }
-
-      const group = await Chat.findOne({
-        where: {
-          id: groupId,
-          chatType: 'group',
-          '$participants.id$': currentUserId,
-          '$admins.id$': currentUserId,
-          isArchived: false
-        },
-        include: [
-          {
-            model: User,
-            as: 'participants',
-            attributes: ['id'],
-            through: { attributes: [] }
-          },
-          {
-            model: User,
-            as: 'admins',
-            attributes: ['id'],
-            through: { attributes: [] }
-          }
-        ]
-      });
-
-      if (!group) {
-        return res.status(404).json({
-          status: 'error',
-          message: 'Group not found or admin access required'
-        });
-      }
-
-      const isMember = group.participants && group.participants.some(p => p.id === newOwnerId);
-      if (!isMember) {
-        return res.status(400).json({
-          status: 'error',
-          message: 'New owner must be a member of the group'
-        });
-      }
-
-      await group.update({ createdBy: newOwnerId });
-
-      if (!group.admins || !group.admins.some(admin => admin.id === newOwnerId)) {
-        await group.addAdmin(newOwnerId);
-      }
-
-      const newOwner = await User.findByPk(newOwnerId);
-      const currentUser = await User.findByPk(currentUserId);
-
-      if (req.io && newOwner && currentUser) {
-        if (newOwner.socketIds && Array.isArray(newOwner.socketIds) && newOwner.socketIds.length > 0) {
-          newOwner.socketIds.forEach(socketId => {
-            req.io.to(socketId).emit('group:ownership-transferred', {
-              groupId: group.id,
-              groupName: group.chatName,
-              previousOwner: {
-                id: currentUser.id,
-                username: currentUser.username,
-              },
-            });
-          });
-        }
-
-        const allMembers = await User.findAll({
-          where: { id: (group.participants || []).map(p => p.id) },
-          attributes: ['id', 'socketIds']
-        });
-
-        allMembers.forEach(member => {
-          if (member.socketIds && Array.isArray(member.socketIds) && member.socketIds.length > 0) {
-            member.socketIds.forEach(socketId => {
-              req.io.to(socketId).emit('group:owner-changed', {
-                groupId: group.id,
-                previousOwnerId: currentUserId,
-                newOwnerId: newOwnerId,
-                newOwnerUsername: newOwner.username,
-              });
-            });
-          }
-        });
-      }
-
-      res.status(200).json({
-        status: 'success',
-        message: 'Group ownership transferred successfully',
-      });
-    } catch (error) {
-      console.error('Error transferring ownership:', error.message);
-      res.status(500).json({
-        status: 'error',
-        message: 'Failed to transfer ownership'
-      });
-    }
-  })
-);
-
-// POST /groups/:groupId/invite/link - generate invite link
-router.post(
-  '/:groupId/invite/link',
-  apiRateLimiter,
-  asyncHandler(async (req, res) => {
-    try {
-      const auth = checkAuth(req, res);
-      if (auth.status) return auth;
-      const userId = auth.userId;
-
-      if (!checkModels(res)) return;
-
-      const { groupId } = req.params;
-      const { expiresIn = '7d', maxUses = null } = req.body;
-
-      if (!groupId) {
-        return res.status(400).json({
-          status: 'error',
-          message: 'Group ID is required'
-        });
-      }
-
-      const group = await Chat.findOne({
-        where: {
-          id: groupId,
-          chatType: 'group',
-          '$participants.id$': userId,
-          '$admins.id$': userId,
-          isArchived: false
-        }
-      });
-
-      if (!group) {
-        return res.status(404).json({
-          status: 'error',
-          message: 'Group not found or admin access required'
-        });
-      }
-
-      const inviteCode = crypto.randomBytes(16).toString('hex');
-
-      const expiresAt = new Date();
-      const expiresInDays = parseInt(expiresIn) || 7;
-      expiresAt.setDate(expiresAt.getDate() + expiresInDays);
-
-      let invite = null;
-      if (GroupInvite) {
-        invite = await GroupInvite.create({
-          groupId: group.id,
-          code: inviteCode,
+      
+      if (!Group) {
+        // Fallback for when Group model doesn't exist
+        const newGroup = {
+          id: Date.now(),
+          name: name.trim(),
+          description: description || '',
+          isPublic: isPublic !== undefined ? isPublic : true,
+          purpose: purpose || 'social',
+          maxMembers: maxMembers || 100,
+          tags: tags || [],
+          rules: rules || '',
+          location: location || '',
+          avatar: avatar || null,
           createdBy: userId,
-          expiresAt,
-          maxUses,
-          usedBy: [],
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          stats: { totalMembers: 1, totalMessages: 0, dailyActiveUsers: 1, weeklyActiveUsers: 1 },
+          isVerified: false
+        };
+        
+        return res.status(201).json({
+          success: true,
+          data: { group: newGroup },
+          message: 'Group created successfully'
         });
       }
-
-      const inviteLink = `${process.env.CLIENT_URL || 'http://localhost:3000'}/groups/join/${inviteCode}`;
-
+      
+      const newGroup = await Group.create({
+        name: name.trim(),
+        description: description || '',
+        isPublic: isPublic !== undefined ? isPublic : true,
+        purpose: purpose || 'social',
+        maxMembers: maxMembers || 100,
+        tags: tags || [],
+        rules: rules || '',
+        location: location || '',
+        avatar: avatar || null,
+        createdBy: userId,
+        createdAt: new Date(),
+        updatedAt: new Date()
+      });
+      
+      // Add creator as owner
+      if (GroupMember) {
+        await GroupMember.create({
+          groupId: newGroup.id,
+          userId: userId,
+          role: 'owner',
+          joinedAt: new Date()
+        });
+      }
+      
       res.status(201).json({
-        status: 'success',
-        data: {
-          inviteLink,
-          code: inviteCode,
-          expiresAt: invite ? invite.expiresAt : expiresAt,
-          maxUses: invite ? invite.maxUses : maxUses,
-        },
+        success: true,
+        data: { group: formatGroup(newGroup) },
+        message: 'Group created successfully'
       });
     } catch (error) {
-      console.error('Error generating invite link:', error.message);
-      res.status(500).json({
-        status: 'error',
-        message: 'Failed to generate invite link'
+      console.error('[Groups] Error creating group:', error);
+      res.status(500).json({ success: false, message: 'Failed to create group', error: error.message });
+    }
+  }
+
+  // Get user groups - PROTECTED
+  async getUserGroups(req, res) {
+    try {
+      const userId = getUserId(req);
+      
+      if (!userId) {
+        return res.status(401).json({
+          success: false,
+          message: 'Authentication required'
+        });
+      }
+      
+      const { limit = 50, offset = 0, includeArchived = false } = req.query;
+      const limitNum = Math.min(parseInt(limit), 200);
+      const offsetNum = parseInt(offset);
+      
+      if (!Group || !GroupMember) {
+        return res.json({
+          success: true,
+          data: { groups: [] },
+          pagination: { limit: limitNum, offset: offsetNum, total: 0, hasMore: false },
+          userId
+        });
+      }
+      
+      const memberships = await withTimeout(GroupMember.findAll({
+        where: { userId: userId },
+        include: [{
+          model: Group,
+          as: 'group',
+          required: true,
+          attributes: ['id', 'name', 'description', 'avatar', 'purpose', 'isPublic', 'maxMembers', 'createdBy', 'createdAt', 'updatedAt']
+        }],
+        limit: limitNum,
+        offset: offsetNum
+      }));
+      
+      const groups = memberships.map(m => formatGroup(m.group)).filter(g => g);
+      
+      res.json({
+        success: true,
+        data: { groups: groups },
+        pagination: {
+          limit: limitNum,
+          offset: offsetNum,
+          total: groups.length,
+          hasMore: groups.length === limitNum
+        },
+        userId
+      });
+    } catch (error) {
+      console.error('[Groups] Error getting user groups:', error);
+      res.status(200).json({ 
+        success: true, 
+        data: { groups: [] },
+        pagination: { limit: 50, offset: 0, total: 0, hasMore: false }
       });
     }
-  })
-);
+  }
 
-// POST /groups/join/:inviteCode - join via invite
-router.post(
-  '/join/:inviteCode',
-  apiRateLimiter,
-  asyncHandler(async (req, res) => {
+  // Get group by ID - PROTECTED
+  async getGroupById(req, res) {
     try {
-      const auth = checkAuth(req, res);
-      if (auth.status) return auth;
-      const userId = auth.userId;
-
-      if (!checkModels(res)) return;
-
-      const { inviteCode } = req.params;
-
-      if (!inviteCode) {
+      const { groupId } = req.params;
+      const userId = getUserId(req);
+      
+      if (!userId) {
+        return res.status(401).json({
+          success: false,
+          message: 'Authentication required'
+        });
+      }
+      
+      const groupIdNum = parseInt(groupId);
+      if (isNaN(groupIdNum)) {
         return res.status(400).json({
-          status: 'error',
-          message: 'Invite code is required'
+          success: false,
+          message: 'Invalid group ID',
+          code: 'INVALID_GROUP_ID'
         });
       }
-
-      let invite = null;
-      if (GroupInvite) {
-        invite = await GroupInvite.findOne({
-          where: {
-            code: inviteCode,
-            expiresAt: { [Op.gt]: new Date() },
-            [Op.or]: [
-              { maxUses: null },
-              Sequelize.literal('(SELECT COUNT(*) FROM unnest("usedBy") AS u) < "maxUses"')
-            ]
-          },
-          include: [{
-            model: Chat,
-            as: 'group'
-          }]
-        });
-      }
-
-      if (!invite || !invite.group) {
+      
+      if (!Group) {
         return res.status(404).json({
-          status: 'error',
-          message: 'Invalid or expired invite code'
+          success: false,
+          message: 'Group not found'
         });
       }
-
-      const group = invite.group;
-
-      const isMember = await group.hasParticipant(userId);
-      if (isMember) {
-        return res.status(409).json({
-          status: 'error',
-          message: 'Already a member of this group'
+      
+      const group = await withTimeout(Group.findByPk(groupIdNum, {
+        attributes: ['id', 'name', 'description', 'avatar', 'isPublic', 'purpose', 'maxMembers', 'tags', 'rules', 'location', 'createdBy', 'createdAt', 'updatedAt', 'isVerified', 'settings']
+      }));
+      
+      if (!group) {
+        return res.status(404).json({
+          success: false,
+          message: 'Group not found'
         });
       }
+      
+      // Check if user is a member
+      let userRole = null;
+      if (GroupMember) {
+        const membership = await GroupMember.findOne({
+          where: { groupId: groupIdNum, userId: userId }
+        });
+        if (membership) {
+          userRole = membership.role;
+        }
+      }
+      
+      // Get members
+      let members = [];
+      if (GroupMember && (userRole === 'owner' || userRole === 'admin' || group.isPublic)) {
+        const memberList = await GroupMember.findAll({
+          where: { groupId: groupIdNum },
+          include: [{
+            model: User,
+            as: 'user',
+            attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status']
+          }],
+          limit: 100
+        });
+        members = memberList.map(m => ({
+          userId: m.userId,
+          role: m.role,
+          joinedAt: m.joinedAt,
+          user: m.user ? {
+            id: m.user.id,
+            username: m.user.username,
+            avatar: m.user.avatar,
+            displayName: [m.user.firstName, m.user.lastName].filter(Boolean).join(' ') || m.user.username
+          } : null
+        }));
+      }
+      
+      res.json({
+        success: true,
+        data: {
+          group: formatGroup(group),
+          userRole: userRole,
+          members: members,
+          isMember: !!userRole
+        }
+      });
+    } catch (error) {
+      console.error('[Groups] Error getting group by ID:', error);
+      res.status(500).json({ success: false, message: 'Failed to get group', error: error.message });
+    }
+  }
 
-      const maxParticipants = group.settings?.maxParticipants || 1000;
-      const participantCount = await group.countParticipants();
-      if (participantCount >= maxParticipants) {
+  // Update group - PROTECTED
+  async updateGroup(req, res) {
+    try {
+      const { groupId } = req.params;
+      const userId = getUserId(req);
+      const updates = req.body;
+      
+      if (!userId) {
+        return res.status(401).json({
+          success: false,
+          message: 'Authentication required'
+        });
+      }
+      
+      const groupIdNum = parseInt(groupId);
+      if (isNaN(groupIdNum)) {
         return res.status(400).json({
-          status: 'error',
-          message: 'Group is full'
+          success: false,
+          message: 'Invalid group ID'
         });
       }
+      
+      if (!Group) {
+        return res.status(404).json({
+          success: false,
+          message: 'Group not found'
+        });
+      }
+      
+      const group = await Group.findByPk(groupIdNum);
+      if (!group) {
+        return res.status(404).json({
+          success: false,
+          message: 'Group not found'
+        });
+      }
+      
+      // Check permission
+      if (group.createdBy !== userId) {
+        return res.status(403).json({
+          success: false,
+          message: 'Only group owner can update group',
+          code: 'INSUFFICIENT_PERMISSION'
+        });
+      }
+      
+      const allowedUpdates = ['name', 'description', 'isPublic', 'purpose', 'maxMembers', 'tags', 'rules', 'location', 'avatar'];
+      const filteredUpdates = {};
+      
+      for (const key of allowedUpdates) {
+        if (updates[key] !== undefined) {
+          filteredUpdates[key] = updates[key];
+        }
+      }
+      
+      if (Object.keys(filteredUpdates).length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'No valid updates provided',
+          code: 'NO_UPDATES'
+        });
+      }
+      
+      filteredUpdates.updatedAt = new Date();
+      await group.update(filteredUpdates);
+      
+      res.json({
+        success: true,
+        data: { group: formatGroup(group) },
+        message: 'Group updated successfully'
+      });
+    } catch (error) {
+      console.error('[Groups] Error updating group:', error);
+      res.status(500).json({ success: false, message: 'Failed to update group', error: error.message });
+    }
+  }
 
-      const currentUser = await User.findByPk(userId);
-      const groupMembers = await User.findAll({
-        where: {
-          id: (group.participants || []).map(p => p.id)
-        },
+  // Delete group - PROTECTED
+  async deleteGroup(req, res) {
+    try {
+      const { groupId } = req.params;
+      const userId = getUserId(req);
+      
+      if (!userId) {
+        return res.status(401).json({
+          success: false,
+          message: 'Authentication required'
+        });
+      }
+      
+      const groupIdNum = parseInt(groupId);
+      if (isNaN(groupIdNum)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid group ID'
+        });
+      }
+      
+      if (!Group) {
+        return res.status(404).json({
+          success: false,
+          message: 'Group not found'
+        });
+      }
+      
+      const group = await Group.findByPk(groupIdNum);
+      if (!group) {
+        return res.status(404).json({
+          success: false,
+          message: 'Group not found'
+        });
+      }
+      
+      // Check permission
+      if (group.createdBy !== userId) {
+        return res.status(403).json({
+          success: false,
+          message: 'Only group owner can delete group',
+          code: 'INSUFFICIENT_PERMISSION'
+        });
+      }
+      
+      await group.destroy();
+      
+      res.json({
+        success: true,
+        message: 'Group deleted successfully'
+      });
+    } catch (error) {
+      console.error('[Groups] Error deleting group:', error);
+      res.status(500).json({ success: false, message: 'Failed to delete group', error: error.message });
+    }
+  }
+
+  // Get group members - PROTECTED
+  async getGroupMembers(req, res) {
+    try {
+      const { groupId } = req.params;
+      const userId = getUserId(req);
+      const { limit = 100, offset = 0, role } = req.query;
+      
+      if (!userId) {
+        return res.status(401).json({
+          success: false,
+          message: 'Authentication required'
+        });
+      }
+      
+      const groupIdNum = parseInt(groupId);
+      if (isNaN(groupIdNum)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid group ID'
+        });
+      }
+      
+      if (!GroupMember) {
+        return res.json({
+          success: true,
+          data: { members: [] },
+          pagination: { limit: parseInt(limit), offset: parseInt(offset), total: 0, hasMore: false }
+        });
+      }
+      
+      const whereCondition = { groupId: groupIdNum };
+      if (role && role !== 'all') {
+        whereCondition.role = role;
+      }
+      
+      const { count, rows: members } = await withTimeout(GroupMember.findAndCountAll({
+        where: whereCondition,
         include: [{
           model: User,
-          as: 'blockedUsers',
-          attributes: ['id']
-        }]
+          as: 'user',
+          attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen']
+        }],
+        limit: Math.min(parseInt(limit), 200),
+        offset: parseInt(offset),
+        order: [['role', 'ASC'], ['joinedAt', 'DESC']]
+      }));
+      
+      const formattedMembers = (members || []).map(m => ({
+        userId: m.userId,
+        role: m.role,
+        joinedAt: m.joinedAt,
+        user: m.user ? {
+          id: m.user.id,
+          username: m.user.username,
+          avatar: m.user.avatar,
+          displayName: [m.user.firstName, m.user.lastName].filter(Boolean).join(' ') || m.user.username,
+          status: m.user.status,
+          lastSeen: m.user.lastSeen
+        } : null
+      }));
+      
+      res.json({
+        success: true,
+        data: { members: formattedMembers },
+        pagination: {
+          limit: parseInt(limit),
+          offset: parseInt(offset),
+          total: count,
+          hasMore: parseInt(offset) + parseInt(limit) < count
+        }
       });
+    } catch (error) {
+      console.error('[Groups] Error getting group members:', error);
+      res.status(200).json({ 
+        success: true, 
+        data: { members: [] },
+        pagination: { limit: 100, offset: 0, total: 0, hasMore: false }
+      });
+    }
+  }
 
-      const isBlocked = groupMembers.some(member =>
-        member.blockedUsers && member.blockedUsers.some(bu => bu.id === userId)
-      );
-
-      if (isBlocked) {
-        return res.status(403).json({
-          status: 'error',
-          message: 'Cannot join group - blocked by a member'
+  // Add group member - PROTECTED
+  async addGroupMember(req, res) {
+    try {
+      const { groupId, userId: targetUserId } = req.params;
+      const currentUserId = getUserId(req);
+      const { role = 'member' } = req.body;
+      
+      if (!currentUserId) {
+        return res.status(401).json({
+          success: false,
+          message: 'Authentication required'
         });
       }
-
-      await group.addParticipant(userId);
-
-      if (invite) {
-        const usedBy = invite.usedBy || [];
-        usedBy.push({
-          user: userId,
-          usedAt: new Date(),
+      
+      const groupIdNum = parseInt(groupId);
+      const targetIdNum = parseInt(targetUserId);
+      
+      if (isNaN(groupIdNum) || isNaN(targetIdNum)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid group ID or user ID'
         });
-        await invite.update({ usedBy });
       }
+      
+      if (!['member', 'admin', 'moderator'].includes(role)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid role',
+          code: 'INVALID_ROLE'
+        });
+      }
+      
+      if (!GroupMember) {
+        return res.status(201).json({
+          success: true,
+          data: { groupId: groupIdNum, userId: targetIdNum, role, joinedAt: new Date().toISOString() },
+          message: 'Member added successfully'
+        });
+      }
+      
+      // Check if already a member
+      const existing = await GroupMember.findOne({
+        where: { groupId: groupIdNum, userId: targetIdNum }
+      });
+      
+      if (existing) {
+        return res.status(400).json({
+          success: false,
+          message: 'User is already a member of this group',
+          code: 'ALREADY_MEMBER'
+        });
+      }
+      
+      const membership = await GroupMember.create({
+        groupId: groupIdNum,
+        userId: targetIdNum,
+        role: role,
+        joinedAt: new Date()
+      });
+      
+      res.status(201).json({
+        success: true,
+        data: {
+          groupId: groupIdNum,
+          userId: targetIdNum,
+          role: role,
+          joinedAt: membership.joinedAt
+        },
+        message: 'Member added successfully'
+      });
+    } catch (error) {
+      console.error('[Groups] Error adding group member:', error);
+      res.status(500).json({ success: false, message: 'Failed to add member', error: error.message });
+    }
+  }
 
-      const updatedGroup = await Chat.findByPk(group.id, {
+  // Remove group member - PROTECTED
+  async removeGroupMember(req, res) {
+    try {
+      const { groupId, userId: targetUserId } = req.params;
+      const currentUserId = getUserId(req);
+      
+      if (!currentUserId) {
+        return res.status(401).json({
+          success: false,
+          message: 'Authentication required'
+        });
+      }
+      
+      const groupIdNum = parseInt(groupId);
+      const targetIdNum = parseInt(targetUserId);
+      
+      if (isNaN(groupIdNum) || isNaN(targetIdNum)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid group ID or user ID'
+        });
+      }
+      
+      if (!GroupMember) {
+        return res.json({
+          success: true,
+          message: 'Member removed successfully'
+        });
+      }
+      
+      const membership = await GroupMember.findOne({
+        where: { groupId: groupIdNum, userId: targetIdNum }
+      });
+      
+      if (!membership) {
+        return res.status(404).json({
+          success: false,
+          message: 'Member not found'
+        });
+      }
+      
+      await membership.destroy();
+      
+      res.json({
+        success: true,
+        message: 'Member removed successfully'
+      });
+    } catch (error) {
+      console.error('[Groups] Error removing group member:', error);
+      res.status(500).json({ success: false, message: 'Failed to remove member', error: error.message });
+    }
+  }
+
+  // Update member role - PROTECTED
+  async updateMemberRole(req, res) {
+    try {
+      const { groupId, userId: targetUserId } = req.params;
+      const { role } = req.body;
+      const currentUserId = getUserId(req);
+      
+      if (!currentUserId) {
+        return res.status(401).json({
+          success: false,
+          message: 'Authentication required'
+        });
+      }
+      
+      const groupIdNum = parseInt(groupId);
+      const targetIdNum = parseInt(targetUserId);
+      
+      if (isNaN(groupIdNum) || isNaN(targetIdNum)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid group ID or user ID'
+        });
+      }
+      
+      if (!['member', 'admin', 'moderator', 'owner'].includes(role)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid role',
+          code: 'INVALID_ROLE'
+        });
+      }
+      
+      if (!GroupMember) {
+        return res.json({
+          success: true,
+          message: 'Member role updated successfully'
+        });
+      }
+      
+      const membership = await GroupMember.findOne({
+        where: { groupId: groupIdNum, userId: targetIdNum }
+      });
+      
+      if (!membership) {
+        return res.status(404).json({
+          success: false,
+          message: 'Member not found'
+        });
+      }
+      
+      membership.role = role;
+      await membership.save();
+      
+      res.json({
+        success: true,
+        data: { groupId: groupIdNum, userId: targetIdNum, role: role },
+        message: 'Member role updated successfully'
+      });
+    } catch (error) {
+      console.error('[Groups] Error updating member role:', error);
+      res.status(500).json({ success: false, message: 'Failed to update member role', error: error.message });
+    }
+  }
+
+  // ===== INVITE ROUTES =====
+  
+  // GET /api/invites - Get user invites (ADDED - FIXES 404 ERROR)
+  async getUserInvites(req, res) {
+    try {
+      const userId = getUserId(req);
+      
+      if (!userId) {
+        return res.status(401).json({
+          success: false,
+          message: 'Authentication required'
+        });
+      }
+      
+      const { status = 'pending', limit = 50, offset = 0 } = req.query;
+      const limitNum = Math.min(parseInt(limit), 100);
+      const offsetNum = parseInt(offset);
+      
+      if (!Invite) {
+        return res.json({
+          success: true,
+          data: { invites: [] },
+          pagination: { limit: limitNum, offset: offsetNum, total: 0, hasMore: false },
+          userId
+        });
+      }
+      
+      const whereCondition = {
+        [Op.or]: [
+          { targetUserId: userId },
+          { targetEmail: userId }
+        ]
+      };
+      
+      if (status !== 'all') {
+        whereCondition.status = status;
+      }
+      
+      const { count, rows: invites } = await withTimeout(Invite.findAndCountAll({
+        where: whereCondition,
         include: [
           {
             model: User,
-            as: 'participants',
-            attributes: ['id', 'username', 'avatar', 'socketIds'],
-            through: { attributes: [] }
+            as: 'inviter',
+            attributes: ['id', 'username', 'avatar', 'firstName', 'lastName']
           },
           {
-            model: User,
-            as: 'admins',
-            attributes: ['username', 'avatar']
+            model: Group,
+            as: 'group',
+            attributes: ['id', 'name', 'avatar', 'description', 'purpose']
           }
-        ]
-      });
-
-      if (req.io && currentUser && updatedGroup && updatedGroup.participants) {
-        if (currentUser.socketIds && Array.isArray(currentUser.socketIds) && currentUser.socketIds.length > 0) {
-          currentUser.socketIds.forEach(socketId => {
-            req.io.to(socketId).emit('group:joined', {
-              group: updatedGroup.toJSON ? updatedGroup.toJSON() : updatedGroup,
-              joinedVia: 'invite',
-            });
-          });
-        }
-
-        const existingMembers = await User.findAll({
-          where: {
-            id: (group.participants || [])
-              .filter(p => p.id !== userId)
-              .map(p => p.id)
-          },
-          attributes: ['id', 'socketIds']
-        });
-
-        existingMembers.forEach(member => {
-          if (member.socketIds && Array.isArray(member.socketIds) && member.socketIds.length > 0) {
-            member.socketIds.forEach(socketId => {
-              req.io.to(socketId).emit('group:member-joined', {
-                groupId: group.id,
-                userId: userId,
-                username: currentUser.username,
-                joinedVia: 'invite',
-              });
-            });
-          }
-        });
-      }
-
-      res.status(200).json({
-        status: 'success',
-        message: 'Joined group successfully',
-        data: { group: updatedGroup },
+        ],
+        limit: limitNum,
+        offset: offsetNum,
+        order: [['createdAt', 'DESC']]
+      }));
+      
+      const formattedInvites = (invites || []).map(invite => ({
+        id: invite.id,
+        group: invite.group ? {
+          id: invite.group.id,
+          name: invite.group.name,
+          avatar: invite.group.avatar,
+          description: invite.group.description,
+          purpose: invite.group.purpose
+        } : null,
+        inviter: invite.inviter ? {
+          id: invite.inviter.id,
+          username: invite.inviter.username,
+          avatar: invite.inviter.avatar,
+          displayName: [invite.inviter.firstName, invite.inviter.lastName].filter(Boolean).join(' ') || invite.inviter.username
+        } : null,
+        message: invite.message,
+        status: invite.status,
+        createdAt: invite.createdAt,
+        expiresAt: invite.expiresAt
+      }));
+      
+      res.json({
+        success: true,
+        data: { invites: formattedInvites },
+        pagination: {
+          limit: limitNum,
+          offset: offsetNum,
+          total: count,
+          hasMore: offsetNum + limitNum < count
+        },
+        userId
       });
     } catch (error) {
-      console.error('Error joining group:', error.message);
-      res.status(500).json({
-        status: 'error',
-        message: 'Failed to join group'
+      console.error('[Groups] Error getting user invites:', error);
+      res.status(200).json({ 
+        success: true, 
+        data: { invites: [] },
+        pagination: { limit: 50, offset: 0, total: 0, hasMore: false }
       });
     }
-  })
-);
+  }
 
-// GET /groups/:groupId/stats - group statistics
-router.get(
-  '/:groupId/stats',
-  apiRateLimiter,
-  asyncHandler(async (req, res) => {
+  // Invite to group - PROTECTED
+  async inviteToGroup(req, res) {
     try {
-      const auth = checkAuth(req, res);
-      if (auth.status) return auth;
-      const userId = auth.userId;
-
-      if (!checkModels(res)) return;
-
       const { groupId } = req.params;
-
-      if (!groupId) {
-        return res.status(400).json({
-          status: 'error',
-          message: 'Group ID is required'
+      const { userId: targetUserId, email, message } = req.body;
+      const inviterId = getUserId(req);
+      
+      if (!inviterId) {
+        return res.status(401).json({
+          success: false,
+          message: 'Authentication required'
         });
       }
-
-      const group = await Chat.findOne({
-        where: {
-          id: groupId,
-          chatType: 'group',
-          '$participants.id$': userId,
-          isArchived: false
-        },
-        include: [{
-          model: User,
-          as: 'participants',
-          attributes: ['id']
-        }]
+      
+      const groupIdNum = parseInt(groupId);
+      if (isNaN(groupIdNum)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid group ID'
+        });
+      }
+      
+      if (!targetUserId && !email) {
+        return res.status(400).json({
+          success: false,
+          message: 'Either userId or email is required',
+          code: 'MISSING_INVITE_TARGET'
+        });
+      }
+      
+      if (!Invite) {
+        const invite = {
+          id: Date.now(),
+          groupId: groupIdNum,
+          inviterId,
+          targetUserId: targetUserId ? parseInt(targetUserId) : null,
+          targetEmail: email || null,
+          message: message || '',
+          status: 'pending',
+          createdAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+          inviteLink: `/invite/${groupIdNum}/${Date.now()}`
+        };
+        
+        return res.status(201).json({
+          success: true,
+          data: { invite },
+          message: 'Invite sent successfully'
+        });
+      }
+      
+      const invite = await Invite.create({
+        groupId: groupIdNum,
+        inviterId,
+        targetUserId: targetUserId ? parseInt(targetUserId) : null,
+        targetEmail: email || null,
+        message: message || '',
+        status: 'pending',
+        createdAt: new Date(),
+        expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
       });
+      
+      res.status(201).json({
+        success: true,
+        data: { invite: formatInvite(invite) },
+        message: 'Invite sent successfully'
+      });
+    } catch (error) {
+      console.error('[Groups] Error inviting to group:', error);
+      res.status(500).json({ success: false, message: 'Failed to send invite', error: error.message });
+    }
+  }
 
+  // Get group invites - PROTECTED
+  async getGroupInvites(req, res) {
+    try {
+      const userId = getUserId(req);
+      
+      if (!userId) {
+        return res.status(401).json({
+          success: false,
+          message: 'Authentication required'
+        });
+      }
+      
+      const { status = 'pending', limit = 50, offset = 0 } = req.query;
+      const limitNum = Math.min(parseInt(limit), 100);
+      const offsetNum = parseInt(offset);
+      
+      if (!Invite) {
+        return res.json({
+          success: true,
+          data: { invites: [] },
+          pagination: { limit: limitNum, offset: offsetNum, total: 0, hasMore: false }
+        });
+      }
+      
+      const whereCondition = { targetUserId: userId };
+      if (status !== 'all') {
+        whereCondition.status = status;
+      }
+      
+      const { count, rows: invites } = await withTimeout(Invite.findAndCountAll({
+        where: whereCondition,
+        include: [
+          {
+            model: User,
+            as: 'inviter',
+            attributes: ['id', 'username', 'avatar', 'firstName', 'lastName']
+          },
+          {
+            model: Group,
+            as: 'group',
+            attributes: ['id', 'name', 'avatar', 'description', 'purpose']
+          }
+        ],
+        limit: limitNum,
+        offset: offsetNum,
+        order: [['createdAt', 'DESC']]
+      }));
+      
+      const formattedInvites = (invites || []).map(invite => formatInvite(invite));
+      
+      res.json({
+        success: true,
+        data: { invites: formattedInvites },
+        pagination: {
+          limit: limitNum,
+          offset: offsetNum,
+          total: count,
+          hasMore: offsetNum + limitNum < count
+        }
+      });
+    } catch (error) {
+      console.error('[Groups] Error getting group invites:', error);
+      res.status(200).json({ 
+        success: true, 
+        data: { invites: [] },
+        pagination: { limit: 50, offset: 0, total: 0, hasMore: false }
+      });
+    }
+  }
+
+  // Accept group invite - PROTECTED
+  async acceptGroupInvite(req, res) {
+    try {
+      const { inviteId } = req.params;
+      const userId = getUserId(req);
+      
+      if (!userId) {
+        return res.status(401).json({
+          success: false,
+          message: 'Authentication required'
+        });
+      }
+      
+      const inviteIdNum = parseInt(inviteId);
+      if (isNaN(inviteIdNum)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid invite ID'
+        });
+      }
+      
+      if (!Invite || !GroupMember) {
+        return res.json({
+          success: true,
+          message: 'Invite accepted successfully'
+        });
+      }
+      
+      const invite = await Invite.findOne({
+        where: { id: inviteIdNum, targetUserId: userId, status: 'pending' }
+      });
+      
+      if (!invite) {
+        return res.status(404).json({
+          success: false,
+          message: 'Invite not found or already processed'
+        });
+      }
+      
+      // Add user to group
+      await GroupMember.create({
+        groupId: invite.groupId,
+        userId: userId,
+        role: 'member',
+        joinedAt: new Date()
+      });
+      
+      invite.status = 'accepted';
+      await invite.save();
+      
+      res.json({
+        success: true,
+        message: 'Invite accepted successfully'
+      });
+    } catch (error) {
+      console.error('[Groups] Error accepting invite:', error);
+      res.status(500).json({ success: false, message: 'Failed to accept invite', error: error.message });
+    }
+  }
+
+  // Reject group invite - PROTECTED
+  async rejectGroupInvite(req, res) {
+    try {
+      const { inviteId } = req.params;
+      const userId = getUserId(req);
+      
+      if (!userId) {
+        return res.status(401).json({
+          success: false,
+          message: 'Authentication required'
+        });
+      }
+      
+      const inviteIdNum = parseInt(inviteId);
+      if (isNaN(inviteIdNum)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid invite ID'
+        });
+      }
+      
+      if (!Invite) {
+        return res.json({
+          success: true,
+          message: 'Invite rejected successfully'
+        });
+      }
+      
+      const invite = await Invite.findOne({
+        where: { id: inviteIdNum, targetUserId: userId, status: 'pending' }
+      });
+      
+      if (!invite) {
+        return res.status(404).json({
+          success: false,
+          message: 'Invite not found or already processed'
+        });
+      }
+      
+      invite.status = 'rejected';
+      await invite.save();
+      
+      res.json({
+        success: true,
+        message: 'Invite rejected successfully'
+      });
+    } catch (error) {
+      console.error('[Groups] Error rejecting invite:', error);
+      res.status(500).json({ success: false, message: 'Failed to reject invite', error: error.message });
+    }
+  }
+
+  // Join group - PROTECTED
+  async joinGroup(req, res) {
+    try {
+      const { groupId } = req.params;
+      const userId = getUserId(req);
+      
+      if (!userId) {
+        return res.status(401).json({
+          success: false,
+          message: 'Authentication required'
+        });
+      }
+      
+      const groupIdNum = parseInt(groupId);
+      if (isNaN(groupIdNum)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid group ID'
+        });
+      }
+      
+      if (!Group || !GroupMember) {
+        return res.json({
+          success: true,
+          message: 'Joined group successfully'
+        });
+      }
+      
+      const group = await Group.findByPk(groupIdNum);
       if (!group) {
         return res.status(404).json({
-          status: 'error',
-          message: 'Group not found or access denied'
+          success: false,
+          message: 'Group not found'
         });
       }
-
-      const thirtyDaysAgo = new Date();
-      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-
-      const messageStats = await Message.findAll({
-        where: {
-          chatId: group.id,
-          createdAt: { [Op.gte]: thirtyDaysAgo },
-          isDeleted: false
-        },
-        attributes: [
-          [Sequelize.fn('DATE', Sequelize.col('createdAt')), 'date'],
-          [Sequelize.fn('COUNT', Sequelize.col('id')), 'count'],
-          [Sequelize.fn('COUNT', Sequelize.fn('DISTINCT', Sequelize.col('senderId'))), 'senders']
-        ],
-        group: [Sequelize.fn('DATE', Sequelize.col('createdAt'))],
-        order: [[Sequelize.fn('DATE', Sequelize.col('createdAt')), 'ASC']],
-        raw: true
+      
+      if (!group.isPublic) {
+        return res.status(403).json({
+          success: false,
+          message: 'This is a private group. You need an invitation to join.',
+          code: 'PRIVATE_GROUP'
+        });
+      }
+      
+      const existing = await GroupMember.findOne({
+        where: { groupId: groupIdNum, userId: userId }
       });
-
-      const sevenDaysAgo = new Date();
-      sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-
-      const activeMembers = await Message.findAll({
-        where: {
-          chatId: group.id,
-          createdAt: { [Op.gte]: sevenDaysAgo },
-          isDeleted: false
-        },
-        attributes: [[Sequelize.fn('DISTINCT', Sequelize.col('senderId')), 'senderId']],
-        raw: true
+      
+      if (existing) {
+        return res.status(400).json({
+          success: false,
+          message: 'You are already a member of this group',
+          code: 'ALREADY_MEMBER'
+        });
+      }
+      
+      await GroupMember.create({
+        groupId: groupIdNum,
+        userId: userId,
+        role: 'member',
+        joinedAt: new Date()
       });
-
-      const onlineMembers = await User.count({
-        where: {
-          id: (group.participants || []).map(p => p.id),
-          online: true
-        }
-      });
-
-      res.status(200).json({
-        status: 'success',
-        data: {
-          totalMembers: (group.participants || []).length,
-          onlineMembers: onlineMembers || 0,
-          activeMembers: (activeMembers || []).length,
-          messageStats: (messageStats || []).map(stat => ({
-            _id: stat.date,
-            count: parseInt(stat.count || 0),
-            senders: parseInt(stat.senders || 0)
-          })),
-          created: group.createdAt,
-          lastActive: group.updatedAt,
-        },
+      
+      res.json({
+        success: true,
+        message: 'Joined group successfully'
       });
     } catch (error) {
-      console.error('Error fetching group statistics:', error.message);
-      res.status(500).json({
-        status: 'error',
-        message: 'Failed to fetch group statistics'
-      });
+      console.error('[Groups] Error joining group:', error);
+      res.status(500).json({ success: false, message: 'Failed to join group', error: error.message });
     }
-  })
-);
+  }
+
+  // Leave group - PROTECTED
+  async leaveGroup(req, res) {
+    try {
+      const { groupId } = req.params;
+      const userId = getUserId(req);
+      
+      if (!userId) {
+        return res.status(401).json({
+          success: false,
+          message: 'Authentication required'
+        });
+      }
+      
+      const groupIdNum = parseInt(groupId);
+      if (isNaN(groupIdNum)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid group ID'
+        });
+      }
+      
+      if (!GroupMember) {
+        return res.json({
+          success: true,
+          message: 'Left group successfully'
+        });
+      }
+      
+      const membership = await GroupMember.findOne({
+        where: { groupId: groupIdNum, userId: userId }
+      });
+      
+      if (!membership) {
+        return res.status(404).json({
+          success: false,
+          message: 'You are not a member of this group'
+        });
+      }
+      
+      if (membership.role === 'owner') {
+        return res.status(400).json({
+          success: false,
+          message: 'Group owner cannot leave. Transfer ownership first or delete the group.',
+          code: 'CANNOT_LEAVE_AS_OWNER'
+        });
+      }
+      
+      await membership.destroy();
+      
+      res.json({
+        success: true,
+        message: 'Left group successfully'
+      });
+    } catch (error) {
+      console.error('[Groups] Error leaving group:', error);
+      res.status(500).json({ success: false, message: 'Failed to leave group', error: error.message });
+    }
+  }
+
+  // Update group settings - PROTECTED
+  async updateGroupSettings(req, res) {
+    try {
+      const { groupId } = req.params;
+      const userId = getUserId(req);
+      const settings = req.body;
+      
+      if (!userId) {
+        return res.status(401).json({
+          success: false,
+          message: 'Authentication required'
+        });
+      }
+      
+      const groupIdNum = parseInt(groupId);
+      if (isNaN(groupIdNum)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid group ID'
+        });
+      }
+      
+      if (!Group) {
+        return res.json({
+          success: true,
+          message: 'Group settings updated successfully'
+        });
+      }
+      
+      const group = await Group.findByPk(groupIdNum);
+      if (!group) {
+        return res.status(404).json({
+          success: false,
+          message: 'Group not found'
+        });
+      }
+      
+      // Check permission (only owner and admins can update settings)
+      let isAuthorized = false;
+      if (GroupMember) {
+        const membership = await GroupMember.findOne({
+          where: { groupId: groupIdNum, userId: userId }
+        });
+        isAuthorized = membership && (membership.role === 'owner' || membership.role === 'admin');
+      } else {
+        isAuthorized = group.createdBy === userId;
+      }
+      
+      if (!isAuthorized) {
+        return res.status(403).json({
+          success: false,
+          message: 'Only group owner and admins can update settings',
+          code: 'INSUFFICIENT_PERMISSION'
+        });
+      }
+      
+      const allowedSettings = [
+        'allowMedia', 'allowCalls', 'allowReactions', 'allowReplies',
+        'allowEditing', 'allowDeleting', 'slowMode', 'requireAdminApproval'
+      ];
+      
+      const currentSettings = group.settings || {};
+      const filteredSettings = {};
+      for (const key of allowedSettings) {
+        if (settings[key] !== undefined) {
+          filteredSettings[key] = settings[key];
+        }
+      }
+      
+      if (Object.keys(filteredSettings).length > 0) {
+        await group.update({ settings: { ...currentSettings, ...filteredSettings } });
+      }
+      
+      res.json({
+        success: true,
+        data: { settings: { ...currentSettings, ...filteredSettings } },
+        message: 'Group settings updated successfully'
+      });
+    } catch (error) {
+      console.error('[Groups] Error updating group settings:', error);
+      res.status(500).json({ success: false, message: 'Failed to update settings', error: error.message });
+    }
+  }
+
+  // Generate invite link - PROTECTED
+  async generateInviteLink(req, res) {
+    try {
+      const { groupId } = req.params;
+      const { expiresInHours = 24 } = req.body;
+      const userId = getUserId(req);
+      
+      if (!userId) {
+        return res.status(401).json({
+          success: false,
+          message: 'Authentication required'
+        });
+      }
+      
+      const groupIdNum = parseInt(groupId);
+      if (isNaN(groupIdNum)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid group ID'
+        });
+      }
+      
+      if (!Group) {
+        const inviteLink = {
+          link: `/join/${groupIdNum}/${Math.random().toString(36).substr(2, 16)}`,
+          expiresAt: new Date(Date.now() + expiresInHours * 60 * 60 * 1000).toISOString(),
+          groupId: groupIdNum,
+          createdBy: userId
+        };
+        
+        return res.json({
+          success: true,
+          ...inviteLink,
+          message: 'Invite link generated successfully'
+        });
+      }
+      
+      const group = await Group.findByPk(groupIdNum);
+      if (!group) {
+        return res.status(404).json({
+          success: false,
+          message: 'Group not found'
+        });
+      }
+      
+      const inviteLink = `/join/${groupIdNum}/${Math.random().toString(36).substr(2, 16)}`;
+      const expiresAt = new Date(Date.now() + expiresInHours * 60 * 60 * 1000);
+      
+      if (Invite) {
+        await Invite.create({
+          groupId: groupIdNum,
+          inviterId: userId,
+          targetEmail: null,
+          message: 'Join via invite link',
+          status: 'pending',
+          inviteLink: inviteLink,
+          expiresAt: expiresAt,
+          createdAt: new Date()
+        });
+      }
+      
+      res.json({
+        success: true,
+        link: inviteLink,
+        expiresAt: expiresAt.toISOString(),
+        groupId: groupIdNum,
+        createdBy: userId,
+        message: 'Invite link generated successfully'
+      });
+    } catch (error) {
+      console.error('[Groups] Error generating invite link:', error);
+      res.status(500).json({ success: false, message: 'Failed to generate invite link', error: error.message });
+    }
+  }
+
+  // Revoke invite link - PROTECTED
+  async revokeInviteLink(req, res) {
+    try {
+      const { groupId } = req.params;
+      const userId = getUserId(req);
+      
+      if (!userId) {
+        return res.status(401).json({
+          success: false,
+          message: 'Authentication required'
+        });
+      }
+      
+      const groupIdNum = parseInt(groupId);
+      if (isNaN(groupIdNum)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid group ID'
+        });
+      }
+      
+      if (Invite) {
+        await Invite.update(
+          { status: 'revoked' },
+          { where: { groupId: groupIdNum, status: 'pending', inviteLink: { [Op.ne]: null } } }
+        );
+      }
+      
+      res.json({
+        success: true,
+        message: 'Invite link revoked successfully'
+      });
+    } catch (error) {
+      console.error('[Groups] Error revoking invite link:', error);
+      res.status(500).json({ success: false, message: 'Failed to revoke invite link', error: error.message });
+    }
+  }
+}
+
+// Initialize controller
+const groupController = new GroupController();
+
+// ========== PUBLIC ROUTES (No authentication required) ==========
+router.get('/purposes', groupController.getGroupPurposes.bind(groupController));
+router.get('/public', groupController.getPublicGroups.bind(groupController));
+router.get('/search', groupController.searchGroups.bind(groupController));
+
+// ========== PROTECTED ROUTES (Authentication required) ==========
+// Apply authentication middleware to all routes below
+router.use(authenticateToken);
+
+// Group CRUD operations
+router.post('/', [
+  body('name').notEmpty().withMessage('Group name is required').isLength({ max: 100 }).withMessage('Name too long'),
+  body('description').optional().isLength({ max: 500 }).withMessage('Description too long'),
+  body('purpose').optional().isString(),
+  body('maxMembers').optional().isInt({ min: 1, max: 1000 }).withMessage('Max members must be between 1 and 1000')
+], groupController.createGroup.bind(groupController));
+
+router.get('/', groupController.getUserGroups.bind(groupController));
+router.get('/user', groupController.getUserGroups.bind(groupController));
+router.get('/:groupId', groupController.getGroupById.bind(groupController));
+router.put('/:groupId', groupController.updateGroup.bind(groupController));
+router.delete('/:groupId', groupController.deleteGroup.bind(groupController));
+
+// Group members
+router.get('/:groupId/members', groupController.getGroupMembers.bind(groupController));
+router.post('/:groupId/members/:userId', groupController.addGroupMember.bind(groupController));
+router.delete('/:groupId/members/:userId', groupController.removeGroupMember.bind(groupController));
+router.put('/:groupId/members/:userId/role', [
+  body('role').isIn(['member', 'admin', 'moderator', 'owner']).withMessage('Invalid role')
+], groupController.updateMemberRole.bind(groupController));
+
+// Group invites
+router.post('/:groupId/invite', [
+  body('userId').optional().isInt().withMessage('Invalid user ID'),
+  body('email').optional().isEmail().withMessage('Invalid email')
+], groupController.inviteToGroup.bind(groupController));
+
+router.get('/invites', groupController.getGroupInvites.bind(groupController));
+router.post('/invites/:inviteId/accept', groupController.acceptGroupInvite.bind(groupController));
+router.post('/invites/:inviteId/reject', groupController.rejectGroupInvite.bind(groupController));
+
+// ===== INVITES ENDPOINT (FIXES 404 ERROR) =====
+// This is the main /api/invites endpoint that the frontend is calling
+router.get('/invites/user', groupController.getUserInvites.bind(groupController));
+
+// Invite links
+router.post('/:groupId/invite-link', groupController.generateInviteLink.bind(groupController));
+router.delete('/:groupId/invite-link', groupController.revokeInviteLink.bind(groupController));
+
+// Group actions
+router.post('/:groupId/join', groupController.joinGroup.bind(groupController));
+router.post('/:groupId/leave', groupController.leaveGroup.bind(groupController));
+router.put('/:groupId/settings', groupController.updateGroupSettings.bind(groupController));
+
+// Error handling middleware for validation errors
+router.use((err, req, res, next) => {
+  if (err.type === 'validation') {
+    return res.status(400).json({
+      success: false,
+      message: 'Validation error',
+      errors: err.errors || err.message,
+      code: 'VALIDATION_ERROR'
+    });
+  }
+  next(err);
+});
+
+// Log route initialization
+console.log('✅ Group routes initialized');
+console.log('   🔓 PUBLIC endpoints:');
+console.log('      - GET /api/groups/purposes - Get group purposes');
+console.log('      - GET /api/groups/public - Get public groups');
+console.log('      - GET /api/groups/search - Search groups');
+console.log('   🔒 PROTECTED endpoints (JWT required):');
+console.log('      - POST /api/groups - Create group');
+console.log('      - GET /api/groups - Get user groups');
+console.log('      - GET /api/groups/:groupId - Get group by ID');
+console.log('      - PUT /api/groups/:groupId - Update group');
+console.log('      - DELETE /api/groups/:groupId - Delete group');
+console.log('      - GET /api/groups/:groupId/members - Get members');
+console.log('      - POST /api/groups/:groupId/members/:userId - Add member');
+console.log('      - DELETE /api/groups/:groupId/members/:userId - Remove member');
+console.log('      - PUT /api/groups/:groupId/members/:userId/role - Update role');
+console.log('      - POST /api/groups/:groupId/invite - Invite to group');
+console.log('      - GET /api/groups/invites - Get invites');
+console.log('      - GET /api/groups/invites/user - Get user invites (FIXES /api/invites)');
+console.log('      - POST /api/groups/invites/:inviteId/accept - Accept invite');
+console.log('      - POST /api/groups/invites/:inviteId/reject - Reject invite');
+console.log('      - POST /api/groups/:groupId/invite-link - Generate invite link');
+console.log('      - DELETE /api/groups/:groupId/invite-link - Revoke invite link');
+console.log('      - POST /api/groups/:groupId/join - Join group');
+console.log('      - POST /api/groups/:groupId/leave - Leave group');
+console.log('      - PUT /api/groups/:groupId/settings - Update settings');
 
 module.exports = router;

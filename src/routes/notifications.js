@@ -1,3 +1,4 @@
+const path = require('path');
 const express = require('express');
 const router = express.Router();
 const asyncHandler = require('express-async-handler');
@@ -5,11 +6,11 @@ const {
   NotFoundError,
   ValidationError,
 } = require('../middleware/errorHandler');
-const { authenticate } = require('../middleware/auth');
 const { apiRateLimiter } = require('../middleware/rateLimiter');
 const { Notification, User } = require('../models');
 
-router.use(authenticate);
+// All routes are protected by parent auth middleware in server.js
+// No need for router.use(authenticate) as parent handles it
 
 console.log('✅ Notifications routes initialized');
 

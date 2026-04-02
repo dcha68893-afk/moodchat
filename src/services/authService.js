@@ -193,84 +193,72 @@ class AuthService {
     }
   }
 
-  generateTokens(userId) {
-    console.log("🔧 [AuthService] Generating tokens for user:", userId);
-    
-    const secret = process.env.JWT_SECRET || process.env.JWT_ACCESS_SECRET || 'dev-secret-change-in-production';
-    const expiresIn = process.env.JWT_EXPIRES_IN || '24h';
-
-    const accessToken = jwt.sign(
-      { 
-        userId, 
+  // In authService.js generateTokens method
+generateTokens(userId, userData = {}) {
+    // Use tokenService instead of direct jwt.sign
+    const user = {
         id: userId,
-        type: 'access'
-      }, 
-      secret,
-      { expiresIn }
-    );
-
-    const refreshToken = jwt.sign(
-      { 
-        userId, 
-        id: userId,
-        type: 'refresh'
-      }, 
-      secret,
-      { expiresIn: '7d' }
-    );
-
-    return { 
-      accessToken, 
-      refreshToken,
-      tokenType: 'Bearer',
-      expiresIn: 24 * 60 * 60 // 24 hours in seconds
+        userId: userId,
+        email: userData.email || null,
+        username: userData.username || null,
+        role: userData.role || 'user'
     };
-  }
+    
+    const accessToken = tokenService.generateAccessToken(user);
+    const refreshToken = tokenService.generateRefreshToken(user);
+    
+    return { 
+        accessToken, 
+        refreshToken,
+        tokenType: 'Bearer',
+        expiresIn: 24 * 60 * 60
+    };
+}
 
-  async verifyToken(token) {
-    try {
-      const secret = process.env.JWT_SECRET || process.env.JWT_ACCESS_SECRET || 'dev-secret-change-in-production';
-      const decoded = jwt.verify(token, secret);
-      return { success: true, data: decoded };
-    } catch (error) {
-      console.error('Token verification error:', error.message);
-      return { success: false, message: error.message };
+async verifyToken(token) {
+  try {
+    const secret = this.JWT_SECRET || process.env.JWT_SECRET || process.env.JWT_ACCESS_SECRET || '3e78ab2d6cb698f95b3b8d510614058c';
+    const decoded = jwt.verify(token, secret);
+    return { success: true, data: decoded };
+  } catch (error) {
+    console.error('Token verification error:', error.message);
+    return { success: false, message: error.message };
+  }
+}
+
+async refreshToken(refreshToken) {
+  try {
+    const tokenData = AuthService.tokenStore.get(refreshToken);
+    if (!tokenData || tokenData.expires < Date.now()) {
+      throw new Error('Invalid or expired refresh token');
     }
+
+    const secret = this.JWT_SECRET || process.env.JWT_SECRET || process.env.JWT_ACCESS_SECRET || '3e78ab2d6cb698f95b3b8d510614058c';
+    const decoded = jwt.verify(refreshToken, secret);
+    
+    // Generate new tokens
+    const tokens = this.generateTokens(decoded.userId);
+
+    // Delete old refresh token
+    AuthService.tokenStore.delete(refreshToken);
+
+    // Store new refresh token
+    AuthService.tokenStore.set(tokens.refreshToken, {
+      userId: decoded.userId,
+      expires: Date.now() + 7 * 24 * 60 * 60 * 1000
+    });
+
+    return {
+      success: true,
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+      expiresIn: tokens.expiresIn
+    };
+  } catch (error) {
+    console.error('Refresh token error:', error.message);
+    return { success: false, message: error.message };
   }
-
-  async refreshToken(refreshToken) {
-    try {
-      const tokenData = AuthService.tokenStore.get(refreshToken);
-      if (!tokenData || tokenData.expires < Date.now()) {
-        throw new Error('Invalid or expired refresh token');
-      }
-
-      const secret = process.env.JWT_SECRET || process.env.JWT_ACCESS_SECRET || 'dev-secret-change-in-production';
-      const decoded = jwt.verify(refreshToken, secret);
-      
-      // Generate new tokens
-      const tokens = this.generateTokens(decoded.userId);
-
-      // Delete old refresh token
-      AuthService.tokenStore.delete(refreshToken);
-
-      // Store new refresh token
-      AuthService.tokenStore.set(tokens.refreshToken, {
-        userId: decoded.userId,
-        expires: Date.now() + 7 * 24 * 60 * 60 * 1000
-      });
-
-      return {
-        success: true,
-        accessToken: tokens.accessToken,
-        refreshToken: tokens.refreshToken,
-        expiresIn: tokens.expiresIn
-      };
-    } catch (error) {
-      console.error('Refresh token error:', error.message);
-      return { success: false, message: error.message };
-    }
-  }
+}
 
   async logout(userId) {
     try {
@@ -371,14 +359,16 @@ class AuthService {
     }
   }
 
-  validateJWTConfig() {
+validateJWTConfig() {
     const secret = process.env.JWT_SECRET || process.env.JWT_ACCESS_SECRET;
-    if (!secret || secret === 'dev-secret-change-in-production' || secret === '3e78ab2d6cb698f95b3b8d510614058c') {
-      console.warn('⚠️ JWT_SECRET not properly configured');
-      return false;
+    // Check if secret is properly configured (not using default fallback)
+    if (!secret || secret === '3e78ab2d6cb698f95b3b8d510614058c') {
+        console.warn('⚠️ JWT_SECRET not properly configured - using default/fallback secret');
+        return false;
     }
+    console.log('✅ JWT_SECRET properly configured');
     return true;
-  }
+}
 }
 
 // Create and export a single instance

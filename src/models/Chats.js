@@ -94,7 +94,7 @@ module.exports = (sequelize, DataTypes) => {
     }
   );
 
-  // Instance methods (PRESERVED)
+  // Instance methods
   Chats.prototype.updateLastMessage = async function (messageId) {
     this.lastMessageId = messageId;
     this.lastMessageAt = new Date();
@@ -113,7 +113,7 @@ module.exports = (sequelize, DataTypes) => {
     return participants.map(p => p.userId);
   };
 
-  // Static methods (PRESERVED)
+  // Static methods
   Chats.getDirectChat = async function (userId1, userId2) {
     if (!this.sequelize.models.ChatParticipant) {
       return null;
@@ -135,14 +135,20 @@ module.exports = (sequelize, DataTypes) => {
         },
       ],
       group: ['Chats.id'],
-      having: this.sequelize.literal('COUNT(DISTINCT "ChatParticipant"."userId") = 2'),
+      having: this.sequelize.literal('COUNT(DISTINCT "chatParticipants"."userId") = 2'),
     });
 
     return chats[0] || null;
   };
 
   Chats.getUserChats = async function (userId) {
-    const include = [
+    // Check if models exist
+    if (!this.sequelize.models.ChatParticipant) {
+      console.error('[Chats] ChatParticipant model not found');
+      return [];
+    }
+
+    const includeArray = [
       {
         model: this.sequelize.models.ChatParticipant,
         as: 'chatParticipants',
@@ -152,34 +158,61 @@ module.exports = (sequelize, DataTypes) => {
       }
     ];
 
+    // Only add Messages include if the model exists
     if (this.sequelize.models.Messages) {
-      include.push({
+      const messagesInclude = {
         model: this.sequelize.models.Messages,
         as: 'chatMessages',
         attributes: ['id', 'content', 'type', 'createdAt'],
         required: false,
         limit: 1,
-        order: [['createdAt', 'DESC']],
-        include: this.sequelize.models.Users ? [
+        order: [['createdAt', 'DESC']]
+      };
+      
+      // Add user include only if Users model exists
+      if (this.sequelize.models.Users) {
+        messagesInclude.include = [
           {
             model: this.sequelize.models.Users,
             as: 'messageSender',
             attributes: ['id', 'username', 'avatar'],
           },
-        ] : undefined,
-      });
+        ];
+      }
+      
+      includeArray.push(messagesInclude);
     }
 
-    return await this.findAll({
-      include: include,
-      order: [
-        ['lastMessageAt', 'DESC NULLS LAST'],
-        ['updatedAt', 'DESC'],
-      ],
-    });
+    try {
+      return await this.findAll({
+        include: includeArray,
+        order: [
+          ['lastMessageAt', 'DESC NULLS LAST'],
+          ['updatedAt', 'DESC'],
+        ],
+      });
+    } catch (error) {
+      console.error('[Chats] Error fetching chats:', error.message);
+      // Fallback without the messages include
+      return await this.findAll({
+        include: [
+          {
+            model: this.sequelize.models.ChatParticipant,
+            as: 'chatParticipants',
+            where: { userId: userId },
+            required: true,
+            attributes: [],
+          }
+        ],
+        order: [
+          ['lastMessageAt', 'DESC NULLS LAST'],
+          ['updatedAt', 'DESC'],
+        ],
+      });
+    }
   };
 
-  // FIXED: Associations with unique aliases
+  // Associations
   Chats.associate = function (models) {
     if (models.Messages) {
       Chats.hasMany(models.Messages, {

@@ -1,7 +1,9 @@
+// controllers/authController.js - COMPLETE FIXED VERSION
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const validator = require('validator');
 const { Op } = require('sequelize');
+const tokenService = require('../services/tokenService');
 
 // CRITICAL FIX: Use consistent JWT secret - load from env with proper fallback
 const JWT_SECRET = process.env.JWT_SECRET || process.env.JWT_ACCESS_SECRET || '3e78ab2d6cb698f95b3b8d510614058c';
@@ -100,6 +102,7 @@ class AuthController {
       }
 
       // Hash password with bcrypt
+      const hashedPassword = await bcrypt.hash(password, 10);
       
       // Create avatar URL
       const avatar = `https://ui-avatars.com/api/?name=${encodeURIComponent(username)}&background=random&color=fff`;
@@ -160,15 +163,19 @@ class AuthController {
         });
       }
 
-      // Generate JWT token
-      const token = this.generateToken(user);
+      // Generate JWT tokens using tokenService
+      const accessToken = tokenService.generateAccessToken(user);
+      const refreshToken = tokenService.generateRefreshToken(user);
+      
+      // Store refresh token
+      tokenService.storeRefreshToken(refreshToken, user.id);
 
       // Save token to database if available
       if (req.app.locals.models && req.app.locals.models.Token) {
         try {
           await req.app.locals.models.Token.create({
             userId: user.id,
-            token: token,
+            token: accessToken,
             tokenType: 'access',
             expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000)
           });
@@ -184,7 +191,9 @@ class AuthController {
       return res.status(201).json({
         success: true,
         message: 'User registered successfully',
-        token: token, // Direct token property for frontend
+        accessToken: accessToken,
+        refreshToken: refreshToken,
+        token: accessToken, // Direct token property for frontend
         user: { // Direct user object for frontend
           id: user.id,
           email: user.email,
@@ -193,6 +202,7 @@ class AuthController {
           firstName: user.firstName,
           lastName: user.lastName,
           status: user.status,
+          role: user.role || 'user',
           isActive: user.isActive,
           isVerified: user.isVerified,
           createdAt: user.createdAt || new Date().toISOString()
@@ -317,15 +327,19 @@ class AuthController {
       // Reset attempts on successful login
       loginAttemptsStore.delete(attemptKey);
 
-      // Generate JWT token
-      const token = this.generateToken(user);
+      // Generate JWT tokens using tokenService
+      const accessToken = tokenService.generateAccessToken(user);
+      const refreshToken = tokenService.generateRefreshToken(user);
+      
+      // Store refresh token
+      tokenService.storeRefreshToken(refreshToken, user.id);
 
       // Save token to database if available
       if (req.app.locals.models && req.app.locals.models.Token) {
         try {
           await req.app.locals.models.Token.create({
             userId: user.id,
-            token: token,
+            token: accessToken,
             tokenType: 'access',
             expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000)
           });
@@ -340,7 +354,6 @@ class AuthController {
         try {
           await user.update({
             status: 'online',
-            lastSeen: new Date(),
             lastSeen: new Date()
           });
         } catch (updateError) {
@@ -354,7 +367,9 @@ class AuthController {
       return res.status(200).json({
         success: true,
         message: 'Login successful',
-        token: token, // Direct token property for frontend
+        accessToken: accessToken,
+        refreshToken: refreshToken,
+        token: accessToken, // Direct token property for frontend
         user: { // Direct user object for frontend
           id: user.id,
           email: user.email,
@@ -363,6 +378,7 @@ class AuthController {
           firstName: user.firstName,
           lastName: user.lastName,
           status: 'online',
+          role: user.role || 'user',
           isActive: user.isActive,
           isVerified: user.isVerified,
           createdAt: user.createdAt || new Date().toISOString()
@@ -374,6 +390,196 @@ class AuthController {
       return res.status(500).json({
         success: false,
         message: 'Internal server error during login',
+        errorCode: 'INTERNAL_ERROR'
+      });
+    }
+  }
+
+  async refreshToken(req, res, next) {
+    try {
+      console.log("📝 [AuthController] Refresh token request received");
+      
+      const refreshToken = tokenService.extractRefreshTokenFromRequest(req);
+      
+      if (!refreshToken) {
+        return res.status(400).json({
+          success: false,
+          message: 'Refresh token is required',
+          errorCode: 'REFRESH_TOKEN_REQUIRED'
+        });
+      }
+      
+      // Verify refresh token
+      const verification = tokenService.verifyRefreshToken(refreshToken);
+      
+      if (!verification.valid) {
+        return res.status(401).json({
+          success: false,
+          message: verification.error === 'REFRESH_TOKEN_EXPIRED' 
+            ? 'Refresh token expired. Please login again.' 
+            : 'Invalid refresh token',
+          errorCode: verification.error
+        });
+      }
+      
+      // Verify stored refresh token
+      const storedCheck = tokenService.validateStoredRefreshToken(refreshToken);
+      if (!storedCheck.valid) {
+        return res.status(401).json({
+          success: false,
+          message: 'Invalid refresh token',
+          errorCode: 'INVALID_REFRESH_TOKEN'
+        });
+      }
+      
+      const userId = verification.decoded.userId;
+      
+      // Get user from database
+      let user = null;
+      if (req.app.locals.models && (req.app.locals.models.User || req.app.locals.models.Users)) {
+        const UsersModel = req.app.locals.models.User || req.app.locals.models.Users;
+        user = await UsersModel.findByPk(userId);
+      }
+      
+      if (!user && req.app.locals.users) {
+        user = req.app.locals.users.find(u => u.id === userId);
+      }
+      
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: 'User not found',
+          errorCode: 'USER_NOT_FOUND'
+        });
+      }
+      
+      // Generate new tokens
+      const newAccessToken = tokenService.generateAccessToken(user);
+      const newRefreshToken = tokenService.generateRefreshToken(user);
+      
+      // Invalidate old refresh token and store new one
+      tokenService.invalidateRefreshToken(refreshToken);
+      tokenService.storeRefreshToken(newRefreshToken, user.id);
+      
+      console.log("✅ [AuthController] Refresh token successful for user:", userId);
+      
+      return res.status(200).json({
+        success: true,
+        message: 'Token refreshed successfully',
+        accessToken: newAccessToken,
+        refreshToken: newRefreshToken,
+        token: newAccessToken
+      });
+      
+    } catch (error) {
+      console.error('❌ [AuthController] Refresh token error:', error.message);
+      return res.status(500).json({
+        success: false,
+        message: 'Internal server error during token refresh',
+        errorCode: 'INTERNAL_ERROR'
+      });
+    }
+  }
+
+  // CRITICAL FIX: Updated validateToken to match the format that frontend expects
+  async validateToken(req, res, next) {
+    console.log('=' .repeat(60));
+    console.log('🔵🔵🔵 AUTHCONTROLLER.JS validateToken method CALLED 🔵🔵🔵');
+    console.log('=' .repeat(60));
+    
+    try {
+      // Extract token from request
+      let token = null;
+      
+      if (req.headers.authorization) {
+        const parts = req.headers.authorization.split(' ');
+        if (parts.length === 2 && parts[0].toLowerCase() === 'bearer') {
+          token = parts[1];
+          console.log('[CONTROLLER] Token from Authorization header');
+        }
+      }
+      
+      if (!token && req.body.token) {
+        token = req.body.token;
+        console.log('[CONTROLLER] Token from body');
+      }
+      
+      if (!token) {
+        console.log('[CONTROLLER] ❌ No token');
+        return res.status(401).json({
+          success: false,
+          valid: false,
+          authValidated: false,
+          message: 'Token is required'
+        });
+      }
+      
+      // CRITICAL FIX: Use tokenService for verification (single source of truth)
+      const verification = tokenService.verifyAccessToken(token);
+      
+      if (!verification.valid) {
+        console.log('[CONTROLLER] ❌ Token verification failed:', verification.error);
+        return res.status(401).json({
+          success: false,
+          valid: false,
+          authValidated: false,
+          message: verification.error === 'TOKEN_EXPIRED' ? 'Token has expired' : 'Invalid token',
+          errorCode: verification.error
+        });
+      }
+      
+      const decoded = verification.decoded;
+      const userId = decoded.userId || decoded.id;
+      
+      console.log('[CONTROLLER] ✅ Token verified for user:', userId);
+      
+      // CRITICAL FIX: Fetch user from database if available
+      let user = null;
+      if (req.app.locals.models && (req.app.locals.models.User || req.app.locals.models.Users)) {
+        try {
+          const UsersModel = req.app.locals.models.User || req.app.locals.models.Users;
+          user = await UsersModel.findByPk(userId, {
+            attributes: { exclude: ['password'] }
+          });
+        } catch (dbError) {
+          console.error('[CONTROLLER] Database lookup error:', dbError.message);
+        }
+      }
+      
+      // CRITICAL FIX: Return the SAME format as routes/auth.js validate-token endpoint
+      return res.status(200).json({
+        success: true,           // ← MUST BE TRUE
+        valid: true,             // ← MUST BE TRUE
+        authValidated: true,     // ← MUST BE TRUE
+        message: 'Token is valid',
+        user: user ? {
+          id: user.id,
+          userId: user.id,
+          email: user.email,
+          username: user.username,
+          role: user.role || 'user',
+          avatar: user.avatar,
+          isVerified: user.isVerified,
+          status: user.status
+        } : {
+          id: userId,
+          userId: userId,
+          email: decoded.email || null,
+          username: decoded.username || null,
+          role: decoded.role || 'user'
+        },
+        userId: userId,
+        expiresIn: decoded.exp ? decoded.exp - Math.floor(Date.now() / 1000) : 86400,
+        timestamp: new Date().toISOString()
+      });
+      
+    } catch (error) {
+      console.error('[CONTROLLER] ❌ Error:', error);
+      return res.status(500).json({
+        success: false,
+        valid: false,
+        authValidated: false,
+        message: 'Failed to validate token',
         errorCode: 'INTERNAL_ERROR'
       });
     }
@@ -396,6 +602,12 @@ class AuthController {
         }
       }
       
+      // Get refresh token and invalidate it
+      const refreshToken = tokenService.extractRefreshTokenFromRequest(req);
+      if (refreshToken) {
+        tokenService.invalidateRefreshToken(refreshToken);
+      }
+      
       // Update user status if user exists
       if (req.user && req.user.userId && req.app.locals.models) {
         try {
@@ -411,6 +623,10 @@ class AuthController {
         }
       }
       
+      // Clear cookies
+      res.clearCookie('refreshToken');
+      res.clearCookie('accessToken');
+      
       return res.status(200).json({
         success: true,
         message: 'Logged out successfully'
@@ -421,81 +637,6 @@ class AuthController {
       return res.status(500).json({
         success: false,
         message: 'Internal server error during logout',
-        errorCode: 'INTERNAL_ERROR'
-      });
-    }
-  }
-
-  async refreshToken(req, res, next) {
-    try {
-      const { refreshToken } = req.body;
-      
-      if (!refreshToken) {
-        return res.status(400).json({
-          success: false,
-          message: 'Refresh token is required',
-          errorCode: 'VALIDATION_ERROR'
-        });
-      }
-      
-      // Check if Token model is available
-      if (!req.app.locals.models || !req.app.locals.models.Token) {
-        return res.status(501).json({
-          success: false,
-          message: 'Token refresh not implemented',
-          errorCode: 'NOT_IMPLEMENTED'
-        });
-      }
-      
-      // Find and validate refresh token
-      const tokenRecord = await req.app.locals.models.Token.findOne({
-        where: {
-          token: refreshToken,
-          tokenType: 'refresh',
-          isRevoked: false,
-          expiresAt: { [Op.gt]: new Date() }
-        },
-        include: [{ 
-          model: req.app.locals.models.User || req.app.locals.models.Users,
-          attributes: ['id', 'email', 'username'] 
-        }]
-      });
-      
-      if (!tokenRecord) {
-        return res.status(401).json({
-          success: false,
-          message: 'Invalid or expired refresh token',
-          errorCode: 'INVALID_REFRESH_TOKEN'
-        });
-      }
-      
-      // Generate new access token
-      const accessToken = this.generateToken(tokenRecord.User);
-      
-      // Create new token record
-      await req.app.locals.models.Token.create({
-        userId: tokenRecord.User.id,
-        token: accessToken,
-        tokenType: 'access',
-        expiresAt: new Date(Date.now() + 15 * 60 * 1000) // 15 minutes
-      });
-      
-      return res.status(200).json({
-        success: true,
-        message: 'Token refreshed successfully',
-        token: accessToken,
-        user: {
-          id: tokenRecord.User.id,
-          email: tokenRecord.User.email,
-          username: tokenRecord.User.username
-        }
-      });
-      
-    } catch (error) {
-      console.error('Refresh token error:', error);
-      return res.status(500).json({
-        success: false,
-        message: 'Internal server error during token refresh',
         errorCode: 'INTERNAL_ERROR'
       });
     }
@@ -555,10 +696,10 @@ class AuthController {
         lastName: user.lastName || null,
         avatar: user.avatar || null,
         status: user.status || 'offline',
+        role: user.role || 'user',
         isActive: user.isActive !== undefined ? user.isActive : true,
         isVerified: user.isVerified !== undefined ? user.isVerified : false,
         lastSeen: user.lastSeen || null,
-        role: user.role || 'user',
         createdAt: user.createdAt || new Date().toISOString()
       };
 
@@ -801,6 +942,7 @@ module.exports = {
   login: authController.login.bind(authController),
   logout: authController.logout.bind(authController),
   refreshToken: authController.refreshToken.bind(authController),
+  validateToken: authController.validateToken.bind(authController),
   getCurrentUser: authController.getCurrentUser.bind(authController),
   getCurrentUserSimple: authController.getCurrentUser.bind(authController),
   forgotPassword: authController.forgotPassword.bind(authController),

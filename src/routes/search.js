@@ -1,12 +1,13 @@
-
+const path = require('path');
 const express = require('express');
 const router = express.Router();
-const { authenticate } = require('../middleware/auth');
 const { apiRateLimiter } = require('../middleware/rateLimiter');
 const searchController = require('../controllers/searchController');
 
-// Apply authentication to all routes
-router.use(authenticate);
+// All routes are protected by parent auth middleware in server.js
+// No need for router.use(authenticate) as parent handles it
+
+console.log('✅ Search routes initialized');
 
 // Global search
 router.get('/global', apiRateLimiter, searchController.globalSearch);

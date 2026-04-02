@@ -1,3 +1,4 @@
+const path = require('path');
 const asyncHandler = require('express-async-handler');
 const express = require('express');
 const router = express.Router();
@@ -8,8 +9,7 @@ const User = db.User || db.Users;
 const Chat = db.Chat;
 const Call = db.Call;
 
-// Import the unified authentication middleware
-const { authenticateToken } = require('../middleware/auth');
+// Import middleware
 const { apiRateLimiter } = require('../middleware/rateLimiter');
 
 // Get Sequelize operators
@@ -18,9 +18,6 @@ const { Op, fn, col, literal } = Sequelize;
 
 const CALL_HISTORY_RETENTION_DAYS = parseInt(process.env.CALL_HISTORY_RETENTION_DAYS) || 365;
 const MAX_CALL_DURATION = parseInt(process.env.MAX_CALL_DURATION) || 14400;
-
-// Use the unified authentication middleware
-router.use(authenticateToken);
 
 console.log('✅ Calls routes initialized');
 
@@ -371,7 +368,7 @@ router.post(
           include: [{
             model: User,
             as: 'participants',
-            attributes: ['id', 'username', 'socketIds', 'blockedUsers']
+            attributes: ['id', 'username', 'socketIds']
           }]
         });
 
@@ -392,33 +389,6 @@ router.post(
         participants = (chat.participants || [])
           .filter(p => p.id !== userId)
           .map(p => p.id);
-
-        const currentUser = await User.findByPk(userId, {
-          include: [{
-            model: User,
-            as: 'blockedUsers',
-            attributes: ['id']
-          }]
-        });
-
-        if (!currentUser) {
-          return res.status(404).json({
-            status: 'error',
-            message: 'User not found'
-          });
-        }
-
-        const blockedParticipants = (chat.participants || []).filter(p => 
-          currentUser.blockedUsers && currentUser.blockedUsers.some(bu => bu.id === p.id) ||
-          (p.blockedUsers && p.blockedUsers.some(bu => bu.id === userId))
-        );
-
-        if (blockedParticipants.length > 0) {
-          return res.status(403).json({
-            status: 'error',
-            message: 'Cannot call blocked users'
-          });
-        }
 
         if (isGroupCall && participants.length > 10) {
           return res.status(400).json({
@@ -443,40 +413,13 @@ router.post(
 
         const participantUsers = await User.findAll({
           where: { id: participantIds },
-          attributes: ['id', 'username', 'socketIds', 'blockedUsers']
+          attributes: ['id', 'username', 'socketIds']
         });
 
         if (participantUsers.length !== participantIds.length) {
           return res.status(404).json({
             status: 'error',
             message: 'One or more participants not found'
-          });
-        }
-
-        const currentUser = await User.findByPk(userId, {
-          include: [{
-            model: User,
-            as: 'blockedUsers',
-            attributes: ['id']
-          }]
-        });
-
-        if (!currentUser) {
-          return res.status(404).json({
-            status: 'error',
-            message: 'User not found'
-          });
-        }
-
-        const blockedParticipants = participantUsers.filter(p =>
-          (currentUser.blockedUsers && currentUser.blockedUsers.some(bu => bu.id === p.id)) ||
-          (p.blockedUsers && p.blockedUsers.some(bu => bu.id === userId))
-        );
-
-        if (blockedParticipants.length > 0) {
-          return res.status(403).json({
-            status: 'error',
-            message: 'Cannot call blocked users'
           });
         }
 

@@ -18,8 +18,8 @@ class FriendController {
         success: true,
         message: 'Friend request sent successfully',
         data: {
-          friendRequest,
-        },
+          friendRequest: friendRequest
+        }
       });
     } catch (error) {
       logger.error('Send friend request controller error:', error);
@@ -38,8 +38,8 @@ class FriendController {
         success: true,
         message: `Friend request ${action}ed successfully`,
         data: {
-          friendRequest,
-        },
+          friendRequest: friendRequest
+        }
       });
     } catch (error) {
       logger.error('Respond to friend request controller error:', error);
@@ -57,9 +57,9 @@ class FriendController {
       res.json({
         success: true,
         data: {
-          friends,
-          count: friends.length,
-        },
+          friends: friends,
+          count: friends.length
+        }
       });
     } catch (error) {
       logger.error('Get friends controller error:', error);
@@ -76,9 +76,9 @@ class FriendController {
       res.json({
         success: true,
         data: {
-          requests,
-          count: requests.length,
-        },
+          requests: requests,
+          count: requests.length
+        }
       });
     } catch (error) {
       logger.error('Get pending requests controller error:', error);
@@ -95,9 +95,9 @@ class FriendController {
       res.json({
         success: true,
         data: {
-          requests,
-          count: requests.length,
-        },
+          requests: requests,
+          count: requests.length
+        }
       });
     } catch (error) {
       logger.error('Get sent requests controller error:', error);
@@ -114,9 +114,9 @@ class FriendController {
       res.json({
         success: true,
         data: {
-          blockedUsers,
-          count: blockedUsers.length,
-        },
+          blockedUsers: blockedUsers,
+          count: blockedUsers.length
+        }
       });
     } catch (error) {
       logger.error('Get blocked users controller error:', error);
@@ -133,7 +133,7 @@ class FriendController {
 
       res.json({
         success: true,
-        message: 'Friend removed successfully',
+        message: 'Friend removed successfully'
       });
     } catch (error) {
       logger.error('Unfriend controller error:', error);
@@ -154,7 +154,7 @@ class FriendController {
 
       res.json({
         success: true,
-        message: 'User blocked successfully',
+        message: 'User blocked successfully'
       });
     } catch (error) {
       logger.error('Block user controller error:', error);
@@ -171,7 +171,7 @@ class FriendController {
 
       res.json({
         success: true,
-        message: 'User unblocked successfully',
+        message: 'User unblocked successfully'
       });
     } catch (error) {
       logger.error('Unblock user controller error:', error);
@@ -190,9 +190,9 @@ class FriendController {
       res.json({
         success: true,
         data: {
-          areFriends,
-          isBlocked,
-        },
+          areFriends: areFriends,
+          isBlocked: isBlocked
+        }
       });
     } catch (error) {
       logger.error('Check friendship controller error:', error);
@@ -209,8 +209,8 @@ class FriendController {
       res.json({
         success: true,
         data: {
-          count,
-        },
+          count: count
+        }
       });
     } catch (error) {
       logger.error('Get friends count controller error:', error);
@@ -228,9 +228,9 @@ class FriendController {
       res.json({
         success: true,
         data: {
-          mutualFriends,
-          count: mutualFriends.length,
-        },
+          mutualFriends: mutualFriends,
+          count: mutualFriends.length
+        }
       });
     } catch (error) {
       logger.error('Get mutual friends controller error:', error);

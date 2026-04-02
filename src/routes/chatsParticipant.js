@@ -1,13 +1,8 @@
+const path = require('path');
 const express = require('express');
 const router = express.Router();
-// FIXED: Correct controller path (typo in original)
 const chatParticipantController = require('../controllers/chatParticipantController');
-// FIXED: Import the unified authentication middleware
-const { authenticateToken } = require('../middleware/auth');
 const { apiRateLimiter } = require('../middleware/rateLimiter');
-
-// FIXED: Use the unified authentication middleware
-router.use(authenticateToken);
 
 console.log('✅ Chats Participant routes initialized');
 

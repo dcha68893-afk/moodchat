@@ -2,7 +2,6 @@
 // Complete implementation with FIXED middleware order and WebSocket
 // PATCHED: Fixed authentication handling, token extraction, and middleware consistency
 // CRITICAL FIX: Standardized token response format, fixed public route detection
-// ENHANCED: Professional model diagnostics with column names and table details
 // =========================================================================
 // ========== ABSOLUTE FIRST LINE - LOAD ENVIRONMENT ==========
 require('dotenv').config();
@@ -543,7 +542,7 @@ class SystemStateManager {
         this.logTransition('CONNECTION_REGISTERED', { connection: name });
     }
     
-    // Register a model with enhanced details
+    // Register a model
     registerModel(name, modelInfo) {
         this.state.models.set(name, {
             name,
@@ -553,26 +552,8 @@ class SystemStateManager {
             warnings: [],
             associations: modelInfo.associations || [],
             aliasConflicts: modelInfo.aliasConflicts || [],
-            columns: modelInfo.columns || [],
-            columnCount: modelInfo.columns?.length || 0,
-            primaryKeys: modelInfo.primaryKeys || [],
-            foreignKeys: modelInfo.foreignKeys || [],
-            indexes: modelInfo.indexes || [],
             timestamp: new Date()
         });
-    }
-    
-    // Update model state with column details
-    updateModelWithColumns(name, columnDetails) {
-        const model = this.state.models.get(name);
-        if (model) {
-            model.columns = columnDetails.columns || [];
-            model.columnCount = columnDetails.columns?.length || 0;
-            model.primaryKeys = columnDetails.primaryKeys || [];
-            model.foreignKeys = columnDetails.foreignKeys || [];
-            model.indexes = columnDetails.indexes || [];
-            model.timestamp = new Date();
-        }
     }
     
     // Update model state
@@ -798,18 +779,15 @@ class SystemStateManager {
             };
         }
         
-        // Models with enhanced details
+        // Models
         for (const [name, model] of this.state.models.entries()) {
             publicState.models[name] = {
                 tableName: model.tableName,
                 loaded: model.loaded,
-                columnCount: model.columnCount,
                 associations: model.associations.length,
                 warnings: model.warnings.length,
                 errors: model.errors.length,
-                aliasConflicts: model.aliasConflicts.length,
-                columns: model.columns?.slice(0, 10) || [],
-                primaryKeys: model.primaryKeys || []
+                aliasConflicts: model.aliasConflicts.length
             };
         }
         
@@ -865,29 +843,6 @@ class SystemStateManager {
             aliasConflicts: Array.from(this.state.models.values())
                 .filter(m => m.aliasConflicts.length > 0).length
         };
-    }
-    
-    // Get detailed model info for diagnostics
-    getDetailedModelInfo() {
-        const modelDetails = [];
-        
-        for (const [name, model] of this.state.models.entries()) {
-            modelDetails.push({
-                name: name,
-                tableName: model.tableName,
-                loaded: model.loaded,
-                columnCount: model.columnCount,
-                columns: model.columns || [],
-                primaryKeys: model.primaryKeys || [],
-                foreignKeys: model.foreignKeys || [],
-                associations: model.associations || [],
-                aliasConflicts: model.aliasConflicts || [],
-                warnings: model.warnings || [],
-                errors: model.errors || []
-            });
-        }
-        
-        return modelDetails;
     }
     
     // Helper methods
@@ -1215,79 +1170,6 @@ class ProfessionalLogger {
         this.table('STARTUP REPORT', ['Component', 'Status', 'Health'], rows);
     }
     
-    // ENHANCED: Display detailed model information with column details
-    displayModelDetails(models) {
-        console.log(`\n${this.colors.blue}══════════════════════════════════════════════════════════════════════════════${this.colors.reset}`);
-        console.log(`${this.colors.cyan}                    📊 MODEL SCHEMA DIAGNOSTICS                              ${this.colors.reset}`);
-        console.log(`${this.colors.blue}══════════════════════════════════════════════════════════════════════════════${this.colors.reset}`);
-        
-        for (const model of models) {
-            console.log(`\n${this.colors.green}📁 Model: ${model.name}${this.colors.reset}`);
-            console.log(`${this.colors.gray}   Table: ${model.tableName}${this.colors.reset}`);
-            console.log(`${this.colors.gray}   Status: ${model.loaded ? '✓ LOADED' : '✗ FAILED'}${this.colors.reset}`);
-            console.log(`${this.colors.gray}   Columns: ${model.columnCount}${this.colors.reset}`);
-            console.log(`${this.colors.gray}   Associations: ${model.associations?.length || 0}${this.colors.reset}`);
-            console.log(`${this.colors.gray}   Alias Conflicts: ${model.aliasConflicts?.length || 0}${this.colors.reset}`);
-            
-            // Display columns in a formatted table
-            if (model.columns && model.columns.length > 0) {
-                console.log(`${this.colors.cyan}   ┌─────────────────────────────────────────────────────────────────────────┐${this.colors.reset}`);
-                console.log(`${this.colors.cyan}   │ COLUMN DETAILS                                                          │${this.colors.reset}`);
-                console.log(`${this.colors.cyan}   ├───────────────┬─────────────────────────────────────────────────────────┤${this.colors.reset}`);
-                console.log(`${this.colors.cyan}   │ Column Name   │ Type & Constraints                                      │${this.colors.reset}`);
-                console.log(`${this.colors.cyan}   ├───────────────┼─────────────────────────────────────────────────────────┤${this.colors.reset}`);
-                
-                const displayColumns = model.columns.slice(0, 20);
-                displayColumns.forEach(col => {
-                    const colName = (col.name || col.columnName || '').substring(0, 14).padEnd(14);
-                    let typeInfo = `${col.type || col.dataType || 'unknown'}`;
-                    if (col.allowNull === false) typeInfo += ' NOT NULL';
-                    if (col.primaryKey) typeInfo += ' PRIMARY KEY';
-                    if (col.autoIncrement) typeInfo += ' AUTO_INCREMENT';
-                    if (col.defaultValue !== undefined) typeInfo += ` DEFAULT ${col.defaultValue}`;
-                    
-                    console.log(`${this.colors.cyan}   │ ${colName} │ ${typeInfo.substring(0, 55).padEnd(55)}${this.colors.reset}`);
-                });
-                
-                if (model.columns.length > 20) {
-                    console.log(`${this.colors.cyan}   │ ...           │ ${model.columns.length - 20} more columns...                         │${this.colors.reset}`);
-                }
-                
-                console.log(`${this.colors.cyan}   └───────────────┴─────────────────────────────────────────────────────────┘${this.colors.reset}`);
-            }
-            
-            // Display primary keys
-            if (model.primaryKeys && model.primaryKeys.length > 0) {
-                console.log(`${this.colors.green}   🔑 Primary Keys: ${model.primaryKeys.join(', ')}${this.colors.reset}`);
-            }
-            
-            // Display foreign keys
-            if (model.foreignKeys && model.foreignKeys.length > 0) {
-                console.log(`${this.colors.magenta}   🔗 Foreign Keys: ${model.foreignKeys.map(fk => `${fk.column} → ${fk.references?.table}.${fk.references?.column}`).join(', ')}${this.colors.reset}`);
-            }
-            
-            // Display warnings
-            if (model.warnings && model.warnings.length > 0) {
-                console.log(`${this.colors.yellow}   ⚠ Warnings: ${model.warnings.length}${this.colors.reset}`);
-                model.warnings.slice(0, 3).forEach(warning => {
-                    console.log(`${this.colors.yellow}      - ${warning.substring(0, 70)}${this.colors.reset}`);
-                });
-            }
-            
-            // Display alias conflicts
-            if (model.aliasConflicts && model.aliasConflicts.length > 0) {
-                console.log(`${this.colors.red}   ❌ Alias Conflicts: ${model.aliasConflicts.length}${this.colors.reset}`);
-                model.aliasConflicts.slice(0, 3).forEach(conflict => {
-                    console.log(`${this.colors.red}      - ${conflict.substring(0, 70)}${this.colors.reset}`);
-                });
-            }
-            
-            console.log(`${this.colors.gray}   ${'─'.repeat(80)}${this.colors.reset}`);
-        }
-        
-        console.log(`\n${this.colors.blue}══════════════════════════════════════════════════════════════════════════════${this.colors.reset}`);
-    }
-    
     displaySystemHealth() {
         const services = [];
         const connections = [];
@@ -1355,7 +1237,6 @@ class ProfessionalLogger {
         }
     }
     
-    // ENHANCED: Display models info with column counts
     displayModelsInfo() {
         const rows = [];
         
@@ -1366,7 +1247,6 @@ class ProfessionalLogger {
                 model.name,
                 model.tableName,
                 status,
-                model.columnCount,
                 model.associations.length,
                 model.warnings.length,
                 model.errors.length,
@@ -1375,15 +1255,9 @@ class ProfessionalLogger {
         }
         
         if (rows.length > 0) {
-            this.table('MODELS', ['Name', 'Table', 'Loaded', 'Columns', 'Associations', 'Warnings', 'Errors', 'Alias'], rows, {
-                columnWidths: [15, 20, 8, 10, 12, 10, 10, 10]
+            this.table('MODELS', ['Name', 'Table', 'Loaded', 'Associations', 'Warnings', 'Errors', 'Alias'], rows, {
+                columnWidths: [15, 20, 8, 12, 10, 10, 10]
             });
-        }
-        
-        // Display detailed model information
-        const detailedModels = systemState.getDetailedModelInfo();
-        if (detailedModels.length > 0) {
-            this.displayModelDetails(detailedModels);
         }
     }
     
@@ -1727,15 +1601,18 @@ class ConfigurationManager {
 
 const config = new ConfigurationManager();
 
-// ========== JWT SECRET DEBUG - AFTER CONFIG INITIALIZATION ==========
-console.log('\n=== JWT SECRET VERIFICATION ===');
-console.log('config.get(JWT_SECRET):', config.get('JWT_SECRET') ? config.get('JWT_SECRET').substring(0, 10) + '...' : 'MISSING');
-console.log('process.env.JWT_SECRET:', process.env.JWT_SECRET ? process.env.JWT_SECRET.substring(0, 10) + '...' : 'MISSING');
-console.log('process.env.JWT_ACCESS_SECRET:', process.env.JWT_ACCESS_SECRET ? process.env.JWT_ACCESS_SECRET.substring(0, 10) + '...' : 'MISSING');
-
+// ========== CRITICAL FIX: JWT SECRET SYNC AFTER CONFIG INITIALIZATION ==========
+// This MUST be placed AFTER config is created, not before!
+console.log('🔧 [Server] Syncing JWT secrets with tokenService...');
 const tokenService = require('./services/tokenService');
-console.log('tokenService.accessSecret:', tokenService.accessSecret ? tokenService.accessSecret.substring(0, 10) + '...' : 'MISSING');
-console.log('================================\n');
+const jwtSecretFromConfig = config.get('JWT_SECRET');
+if (jwtSecretFromConfig && tokenService) {
+  tokenService.accessSecret = jwtSecretFromConfig;
+  tokenService.refreshSecret = config.get('JWT_REFRESH_SECRET') || jwtSecretFromConfig;
+  console.log('✅ [Server] JWT secrets synced with tokenService');
+} else {
+  console.warn('⚠️ [Server] Could not sync JWT secrets - config or tokenService not ready');
+}
 
 // ========== DATABASE SERVICE ==========
 class DatabaseService {
@@ -1796,21 +1673,13 @@ class DatabaseService {
             });
             
             // Register all models with system state
-            for (const modelName of Object.keys(this.models)) {
+            Object.keys(this.models).forEach(modelName => {
                 const model = this.models[modelName];
-                
-                // Get column information from model
-                const columnInfo = await this.getModelColumnInfo(model);
-                
                 systemState.registerModel(modelName, {
                     tableName: model.tableName || modelName,
-                    associations: Object.keys(model.associations || {}),
-                    columns: columnInfo.columns || [],
-                    primaryKeys: columnInfo.primaryKeys || [],
-                    foreignKeys: columnInfo.foreignKeys || [],
-                    indexes: columnInfo.indexes || []
+                    associations: Object.keys(model.associations || {})
                 });
-            }
+            });
             
             // Log all available models
             console.log('🔍 DATABASE MODELS LOADED:');
@@ -1824,7 +1693,7 @@ class DatabaseService {
             // Safe schema sync
             await this.syncSchema();
             
-            // Inspect schema for warnings and get column details
+            // Inspect schema for warnings
             await this.inspectSchema();
             
             // Check for alias conflicts
@@ -1839,71 +1708,6 @@ class DatabaseService {
             this.handleDatabaseError(error);
             return false;
         }
-    }
-    
-    // ENHANCED: Get detailed column information from model
-    async getModelColumnInfo(model) {
-        const columnInfo = {
-            columns: [],
-            primaryKeys: [],
-            foreignKeys: [],
-            indexes: []
-        };
-        
-        if (!model || !model.rawAttributes) {
-            return columnInfo;
-        }
-        
-        try {
-            // Get columns from rawAttributes
-            for (const [colName, attribute] of Object.entries(model.rawAttributes)) {
-                const column = {
-                    name: colName,
-                    field: attribute.field || colName,
-                    type: attribute.type?.toString() || 'unknown',
-                    allowNull: attribute.allowNull !== false,
-                    primaryKey: attribute.primaryKey === true,
-                    autoIncrement: attribute.autoIncrement === true,
-                    defaultValue: attribute.defaultValue,
-                    unique: attribute.unique || false
-                };
-                
-                columnInfo.columns.push(column);
-                
-                if (column.primaryKey) {
-                    columnInfo.primaryKeys.push(colName);
-                }
-            }
-            
-            // Get foreign key information from associations
-            if (model.associations) {
-                for (const [assocName, association] of Object.entries(model.associations)) {
-                    if (association.associationType === 'BelongsTo' && association.foreignKey) {
-                        const fkColumn = association.foreignKey;
-                        const targetModel = association.target?.name;
-                        
-                        columnInfo.foreignKeys.push({
-                            column: fkColumn,
-                            references: {
-                                table: targetModel,
-                                column: association.targetKey || 'id'
-                            },
-                            association: assocName
-                        });
-                    }
-                }
-            }
-            
-            // Get index information from model options
-            if (model.options && model.options.indexes) {
-                columnInfo.indexes = model.options.indexes;
-            }
-            
-        } catch (error) {
-            logger.debug(`Error getting column info for ${model.name}: ${error.message}`, 'DATABASE');
-        }
-        
-        return columnInfo;
     }
     
     // Get masked database URL for logging
@@ -1958,7 +1762,7 @@ class DatabaseService {
         
         const associationErrors = [];
         
-        for (const modelName of Object.keys(this.models)) {
+        Object.keys(this.models).forEach(modelName => {
             const model = this.models[modelName];
             if (model.associate) {
                 try {
@@ -1983,7 +1787,7 @@ class DatabaseService {
                     logger.warn(warning, 'DATABASE');
                 }
             }
-        }
+        });
         
         // Log association errors summary
         if (associationErrors.length > 0) {
@@ -1997,17 +1801,17 @@ class DatabaseService {
         
         const aliasMap = new Map();
         
-        for (const modelName of Object.keys(this.models)) {
+        Object.keys(this.models).forEach(modelName => {
             const model = this.models[modelName];
             if (model.associations) {
-                for (const alias of Object.keys(model.associations)) {
+                Object.keys(model.associations).forEach(alias => {
                     if (!aliasMap.has(alias)) {
                         aliasMap.set(alias, []);
                     }
                     aliasMap.get(alias).push(modelName);
-                }
+                });
             }
-        }
+        });
         
         // Find conflicts (aliases used by multiple models)
         for (const [alias, models] of aliasMap.entries()) {
@@ -2015,7 +1819,7 @@ class DatabaseService {
                 this.aliasConflicts.set(alias, models);
                 
                 // Log each conflict
-                for (const modelName of models) {
+                models.forEach(modelName => {
                     const conflictMsg = `Alias '${alias}' also used by: ${models.filter(m => m !== modelName).join(', ')}`;
                     logger.logAliasConflict(modelName, conflictMsg);
                     
@@ -2024,7 +1828,7 @@ class DatabaseService {
                     systemState.updateModelState(modelName, {
                         aliasConflicts: [...currentConflicts, conflictMsg]
                     });
-                }
+                });
             }
         }
     }
@@ -2067,36 +1871,7 @@ class DatabaseService {
             for (const tableName of tables) {
                 try {
                     const tableInfo = await queryInterface.describeTable(tableName);
-                    
-                    // Update model column info for the corresponding model
-                    const modelName = Object.keys(this.models).find(name => 
-                        (this.models[name].tableName || name).toLowerCase() === tableName.toLowerCase()
-                    );
-                    
-                    if (modelName && this.models[modelName]) {
-                        const columns = [];
-                        const primaryKeys = [];
-                        
-                        for (const [colName, colInfo] of Object.entries(tableInfo)) {
-                            columns.push({
-                                name: colName,
-                                type: colInfo.type,
-                                allowNull: colInfo.allowNull,
-                                primaryKey: colInfo.primaryKey,
-                                defaultValue: colInfo.defaultValue
-                            });
-                            
-                            if (colInfo.primaryKey) {
-                                primaryKeys.push(colName);
-                            }
-                        }
-                        
-                        systemState.updateModelWithColumns(modelName, {
-                            columns: columns,
-                            primaryKeys: primaryKeys
-                        });
-                    }
-                    
+                    // Schema inspection complete
                 } catch (error) {
                     const warning = `Table inspection failed for ${tableName}: ${error.message}`;
                     this.schemaWarnings.push(warning);
@@ -2745,15 +2520,14 @@ class RouterManager {
         this.authService = null;
         this.authMiddlewareManager = null;
         
-        // In server.js, find the RouterManager class and update:
-this.publicRoutes = [
-  '/', '/health', '/live', '/ready',
-  '/api/health', '/api/status', '/api/info', '/api/cors-info',
-  '/api/auth/login', '/api/auth/register', '/api/auth/refresh',
-  '/api/auth/forgot-password', '/api/auth/reset-password', '/api/auth/validate-token',
-  '/api/public'
-];
-// Remove '/' from this list if it's causing issues, or keep it for root only
+        // CRITICAL FIX: Define public routes (NO JWT required) - ensure auth endpoints are public
+        this.publicRoutes = [
+            '/', '/health', '/live', '/ready',
+            '/api/health', '/api/status', '/api/info', '/api/cors-info',
+            '/api/auth/login', '/api/auth/register', '/api/auth/refresh',
+            '/api/auth/forgot-password', '/api/auth/reset-password', '/api/auth/validate-token',
+            '/api/public'
+        ];
         
         // CRITICAL FIX: Define protected routes (JWT REQUIRED)
         this.protectedRoutes = [
@@ -3432,16 +3206,16 @@ this.publicRoutes = [
         return true;
     }
     
-async mountRoutersSelective(loadedRouters) {
+   async mountRoutersSelective(loadedRouters) {
   for (const { filename, router, mountPath, requiresAuth } of loadedRouters) {
     try {
       const handlers = [];
       
       // CRITICAL FIX: Only add auth middleware if required
       if (requiresAuth) {
-        // IMPORTANT: Don't apply auth middleware to /settings if it's causing issues
-        // For now, let's make sure auth is applied correctly
-        const { authenticateToken } = require('../middleware/auth');
+        // FIXED: Use path.join with __dirname for correct path resolution
+        const path = require('path');
+        const { authenticateToken } = require(path.join(__dirname, './middleware/auth'));
         handlers.push(authenticateToken);
         console.log(`🔒 ${mountPath} - PROTECTED (JWT required)`);
       } else {
@@ -3483,7 +3257,6 @@ async mountRoutersSelective(loadedRouters) {
     }
   }
 }
-
 }
 
 // ========== WEBSOCKET SERVICE ==========
@@ -3731,8 +3504,6 @@ class Application {
             systemState.recordStartupStep('middleware_setup');
             this.setupMiddleware();
             
-    
-            
             // 3. Initialize database (CRITICAL)
             systemState.recordStartupStep('database_connection');
             this.database = new DatabaseService();
@@ -3742,81 +3513,21 @@ class Application {
                 throw new Error('Database connection failed - CRITICAL');
             }
             
-// 4. RouterManager is DISABLED - using index.js for all routes
-// RouterManager was causing duplicate route mounting and auth issues
-systemState.recordStartupStep('auth_routes_mount');
-// this.routerManager = new RouterManager(this.app);
-// await this.routerManager.initialize(this.database);
-
-// Skip RouterManager - use index.js for all routing
-console.log('✅ RouterManager DISABLED - using index.js for all routes');
-   // 5. CRITICAL: Mount the main API router
-systemState.recordStartupStep('api_routes_mount');
-
-// Import the main router from index.js
-const mainRouter = require('./routes/index');
-
- // Status endpoint (public) - Ensure it's explicitly public
-        this.app.get('/api/status', (req, res) => {
-            logger.logPublicRouteAccess(req.path, req.method);
-            systemState.incrementMetric('publicRouteAccess');
-            const isReady = systemState.isServerReady();
-            const overallState = systemState.state.overall;
+            // 4. Mount auth routes with database dependency
+            systemState.recordStartupStep('auth_routes_mount');
+            this.routerManager = new RouterManager(this.app);
+            await this.routerManager.initialize(this.database);
             
-            return res.json({
-                success: true,
-                server: config.get('APP_NAME'),
-                status: overallState.toLowerCase(),
-                ready: isReady,
-                timestamp: new Date().toISOString(),
-                environment: config.get('NODE_ENV'),
-                version: config.get('API_VERSION'),
-                auth: {
-                    mode: 'PROTECTED_ROUTES_ONLY',
-                    description: 'Public routes accessible without JWT'
-                },
-                websocket: {
-                    enabled: config.get('FEATURE_WEBSOCKETS'),
-                    state: this.websocket?.state || 'DISABLED'
-                },
-                cors: {
-                    allowedOrigins: corsManager.getAllowedOrigins().slice(0, 5),
-                    total: corsManager.getAllowedOrigins().length
-                },
-                degradedServices: {
-                    redis: this.redis && !systemState.isConnectionHealthy('redis'),
-                    websocket: !systemState.isConnectionHealthy('websocket')
-                },
-                metrics: systemState.state.metrics
-            });
-        });
-// Mount the main router
-this.app.use('/', mainRouter);
-console.log('✅ Mounted main API router');
-
-// CRITICAL FIX: DIRECTLY MOUNT AUTH ROUTES
-console.log('🔧 DIRECTLY MOUNTING AUTH ROUTES');
-const authRouter = require('./routes/auth');
-this.app.use('/api/auth', authRouter);
-console.log('✅ Auth routes mounted directly at /api/auth');
-
-// Debug: Verify auth routes are registered
-console.log('🔍 Verifying auth routes registration...');
-this.app._router.stack.forEach(middleware => {
-    if (middleware.route && middleware.route.path.includes('auth')) {
-        console.log(`   ✅ Route registered: ${middleware.route.path}`);
-    } else if (middleware.name === 'router' && middleware.handle.stack) {
-        middleware.handle.stack.forEach(handler => {
-            if (handler.route && handler.route.path) {
-                console.log(`   ✅ Router handler: ${handler.route.path}`);
-            }
-        });
-    }
-});
-
-// Debug: Log all mounted routes
-console.log('\n🔍 Checking mounted routes...');
-console.log('Available routes will be handled by RouterManager');
+            // 5. CRITICAL: Mount the main API router with auth middleware
+            systemState.recordStartupStep('api_routes_mount');
+            
+            // Import the main router from index.js
+            const mainRouter = require('./routes/index');
+            
+            // Apply auth middleware to ALL /api routes
+            this.app.use('/api', mainRouter);  // Auth is handled by RouterManager's selective auth
+            
+            console.log('✅ Mounted main API router at /api (auth handled selectively by RouterManager)');
             
             // 6. Setup health and status endpoints (public) - AFTER API routes
             systemState.recordStartupStep('health_endpoints');
@@ -3914,25 +3625,7 @@ console.log('Available routes will be handled by RouterManager');
     // CRITICAL FIX: Setup middleware WITH CORRECT ORDER and proper preflight handling
     setupMiddleware() {
         console.log('🔄 Setting up middleware with correct order...');
-        // In server.js, in setupMiddleware() function, add this BEFORE all other middleware:
-
-// CRITICAL: Handle OPTIONS preflight for ALL routes
-this.app.options('*', (req, res) => {
-    console.log('🌐 OPTIONS request for:', req.path);
-    const origin = req.headers.origin;
-    
-    // Allow your frontend origin
-    if (origin && (origin.includes('127.0.0.1:5500') || origin.includes('localhost:5500'))) {
-        res.header('Access-Control-Allow-Origin', origin);
-        res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
-        res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept');
-        res.header('Access-Control-Allow-Credentials', 'true');
-        res.header('Access-Control-Max-Age', '86400');
-        res.status(204).send();
-    } else {
-        res.status(204).send();
-    }
-});
+        
         // Get dynamic CORS options from the manager
         const corsOptions = corsManager.getCorsOptions();
         
@@ -4120,7 +3813,40 @@ this.app.options('*', (req, res) => {
             });
         });
         
-       
+        // Status endpoint (public) - Ensure it's explicitly public
+        this.app.get('/api/status', (req, res) => {
+            logger.logPublicRouteAccess(req.path, req.method);
+            systemState.incrementMetric('publicRouteAccess');
+            const isReady = systemState.isServerReady();
+            const overallState = systemState.state.overall;
+            
+            return res.json({
+                success: true,
+                server: config.get('APP_NAME'),
+                status: overallState.toLowerCase(),
+                ready: isReady,
+                timestamp: new Date().toISOString(),
+                environment: config.get('NODE_ENV'),
+                version: config.get('API_VERSION'),
+                auth: {
+                    mode: 'PROTECTED_ROUTES_ONLY',
+                    description: 'Public routes accessible without JWT'
+                },
+                websocket: {
+                    enabled: config.get('FEATURE_WEBSOCKETS'),
+                    state: this.websocket?.state || 'DISABLED'
+                },
+                cors: {
+                    allowedOrigins: corsManager.getAllowedOrigins().slice(0, 5),
+                    total: corsManager.getAllowedOrigins().length
+                },
+                degradedServices: {
+                    redis: this.redis && !systemState.isConnectionHealthy('redis'),
+                    websocket: !systemState.isConnectionHealthy('websocket')
+                },
+                metrics: systemState.state.metrics
+            });
+        });
         
         // System info (public)
         this.app.get('/api/info', (req, res) => {
@@ -4424,7 +4150,7 @@ this.app.options('*', (req, res) => {
         // System health
         logger.displaySystemHealth();
         
-        // Models with enhanced column details
+        // Models
         logger.displayModelsInfo();
         
         // Routes

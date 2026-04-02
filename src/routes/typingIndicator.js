@@ -1,3 +1,4 @@
+const path = require('path');
 const express = require('express');
 const router = express.Router();
 const typingIndicatorController = require('../controllers/typingIndicatorController');
@@ -5,7 +6,7 @@ const { authenticate } = require('../middleware/auth');
 const { apiRateLimiter } = require('../middleware/rateLimiter');
 
 // Apply authentication to all routes
-router.use(authenticate);
+
 
 // Start typing indicator
 router.post('/start', apiRateLimiter, typingIndicatorController.startTyping);

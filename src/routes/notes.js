@@ -1,12 +1,13 @@
-
+const path = require('path');
 const express = require('express');
 const router = express.Router();
-const { authenticate } = require('../middleware/auth');
 const { apiRateLimiter } = require('../middleware/rateLimiter');
 const notesController = require('../controllers/notesController');
 
-// Apply authentication to all routes
-router.use(authenticate);
+// All routes are protected by parent auth middleware in server.js
+// No need for router.use(authenticateToken) or router.use(authenticate) as parent handles it
+
+console.log('✅ Notes routes initialized');
 
 // CRUD operations
 router.post('/', apiRateLimiter, notesController.createNote);

@@ -1,11 +1,11 @@
+const path = require('path');
 const express = require('express');
 const router = express.Router();
 const sharedMoodController = require('../controllers/sharedMoodController');
 const { authenticate } = require('../middleware/auth');
 const { apiRateLimiter } = require('../middleware/rateLimiter');
-
 // Apply authentication to all routes
-router.use(authenticate);
+
 
 // Share a mood
 router.post('/share', apiRateLimiter, sharedMoodController.shareMood);

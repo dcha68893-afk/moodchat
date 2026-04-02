@@ -1,21 +1,20 @@
-
+const path = require('path');
 const express = require('express');
 const router = express.Router();
 const asyncHandler = require('express-async-handler');
 const multer = require('multer');
-const path = require('path');
 const fs = require('fs');
 const {
   NotFoundError,
   ValidationError,
   AuthorizationError,
 } = require('../middleware/errorHandler');
-const { authenticate } = require('../middleware/auth');
 const { apiRateLimiter } = require('../middleware/rateLimiter');
 const { Media, User, Chat, Message } = require('../models');
 const config = require('../config/index');
 
-router.use(authenticate);
+// All routes are protected by parent auth middleware in server.js
+// No need for router.use(authenticateToken) as parent handles it
 
 // Ensure upload directories exist
 const ensureDirExists = (dirPath) => {

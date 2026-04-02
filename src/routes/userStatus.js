@@ -1,3 +1,4 @@
+const path = require('path');
 const express = require('express');
 const router = express.Router();
 const userStatusController = require('../controllers/userStatusController');
@@ -5,7 +6,7 @@ const { authenticate } = require('../middleware/auth');
 const { apiRateLimiter } = require('../middleware/rateLimiter');
 
 // Apply authentication to all routes
-router.use(authenticate);
+
 
 // Update user status
 router.post('/update', apiRateLimiter, userStatusController.updateStatus);

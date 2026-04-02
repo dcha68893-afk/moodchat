@@ -1,4 +1,4 @@
-﻿require('dotenv').config();
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
@@ -385,7 +385,7 @@ app.get('/api/chat/users', authenticateToken, (req, res) => {
     id: user.id,
     username: user.username,
     avatar: user.avatar,
-    lastActive: new Date().toISOString(),
+    lastSeen: new Date().toISOString(),
     isOnline: true
   }));
   
@@ -398,13 +398,13 @@ app.get('/api/chat/users', authenticateToken, (req, res) => {
 // ========== START SERVER ==========
 
 app.listen(PORT, () => {
-  console.log(`🚀 TEMP AUTH SERVER on http://localhost:${PORT}`);
-  console.log(`📌 Test endpoints:`);
+  console.log(`?? TEMP AUTH SERVER on http://localhost:${PORT}`);
+  console.log(`?? Test endpoints:`);
   console.log(`   GET  /health`);
   console.log(`   GET  /test`);
   console.log(`   POST /api/auth/register`);
   console.log(`   POST /api/auth/login`);
   console.log(`   GET  /api/auth/profile (protected)`);
   console.log(`   GET  /api/chat/rooms (protected)`);
-  console.log(`\n🔒 Protected endpoints require: Authorization: Bearer <token>`);
+  console.log(`\n?? Protected endpoints require: Authorization: Bearer <token>`);
 });
