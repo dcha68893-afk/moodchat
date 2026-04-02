@@ -1684,21 +1684,26 @@ class ConfigurationManager {
             process.exit(1);
         }
         
-        // Check CORS configuration
-        const allowedOrigins = this.get('CORS_ORIGINS');
-        const frontendUrl = process.env.FRONTEND_URL;
-        
-        if (!frontendUrl) {
-            console.error('❌ FATAL: FRONTEND_URL not set in .env file!');
-            console.error('Please add FRONTEND_URL=https://your-frontend-url.com to .env');
-            process.exit(1);
-        }
-        
-        if (!allowedOrigins || !allowedOrigins.includes(frontendUrl)) {
-            console.error(`❌ FATAL: Frontend URL ${frontendUrl} not in CORS allowed origins!`);
-            console.error('Please add it to CORS_ADDITIONAL_ORIGINS in .env');
-            process.exit(1);
-        }
+    const allowedOrigins = this.get('CORS_ORIGINS');
+// Normalize: trim whitespace and strip trailing slash
+const frontendUrl = (process.env.FRONTEND_URL || '').trim().replace(/\/+$/, '');
+
+if (!frontendUrl) {
+    console.error('❌ FATAL: FRONTEND_URL not set in .env file!');
+    console.error('Please add FRONTEND_URL=https://your-frontend-url.com to .env');
+    process.exit(1);
+}
+
+// Normalize all allowed origins the same way before comparing
+const normalizedOrigins = (allowedOrigins || []).map(o => o.trim().replace(/\/+$/, ''));
+
+if (!normalizedOrigins.includes(frontendUrl)) {
+    // Auto-fix: add it rather than crashing, log a warning
+    corsManager.allowedOrigins.add(frontendUrl);
+    this.set('CORS_ORIGINS', corsManager.getAllowedOrigins());
+    console.warn(`⚠️  CORS: FRONTEND_URL "${frontendUrl}" was missing from allowed origins — auto-added.`);
+    console.warn('To silence this warning, add FRONTEND_URL to CORS_ADDITIONAL_ORIGINS in .env');
+}
         
         // Check DB sync options
         if (this.get('DB_SYNC_FORCE')) {
