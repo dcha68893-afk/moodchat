@@ -19,6 +19,101 @@ const JWT_SECRET = process.env.JWT_SECRET || process.env.JWT_ACCESS_SECRET;
 
 console.log('✅ AUTH ROUTER LOADED - FIXED VERSION');
 
+// REGISTER ENDPOINT
+router.post('/register', asyncHandler(async (req, res) => {
+    console.log('📝 REGISTER called');
+    const { email, username, password, name } = req.body;
+
+    // Validate required fields
+    if (!email || !username || !password) {
+        return res.status(400).json({
+            success: false,
+            message: 'Email, username and password are required'
+        });
+    }
+
+    if (!email.includes('@')) {
+        return res.status(400).json({
+            success: false,
+            message: 'Valid email is required'
+        });
+    }
+
+    if (username.length < 3) {
+        return res.status(400).json({
+            success: false,
+            message: 'Username must be at least 3 characters'
+        });
+    }
+
+    if (password.length < 8) {
+        return res.status(400).json({
+            success: false,
+            message: 'Password must be at least 8 characters'
+        });
+    }
+
+    try {
+        // Check if email already exists
+        const existingEmail = await Users.findOne({ where: { email } });
+        if (existingEmail) {
+            return res.status(409).json({
+                success: false,
+                message: 'Email already in use'
+            });
+        }
+
+        // Check if username already exists
+        const existingUsername = await Users.findOne({ where: { username } });
+        if (existingUsername) {
+            return res.status(409).json({
+                success: false,
+                message: 'Username already taken'
+            });
+        }
+
+        // Hash password
+        const hashedPassword = await bcrypt.hash(password, 12);
+
+        // Create user
+        const newUser = await Users.create({
+            email,
+            username,
+            password: hashedPassword,
+            ...(name && { firstName: name.split(' ')[0], lastName: name.split(' ').slice(1).join(' ') || null }),
+            role: 'user',
+            status: 'offline'
+        });
+
+        // Generate tokens
+        const token = tokenService.generateAccessToken(newUser);
+        const refreshToken = tokenService.generateRefreshToken(newUser);
+
+        tokenService.storeRefreshToken(refreshToken, newUser.id);
+
+        console.log('✅ User registered:', newUser.id, newUser.username);
+
+        res.status(201).json({
+            success: true,
+            token,
+            refreshToken,
+            user: {
+                id: newUser.id,
+                username: newUser.username,
+                email: newUser.email,
+                avatar: newUser.avatar || null,
+                role: newUser.role
+            }
+        });
+    } catch (error) {
+        console.error('❌ Registration error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Registration failed: ' + error.message
+        });
+    }
+}));
+
 // LOGIN ENDPOINT
 router.post('/login', asyncHandler(async (req, res) => {
     console.log('🔐 LOGIN called');
