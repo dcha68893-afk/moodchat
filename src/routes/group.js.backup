@@ -1,4 +1,4 @@
-// routes/groups.js - Complete Group Management Routes
+﻿// routes/groups.js - Complete Group Management Routes
 // Full implementation with all features - NO SUMMARIZATION
 // Includes: Group CRUD, Members, Invites, Invite Links, Settings, Public Groups, Search, Purposes
 
@@ -13,11 +13,11 @@ const { body, param, query, validationResult } = require('express-validator');
 let db, User, Group, GroupMember, Invite, Chat;
 try {
     db = require('../models');
-    // Primary: db.models (sequelize registered names) ? fallback to direct export keys
+    // Primary: db.models (sequelize registered names) → fallback to direct export keys
     const m = db.models || {};
     User        = m.Users        || m.User        || db.Users        || db.User;
-    Group       = m.userGroups       || m.userGroup       || db.Groups       || db.Group;
-    GroupMember = m.userGroupMembers || m.userGroupMember || db.GroupMembers || db.GroupMember;
+    Group       = m.Groups       || m.Group       || db.Groups       || db.Group;
+    GroupMember = m.GroupMembers || m.GroupMember || db.GroupMembers || db.GroupMember;
     Invite      = m.Invite       || m.Invites     || db.Invite       || db.Invites || null;
     Chat        = m.Chats        || m.Chat        || db.Chats        || db.Chat;
     console.log('[Groups Route] Models loaded - User:', !!User, 'Group:', !!Group, 'GroupMember:', !!GroupMember, 'Invite:', !!Invite);
@@ -132,26 +132,26 @@ class GroupController {
         success: true,
         data: {
           purposes: [
-            { id: 'social', name: 'Social', icon: '??', description: 'Connect with friends and make new ones' },
-            { id: 'study', name: 'Study', icon: '??', description: 'Study groups and academic discussions' },
-            { id: 'work', name: 'Work', icon: '??', description: 'Professional collaboration and networking' },
-            { id: 'gaming', name: 'Gaming', icon: '??', description: 'Gaming communities and tournaments' },
-            { id: 'support', name: 'Support', icon: '??', description: 'Support groups and wellness communities' },
-            { id: 'hobby', name: 'Hobby', icon: '??', description: 'Share and discuss your hobbies' },
-            { id: 'professional', name: 'Professional', icon: '??', description: 'Industry professionals and experts' },
-            { id: 'entertainment', name: 'Entertainment', icon: '??', description: 'Movies, music, and entertainment' },
-            { id: 'education', name: 'Education', icon: '??', description: 'Educational content and learning' },
-            { id: 'tech', name: 'Technology', icon: '??', description: 'Tech discussions and innovations' },
-            { id: 'sports', name: 'Sports', icon: '?', description: 'Sports fans and teams' },
-            { id: 'health', name: 'Health', icon: '??', description: 'Health and fitness communities' },
-            { id: 'business', name: 'Business', icon: '??', description: 'Business networking and entrepreneurship' },
-            { id: 'art', name: 'Art', icon: '??', description: 'Artists and creative communities' },
-            { id: 'travel', name: 'Travel', icon: '??', description: 'Travel enthusiasts and explorers' },
-            { id: 'food', name: 'Food', icon: '??', description: 'Food lovers and cooking enthusiasts' },
-            { id: 'music', name: 'Music', icon: '??', description: 'Music lovers and musicians' },
-            { id: 'photography', name: 'Photography', icon: '??', description: 'Photography enthusiasts' },
-            { id: 'writing', name: 'Writing', icon: '??', description: 'Writers and authors' },
-            { id: 'other', name: 'Other', icon: '??', description: 'Other types of groups' }
+            { id: 'social', name: 'Social', icon: '👥', description: 'Connect with friends and make new ones' },
+            { id: 'study', name: 'Study', icon: '📚', description: 'Study groups and academic discussions' },
+            { id: 'work', name: 'Work', icon: '💼', description: 'Professional collaboration and networking' },
+            { id: 'gaming', name: 'Gaming', icon: '🎮', description: 'Gaming communities and tournaments' },
+            { id: 'support', name: 'Support', icon: '🤝', description: 'Support groups and wellness communities' },
+            { id: 'hobby', name: 'Hobby', icon: '🎨', description: 'Share and discuss your hobbies' },
+            { id: 'professional', name: 'Professional', icon: '👔', description: 'Industry professionals and experts' },
+            { id: 'entertainment', name: 'Entertainment', icon: '🎬', description: 'Movies, music, and entertainment' },
+            { id: 'education', name: 'Education', icon: '🎓', description: 'Educational content and learning' },
+            { id: 'tech', name: 'Technology', icon: '💻', description: 'Tech discussions and innovations' },
+            { id: 'sports', name: 'Sports', icon: '⚽', description: 'Sports fans and teams' },
+            { id: 'health', name: 'Health', icon: '🏃', description: 'Health and fitness communities' },
+            { id: 'business', name: 'Business', icon: '📈', description: 'Business networking and entrepreneurship' },
+            { id: 'art', name: 'Art', icon: '🎭', description: 'Artists and creative communities' },
+            { id: 'travel', name: 'Travel', icon: '✈️', description: 'Travel enthusiasts and explorers' },
+            { id: 'food', name: 'Food', icon: '🍜', description: 'Food lovers and cooking enthusiasts' },
+            { id: 'music', name: 'Music', icon: '🎵', description: 'Music lovers and musicians' },
+            { id: 'photography', name: 'Photography', icon: '📷', description: 'Photography enthusiasts' },
+            { id: 'writing', name: 'Writing', icon: '✍️', description: 'Writers and authors' },
+            { id: 'other', name: 'Other', icon: '📌', description: 'Other types of groups' }
           ]
         }
       });
@@ -431,12 +431,12 @@ async getUserGroups(req, res) {
       });
     }
     
-    // FIXED: Change 'as: 'userGroup'' to 'as: 'userGroup'' to match the association
+    // FIXED: Change 'as: 'group'' to 'as: 'userGroup'' to match the association
     const memberships = await withTimeout(GroupMember.findAll({
       where: { userId: userId, leftAt: null },
       include: [{
         model: Group,
-        as: 'userGroup',  // ? CHANGED from 'group' to 'userGroup'
+        as: 'userGroup',  // ← CHANGED from 'group' to 'userGroup'
         required: true,
         attributes: ['id', 'name', 'description', 'avatar', 'purpose', 'isPublic', 'maxMembers', 'createdBy', 'createdAt', 'updatedAt']
       }],
@@ -444,7 +444,7 @@ async getUserGroups(req, res) {
       offset: offsetNum
     }));
     
-    const groups = memberships.map(m => formatGroup(m.userGroup)).filter(g => g);  // ? CHANGED from m.userGroup to m.userGroup
+    const groups = memberships.map(m => formatGroup(m.userGroup)).filter(g => g);  // ← CHANGED from m.group to m.userGroup
     
     res.json({
       success: true,
@@ -1014,7 +1014,7 @@ async getUserGroups(req, res) {
           },
           {
             model: Group,
-            as: 'userGroup',
+            as: 'group',
             attributes: ['id', 'name', 'avatar', 'description', 'purpose']
           }
         ],
@@ -1177,7 +1177,7 @@ async getUserGroups(req, res) {
           },
           {
             model: Group,
-            as: 'userGroup',
+            as: 'group',
             attributes: ['id', 'name', 'avatar', 'description', 'purpose']
           }
         ],
@@ -1664,16 +1664,16 @@ router.get('/moods', (req, res) => {
     success: true,
     data: {
       moods: [
-        { id: 'happy',    label: 'Happy',    emoji: '??', color: '#FFD700' },
-        { id: 'excited',  label: 'Excited',  emoji: '??', color: '#FF6B6B' },
-        { id: 'calm',     label: 'Calm',     emoji: '??', color: '#4ECDC4' },
-        { id: 'focused',  label: 'Focused',  emoji: '??', color: '#45B7D1' },
-        { id: 'sad',      label: 'Sad',      emoji: '??', color: '#74B9FF' },
-        { id: 'angry',    label: 'Angry',    emoji: '??', color: '#FF7675' },
-        { id: 'anxious',  label: 'Anxious',  emoji: '??', color: '#A29BFE' },
-        { id: 'grateful', label: 'Grateful', emoji: '??', color: '#FD79A8' },
-        { id: 'bored',    label: 'Bored',    emoji: '??', color: '#B2BEC3' },
-        { id: 'tired',    label: 'Tired',    emoji: '??', color: '#636E72' }
+        { id: 'happy',    label: 'Happy',    emoji: '😊', color: '#FFD700' },
+        { id: 'excited',  label: 'Excited',  emoji: '🎉', color: '#FF6B6B' },
+        { id: 'calm',     label: 'Calm',     emoji: '😌', color: '#4ECDC4' },
+        { id: 'focused',  label: 'Focused',  emoji: '🎯', color: '#45B7D1' },
+        { id: 'sad',      label: 'Sad',      emoji: '😢', color: '#74B9FF' },
+        { id: 'angry',    label: 'Angry',    emoji: '😠', color: '#FF7675' },
+        { id: 'anxious',  label: 'Anxious',  emoji: '😰', color: '#A29BFE' },
+        { id: 'grateful', label: 'Grateful', emoji: '🙏', color: '#FD79A8' },
+        { id: 'bored',    label: 'Bored',    emoji: '😑', color: '#B2BEC3' },
+        { id: 'tired',    label: 'Tired',    emoji: '😴', color: '#636E72' }
       ]
     }
   });
@@ -1743,12 +1743,12 @@ router.use((err, req, res, next) => {
 });
 
 // Log route initialization
-console.log('? Group routes initialized');
-console.log('   ?? PUBLIC endpoints:');
+console.log('✅ Group routes initialized');
+console.log('   🔓 PUBLIC endpoints:');
 console.log('      - GET /api/groups/purposes - Get group purposes');
 console.log('      - GET /api/groups/public - Get public groups');
 console.log('      - GET /api/groups/search - Search groups');
-console.log('   ?? PROTECTED endpoints (JWT required):');
+console.log('   🔒 PROTECTED endpoints (JWT required):');
 console.log('      - POST /api/groups - Create group');
 console.log('      - GET /api/groups - Get user groups');
 console.log('      - GET /api/groups/:groupId - Get group by ID');

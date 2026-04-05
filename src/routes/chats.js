@@ -1,18 +1,4 @@
-﻿// Helper function to format user data
-const formatUser = (user) => {
-    if (!user) return null;
-    const userData = user.toJSON ? user.toJSON() : user;
-    const displayName = [userData.firstName, userData.lastName].filter(Boolean).join(' ').trim() || userData.username;
-    return {
-        id: userData.id,
-        username: userData.username,
-        avatar: userData.avatar,
-        displayName: displayName,
-        status: userData.status
-    };
-};
-
-const path = require('path');
+﻿const path = require('path');
 const asyncHandler = require('express-async-handler');
 const express = require('express');
 const router = express.Router();
@@ -22,11 +8,6 @@ const db = require('../models');
 const User = db.User || db.Users;
 const Chat = db.Chat || db.Chats;
 const Message = db.Message || db.Messages;
-const ChatParticipant = db.ChatParticipant;
-
-// Get Sequelize operators
-const Sequelize = require('sequelize');
-const { Op } = Sequelize;
 
 // Import middleware
 const { apiRateLimiter } = require('../middleware/rateLimiter');
@@ -42,18 +23,7 @@ const getUserId = (req) => {
     return req.user.userId || req.user.id;
 };
 
-// Helper function to check database models
-const checkModels = (res) => {
-    if (!db || !Chat || !User || !Message) {
-        return res.status(503).json({
-            status: 'error',
-            message: 'Database service not available'
-        });
-    }
-    return true;
-};
-
-// ===== GET ALL CHATS =====
+// ===== GET ALL CHATS (FIXED with raw SQL) =====
 router.get(
     '/',
     apiRateLimiter,
@@ -70,98 +40,85 @@ router.get(
             
             console.log('[Chats] Fetching chats for user:', userId);
 
-            if (!checkModels(res)) return;
-
-            // Get all chats for user using correct alias 'chatParticipants' from model
-            const chats = await Chat.findAll({
-                where: {
-                    isActive: true
-                },
-                include: [
-                    {
-                        model: ChatParticipant,
-                        as: 'chatParticipants',
-                        where: { userId: userId },
-                        required: true,
-                        attributes: ['userId']
-                    },
-                    {
-                        model: Message,
-                        as: 'chatMessages',
-                        required: false,
-                        limit: 1,
-                        order: [['createdAt', 'DESC']],
-                        attributes: ['id', 'content', 'messageType', 'createdAt', 'senderId']
-                    },
-                    {
-                        model: User,
-                        as: 'chatCreator',
-                        attributes: ['id', 'username', 'avatar']
-                    }
-                ],
-                order: [['lastMessageAt', 'DESC NULLS LAST'], ['updatedAt', 'DESC']],
-                limit: 50
-            });
-
-            // Get all participant IDs for each chat to find other participants
-            const chatIds = chats.map(chat => chat.id);
-            let participantsMap = {};
+            const sequelize = req.app.locals.db;
             
-            if (chatIds.length > 0 && ChatParticipant) {
-                const allParticipants = await ChatParticipant.findAll({
-                    where: { chatId: { [Op.in]: chatIds } },
-                    attributes: ['chatId', 'userId']
-                });
-                
-                participantsMap = allParticipants.reduce((map, p) => {
-                    if (!map[p.chatId]) map[p.chatId] = [];
-                    map[p.chatId].push(p.userId);
-                    return map;
-                }, {});
-            }
-
-            // Get all other participants info
-            const allUserIds = new Set();
-            Object.values(participantsMap).forEach(ids => ids.forEach(id => allUserIds.add(id)));
-            const userInfos = await User.findAll({
-                where: { id: { [Op.in]: Array.from(allUserIds) } },
-                attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen']
-            });
-            const userMap = userInfos.reduce((map, user) => {
-                map[user.id] = user;
-                return map;
-            }, {});
-
+            // Get all chats where user is a participant using raw SQL
+            const chats = await sequelize.query(`
+                SELECT 
+                    c.id,
+                    c.type,
+                    c.name,
+                    c."createdBy",
+                    c."isActive",
+                    c."lastMessageId",
+                    c."lastMessageAt",
+                    c."createdAt",
+                    c."updatedAt",
+                    (
+                        SELECT jsonb_build_object(
+                            'id', m.id,
+                            'content', m.content,
+                            'type', m.type,
+                            'senderId', m."senderId",
+                            'createdAt', m."createdAt",
+                            'sender', jsonb_build_object(
+                                'id', u.id,
+                                'username', u.username,
+                                'avatar', u.avatar
+                            )
+                        )
+                        FROM "Messages" m
+                        LEFT JOIN "Users" u ON u.id = m."senderId"
+                        WHERE m."chatId" = c.id AND m."isDeleted" = false
+                        ORDER BY m."createdAt" DESC
+                        LIMIT 1
+                    ) as "lastMessage",
+                    (
+                        SELECT jsonb_agg(
+                            jsonb_build_object(
+                                'id', p.id,
+                                'username', p.username,
+                                'avatar', p.avatar,
+                                'firstName', p."firstName",
+                                'lastName', p."lastName",
+                                'status', p.status
+                            )
+                        )
+                        FROM chat_participants cp
+                        JOIN "Users" p ON p.id = cp."userId"
+                        WHERE cp."chatId" = c.id
+                    ) as participants
+                FROM chats c
+                WHERE EXISTS (
+                    SELECT 1 FROM chat_participants cp 
+                    WHERE cp."chatId" = c.id AND cp."userId" = ${userId}
+                )
+                ORDER BY c."updatedAt" DESC
+            `, { type: sequelize.QueryTypes.SELECT });
+            
             // Format chats for response
-            const formattedChats = (chats || []).map(chat => {
-                const chatObj = chat.toJSON ? chat.toJSON() : chat;
-                const participantIds = participantsMap[chat.id] || [];
+            const formattedChats = chats.map(chat => {
+                const participants = chat.participants || [];
                 
-                // For direct chats, get the other participant info
-                if (chatObj.type === 'direct') {
-                    const otherUserId = participantIds.find(id => id !== userId);
-                    if (otherUserId && userMap[otherUserId]) {
-                        const otherUser = userMap[otherUserId];
-                        const displayName = [otherUser.firstName, otherUser.lastName].filter(Boolean).join(' ').trim() || otherUser.username;
-                        chatObj.otherParticipant = {
-                            id: otherUser.id,
-                            username: otherUser.username,
-                            avatar: otherUser.avatar,
+                // For direct chats, get the other participant
+                if (chat.type === 'direct') {
+                    const otherParticipant = participants.find(p => p.id !== userId);
+                    if (otherParticipant) {
+                        const displayName = [otherParticipant.firstName, otherParticipant.lastName].filter(Boolean).join(' ').trim() || otherParticipant.username;
+                        chat.otherParticipant = {
+                            id: otherParticipant.id,
+                            username: otherParticipant.username,
+                            avatar: otherParticipant.avatar,
                             displayName: displayName,
-                            status: otherUser.status || 'offline'
+                            status: otherParticipant.status || 'offline'
                         };
-                        chatObj.chatName = displayName;
-                        chatObj.avatar = otherUser.avatar;
-                    }
-                } else if (chatObj.type === 'group') {
-                    // For groups, use chat name
-                    if (!chatObj.chatName && chatObj.name) {
-                        chatObj.chatName = chatObj.name;
+                        chat.chatName = displayName;
+                        chat.avatar = otherParticipant.avatar;
                     }
                 }
                 
-                chatObj.unreadCount = 0;
-                return chatObj;
+                chat.unreadCount = 0;
+                return chat;
             });
 
             res.status(200).json({
@@ -181,7 +138,7 @@ router.get(
     })
 );
 
-// ===== GET SINGLE CHAT =====
+// ===== GET SINGLE CHAT (FIXED with raw SQL) =====
 router.get(
     '/:chatId',
     apiRateLimiter,
@@ -196,10 +153,8 @@ router.get(
                 });
             }
 
-            if (!checkModels(res)) return;
-
             const { chatId } = req.params;
-
+            
             if (!chatId) {
                 return res.status(400).json({
                     status: 'error',
@@ -207,76 +162,82 @@ router.get(
                 });
             }
 
-            const chat = await Chat.findOne({
-                where: {
-                    id: chatId,
-                    isActive: true
-                },
-                include: [
-                    {
-                        model: ChatParticipant,
-                        as: 'chatParticipants',
-                        where: { userId: userId },
-                        required: true,
-                        attributes: ['userId']
-                    },
-                    {
-                        model: Message,
-                        as: 'chatMessages',
-                        required: false,
-                        limit: 1,
-                        order: [['createdAt', 'DESC']],
-                        attributes: ['id', 'content', 'messageType', 'createdAt', 'senderId']
-                    },
-                    {
-                        model: User,
-                        as: 'chatCreator',
-                        attributes: ['id', 'username', 'avatar']
-                    }
-                ]
-            });
+            const sequelize = req.app.locals.db;
+            
+            // Check if user is in this chat
+            const isParticipant = await sequelize.query(`
+                SELECT 1 FROM chat_participants 
+                WHERE "chatId" = ${chatId} AND "userId" = ${userId}
+                LIMIT 1
+            `, { type: sequelize.QueryTypes.SELECT });
 
-            if (!chat) {
+            if (!isParticipant || isParticipant.length === 0) {
                 return res.status(404).json({
                     status: 'error',
                     message: 'Chat not found or access denied'
                 });
             }
 
-            // Get all participants for this chat
-            const participants = await ChatParticipant.findAll({
-                where: { chatId: chat.id },
-                attributes: ['userId']
-            });
+            // Get chat details
+            const chats = await sequelize.query(`
+                SELECT 
+                    c.id,
+                    c.type,
+                    c.name,
+                    c."createdBy",
+                    c."isActive",
+                    c."lastMessageId",
+                    c."lastMessageAt",
+                    c."createdAt",
+                    c."updatedAt",
+                    (
+                        SELECT jsonb_agg(
+                            jsonb_build_object(
+                                'id', p.id,
+                                'username', p.username,
+                                'avatar', p.avatar,
+                                'firstName', p."firstName",
+                                'lastName', p."lastName",
+                                'status', p.status,
+                                'lastSeen', p."lastSeen"
+                            )
+                        )
+                        FROM chat_participants cp
+                        JOIN "Users" p ON p.id = cp."userId"
+                        WHERE cp."chatId" = c.id
+                    ) as participants
+                FROM chats c
+                WHERE c.id = ${chatId}
+            `, { type: sequelize.QueryTypes.SELECT });
             
-            const participantIds = participants.map(p => p.userId);
+            if (!chats || chats.length === 0) {
+                return res.status(404).json({
+                    status: 'error',
+                    message: 'Chat not found'
+                });
+            }
             
-            // Get all user details for participants
-            const participantUsers = await User.findAll({
-                where: { id: { [Op.in]: participantIds } },
-                attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen']
-            });
-
-            const chatData = chat.toJSON ? chat.toJSON() : chat;
+            const chat = chats[0];
+            const participants = chat.participants || [];
             
-            chatData.unreadCount = 0;
-            chatData.participants = participantUsers;
+            chat.unreadCount = 0;
 
             if (chat.type === 'direct') {
-                const otherParticipant = participantUsers.find(p => p.id !== userId);
-                chatData.otherParticipant = otherParticipant || null;
-                if (!chatData.chatName && otherParticipant) {
-                    chatData.chatName = [otherParticipant.firstName, otherParticipant.lastName].filter(Boolean).join(' ').trim() || otherParticipant.username;
+                const otherParticipant = participants.find(p => p.id !== userId);
+                chat.otherParticipant = otherParticipant || null;
+                if (!chat.name && otherParticipant) {
+                    const displayName = [otherParticipant.firstName, otherParticipant.lastName].filter(Boolean).join(' ').trim() || otherParticipant.username;
+                    chat.chatName = displayName;
                 }
             } else if (chat.type === 'group') {
-                if (!chatData.chatName && chatData.name) {
-                    chatData.chatName = chatData.name;
+                if (!chat.chatName && chat.name) {
+                    chat.chatName = chat.name;
                 }
             }
 
             res.status(200).json({
                 status: 'success',
-                data: { chat: chatData },
+                data: { chat: chat },
             });
         } catch (error) {
             console.error('Error fetching chat:', error.message);
@@ -288,7 +249,7 @@ router.get(
     })
 );
 
-// ===== CREATE DIRECT CHAT =====
+// ===== CREATE DIRECT CHAT (FIXED with raw SQL) =====
 router.post(
     '/direct',
     apiRateLimiter,
@@ -302,8 +263,6 @@ router.post(
                     message: 'Authentication required'
                 });
             }
-
-            if (!checkModels(res)) return;
 
             const { userId: otherUserId } = req.body;
 
@@ -321,8 +280,14 @@ router.post(
                 });
             }
 
-            const otherUser = await User.findByPk(otherUserId);
-            if (!otherUser) {
+            const sequelize = req.app.locals.db;
+            
+            // Check if other user exists
+            const otherUser = await sequelize.query(`
+                SELECT id, username, avatar, "firstName", "lastName" FROM "Users" WHERE id = ${otherUserId}
+            `, { type: sequelize.QueryTypes.SELECT });
+
+            if (!otherUser || otherUser.length === 0) {
                 return res.status(404).json({
                     status: 'error',
                     message: 'User not found'
@@ -330,91 +295,79 @@ router.post(
             }
 
             // Check if direct chat already exists
-            let existingChat = null;
-            
-            // Manual check for existing chat
-            const chatsWithParticipant = await Chat.findAll({
-                include: [
-                    {
-                        model: ChatParticipant,
-                        as: 'chatParticipants',
-                        where: { userId: userId },
-                        required: true
-                    }
-                ],
-                where: { type: 'direct', isActive: true }
-            });
-            
-            for (const chat of chatsWithParticipant) {
-                const participants = await ChatParticipant.findAll({
-                    where: { chatId: chat.id },
-                    attributes: ['userId']
-                });
-                const participantIds = participants.map(p => p.userId);
-                if (participantIds.includes(userId) && participantIds.includes(otherUserId)) {
-                    existingChat = chat;
-                    break;
-                }
-            }
+            const existingChats = await sequelize.query(`
+                SELECT c.id, c.type, c.name
+                FROM chats c
+                JOIN chat_participants cp1 ON cp1."chatId" = c.id AND cp1."userId" = ${userId}
+                JOIN chat_participants cp2 ON cp2."chatId" = c.id AND cp2."userId" = ${otherUserId}
+                WHERE c.type = 'direct'
+                LIMIT 1
+            `, { type: sequelize.QueryTypes.SELECT });
 
-            if (existingChat) {
-                const chatData = existingChat.toJSON ? existingChat.toJSON() : existingChat;
-                chatData.otherParticipant = otherUser;
-                chatData.chatName = [otherUser.firstName, otherUser.lastName].filter(Boolean).join(' ').trim() || otherUser.username;
-
+            if (existingChats && existingChats.length > 0) {
+                const existingChat = existingChats[0];
+                const otherUserData = otherUser[0];
+                const displayName = [otherUserData.firstName, otherUserData.lastName].filter(Boolean).join(' ').trim() || otherUserData.username;
+                
                 return res.status(200).json({
                     status: 'success',
                     message: 'Chat already exists',
-                    data: { chat: chatData },
+                    data: { 
+                        chat: {
+                            id: existingChat.id,
+                            type: 'direct',
+                            otherParticipant: {
+                                id: otherUserData.id,
+                                username: otherUserData.username,
+                                avatar: otherUserData.avatar,
+                                displayName: displayName
+                            },
+                            chatName: displayName,
+                            unreadCount: 0
+                        }
+                    },
                 });
             }
-
-            const currentUser = await User.findByPk(userId);
 
             // Create new chat
-            const chat = await Chat.create({
-                type: 'direct',
-                createdBy: userId,
-                name: null,
-                isActive: true
-            });
-
-            if (!chat) {
-                return res.status(500).json({
-                    status: 'error',
-                    message: 'Failed to create chat'
-                });
-            }
-
+            const newChat = await sequelize.query(`
+                INSERT INTO chats (type, "createdBy", "isActive", "createdAt", "updatedAt")
+                VALUES ('direct', ${userId}, true, NOW(), NOW())
+                RETURNING id, type, name, "createdBy", "createdAt", "updatedAt"
+            `, { type: sequelize.QueryTypes.INSERT });
+            
+            const chatId = newChat[0][0].id;
+            
             // Add participants
-            if (ChatParticipant) {
-                await ChatParticipant.bulkCreate([
-                    { chatId: chat.id, userId: userId },
-                    { chatId: chat.id, userId: otherUserId }
-                ]);
-            }
+            await sequelize.query(`
+                INSERT INTO chat_participants ("chatId", "userId", "joinedAt", "createdAt", "updatedAt")
+                VALUES 
+                    (${chatId}, ${userId}, NOW(), NOW(), NOW()),
+                    (${chatId}, ${otherUserId}, NOW(), NOW(), NOW())
+            `);
 
-            const chatData = chat.toJSON ? chat.toJSON() : chat;
-            chatData.otherParticipant = otherUser;
-            chatData.chatName = [otherUser.firstName, otherUser.lastName].filter(Boolean).join(' ').trim() || otherUser.username;
-
-            if (req.io && otherUser.socketIds && Array.isArray(otherUser.socketIds) && otherUser.socketIds.length > 0) {
-                otherUser.socketIds.forEach(socketId => {
-                    req.io.to(socketId).emit('chat:created', {
-                        chat: chatData,
-                        createdBy: {
-                            id: userId,
-                            username: currentUser.username,
-                            avatar: currentUser.avatar,
-                        },
-                    });
-                });
-            }
+            const otherUserData = otherUser[0];
+            const displayName = [otherUserData.firstName, otherUserData.lastName].filter(Boolean).join(' ').trim() || otherUserData.username;
 
             res.status(201).json({
                 status: 'success',
                 message: 'Chat created successfully',
-                data: { chat: chatData },
+                data: { 
+                    chat: {
+                        id: chatId,
+                        type: 'direct',
+                        otherParticipant: {
+                            id: otherUserData.id,
+                            username: otherUserData.username,
+                            avatar: otherUserData.avatar,
+                            displayName: displayName
+                        },
+                        chatName: displayName,
+                        createdAt: new Date().toISOString(),
+                        updatedAt: new Date().toISOString(),
+                        unreadCount: 0
+                    }
+                },
             });
         } catch (error) {
             console.error('Error creating direct chat:', error.message);

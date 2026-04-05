@@ -232,12 +232,6 @@ module.exports = (sequelize, DataTypes) => {
 
   // FIXED: Associations with unique aliases
   Media.associate = function(models) {
-    // CRITICAL: Prevent duplicate associations (alias conflict fix)
-    if (this.associations && Object.keys(this.associations).length > 0) {
-        // Skip if associations already defined to prevent alias conflicts
-        return;
-    }
-        
     if (models.Users) {
       Media.belongsTo(models.Users, {
         foreignKey: 'userId',

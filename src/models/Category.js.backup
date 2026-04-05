@@ -232,12 +232,6 @@ module.exports = (sequelize, DataTypes) => {
 
   // FIXED: Associations with unique aliases
   Category.associate = function (models) {
-    // CRITICAL: Prevent duplicate associations (alias conflict fix)
-    if (this.associations && Object.keys(this.associations).length > 0) {
-        // Skip if associations already defined to prevent alias conflicts
-        return;
-    }
-        
     // Self-referential relationship for parent-child categories
     Category.belongsTo(models.Category, {
       as: 'parentCategory',

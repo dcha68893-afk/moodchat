@@ -214,12 +214,6 @@ module.exports = (sequelize, DataTypes) => {
 
   // Associations
   Chats.associate = function (models) {
-    // CRITICAL: Prevent duplicate associations (alias conflict fix)
-    if (this.associations && Object.keys(this.associations).length > 0) {
-        // Skip if associations already defined to prevent alias conflicts
-        return;
-    }
-        
     if (models.Messages) {
       Chats.hasMany(models.Messages, {
         foreignKey: 'chatId',

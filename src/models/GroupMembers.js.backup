@@ -132,12 +132,6 @@ module.exports = (sequelize, DataTypes) => {
 
   // FIXED: Associations with unique aliases
   GroupMembers.associate = function(models) {
-    // CRITICAL: Prevent duplicate associations (alias conflict fix)
-    if (this.associations && Object.keys(this.associations).length > 0) {
-        // Skip if associations already defined to prevent alias conflicts
-        return;
-    }
-        
     if (models.Groups) {
       GroupMembers.belongsTo(models.Groups, {
         foreignKey: 'groupId',

@@ -360,49 +360,43 @@ class GroupController {
    * @param {Object} res - Express response object
    * @param {Function} next - Express next middleware function
    */
-  async getUserGroups(req, res, next) {
-    try {
-      const userId = req.user.id;
-      const { 
-        page = 1, 
-        limit = 20, 
-        role,
-        search,
-        sortBy = 'updatedAt',
-        sortOrder = 'desc'
-      } = req.query;
+// In groupController.js - getUserGroups method
+async getUserGroups(req, res, next) {
+  try {
+    const userId = req.user.id;
+    const { page = 1, limit = 20, role, search, sortBy = 'updatedAt', sortOrder = 'desc' } = req.query;
 
-      const options = {
-        page: parseInt(page),
-        limit: parseInt(limit),
-        role,
-        search,
-        sortBy,
-        sortOrder: sortOrder === 'desc' ? -1 : 1
-      };
+    const options = {
+      page: parseInt(page),
+      limit: parseInt(limit),
+      role,
+      search,
+      sortBy,
+      sortOrder: sortOrder === 'desc' ? -1 : 1
+    };
 
-      // Validate pagination
-      if (options.page < 1 || options.limit < 1 || options.limit > 100) {
-        throw new AppError('Invalid pagination parameters', 400);
-      }
+    if (options.page < 1 || options.limit < 1 || options.limit > 100) {
+      throw new AppError('Invalid pagination parameters', 400);
+    }
 
-      const result = await groupService.getUserGroups(userId, options);
+    // FIXED: Use correct alias 'userGroup' in the service call
+    const result = await groupService.getUserGroups(userId, options);
 
-      res.status(200).json({
-        success: true,
-        message: 'User groups retrieved successfully',
-        data: result
-      });
-    } catch (error) {
-      logger.error('Get user groups controller error:', error);
-      
-      if (error instanceof AppError) {
-        next(error);
-      } else {
-        next(new AppError('Failed to retrieve user groups', 500));
-      }
+    res.status(200).json({
+      success: true,
+      message: 'User groups retrieved successfully',
+      data: result
+    });
+  } catch (error) {
+    logger.error('Get user groups controller error:', error);
+    
+    if (error instanceof AppError) {
+      next(error);
+    } else {
+      next(new AppError('Failed to retrieve user groups', 500));
     }
   }
+}
 
   /**
    * Search groups

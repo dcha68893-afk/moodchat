@@ -1,4 +1,4 @@
-﻿// routes/friends.js - Complete Friend Management Routes
+// routes/friends.js - Complete Friend Management Routes
 // Full implementation with all features - NO SUMMARIZATION
 // Includes: Friends CRUD, Requests, Blocking, Pinning, Muting, Export, Search, Suggestions, Contacts, Stats, Invites
 
@@ -31,7 +31,7 @@ const { Op } = Sequelize;
 const asyncHandler = require('express-async-handler');
 const { apiRateLimiter } = require('../middleware/rateLimiter');
 
-console.log('✅ Friends routes initialized');
+console.log('? Friends routes initialized');
 
 // Helper function to format user data
 const formatUser = (user) => {
@@ -116,8 +116,8 @@ router.get(
                 const friendships = await withTimeout(Friend.findAll({
                     where: {
                         [Op.or]: [
-                            { requesterId: userId, status: 'accepted' },
-                            { receiverId: userId, status: 'accepted' }
+                            { requester_id: userId, status: 'accepted' },
+                            { receiver_id: userId, status: 'accepted' }
                         ]
                     },
                     include: [
@@ -191,100 +191,88 @@ router.get(
     })
 );
 
-// ===== GET ALL FRIENDS =====
+// In friends.js - Update the GET / endpoint (around line 140)
 router.get(
-    '/',
-    apiRateLimiter,
-    asyncHandler(async (req, res) => {
-        try {
-            const userId = getUserId(req);
-            
-            if (!userId) {
-                return res.status(401).json({
-                    success: false,
-                    message: 'Authentication required'
-                });
-            }
+  '/',
+  apiRateLimiter,
+  asyncHandler(async (req, res) => {
+    try {
+      const userId = getUserId(req);
+      
+      if (!userId) {
+        return res.status(401).json({
+          success: false,
+          message: 'Authentication required'
+        });
+      }
 
-            console.log('[Friends] Fetching friends for user:', userId);
+      console.log('[Friends] Fetching friends for user:', userId);
 
-            if (!Friend) {
-                return res.status(200).json({
-                    success: true,
-                    data: {
-                        friends: []
-                    }
-                });
-            }
+      if (!Friend) {
+        return res.status(200).json({
+          success: true,
+          data: { friends: [] }
+        });
+      }
 
-            try {
-                // Get all friendships with timeout
-                const friendships = await withTimeout(Friend.findAll({
-                    where: {
-                        [Op.or]: [
-                            { requesterId: userId, status: 'accepted' },
-                            { receiverId: userId, status: 'accepted' }
-                        ]
-                    },
-                    attributes: ['requesterId', 'receiverId'],
-                    raw: true,
-                    limit: 200
-                }));
+      try {
+        // FIXED: Use correct column names with underscore
+        const friendships = await withTimeout(Friend.findAll({
+          where: {
+            [Op.or]: [
+              { requester_id: userId, status: 'accepted' },
+              { receiver_id: userId, status: 'accepted' }
+            ]
+          },
+          attributes: ['requester_id', 'receiver_id'],
+          raw: true,
+          limit: 200
+        }));
 
-                if (!friendships || friendships.length === 0) {
-                    return res.status(200).json({
-                        success: true,
-                        data: {
-                            friends: []
-                        }
-                    });
-                }
-
-                const friendIds = friendships.map(f => f.requesterId === userId ? f.receiverId : f.requesterId).filter(id => id && id !== userId);
-
-                if (friendIds.length === 0) {
-                    return res.status(200).json({
-                        success: true,
-                        data: {
-                            friends: []
-                        }
-                    });
-                }
-
-                // Get friend details with timeout
-                const friends = await withTimeout(User.findAll({
-                    where: { id: { [Op.in]: friendIds } },
-                    attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen'],
-                    limit: 200
-                }));
-
-                const formattedFriends = (friends || []).map(friend => formatUser(friend));
-
-                return res.status(200).json({
-                    success: true,
-                    data: {
-                        friends: formattedFriends
-                    }
-                });
-            } catch (dbError) {
-                console.error('[Friends] Database error:', dbError.message);
-                return res.status(200).json({
-                    success: true,
-                    data: {
-                        friends: []
-                    }
-                });
-            }
-        } catch (error) {
-            console.error('[Friends] Error fetching friends:', error.message);
-            return res.status(200).json({
-                success: true,
-                data: {
-                    friends: []
-                }
-            });
+        if (!friendships || friendships.length === 0) {
+          return res.status(200).json({
+            success: true,
+            data: { friends: [] }
+          });
         }
-    })
+
+        // FIXED: Use correct column names
+        const friendIds = friendships.map(f => f.requester_id === userId ? f.receiver_id : f.requester_id).filter(id => id && id !== userId);
+
+        if (friendIds.length === 0) {
+          return res.status(200).json({
+            success: true,
+            data: { friends: [] }
+          });
+        }
+
+        const friends = await withTimeout(User.findAll({
+          where: { id: { [Op.in]: friendIds } },
+          attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen'],
+          limit: 200
+        }));
+
+        const formattedFriends = (friends || []).map(friend => formatUser(friend));
+
+        return res.status(200).json({
+          success: true,
+          data: { friends: formattedFriends }
+        });
+      } catch (dbError) {
+        console.error('[Friends] Database error:', dbError.message);
+        return res.status(200).json({
+          success: true,
+          data: { friends: [] }
+        });
+      }
+    } catch (error) {
+      console.error('[Friends] Error fetching friends:', error.message);
+      return res.status(200).json({
+        success: true,
+        data: { friends: [] }
+      });
+    }
+  })
 );
 
 // ===== GET INCOMING FRIEND REQUESTS =====
@@ -314,7 +302,7 @@ router.get(
             try {
                 const requests = await withTimeout(Friend.findAll({
                     where: {
-                        receiverId: userId,
+    receiver_id: userId,  // Changed from receiverId
                         status: 'pending'
                     },
                     include: [{
@@ -388,7 +376,7 @@ router.get(
             try {
                 const requests = await withTimeout(Friend.findAll({
                     where: {
-                        requesterId: userId,
+                        receiver_id: userId,
                         status: 'pending'
                     },
                     include: [{
@@ -464,7 +452,7 @@ router.get(
             try {
                 const [incomingRequests, outgoingRequests] = await Promise.all([
                     withTimeout(Friend.findAll({
-                        where: { receiverId: userId, status: 'pending' },
+                        where: { receiver_id: userId, status: 'pending' },
                         include: [{
                             model: User,
                             as: 'friendRequesterUser',
@@ -474,7 +462,7 @@ router.get(
                         limit: 100
                     })),
                     withTimeout(Friend.findAll({
-                        where: { requesterId: userId, status: 'pending' },
+                        where: { requester_id: userId, status: 'pending' },
                         include: [{
                             model: User,
                             as: 'friendReceiverUser',
@@ -561,8 +549,8 @@ router.get(
                 const friendships = await withTimeout(Friend.findAll({
                     where: {
                         [Op.or]: [
-                            { requesterId: userId, status: 'accepted' },
-                            { receiverId: userId, status: 'accepted' }
+                            { requester_id: userId, status: 'accepted' },
+                            { receiver_id: userId, status: 'accepted' }
                         ]
                     },
                     attributes: ['requesterId', 'receiverId'],
@@ -580,7 +568,7 @@ router.get(
                     });
                 }
 
-                const friendIds = friendships.map(f => f.requesterId === userId ? f.receiverId : f.requesterId).filter(id => id && id !== userId);
+                const friendIds = friendships.map(f => f.requesterId === userId ? f.receiver_id : f.requesterId).filter(id => id && id !== userId);
 
                 if (friendIds.length === 0) {
                     return res.status(200).json({
@@ -659,8 +647,8 @@ router.get(
                 const blockedRelations = await withTimeout(Friend.findAll({
                     where: {
                         [Op.or]: [
-                            { requesterId: userId, status: 'blocked' },
-                            { receiverId: userId, status: 'blocked' }
+                            { requester_id: userId, status: 'blocked' },
+                            { receiver_id: userId, status: 'blocked' }
                         ]
                     },
                     attributes: ['requesterId', 'receiverId'],
@@ -678,7 +666,7 @@ router.get(
                     });
                 }
 
-                const blockedIds = blockedRelations.map(f => f.requesterId === userId ? f.receiverId : f.requesterId).filter(id => id && id !== userId);
+                const blockedIds = blockedRelations.map(f => f.requesterId === userId ? f.receiver_id : f.requesterId).filter(id => id && id !== userId);
 
                 if (blockedIds.length === 0) {
                     return res.status(200).json({
@@ -870,8 +858,8 @@ router.post(
                 const existingFriendship = await withTimeout(Friend.findOne({
                     where: {
                         [Op.or]: [
-                            { requesterId: userId, receiverId: targetId },
-                            { requesterId: targetId, receiverId: userId }
+                            { requester_id: userId, receiver_id: targetId },
+                            { requester_id: targetId, receiver_id: userId }
                         ]
                     }
                 }));
@@ -912,8 +900,8 @@ router.post(
 
                 // Create new friend request
                 const friendRequest = await Friend.create({
-                    requesterId: userId,
-                    receiverId: targetId,
+                    requester_id: userId,
+                    receiver_id: targetId,
                     status: 'pending',
                     createdAt: new Date(),
                     updatedAt: new Date()
@@ -924,8 +912,8 @@ router.post(
                     data: {
                         request: {
                             id: friendRequest.id,
-                            requesterId: friendRequest.requesterId,
-                            receiverId: friendRequest.receiverId,
+                            requester_id: friendRequest.requesterId,
+                            receiver_id: friendRequest.receiver_id,
                             status: friendRequest.status,
                             createdAt: friendRequest.createdAt
                         }
@@ -977,7 +965,7 @@ router.post(
                 const friendRequest = await withTimeout(Friend.findOne({
                     where: {
                         id: requestId,
-                        receiverId: userId,
+                        receiver_id: userId,
                         status: 'pending'
                     }
                 }));
@@ -1080,7 +1068,7 @@ router.post(
                 const friendRequest = await withTimeout(Friend.findOne({
                     where: {
                         id: requestId,
-                        receiverId: userId,
+                        receiver_id: userId,
                         status: 'pending'
                     }
                 }));
@@ -1150,8 +1138,8 @@ router.delete(
                 const friendships = await withTimeout(Friend.findAll({
                     where: {
                         [Op.or]: [
-                            { requesterId: userId, receiverId: targetId, status: 'accepted' },
-                            { requesterId: targetId, receiverId: userId, status: 'accepted' }
+                            { requester_id: userId, receiver_id: targetId, status: 'accepted' },
+                            { requester_id: targetId, receiver_id: userId, status: 'accepted' }
                         ]
                     }
                 }));
@@ -1228,8 +1216,8 @@ router.post(
                 let friendship = await withTimeout(Friend.findOne({
                     where: {
                         [Op.or]: [
-                            { requesterId: userId, receiverId: targetId },
-                            { requesterId: targetId, receiverId: userId }
+                            { requester_id: userId, receiver_id: targetId },
+                            { requester_id: targetId, receiver_id: userId }
                         ]
                     }
                 }));
@@ -1240,8 +1228,8 @@ router.post(
                     await friendship.save();
                 } else {
                     friendship = await Friend.create({
-                        requesterId: userId,
-                        receiverId: targetId,
+                        requester_id: userId,
+                        receiver_id: targetId,
                         status: 'blocked',
                         blockedAt: new Date()
                     });
@@ -1306,8 +1294,8 @@ router.post(
                 const friendship = await withTimeout(Friend.findOne({
                     where: {
                         [Op.or]: [
-                            { requesterId: userId, receiverId: targetId, status: 'blocked' },
-                            { requesterId: targetId, receiverId: userId, status: 'blocked' }
+                            { requester_id: userId, receiver_id: targetId, status: 'blocked' },
+                            { requester_id: targetId, receiver_id: userId, status: 'blocked' }
                         ]
                     }
                 }));
@@ -1377,8 +1365,8 @@ router.post(
                 const friendship = await withTimeout(Friend.findOne({
                     where: {
                         [Op.or]: [
-                            { requesterId: userId, receiverId: targetId, status: 'accepted' },
-                            { requesterId: targetId, receiverId: userId, status: 'accepted' }
+                            { requester_id: userId, receiver_id: targetId, status: 'accepted' },
+                            { requester_id: targetId, receiver_id: userId, status: 'accepted' }
                         ]
                     }
                 }));
@@ -1449,8 +1437,8 @@ router.post(
                 const friendship = await withTimeout(Friend.findOne({
                     where: {
                         [Op.or]: [
-                            { requesterId: userId, receiverId: targetId, status: 'accepted' },
-                            { requesterId: targetId, receiverId: userId, status: 'accepted' }
+                            { requester_id: userId, receiver_id: targetId, status: 'accepted' },
+                            { requester_id: targetId, receiver_id: userId, status: 'accepted' }
                         ]
                     }
                 }));
@@ -1522,8 +1510,8 @@ router.post(
                 const friendship = await withTimeout(Friend.findOne({
                     where: {
                         [Op.or]: [
-                            { requesterId: userId, receiverId: targetId, status: 'accepted' },
-                            { requesterId: targetId, receiverId: userId, status: 'accepted' }
+                            { requester_id: userId, receiver_id: targetId, status: 'accepted' },
+                            { requester_id: targetId, receiver_id: userId, status: 'accepted' }
                         ]
                     }
                 }));
@@ -1598,8 +1586,8 @@ router.post(
                 const friendship = await withTimeout(Friend.findOne({
                     where: {
                         [Op.or]: [
-                            { requesterId: userId, receiverId: targetId, status: 'accepted' },
-                            { requesterId: targetId, receiverId: userId, status: 'accepted' }
+                            { requester_id: userId, receiver_id: targetId, status: 'accepted' },
+                            { requester_id: targetId, receiver_id: userId, status: 'accepted' }
                         ]
                     }
                 }));
@@ -1664,8 +1652,8 @@ router.get(
                 const friendships = await withTimeout(Friend.findAll({
                     where: {
                         [Op.or]: [
-                            { requesterId: userId, status: 'accepted' },
-                            { receiverId: userId, status: 'accepted' }
+                            { requester_id: userId, status: 'accepted' },
+                            { receiver_id: userId, status: 'accepted' }
                         ],
                         isPinned: true
                     },
@@ -1746,8 +1734,8 @@ router.get(
                 const friendships = await withTimeout(Friend.findAll({
                     where: {
                         [Op.or]: [
-                            { requesterId: userId, status: 'accepted' },
-                            { receiverId: userId, status: 'accepted' }
+                            { requester_id: userId, status: 'accepted' },
+                            { receiver_id: userId, status: 'accepted' }
                         ],
                         isMuted: true
                     },
@@ -1829,8 +1817,8 @@ router.get(
                 const friendships = await withTimeout(Friend.findAll({
                     where: {
                         [Op.or]: [
-                            { requesterId: userId, status: 'accepted' },
-                            { receiverId: userId, status: 'accepted' }
+                            { requester_id: userId, status: 'accepted' },
+                            { receiver_id: userId, status: 'accepted' }
                         ]
                     },
                     include: [
@@ -1943,8 +1931,8 @@ router.get(
                     friendship = await withTimeout(Friend.findOne({
                         where: {
                             [Op.or]: [
-                                { requesterId: userId, receiverId: targetId, status: 'accepted' },
-                                { requesterId: targetId, receiverId: userId, status: 'accepted' }
+                                { requester_id: userId, receiver_id: targetId, status: 'accepted' },
+                                { requester_id: targetId, receiver_id: userId, status: 'accepted' }
                             ]
                         }
                     }));
@@ -2019,8 +2007,8 @@ router.get(
                 const friendships = await withTimeout(Friend.findAll({
                     where: {
                         [Op.or]: [
-                            { requesterId: userId, status: 'accepted' },
-                            { receiverId: userId, status: 'accepted' }
+                            { requester_id: userId, status: 'accepted' },
+                            { receiver_id: userId, status: 'accepted' }
                         ]
                     },
                     attributes: ['requesterId', 'receiverId', 'isPinned', 'isMuted'],
@@ -2042,7 +2030,7 @@ router.get(
                     });
                 }
 
-                const friendIds = friendships.map(f => f.requesterId === userId ? f.receiverId : f.requesterId).filter(id => id && id !== userId);
+                const friendIds = friendships.map(f => f.requesterId === userId ? f.receiver_id : f.requesterId).filter(id => id && id !== userId);
                 
                 let onlineCount = 0;
                 let recentlyActiveCount = 0;
@@ -2128,15 +2116,15 @@ router.get(
                     const friendships = await withTimeout(Friend.findAll({
                         where: {
                             [Op.or]: [
-                                { requesterId: userId },
-                                { receiverId: userId }
+                                { requester_id: userId },
+                                { receiver_id: userId }
                             ]
                         },
                         attributes: ['requesterId', 'receiverId'],
                         raw: true,
                         limit: 500
                     }));
-                    const friendIds = friendships.map(f => f.requesterId === userId ? f.receiverId : f.requesterId);
+                    const friendIds = friendships.map(f => f.requesterId === userId ? f.receiver_id : f.requesterId);
                     excludedIds = [...excludedIds, ...friendIds];
                 } catch (dbError) {
                     console.log('[Friends Route] Suggestions friend query error:', dbError.message);
@@ -2202,8 +2190,8 @@ router.get(
                 const friendships = await withTimeout(Friend.findAll({
                     where: {
                         [Op.or]: [
-                            { requesterId: userId, status: 'accepted' },
-                            { receiverId: userId, status: 'accepted' }
+                            { requester_id: userId, status: 'accepted' },
+                            { receiver_id: userId, status: 'accepted' }
                         ]
                     },
                     include: [
@@ -2288,15 +2276,15 @@ router.get(
                     const friendships = await withTimeout(Friend.findAll({
                         where: {
                             [Op.or]: [
-                                { requesterId: userId },
-                                { receiverId: userId }
+                                { requester_id: userId },
+                                { receiver_id: userId }
                             ]
                         },
                         attributes: ['requesterId', 'receiverId'],
                         raw: true,
                         limit: 500
                     }));
-                    const friendIds = friendships.map(f => f.requesterId === userId ? f.receiverId : f.requesterId);
+                    const friendIds = friendships.map(f => f.requesterId === userId ? f.receiver_id : f.requesterId);
                     excludedIds = [...excludedIds, ...friendIds];
                 } catch (dbError) {
                     console.log('[Friends Route] Search friend query error:', dbError.message);
@@ -2433,8 +2421,8 @@ router.get(
                     const friendships = await withTimeout(Friend.findAll({
                         where: {
                             [Op.or]: [
-                                { requesterId: userId, status: 'accepted' },
-                                { receiverId: userId, status: 'accepted' }
+                                { requester_id: userId, status: 'accepted' },
+                                { receiver_id: userId, status: 'accepted' }
                             ]
                         },
                         include: [

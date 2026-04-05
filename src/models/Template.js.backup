@@ -325,12 +325,6 @@ module.exports = (sequelize, DataTypes) => {
 
   // FIXED: Associations with unique aliases
   Template.associate = function (models) {
-    // CRITICAL: Prevent duplicate associations (alias conflict fix)
-    if (this.associations && Object.keys(this.associations).length > 0) {
-        // Skip if associations already defined to prevent alias conflicts
-        return;
-    }
-        
     if (models.Category) {
       Template.belongsTo(models.Category, {
         foreignKey: 'categoryId',
