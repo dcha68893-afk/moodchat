@@ -124,34 +124,41 @@ if (this.environment === 'production' || this.isRender) {
         this.allowedOrigins.add('https://[::1]');
     }
     
-    // Load production origins - strict policy
-    loadProductionOrigins() {
-        console.log('🛡️  CORS: Configuring for PRODUCTION environment');
-        
-        // Primary Render frontend URL
-        const renderFrontend = 'https://moodfronted.onrender.com';
-        this.allowedOrigins.add(renderFrontend);
-        console.log(`✅ CORS: Allowed production frontend: ${renderFrontend}`);
-        
-        // Allow Render backend URL if running on Render
-        if (this.isRender && process.env.RENDER_EXTERNAL_URL) {
-            this.allowedOrigins.add(process.env.RENDER_EXTERNAL_URL);
-            console.log(`✅ CORS: Allowed Render backend URL: ${process.env.RENDER_EXTERNAL_URL}`);
-        }
-        
-        // Allow custom frontend URL from environment if specified
-        if (this.frontendUrl) {
-            const urls = this.frontendUrl.split(',').map(url => url.trim());
-            urls.forEach(url => {
-                this.allowedOrigins.add(url);
-                console.log(`✅ CORS: Allowed custom frontend: ${url}`);
-            });
-        }
-        
-        // Additional security for production: Remove any insecure origins
-        this.removeInsecureOrigins();
+   loadProductionOrigins() {
+    console.log('🛡️ CORS: Configuring for PRODUCTION environment');
+    
+    // Primary Render frontend URL
+    const renderFrontend = 'https://moodfronted.onrender.com';
+    this.allowedOrigins.add(renderFrontend);
+    this.allowedOrigins.add(renderFrontend + '/'); // With trailing slash
+    console.log(`✅ CORS: Allowed production frontend: ${renderFrontend}`);
+    
+    // Also allow Render backend URL if running on Render
+    if (this.isRender && process.env.RENDER_EXTERNAL_URL) {
+        this.allowedOrigins.add(process.env.RENDER_EXTERNAL_URL);
+        console.log(`✅ CORS: Allowed Render backend URL: ${process.env.RENDER_EXTERNAL_URL}`);
     }
     
+    // Allow custom frontend URL from environment if specified
+    if (this.frontendUrl) {
+        const urls = this.frontendUrl.split(',').map(url => url.trim());
+        urls.forEach(url => {
+            this.allowedOrigins.add(url);
+            this.allowedOrigins.add(url + '/'); // With trailing slash
+            console.log(`✅ CORS: Allowed custom frontend: ${url}`);
+        });
+    }
+    
+    // CRITICAL: Ensure moodfronted.onrender.com is always allowed
+    if (!this.allowedOrigins.has('https://moodfronted.onrender.com')) {
+        this.allowedOrigins.add('https://moodfronted.onrender.com');
+        console.log(`✅ CORS: Explicitly added moodfronted.onrender.com`);
+    }
+    
+    // Additional security for production: Remove any insecure origins
+    this.removeInsecureOrigins();
+}
+
     // Load development origins - flexible policy
     loadDevelopmentOrigins() {
         console.log('🔧 CORS: Configuring for DEVELOPMENT environment');
@@ -3921,28 +3928,100 @@ console.log('Available routes will be handled by RouterManager');
         console.log('🔄 Setting up middleware with correct order...');
         // In server.js, in setupMiddleware() function, add this BEFORE all other middleware:
 
-// CRITICAL: Handle OPTIONS preflight for ALL routes
-this.app.options('*', (req, res) => {
-    console.log('🌐 OPTIONS request for:', req.path);
-    const origin = req.headers.origin;
-    
-    // Allow your frontend origin
-    if (origin && (origin.includes('127.0.0.1:5500') || origin.includes('localhost:5500'))) {
-        res.header('Access-Control-Allow-Origin', origin);
-        res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
-        res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept');
-        res.header('Access-Control-Allow-Credentials', 'true');
-        res.header('Access-Control-Max-Age', '86400');
-        res.status(204).send();
-    } else {
-        res.status(204).send();
+// 2. Handle preflight requests - FIXED CORS for all origins
+this.app.use((req, res, next) => {
+    // Handle OPTIONS preflight for ALL routes
+    if (req.method === 'OPTIONS') {
+        const origin = req.headers.origin;
+        
+        // Log for debugging
+        console.log(`🌐 OPTIONS preflight for: ${req.path} from origin: ${origin}`);
+        
+        // Check if origin is allowed
+        let isAllowed = false;
+        
+        if (origin) {
+            // Check against CORS manager
+            if (corsManager.isOriginAllowed(origin)) {
+                isAllowed = true;
+            }
+            // Also check for Render frontend explicitly
+            else if (origin === 'https://moodfronted.onrender.com' ||
+                     origin === 'https://moodfronted.onrender.com/' ||
+                     origin.includes('localhost:5500') ||
+                     origin.includes('127.0.0.1:5500')) {
+                isAllowed = true;
+            }
+        }
+        
+        if (isAllowed) {
+            // Set CORS headers for preflight
+            res.header('Access-Control-Allow-Origin', origin);
+            res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
+            res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept, Origin');
+            res.header('Access-Control-Allow-Credentials', 'true');
+            res.header('Access-Control-Max-Age', '86400');
+            
+            console.log(`✅ OPTIONS allowed for: ${origin}`);
+            return res.status(204).end();
+        } else {
+            console.log(`❌ OPTIONS blocked for: ${origin}`);
+            return res.status(204).end(); // Still return 204 but without CORS headers
+        }
     }
+    next();
 });
+
         // Get dynamic CORS options from the manager
         const corsOptions = corsManager.getCorsOptions();
         
         // 1. CORS middleware - FIRST (CRITICAL)
         this.app.use(cors(corsOptions));
+        // 1.5 ADD THIS: Force CORS headers for all responses (especially important for login)
+this.app.use((req, res, next) => {
+    // Store original end function
+    const originalEnd = res.end;
+    const originalJson = res.json;
+    const originalSend = res.send;
+    
+    // Override end to ensure CORS headers are always set
+    res.end = function(...args) {
+        const origin = req.headers.origin;
+        if (origin && (origin === 'https://moodfronted.onrender.com' ||
+                       origin.includes('localhost:5500') ||
+                       origin.includes('127.0.0.1:5500'))) {
+            res.setHeader('Access-Control-Allow-Origin', origin);
+            res.setHeader('Access-Control-Allow-Credentials', 'true');
+        }
+        originalEnd.apply(this, args);
+    };
+    
+    // Override json to ensure CORS headers
+    res.json = function(data) {
+        const origin = req.headers.origin;
+        if (origin && (origin === 'https://moodfronted.onrender.com' ||
+                       origin.includes('localhost:5500') ||
+                       origin.includes('127.0.0.1:5500'))) {
+            res.setHeader('Access-Control-Allow-Origin', origin);
+            res.setHeader('Access-Control-Allow-Credentials', 'true');
+        }
+        return originalJson.call(this, data);
+    };
+    
+    // Override send to ensure CORS headers
+    res.send = function(data) {
+        const origin = req.headers.origin;
+        if (origin && (origin === 'https://moodfronted.onrender.com' ||
+                       origin.includes('localhost:5500') ||
+                       origin.includes('127.0.0.1:5500'))) {
+            res.setHeader('Access-Control-Allow-Origin', origin);
+            res.setHeader('Access-Control-Allow-Credentials', 'true');
+        }
+        return originalSend.call(this, data);
+    };
+    
+    next();
+});
         
         // 2. Handle preflight requests - CRITICAL FIX: Properly handle Authorization header
         this.app.options('*', (req, res) => {
