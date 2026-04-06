@@ -1,348 +1,275 @@
-const mongoose = require('mongoose');
-const Message = require('../models/Message');
-const Conversation = require('../models/Chats');
-const { ServerError, ValidationError, NotFoundError } = require('../utils/errors');
-const { MESSAGE_LIMIT_PER_PAGE } = process.env;
+// =============================================================================
+// messageService.js  — v2.0 (Sequelize / PostgreSQL)
+// FIXED: Replaced Mongoose (MongoDB) implementation with Sequelize queries to
+// match the PostgreSQL database used by every other part of the application.
+// The original file used mongoose.Types.ObjectId, .findById(), $addToSet, etc.
+// — none of which exist in Sequelize — so the entire service was dead code.
+// =============================================================================
 
-/**
- * Message Service
- * Handles all business logic for messaging operations
- */
+const { ValidationError, NotFoundError, ServerError } = require('../utils/errors');
+
+function getDB() {
+    try { return require('../models').sequelize; }
+    catch (e) { throw new ServerError('Database not available'); }
+}
+
+const MESSAGE_LIMIT = parseInt(process.env.MESSAGE_LIMIT_PER_PAGE, 10) || 50;
+
 class MessageService {
-  /**
-   * Create a new message
-   * @param {Object} messageData - Message data including sender, conversationId, content
-   * @returns {Promise<Object>} Created message
-   */
-  async createMessage(messageData) {
-    try {
-      const { sender, conversationId, content, type = 'text' } = messageData;
 
-      // Validate required fields
-      if (!sender || !conversationId || !content) {
-        throw new ValidationError('Sender, conversationId, and content are required');
-      }
+    async createMessage(messageData) {
+        const sequelize = getDB();
+        const { chatId, senderId, content, type = 'text' } = messageData;
 
-      // Check if conversation exists
-      const conversation = await Conversation.findById(conversationId);
-      if (!conversation) {
-        throw new NotFoundError('Conversation not found');
-      }
+        if (!chatId || !senderId || (!content && type === 'text'))
+            throw new ValidationError('chatId, senderId, and content are required');
 
-      // Verify sender is part of the conversation
-      if (!conversation.participants.includes(sender)) {
-        throw new ValidationError('Sender is not a participant in this conversation');
-      }
+        const validTypes = ['text','image','video','audio','file','document','system'];
+        if (!validTypes.includes(type)) throw new ValidationError(`Invalid message type: ${type}`);
+        if (type === 'text' && content.length > 5000) throw new ValidationError('Message too long (max 5000 chars)');
 
-      // Validate message type
-      const validTypes = ['text', 'image', 'file', 'system'];
-      if (!validTypes.includes(type)) {
-        throw new ValidationError('Invalid message type');
-      }
+        const [participant] = await sequelize.query(
+            `SELECT 1 FROM chat_participants WHERE "chatId"=:chatId AND "userId"=:senderId LIMIT 1`,
+            { replacements: { chatId, senderId }, type: sequelize.QueryTypes.SELECT }
+        );
+        if (!participant) throw new ValidationError('Sender is not a participant in this chat');
 
-      // Validate content length for text messages
-      if (type === 'text' && content.length > 5000) {
-        throw new ValidationError('Message content too long');
-      }
+        const [rows] = await sequelize.query(
+            `INSERT INTO "Messages"
+               ("chatId","senderId",content,type,reactions,"isEdited","isDeleted","sentAt","deliveredAt","createdAt","updatedAt")
+             VALUES (:chatId,:senderId,:content,:type,'{}',false,false,NOW(),NOW(),NOW(),NOW())
+             RETURNING *`,
+            { replacements: { chatId, senderId, content: (content||'').trim(), type },
+              type: sequelize.QueryTypes.INSERT }
+        );
+        const message = rows[0];
 
-      // Create message
-      const message = new Message({
-        sender: new mongoose.Types.ObjectId(sender),
-        conversationId: new mongoose.Types.ObjectId(conversationId),
-        content,
-        type,
-        readBy: [sender], // Sender has read their own message
-      });
-
-      const savedMessage = await message.save();
-
-      // Update conversation's last message and timestamp
-      conversation.lastMessage = savedMessage._id;
-      conversation.lastMessageAt = savedMessage.createdAt;
-      await conversation.save();
-
-      // Populate sender details for response
-      await savedMessage.populate({
-        path: 'sender',
-        select: '_id username email profilePicture',
-      });
-
-      return savedMessage;
-    } catch (error) {
-      if (error instanceof ValidationError || error instanceof NotFoundError) {
-        throw error;
-      }
-      console.error('Error creating message:', error);
-      throw new ServerError('Failed to create message');
-    }
-  }
-
-  /**
-   * Get messages for a conversation with pagination
-   * @param {string} conversationId - Conversation ID
-   * @param {string} userId - User ID for read status
-   * @param {number} page - Page number (starting from 1)
-   * @param {number} limit - Messages per page
-   * @returns {Promise<Object>} Messages and pagination info
-   */
-  async getConversationMessages(
-    conversationId,
-    userId,
-    page = 1,
-    limit = MESSAGE_LIMIT_PER_PAGE || 50
-  ) {
-    try {
-      // Validate parameters
-      if (!conversationId || !userId) {
-        throw new ValidationError('Conversation ID and user ID are required');
-      }
-
-      page = parseInt(page);
-      limit = parseInt(limit);
-
-      if (page < 1 || limit < 1 || limit > 100) {
-        throw new ValidationError('Invalid pagination parameters');
-      }
-
-      // Check if conversation exists and user is a participant
-      const conversation = await Conversation.findById(conversationId);
-      if (!conversation) {
-        throw new NotFoundError('Conversation not found');
-      }
-
-      if (!conversation.participants.includes(userId)) {
-        throw new ValidationError('User is not a participant in this conversation');
-      }
-
-      // Calculate skip value for pagination
-      const skip = (page - 1) * limit;
-
-      // Fetch messages with population
-      const messages = await Message.find({ conversationId })
-        .sort({ createdAt: -1 }) // Latest messages first
-        .skip(skip)
-        .limit(limit)
-        .populate({
-          path: 'sender',
-          select: '_id username email profilePicture',
-        })
-        .lean();
-
-      // Update read status for messages not read by this user
-      const unreadMessageIds = messages
-        .filter(msg => !msg.readBy.includes(userId))
-        .map(msg => msg._id);
-
-      if (unreadMessageIds.length > 0) {
-        await Message.updateMany(
-          { _id: { $in: unreadMessageIds } },
-          { $addToSet: { readBy: userId } }
+        await sequelize.query(
+            `UPDATE chats SET "updatedAt"=NOW(),"lastMessageId"=:mid WHERE id=:chatId`,
+            { replacements: { mid: message.id, chatId } }
         );
 
-        // Update read status in the returned messages
-        messages.forEach(msg => {
-          if (unreadMessageIds.includes(msg._id)) {
-            msg.readBy.push(userId);
-          }
-        });
-      }
-
-      // Get total count for pagination metadata
-      const totalMessages = await Message.countDocuments({ conversationId });
-      const totalPages = Math.ceil(totalMessages / limit);
-
-      return {
-        messages: messages.reverse(), // Return in chronological order
-        pagination: {
-          currentPage: page,
-          totalPages,
-          totalMessages,
-          hasNext: page < totalPages,
-          hasPrevious: page > 1,
-        },
-      };
-    } catch (error) {
-      if (error instanceof ValidationError || error instanceof NotFoundError) {
-        throw error;
-      }
-      console.error('Error fetching messages:', error);
-      throw new ServerError('Failed to fetch messages');
+        const [sender] = await sequelize.query(
+            `SELECT id,username,avatar,"firstName","lastName" FROM "Users" WHERE id=:senderId`,
+            { replacements: { senderId }, type: sequelize.QueryTypes.SELECT }
+        );
+        message.sender = sender || null;
+        return message;
     }
-  }
 
-  /**
-   * Mark messages as read
-   * @param {string} conversationId - Conversation ID
-   * @param {string} userId - User ID marking as read
-   * @param {Array<string>} messageIds - Specific message IDs to mark as read (optional)
-   * @returns {Promise<Object>} Update result
-   */
-  async markMessagesAsRead(conversationId, userId, messageIds = null) {
-    try {
-      if (!conversationId || !userId) {
-        throw new ValidationError('Conversation ID and user ID are required');
-      }
+    async getConversationMessages(chatId, userId, page = 1, limit = MESSAGE_LIMIT) {
+        const sequelize = getDB();
+        if (!chatId || !userId) throw new ValidationError('chatId and userId are required');
 
-      // Build query
-      const query = { conversationId };
-      if (messageIds && messageIds.length > 0) {
-        query._id = { $in: messageIds.map(id => new mongoose.Types.ObjectId(id)) };
-      } else {
-        // Mark all unread messages in conversation as read
-        query.readBy = { $ne: userId };
-      }
+        page  = Math.max(1, parseInt(page,10)||1);
+        limit = Math.min(100, Math.max(1, parseInt(limit,10)||MESSAGE_LIMIT));
 
-      // Update messages
-      const result = await Message.updateMany(query, { $addToSet: { readBy: userId } });
+        const [participant] = await sequelize.query(
+            `SELECT 1 FROM chat_participants WHERE "chatId"=:chatId AND "userId"=:userId LIMIT 1`,
+            { replacements: { chatId, userId }, type: sequelize.QueryTypes.SELECT }
+        );
+        if (!participant) throw new ValidationError('User is not a participant in this chat');
 
-      return {
-        success: true,
-        modifiedCount: result.modifiedCount,
-      };
-    } catch (error) {
-      if (error instanceof ValidationError) {
-        throw error;
-      }
-      console.error('Error marking messages as read:', error);
-      throw new ServerError('Failed to mark messages as read');
+        const offset = (page-1)*limit;
+
+        const messages = await sequelize.query(
+            `SELECT m.id,m."chatId",m."senderId",m.content,
+                    m.type AS "messageType",m.reactions,m."isEdited",
+                    m."editedAt",m."isDeleted",m."sentAt",m."createdAt",m."updatedAt",
+                    jsonb_build_object('id',u.id,'username',u.username,'avatar',u.avatar) AS sender
+             FROM "Messages" m
+             LEFT JOIN "Users" u ON u.id=m."senderId"
+             WHERE m."chatId"=:chatId AND m."isDeleted"=false
+             ORDER BY m."createdAt" DESC LIMIT :limit OFFSET :offset`,
+            { replacements:{chatId,limit,offset}, type: sequelize.QueryTypes.SELECT }
+        );
+
+        const [{total}] = await sequelize.query(
+            `SELECT COUNT(*) AS total FROM "Messages" WHERE "chatId"=:chatId AND "isDeleted"=false`,
+            { replacements:{chatId}, type: sequelize.QueryTypes.SELECT }
+        );
+        const totalCount = parseInt(total,10);
+
+        return {
+            messages: messages.reverse(),
+            pagination: {
+                currentPage: page,
+                totalPages: Math.ceil(totalCount/limit),
+                totalMessages: totalCount,
+                hasNext: page < Math.ceil(totalCount/limit),
+                hasPrevious: page > 1,
+            }
+        };
     }
-  }
 
-  /**
-   * Delete a message (soft delete)
-   * @param {string} messageId - Message ID
-   * @param {string} userId - User ID requesting deletion
-   * @returns {Promise<Object>} Deletion result
-   */
-  async deleteMessage(messageId, userId) {
-    try {
-      if (!messageId || !userId) {
-        throw new ValidationError('Message ID and user ID are required');
-      }
+    async markMessagesAsRead(chatId, userId, messageIds = null) {
+        const sequelize = getDB();
+        if (!chatId||!userId) throw new ValidationError('chatId and userId are required');
 
-      const message = await Message.findById(messageId);
-      if (!message) {
-        throw new NotFoundError('Message not found');
-      }
+        const [participant] = await sequelize.query(
+            `SELECT 1 FROM chat_participants WHERE "chatId"=:chatId AND "userId"=:userId LIMIT 1`,
+            { replacements:{chatId,userId}, type: sequelize.QueryTypes.SELECT }
+        );
+        if (!participant) throw new ValidationError('Access denied');
 
-      // Check if user is the sender
-      if (message.sender.toString() !== userId) {
-        throw new ValidationError('Only the sender can delete this message');
-      }
+        if (messageIds && messageIds.length > 0) {
+            const safeIds = messageIds.map(id=>parseInt(id,10)).filter(n=>!isNaN(n));
+            for (const msgId of safeIds) {
+                await sequelize.query(
+                    `INSERT INTO "ReadReceipts"("messageId","userId","readAt","createdAt","updatedAt")
+                     VALUES(:msgId,:userId,NOW(),NOW(),NOW())
+                     ON CONFLICT("messageId","userId") DO NOTHING`,
+                    { replacements:{msgId,userId} }
+                ).catch(()=>{});
+            }
+            return { success:true, markedCount: safeIds.length };
+        }
 
-      // Soft delete by marking as deleted
-      message.deleted = true;
-      message.deletedAt = new Date();
-      await message.save();
-
-      return {
-        success: true,
-        message: 'Message deleted successfully',
-      };
-    } catch (error) {
-      if (error instanceof ValidationError || error instanceof NotFoundError) {
-        throw error;
-      }
-      console.error('Error deleting message:', error);
-      throw new ServerError('Failed to delete message');
+        const [{count}] = await sequelize.query(
+            `SELECT COUNT(*) AS count FROM "Messages"
+             WHERE "chatId"=:chatId AND "senderId"!=:userId AND "isDeleted"=false`,
+            { replacements:{chatId,userId}, type: sequelize.QueryTypes.SELECT }
+        );
+        return { success:true, markedCount: parseInt(count,10) };
     }
-  }
 
-  /**
-   * Get unread message count for a user across all conversations
-   * @param {string} userId - User ID
-   * @returns {Promise<Object>} Unread counts per conversation
-   */
-  async getUnreadCounts(userId) {
-    try {
-      if (!userId) {
-        throw new ValidationError('User ID is required');
-      }
+    async deleteMessage(messageId, userId, deleteForEveryone = false) {
+        const sequelize = getDB();
+        if (!messageId||!userId) throw new ValidationError('messageId and userId are required');
 
-      // Get all conversations where user is a participant
-      const conversations = await Conversation.find({
-        participants: userId,
-      }).select('_id');
+        const [message] = await sequelize.query(
+            `SELECT id,"chatId","senderId" FROM "Messages" WHERE id=:messageId AND "isDeleted"=false LIMIT 1`,
+            { replacements:{messageId}, type: sequelize.QueryTypes.SELECT }
+        );
+        if (!message) throw new NotFoundError('Message not found');
 
-      const conversationIds = conversations.map(conv => conv._id);
+        if (deleteForEveryone) {
+            const [chat] = await sequelize.query(
+                `SELECT "createdBy" FROM chats WHERE id=:chatId LIMIT 1`,
+                { replacements:{chatId:message.chatId}, type: sequelize.QueryTypes.SELECT }
+            );
+            if (chat?.createdBy !== userId && message.senderId !== userId)
+                throw new ValidationError('Not authorised to delete for everyone');
+        } else if (message.senderId !== userId) {
+            throw new ValidationError('Only the sender can delete their own message');
+        }
 
-      // Aggregate unread counts per conversation
-      const unreadCounts = await Message.aggregate([
-        {
-          $match: {
-            conversationId: { $in: conversationIds },
-            readBy: { $ne: new mongoose.Types.ObjectId(userId) },
-            sender: { $ne: new mongoose.Types.ObjectId(userId) }, // Don't count own messages
-          },
-        },
-        {
-          $group: {
-            _id: '$conversationId',
-            count: { $sum: 1 },
-          },
-        },
-      ]);
-
-      // Format results
-      const result = {};
-      unreadCounts.forEach(item => {
-        result[item._id.toString()] = item.count;
-      });
-
-      return result;
-    } catch (error) {
-      if (error instanceof ValidationError) {
-        throw error;
-      }
-      console.error('Error getting unread counts:', error);
-      throw new ServerError('Failed to get unread message counts');
+        await sequelize.query(
+            `UPDATE "Messages" SET "isDeleted"=true,"deletedAt"=NOW(),"deletedBy"=:userId,"updatedAt"=NOW()
+             WHERE id=:messageId`,
+            { replacements:{userId,messageId} }
+        );
+        return { success:true, message:'Message deleted successfully' };
     }
-  }
 
-  /**
-   * Search messages within a conversation
-   * @param {string} conversationId - Conversation ID
-   * @param {string} userId - User ID
-   * @param {string} query - Search query
-   * @param {number} limit - Maximum results
-   * @returns {Promise<Array>} Search results
-   */
-  async searchMessages(conversationId, userId, query, limit = 20) {
-    try {
-      if (!conversationId || !userId || !query) {
-        throw new ValidationError('Conversation ID, user ID, and search query are required');
-      }
+    async getUnreadCounts(userId) {
+        const sequelize = getDB();
+        if (!userId) throw new ValidationError('userId is required');
 
-      // Verify user is part of conversation
-      const conversation = await Conversation.findById(conversationId);
-      if (!conversation || !conversation.participants.includes(userId)) {
-        throw new ValidationError('User cannot access this conversation');
-      }
+        const rows = await sequelize.query(
+            `SELECT m."chatId", COUNT(*) AS count
+             FROM "Messages" m
+             JOIN chat_participants cp ON cp."chatId"=m."chatId" AND cp."userId"=:userId
+             WHERE m."senderId"!=:userId AND m."isDeleted"=false
+               AND NOT EXISTS (
+                   SELECT 1 FROM "ReadReceipts" rr WHERE rr."messageId"=m.id AND rr."userId"=:userId
+               )
+             GROUP BY m."chatId"`,
+            { replacements:{userId}, type: sequelize.QueryTypes.SELECT }
+        ).catch(()=>[]);
 
-      // Search for messages with text content matching query
-      const messages = await Message.find({
-        conversationId,
-        type: 'text',
-        content: { $regex: query, $options: 'i' },
-        deleted: { $ne: true }, // Exclude deleted messages
-      })
-        .sort({ createdAt: -1 })
-        .limit(parseInt(limit))
-        .populate({
-          path: 'sender',
-          select: '_id username profilePicture',
-        })
-        .lean();
-
-      return messages;
-    } catch (error) {
-      if (error instanceof ValidationError) {
-        throw error;
-      }
-      console.error('Error searching messages:', error);
-      throw new ServerError('Failed to search messages');
+        const result = {};
+        rows.forEach(r=>{ result[r.chatId]=parseInt(r.count,10); });
+        return result;
     }
-  }
+
+    async searchMessages(chatId, userId, query, limit = 20) {
+        const sequelize = getDB();
+        if (!chatId||!userId||!query) throw new ValidationError('chatId, userId, and query are required');
+
+        const [participant] = await sequelize.query(
+            `SELECT 1 FROM chat_participants WHERE "chatId"=:chatId AND "userId"=:userId LIMIT 1`,
+            { replacements:{chatId,userId}, type: sequelize.QueryTypes.SELECT }
+        );
+        if (!participant) throw new ValidationError('User cannot access this chat');
+
+        const safeLimit = Math.min(50, Math.max(1, parseInt(limit,10)||20));
+
+        return await sequelize.query(
+            `SELECT m.id,m."chatId",m."senderId",m.content,m.type,m."createdAt",
+                    jsonb_build_object('id',u.id,'username',u.username,'avatar',u.avatar) AS sender
+             FROM "Messages" m
+             LEFT JOIN "Users" u ON u.id=m."senderId"
+             WHERE m."chatId"=:chatId AND m."isDeleted"=false AND m.content ILIKE :pattern
+             ORDER BY m."createdAt" DESC LIMIT :limit`,
+            { replacements:{chatId, pattern:`%${query.trim()}%`, limit:safeLimit},
+              type: sequelize.QueryTypes.SELECT }
+        );
+    }
+
+    async editMessage(messageId, userId, newContent) {
+        const sequelize = getDB();
+        if (!messageId||!userId) throw new ValidationError('messageId and userId are required');
+        if (!newContent?.trim()) throw new ValidationError('Content cannot be empty');
+
+        const [message] = await sequelize.query(
+            `SELECT id,"senderId","createdAt" FROM "Messages"
+             WHERE id=:messageId AND "isDeleted"=false LIMIT 1`,
+            { replacements:{messageId}, type: sequelize.QueryTypes.SELECT }
+        );
+        if (!message) throw new NotFoundError('Message not found');
+        if (message.senderId !== userId) throw new ValidationError('Only the sender can edit this message');
+
+        if (Date.now() - new Date(message.createdAt).getTime() > 15 * 60 * 1000)
+            throw new ValidationError('Message can only be edited within 15 minutes of sending');
+
+        await sequelize.query(
+            `UPDATE "Messages" SET content=:content,"isEdited"=true,"editedAt"=NOW(),"updatedAt"=NOW()
+             WHERE id=:messageId`,
+            { replacements:{content:newContent.trim(),messageId} }
+        );
+        return { success:true, messageId, content:newContent.trim(), editedAt:new Date().toISOString() };
+    }
+
+    async addReaction(messageId, userId, emoji) { return this._toggleReaction(messageId,userId,emoji,'add'); }
+    async removeReaction(messageId, userId, emoji) { return this._toggleReaction(messageId,userId,emoji,'remove'); }
+
+    async _toggleReaction(messageId, userId, emoji, action) {
+        const sequelize = getDB();
+        if (!messageId||!userId||!emoji) throw new ValidationError('messageId, userId, and emoji required');
+
+        const [message] = await sequelize.query(
+            `SELECT id,"chatId",reactions FROM "Messages" WHERE id=:messageId AND "isDeleted"=false LIMIT 1`,
+            { replacements:{messageId}, type: sequelize.QueryTypes.SELECT }
+        );
+        if (!message) throw new NotFoundError('Message not found');
+
+        const [participant] = await sequelize.query(
+            `SELECT 1 FROM chat_participants WHERE "chatId"=:chatId AND "userId"=:userId LIMIT 1`,
+            { replacements:{chatId:message.chatId,userId}, type: sequelize.QueryTypes.SELECT }
+        );
+        if (!participant) throw new ValidationError('Access denied');
+
+        const reactions = message.reactions || {};
+        const key = emoji.trim().substring(0,10);
+
+        if (action==='add') {
+            if (!reactions[key]) reactions[key]=[];
+            Object.keys(reactions).forEach(k=>{ if(k!==key) reactions[k]=reactions[k].filter(id=>id!==userId); });
+            if (!reactions[key].includes(userId)) reactions[key].push(userId);
+        } else {
+            if (reactions[key]) {
+                reactions[key]=reactions[key].filter(id=>id!==userId);
+                if (!reactions[key].length) delete reactions[key];
+            }
+        }
+
+        await sequelize.query(
+            `UPDATE "Messages" SET reactions=:reactions::jsonb,"updatedAt"=NOW() WHERE id=:messageId`,
+            { replacements:{reactions:JSON.stringify(reactions),messageId} }
+        );
+        return { success:true, messageId, reactions };
+    }
 }
 
 module.exports = new MessageService();

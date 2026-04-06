@@ -221,13 +221,14 @@ module.exports = (sequelize, DataTypes) => {
     });
   };
 
-  // FIXED: Associations with unique aliases
+  // FIXED: Use a static boolean flag instead of checking Object.keys(this.associations).
+  // The old guard checked Object.keys(this.associations).length > 0, but Sequelize
+  // may initialise associations to a non-empty object before associate() is called
+  // (e.g. during hot-reloads or when another model calls associate first), causing
+  // this model to silently skip all its own association definitions.
   Messages.associate = function(models) {
-    // CRITICAL: Prevent duplicate associations (alias conflict fix)
-    if (this.associations && Object.keys(this.associations).length > 0) {
-        // Skip if associations already defined to prevent alias conflicts
-        return;
-    }
+    if (Messages._associationsDefined) return;
+    Messages._associationsDefined = true;
         
     if (models.Chats) {
       Messages.belongsTo(models.Chats, {

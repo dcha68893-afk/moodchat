@@ -1,139 +1,104 @@
-const mongoose = require('mongoose');
-const UserStatus = require('../models/UserStatus');
-const User = require('../models/Users');
-const { ServerError, ValidationError, NotFoundError } = require('../utils/errors');
+// statusService.js - Rewritten for Sequelize/PostgreSQL
+// Previously used Mongoose - now aligned with UserStatus Sequelize model
+
+const { Op } = require('sequelize');
+
 const {
   STATUS_EXPIRY_MINUTES = 5,
   MAX_STATUS_LENGTH = 100,
-  STATUS_TYPES = 'online,away,busy,offline,custom',
+  STATUS_TYPES = 'online,away,busy,offline,invisible',
 } = process.env;
 
-// Parse status types from environment variable
 const VALID_STATUS_TYPES = STATUS_TYPES.split(',');
 
-/**
- * Status Service
- * Handles user presence and status management
- */
+// Lazy-load models to avoid circular dependency issues
+function getModels() {
+  const db = require('../models');
+  return {
+    UserStatus: db.UserStatus,
+    Users: db.Users || db.User,
+  };
+}
+
 class StatusService {
-  /**
-   * Update user status and presence
-   * @param {string} userId - User ID
-   * @param {string} statusType - Type of status (online, away, busy, offline, custom)
-   * @param {string} customStatus - Custom status message (optional)
-   * @returns {Promise<Object>} Updated status
-   */
+
   async updateStatus(userId, statusType, customStatus = null) {
+    const { UserStatus, Users } = getModels();
+
+    if (!userId || !statusType) {
+      throw Object.assign(new Error('User ID and status type are required'), { statusCode: 400 });
+    }
+    if (!VALID_STATUS_TYPES.includes(statusType)) {
+      throw Object.assign(
+        new Error(`Status type must be one of: ${VALID_STATUS_TYPES.join(', ')}`),
+        { statusCode: 400 }
+      );
+    }
+    if (customStatus && customStatus.length > parseInt(MAX_STATUS_LENGTH)) {
+      throw Object.assign(
+        new Error(`Custom status cannot exceed ${MAX_STATUS_LENGTH} characters`),
+        { statusCode: 400 }
+      );
+    }
+
     try {
-      if (!userId || !statusType) {
-        throw new ValidationError('User ID and status type are required');
-      }
-
-      // Validate status type
-      if (!VALID_STATUS_TYPES.includes(statusType)) {
-        throw new ValidationError(`Status type must be one of: ${VALID_STATUS_TYPES.join(', ')}`);
-      }
-
-      // Validate custom status length
-      if (customStatus && customStatus.length > parseInt(MAX_STATUS_LENGTH)) {
-        throw new ValidationError(`Custom status cannot exceed ${MAX_STATUS_LENGTH} characters`);
-      }
-
-      // Calculate expiry time
-      const expiryMinutes = parseInt(STATUS_EXPIRY_MINUTES);
-      const expiresAt = new Date(Date.now() + expiryMinutes * 60 * 1000);
-
-      // Find or create user status
-      let userStatus = await UserStatus.findOne({ userId: new mongoose.Types.ObjectId(userId) });
+      let userStatus = await UserStatus.findOne({ where: { userId } });
 
       if (!userStatus) {
-        userStatus = new UserStatus({
-          userId: new mongoose.Types.ObjectId(userId),
+        userStatus = await UserStatus.create({
+          userId,
           status: statusType,
-          customStatus: statusType === 'custom' ? customStatus : null,
+          customStatus: customStatus || null,
           lastSeen: new Date(),
-          expiresAt: statusType === 'offline' ? null : expiresAt,
         });
       } else {
-        // Update existing status
-        userStatus.status = statusType;
-        userStatus.customStatus = statusType === 'custom' ? customStatus : null;
-        userStatus.lastSeen = new Date();
-        userStatus.expiresAt = statusType === 'offline' ? null : expiresAt;
+        await userStatus.update({
+          status: statusType,
+          customStatus: customStatus || null,
+          lastSeen: new Date(),
+        });
       }
 
-      await userStatus.save();
-
-      // Populate user details for response
-      await userStatus.populate({
-        path: 'userId',
-        select: '_id username email profilePicture',
+      await userStatus.reload({
+        include: [{ model: Users, as: 'userStatusOwner', attributes: ['id', 'username', 'avatar'] }],
       });
 
       return this._formatStatusResponse(userStatus);
     } catch (error) {
-      if (error instanceof ValidationError) {
-        throw error;
-      }
       console.error('Error updating status:', error);
-      throw new ServerError('Failed to update status');
+      throw Object.assign(new Error('Failed to update status'), { statusCode: 500 });
     }
   }
 
-  /**
-   * Get status for specific users
-   * @param {string} requesterId - User ID making the request
-   * @param {Array<string>} userIds - Array of user IDs to get status for
-   * @returns {Promise<Array>} Status information for requested users
-   */
   async getUsersStatus(requesterId, userIds) {
+    const { UserStatus, Users } = getModels();
+
+    if (!requesterId || !userIds || !Array.isArray(userIds)) {
+      throw Object.assign(new Error('Requester ID and user IDs array are required'), { statusCode: 400 });
+    }
+    if (userIds.length > 100) {
+      throw Object.assign(new Error('Cannot fetch status for more than 100 users at once'), { statusCode: 400 });
+    }
+
     try {
-      if (!requesterId || !userIds || !Array.isArray(userIds)) {
-        throw new ValidationError('Requester ID and user IDs array are required');
-      }
-
-      // Limit number of users to prevent abuse
-      if (userIds.length > 100) {
-        throw new ValidationError('Cannot fetch status for more than 100 users at once');
-      }
-
-      // Convert to ObjectIds
-      const userObjectIds = userIds.map(id => new mongoose.Types.ObjectId(id));
-
-      // Clean expired statuses first
-      await this._cleanExpiredStatuses();
-
-      // Fetch statuses
-      const statuses = await UserStatus.find({
-        userId: { $in: userObjectIds },
-      }).populate({
-        path: 'userId',
-        select: '_id username email profilePicture',
+      const statuses = await UserStatus.findAll({
+        where: { userId: { [Op.in]: userIds } },
+        include: [{ model: Users, as: 'userStatusOwner', attributes: ['id', 'username', 'avatar'] }],
       });
 
-      // Create a map for quick lookup
       const statusMap = new Map();
-      statuses.forEach(status => {
-        statusMap.set(status.userId._id.toString(), this._formatStatusResponse(status));
-      });
+      statuses.forEach(s => statusMap.set(String(s.userId), this._formatStatusResponse(s)));
 
-      // For users without status records, create default offline status
       const result = [];
-      for (const userId of userIds) {
-        if (statusMap.has(userId)) {
-          result.push(statusMap.get(userId));
+      for (const uid of userIds) {
+        if (statusMap.has(String(uid))) {
+          result.push(statusMap.get(String(uid)));
         } else {
-          // Create default offline status
-          const user = await User.findById(userId).select('_id username email profilePicture');
+          const user = await Users.findByPk(uid, { attributes: ['id', 'username', 'avatar'] });
           if (user) {
             result.push({
-              userId: user._id,
-              user: {
-                _id: user._id,
-                username: user.username,
-                email: user.email,
-                profilePicture: user.profilePicture,
-              },
+              userId: user.id,
+              user: { id: user.id, username: user.username, avatar: user.avatar },
               status: 'offline',
               customStatus: null,
               lastSeen: null,
@@ -142,200 +107,32 @@ class StatusService {
           }
         }
       }
-
       return result;
     } catch (error) {
-      if (error instanceof ValidationError) {
-        throw error;
-      }
       console.error('Error fetching users status:', error);
-      throw new ServerError('Failed to fetch users status');
+      throw Object.assign(new Error('Failed to fetch users status'), { statusCode: 500 });
     }
   }
 
-  /**
-   * Get online friends/contacts status
-   * @param {string} userId - User ID
-   * @returns {Promise<Array>} Online contacts with their status
-   */
-  async getOnlineContacts(userId) {
-    try {
-      if (!userId) {
-        throw new ValidationError('User ID is required');
-      }
-
-      // Clean expired statuses first
-      await this._cleanExpiredStatuses();
-
-      // Get user's contacts/friends (implementation depends on your contact system)
-      // This is a placeholder - adjust based on your application's contact/friend system
-      const user = await User.findById(userId).select('contacts friends');
-
-      let contactIds = [];
-
-      // Adjust based on your data model
-      if (user.contacts && user.contacts.length > 0) {
-        contactIds = user.contacts;
-      } else if (user.friends && user.friends.length > 0) {
-        contactIds = user.friends;
-      }
-
-      if (contactIds.length === 0) {
-        return [];
-      }
-
-      // Fetch online statuses for contacts
-      const onlineStatuses = await UserStatus.find({
-        userId: { $in: contactIds },
-        status: { $ne: 'offline' },
-        expiresAt: { $gt: new Date() },
-      }).populate({
-        path: 'userId',
-        select: '_id username email profilePicture',
-      });
-
-      return onlineStatuses.map(status => this._formatStatusResponse(status));
-    } catch (error) {
-      if (error instanceof ValidationError) {
-        throw error;
-      }
-      console.error('Error fetching online contacts:', error);
-      throw new ServerError('Failed to fetch online contacts');
-    }
-  }
-
-  /**
-   * Update last seen timestamp
-   * @param {string} userId - User ID
-   * @returns {Promise<Object>} Updated status
-   */
-  async updateLastSeen(userId) {
-    try {
-      if (!userId) {
-        throw new ValidationError('User ID is required');
-      }
-
-      const userStatus = await UserStatus.findOne({ userId: new mongoose.Types.ObjectId(userId) });
-
-      if (!userStatus) {
-        // Create a new status record if none exists
-        return await this.updateStatus(userId, 'online');
-      }
-
-      // Update last seen and extend expiry if not offline
-      userStatus.lastSeen = new Date();
-      if (userStatus.status !== 'offline') {
-        const expiryMinutes = parseInt(STATUS_EXPIRY_MINUTES);
-        userStatus.expiresAt = new Date(Date.now() + expiryMinutes * 60 * 1000);
-      }
-
-      await userStatus.save();
-
-      await userStatus.populate({
-        path: 'userId',
-        select: '_id username email profilePicture',
-      });
-
-      return this._formatStatusResponse(userStatus);
-    } catch (error) {
-      if (error instanceof ValidationError) {
-        throw error;
-      }
-      console.error('Error updating last seen:', error);
-      throw new ServerError('Failed to update last seen');
-    }
-  }
-
-  /**
-   * Set user as offline
-   * @param {string} userId - User ID
-   * @returns {Promise<Object>} Updated status
-   */
-  async setOffline(userId) {
-    try {
-      if (!userId) {
-        throw new ValidationError('User ID is required');
-      }
-
-      const userStatus = await UserStatus.findOne({ userId: new mongoose.Types.ObjectId(userId) });
-
-      if (!userStatus) {
-        // Create offline status if none exists
-        const newStatus = new UserStatus({
-          userId: new mongoose.Types.ObjectId(userId),
-          status: 'offline',
-          lastSeen: new Date(),
-          expiresAt: null,
-        });
-
-        await newStatus.save();
-        await newStatus.populate({
-          path: 'userId',
-          select: '_id username email profilePicture',
-        });
-
-        return this._formatStatusResponse(newStatus);
-      }
-
-      // Update to offline status
-      userStatus.status = 'offline';
-      userStatus.customStatus = null;
-      userStatus.lastSeen = new Date();
-      userStatus.expiresAt = null;
-
-      await userStatus.save();
-
-      await userStatus.populate({
-        path: 'userId',
-        select: '_id username email profilePicture',
-      });
-
-      return this._formatStatusResponse(userStatus);
-    } catch (error) {
-      if (error instanceof ValidationError) {
-        throw error;
-      }
-      console.error('Error setting offline status:', error);
-      throw new ServerError('Failed to set offline status');
-    }
-  }
-
-  /**
-   * Get user's current status
-   * @param {string} userId - User ID
-   * @returns {Promise<Object>} User status
-   */
   async getUserStatus(userId) {
+    const { UserStatus, Users } = getModels();
+
+    if (!userId) {
+      throw Object.assign(new Error('User ID is required'), { statusCode: 400 });
+    }
+
     try {
-      if (!userId) {
-        throw new ValidationError('User ID is required');
-      }
-
-      // Clean expired statuses first
-      await this._cleanExpiredStatuses();
-
       const userStatus = await UserStatus.findOne({
-        userId: new mongoose.Types.ObjectId(userId),
-      }).populate({
-        path: 'userId',
-        select: '_id username email profilePicture',
+        where: { userId },
+        include: [{ model: Users, as: 'userStatusOwner', attributes: ['id', 'username', 'avatar'] }],
       });
 
       if (!userStatus) {
-        // Return default offline status
-        const user = await User.findById(userId).select('_id username email profilePicture');
-        if (!user) {
-          throw new NotFoundError('User not found');
-        }
-
+        const user = await Users.findByPk(userId, { attributes: ['id', 'username', 'avatar'] });
+        if (!user) throw Object.assign(new Error('User not found'), { statusCode: 404 });
         return {
-          userId: user._id,
-          user: {
-            _id: user._id,
-            username: user.username,
-            email: user.email,
-            profilePicture: user.profilePicture,
-          },
+          userId: user.id,
+          user: { id: user.id, username: user.username, avatar: user.avatar },
           status: 'offline',
           customStatus: null,
           lastSeen: null,
@@ -343,105 +140,145 @@ class StatusService {
         };
       }
 
-      // Check if status is expired
-      if (userStatus.expiresAt && userStatus.expiresAt < new Date()) {
-        userStatus.status = 'offline';
-        userStatus.customStatus = null;
-        userStatus.expiresAt = null;
-        await userStatus.save();
-      }
-
       return this._formatStatusResponse(userStatus);
     } catch (error) {
-      if (error instanceof ValidationError || error instanceof NotFoundError) {
-        throw error;
-      }
+      if (error.statusCode) throw error;
       console.error('Error getting user status:', error);
-      throw new ServerError('Failed to get user status');
+      throw Object.assign(new Error('Failed to get user status'), { statusCode: 500 });
     }
   }
 
-  /**
-   * Clean up expired statuses
-   * @private
-   */
-  async _cleanExpiredStatuses() {
+  async setOffline(userId) {
+    const { UserStatus } = getModels();
+
+    if (!userId) {
+      throw Object.assign(new Error('User ID is required'), { statusCode: 400 });
+    }
+
     try {
-      const result = await UserStatus.updateMany(
-        {
-          expiresAt: { $lt: new Date(), $ne: null },
-        },
-        {
-          $set: {
-            status: 'offline',
-            customStatus: null,
-            expiresAt: null,
-          },
-        }
-      );
-
-      if (result.modifiedCount > 0) {
-        console.log(`Cleaned ${result.modifiedCount} expired statuses`);
+      let userStatus = await UserStatus.findOne({ where: { userId } });
+      if (!userStatus) {
+        userStatus = await UserStatus.create({
+          userId, status: 'offline', lastSeen: new Date(), socketIds: [],
+        });
+      } else {
+        await userStatus.setOffline();
       }
+      return this._formatStatusResponse(userStatus);
     } catch (error) {
-      console.error('Error cleaning expired statuses:', error);
-      // Don't throw, this is a maintenance operation
+      console.error('Error setting offline:', error);
+      throw Object.assign(new Error('Failed to set offline status'), { statusCode: 500 });
     }
   }
 
-  /**
-   * Format status response
-   * @private
-   * @param {Object} userStatus - UserStatus document
-   * @returns {Object} Formatted status response
-   */
+  async updateLastSeen(userId) {
+    const { UserStatus } = getModels();
+
+    if (!userId) {
+      throw Object.assign(new Error('User ID is required'), { statusCode: 400 });
+    }
+
+    try {
+      let userStatus = await UserStatus.findOne({ where: { userId } });
+      if (!userStatus) return await this.updateStatus(userId, 'online');
+      await userStatus.updateLastSeen();
+      return this._formatStatusResponse(userStatus);
+    } catch (error) {
+      console.error('Error updating last seen:', error);
+      throw Object.assign(new Error('Failed to update last seen'), { statusCode: 500 });
+    }
+  }
+
+  async getAllOnlineUsers(limit = 100) {
+    const { UserStatus, Users } = getModels();
+
+    try {
+      const onlineUsers = await UserStatus.findAll({
+        where: { status: { [Op.in]: ['online', 'away', 'busy'] } },
+        include: [{ model: Users, as: 'userStatusOwner', attributes: ['id', 'username', 'avatar'] }],
+        order: [['lastSeen', 'DESC']],
+        limit: parseInt(limit),
+      });
+      return onlineUsers.map(s => this._formatStatusResponse(s));
+    } catch (error) {
+      console.error('Error fetching online users:', error);
+      throw Object.assign(new Error('Failed to fetch online users'), { statusCode: 500 });
+    }
+  }
+
+  async addSocket(userId, socketId) {
+    const { UserStatus } = getModels();
+    try {
+      let userStatus = await UserStatus.findOne({ where: { userId } });
+      if (!userStatus) {
+        userStatus = await UserStatus.create({
+          userId, status: 'online', lastSeen: new Date(), socketIds: [socketId],
+        });
+      } else {
+        await userStatus.addSocket(socketId);
+        if (userStatus.status === 'offline') {
+          await userStatus.setOnline(socketId);
+        }
+      }
+      return this._formatStatusResponse(userStatus);
+    } catch (error) {
+      console.error('Error adding socket:', error);
+      throw Object.assign(new Error('Failed to register socket'), { statusCode: 500 });
+    }
+  }
+
+  async removeSocket(userId, socketId) {
+    const { UserStatus } = getModels();
+    try {
+      const userStatus = await UserStatus.findOne({ where: { userId } });
+      if (userStatus) await userStatus.removeSocket(socketId);
+      return userStatus ? this._formatStatusResponse(userStatus) : null;
+    } catch (error) {
+      console.error('Error removing socket:', error);
+      throw Object.assign(new Error('Failed to remove socket'), { statusCode: 500 });
+    }
+  }
+
+  async setTyping(userId, chatId) {
+    const { UserStatus } = getModels();
+    try {
+      const userStatus = await UserStatus.findOne({ where: { userId } });
+      if (userStatus) await userStatus.startTyping(chatId);
+      return userStatus ? this._formatStatusResponse(userStatus) : null;
+    } catch (error) {
+      console.error('Error setting typing:', error);
+      throw Object.assign(new Error('Failed to set typing'), { statusCode: 500 });
+    }
+  }
+
+  async clearTyping(userId) {
+    const { UserStatus } = getModels();
+    try {
+      const userStatus = await UserStatus.findOne({ where: { userId } });
+      if (userStatus) await userStatus.stopTyping();
+      return userStatus ? this._formatStatusResponse(userStatus) : null;
+    } catch (error) {
+      console.error('Error clearing typing:', error);
+      throw Object.assign(new Error('Failed to clear typing'), { statusCode: 500 });
+    }
+  }
+
   _formatStatusResponse(userStatus) {
-    const isOnline =
-      userStatus.status !== 'offline' &&
-      (!userStatus.expiresAt || userStatus.expiresAt > new Date());
+    const plain = userStatus.toJSON ? userStatus.toJSON() : userStatus;
+    const user = plain.userStatusOwner || null;
+    const isOnline = ['online', 'away', 'busy'].includes(plain.status) &&
+      plain.showOnlineStatus !== false;
 
     return {
-      userId: userStatus.userId._id,
-      user: {
-        _id: userStatus.userId._id,
-        username: userStatus.userId.username,
-        email: userStatus.userId.email,
-        profilePicture: userStatus.userId.profilePicture,
-      },
-      status: userStatus.status,
-      customStatus: userStatus.customStatus,
-      lastSeen: userStatus.lastSeen,
-      expiresAt: userStatus.expiresAt,
+      userId: plain.userId,
+      user: user ? { id: user.id, username: user.username, avatar: user.avatar } : null,
+      status: plain.status,
+      customStatus: plain.customStatus || null,
+      lastSeen: plain.lastSeen,
       isOnline,
+      isTypingIn: plain.isTypingIn || null,
+      activeDevice: plain.activeDevice || null,
     };
-  }
-
-  /**
-   * Get all online users (for admin/stats purposes)
-   * @param {number} limit - Maximum number of results
-   * @returns {Promise<Array>} Online users with status
-   */
-  async getAllOnlineUsers(limit = 100) {
-    try {
-      // Clean expired statuses first
-      await this._cleanExpiredStatuses();
-
-      const onlineUsers = await UserStatus.find({
-        status: { $ne: 'offline' },
-        expiresAt: { $gt: new Date() },
-      })
-        .limit(parseInt(limit))
-        .populate({
-          path: 'userId',
-          select: '_id username email profilePicture',
-        })
-        .sort({ lastSeen: -1 });
-
-      return onlineUsers.map(status => this._formatStatusResponse(status));
-    } catch (error) {
-      console.error('Error fetching all online users:', error);
-      throw new ServerError('Failed to fetch online users');
-    }
   }
 }
 

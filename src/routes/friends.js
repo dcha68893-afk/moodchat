@@ -1,4 +1,4 @@
-// routes/friends.js - Complete Friend Management Routes
+﻿// routes/friends.js - Complete Friend Management Routes
 // Full implementation with all features - NO SUMMARIZATION
 // Includes: Friends CRUD, Requests, Blocking, Pinning, Muting, Export, Search, Suggestions, Contacts, Stats, Invites
 
@@ -260,9 +260,9 @@ router.get(
         });
       } catch (dbError) {
         console.error('[Friends] Database error:', dbError.message);
-        return res.status(200).json({
-          success: true,
-          data: { friends: [] }
+        return res.status(500).json({
+          success: false,
+          message: 'Database error fetching friends'
         });
       }
     } catch (error) {
@@ -376,7 +376,7 @@ router.get(
             try {
                 const requests = await withTimeout(Friend.findAll({
                     where: {
-                        receiver_id: userId,
+                        requester_id: userId,
                         status: 'pending'
                     },
                     include: [{
@@ -553,7 +553,7 @@ router.get(
                             { receiver_id: userId, status: 'accepted' }
                         ]
                     },
-                    attributes: ['requesterId', 'receiverId'],
+                    attributes: ['requester_id', 'receiver_id'],
                     raw: true,
                     limit: 200
                 }));
@@ -568,7 +568,7 @@ router.get(
                     });
                 }
 
-                const friendIds = friendships.map(f => f.requesterId === userId ? f.receiver_id : f.requesterId).filter(id => id && id !== userId);
+                const friendIds = friendships.map(f => f.requester_id === userId ? f.receiver_id : f.requester_id).filter(id => id && id !== userId);
 
                 if (friendIds.length === 0) {
                     return res.status(200).json({
@@ -651,7 +651,7 @@ router.get(
                             { receiver_id: userId, status: 'blocked' }
                         ]
                     },
-                    attributes: ['requesterId', 'receiverId'],
+                    attributes: ['requester_id', 'receiver_id'],
                     raw: true,
                     limit: 100
                 }));
@@ -666,7 +666,7 @@ router.get(
                     });
                 }
 
-                const blockedIds = blockedRelations.map(f => f.requesterId === userId ? f.receiver_id : f.requesterId).filter(id => id && id !== userId);
+                const blockedIds = blockedRelations.map(f => f.requester_id === userId ? f.receiver_id : f.requester_id).filter(id => id && id !== userId);
 
                 if (blockedIds.length === 0) {
                     return res.status(200).json({
@@ -934,6 +934,109 @@ router.post(
                 success: false,
                 message: 'Failed to send friend request'
             });
+        }
+    })
+);
+
+// ===== SEND FRIEND REQUEST (body-based — used by frontend: POST /requests/send) =====
+router.post(
+    '/requests/send',
+    apiRateLimiter,
+    asyncHandler(async (req, res) => {
+        try {
+            const userId = getUserId(req);
+            if (!userId) {
+                return res.status(401).json({ success: false, message: 'Authentication required' });
+            }
+
+            // Frontend sends { receiverId } in the request body
+            const receiverId = parseInt(req.body.receiverId || req.body.userId || req.body.targetId);
+            if (isNaN(receiverId)) {
+                return res.status(400).json({ success: false, message: 'receiverId is required' });
+            }
+
+            if (receiverId === userId) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Cannot send friend request to yourself',
+                    code: 'SELF_REQUEST'
+                });
+            }
+
+            if (!Friend) {
+                return res.status(503).json({ success: false, message: 'Friend service temporarily unavailable' });
+            }
+
+            try {
+                const targetUser = await withTimeout(User.findByPk(receiverId, { attributes: ['id', 'username'] }));
+                if (!targetUser) {
+                    return res.status(404).json({ success: false, message: 'User not found' });
+                }
+
+                const existing = await withTimeout(Friend.findOne({
+                    where: {
+                        [Op.or]: [
+                            { requester_id: userId,    receiver_id: receiverId },
+                            { requester_id: receiverId, receiver_id: userId    }
+                        ]
+                    }
+                }));
+
+                if (existing) {
+                    if (existing.status === 'accepted') {
+                        return res.status(400).json({ success: false, message: 'Already friends with this user' });
+                    }
+                    if (existing.status === 'pending') {
+                        // If they already sent us a request — auto-accept
+                        if (existing.receiver_id === userId) {
+                            existing.status     = 'accepted';
+                            existing.acceptedAt = new Date();
+                            existing.updatedAt  = new Date();
+                            await existing.save();
+                            return res.status(200).json({
+                                success: true,
+                                data: { request: existing },
+                                message: 'Friend request accepted automatically'
+                            });
+                        }
+                        return res.status(400).json({ success: false, message: 'Friend request already sent' });
+                    }
+                    if (existing.status === 'blocked') {
+                        return res.status(400).json({ success: false, message: 'Cannot send request to blocked user' });
+                    }
+                }
+
+                const friendRequest = await Friend.create({
+                    requester_id: userId,
+                    receiver_id:  receiverId,
+                    status:       'pending',
+                    notes:        req.body.note || null,
+                    category:     req.body.category || null,
+                    createdAt:    new Date(),
+                    updatedAt:    new Date()
+                });
+
+                return res.status(201).json({
+                    success: true,
+                    data: {
+                        request: {
+                            id:           friendRequest.id,
+                            requester_id: friendRequest.requester_id,
+                            receiver_id:  friendRequest.receiver_id,
+                            status:       friendRequest.status,
+                            createdAt:    friendRequest.createdAt
+                        }
+                    },
+                    message: 'Friend request sent successfully'
+                });
+
+            } catch (dbError) {
+                console.error('[Friends] DB error sending request via /requests/send:', dbError.message);
+                return res.status(500).json({ success: false, message: 'Failed to send friend request' });
+            }
+        } catch (error) {
+            console.error('[Friends] Error in /requests/send:', error.message);
+            return res.status(500).json({ success: false, message: 'Failed to send friend request' });
         }
     })
 );
@@ -1875,107 +1978,6 @@ router.get(
 
 // ===== GET FRIEND DETAILS =====
 router.get(
-    '/:friendId',
-    apiRateLimiter,
-    asyncHandler(async (req, res) => {
-        try {
-            const userId = getUserId(req);
-            
-            if (!userId) {
-                return res.status(401).json({
-                    success: false,
-                    message: 'Authentication required'
-                });
-            }
-
-            const { friendId } = req.params;
-            
-            const specialStrings = ['pinned', 'muted', 'list', 'ping', 'stats', 'suggestions', 'export', 'blocked', 'search', 'incoming', 'sent', 'synced', 'users', 'all', 'contacts', 'accepted', 'pending', 'requests', 'invites'];
-            if (specialStrings.includes(friendId)) {
-                return res.status(400).json({
-                    success: false,
-                    message: 'Invalid friend ID'
-                });
-            }
-
-            const targetId = parseInt(friendId);
-            if (isNaN(targetId)) {
-                return res.status(400).json({
-                    success: false,
-                    message: 'Invalid friend ID'
-                });
-            }
-
-            if (!friendId) {
-                return res.status(400).json({
-                    success: false,
-                    message: 'Friend ID is required'
-                });
-            }
-
-            const friend = await withTimeout(User.findByPk(targetId, {
-                attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'bio', 'status', 'lastSeen']
-            }));
-
-            if (!friend) {
-                return res.status(404).json({
-                    success: false,
-                    message: 'User not found'
-                });
-            }
-
-            let isFriend = false;
-            let friendship = null;
-            if (Friend) {
-                try {
-                    friendship = await withTimeout(Friend.findOne({
-                        where: {
-                            [Op.or]: [
-                                { requester_id: userId, receiver_id: targetId, status: 'accepted' },
-                                { requester_id: targetId, receiver_id: userId, status: 'accepted' }
-                            ]
-                        }
-                    }));
-                    isFriend = !!friendship;
-                } catch (dbError) {
-                    console.log('[Friends Route] Friend check error:', dbError.message);
-                    isFriend = false;
-                }
-            }
-
-            if (!isFriend) {
-                return res.status(400).json({
-                    success: false,
-                    message: 'This user is not in your friends list'
-                });
-            }
-
-            return res.status(200).json({
-                success: true,
-                data: {
-                    friend: formatUser(friend),
-                    friendship: friendship ? {
-                        id: friendship.id,
-                        isPinned: friendship.isPinned || false,
-                        isMuted: friendship.isMuted || false,
-                        mutedUntil: friendship.mutedUntil || null,
-                        createdAt: friendship.createdAt,
-                        acceptedAt: friendship.acceptedAt
-                    } : null
-                }
-            });
-        } catch (error) {
-            console.error('Error fetching friend details:', error.message);
-            return res.status(500).json({
-                success: false,
-                message: 'Failed to fetch friend details'
-            });
-        }
-    })
-);
-
-// ===== GET FRIEND STATISTICS =====
-router.get(
     '/stats',
     apiRateLimiter,
     asyncHandler(async (req, res) => {
@@ -2011,7 +2013,7 @@ router.get(
                             { receiver_id: userId, status: 'accepted' }
                         ]
                     },
-                    attributes: ['requesterId', 'receiverId', 'isPinned', 'isMuted'],
+                    attributes: ['requester_id', 'receiver_id', 'is_pinned', 'is_muted'],
                     raw: true,
                     limit: 500
                 }));
@@ -2030,12 +2032,12 @@ router.get(
                     });
                 }
 
-                const friendIds = friendships.map(f => f.requesterId === userId ? f.receiver_id : f.requesterId).filter(id => id && id !== userId);
+                const friendIds = friendships.map(f => f.requester_id === userId ? f.receiver_id : f.requester_id).filter(id => id && id !== userId);
                 
                 let onlineCount = 0;
                 let recentlyActiveCount = 0;
-                const pinnedCount = friendships.filter(f => f.isPinned).length;
-                const mutedCount = friendships.filter(f => f.isMuted).length;
+                const pinnedCount = friendships.filter(f => f.is_pinned).length;
+                const mutedCount = friendships.filter(f => f.is_muted).length;
                 
                 if (friendIds.length > 0) {
                     const friends = await withTimeout(User.findAll({
@@ -2120,11 +2122,11 @@ router.get(
                                 { receiver_id: userId }
                             ]
                         },
-                        attributes: ['requesterId', 'receiverId'],
+                        attributes: ['requester_id', 'receiver_id'],
                         raw: true,
                         limit: 500
                     }));
-                    const friendIds = friendships.map(f => f.requesterId === userId ? f.receiver_id : f.requesterId);
+                    const friendIds = friendships.map(f => f.requester_id === userId ? f.receiver_id : f.requester_id);
                     excludedIds = [...excludedIds, ...friendIds];
                 } catch (dbError) {
                     console.log('[Friends Route] Suggestions friend query error:', dbError.message);
@@ -2280,11 +2282,11 @@ router.get(
                                 { receiver_id: userId }
                             ]
                         },
-                        attributes: ['requesterId', 'receiverId'],
+                        attributes: ['requester_id', 'receiver_id'],
                         raw: true,
                         limit: 500
                     }));
-                    const friendIds = friendships.map(f => f.requesterId === userId ? f.receiver_id : f.requesterId);
+                    const friendIds = friendships.map(f => f.requester_id === userId ? f.receiver_id : f.requester_id);
                     excludedIds = [...excludedIds, ...friendIds];
                 } catch (dbError) {
                     console.log('[Friends Route] Search friend query error:', dbError.message);
@@ -2549,4 +2551,216 @@ router.get(
     })
 );
 
+
+// ===== SEARCH USERS (alias for /search/new — frontend calls /api/friends/search) =====
+router.get(
+    '/search',
+    apiRateLimiter,
+    asyncHandler(async (req, res) => {
+        req.query.query = req.query.q || req.query.query || '';
+        try {
+            const userId = getUserId(req);
+            if (!userId) {
+                return res.status(401).json({ success: false, message: 'Authentication required' });
+            }
+            const query = (req.query.q || req.query.query || '').trim();
+            if (!query || query.length < 2) {
+                return res.status(400).json({ success: false, message: 'Search query must be at least 2 characters' });
+            }
+            const searchRegex = `%${query}%`;
+            const users = await withTimeout(User.findAll({
+                where: {
+                    id: { [Op.ne]: userId },
+                    [Op.or]: [
+                        { username: { [Op.iLike]: searchRegex } },
+                        { firstName: { [Op.iLike]: searchRegex } },
+                        { lastName: { [Op.iLike]: searchRegex } }
+                    ]
+                },
+                attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'bio'],
+                limit: Math.min(100, parseInt(req.query.limit) || 20),
+                order: [['username', 'ASC']]
+            }));
+            return res.status(200).json({
+                success: true,
+                data: { users: (users || []).map(u => formatUser(u)) }
+            });
+        } catch (error) {
+            console.error('[Friends] Search error:', error.message);
+            return res.status(500).json({ success: false, message: 'Search failed' });
+        }
+    })
+);
+
+// ===== INCOMING REQUESTS ALIAS (frontend also calls /requests/incoming) =====
+router.get(
+    '/requests/incoming',
+    apiRateLimiter,
+    asyncHandler(async (req, res) => {
+        try {
+            const userId = getUserId(req);
+            if (!userId) {
+                return res.status(401).json({ success: false, message: 'Authentication required' });
+            }
+            if (!Friend) {
+                return res.status(200).json({ success: true, data: { requests: [] } });
+            }
+            const requests = await withTimeout(Friend.findAll({
+                where: { receiver_id: userId, status: 'pending' },
+                include: [{ model: User, as: 'friendRequesterUser', attributes: ['id', 'username', 'avatar', 'firstName', 'lastName'], required: false }],
+                limit: 100,
+                order: [['createdAt', 'DESC']]
+            }));
+            const formattedRequests = (requests || []).map(r => ({
+                id: r.id,
+                senderId: r.requesterId,
+                user: formatUser(r.friendRequesterUser),
+                status: r.status,
+                notes: r.notes,
+                createdAt: r.createdAt
+            })).filter(r => r.user);
+            return res.status(200).json({ success: true, data: { requests: formattedRequests } });
+        } catch (error) {
+            console.error('[Friends] /requests/incoming error:', error.message);
+            return res.status(500).json({ success: false, message: 'Failed to fetch incoming requests' });
+        }
+    })
+);
+
+// ===== SENT REQUESTS ALIAS (frontend calls /requests/sent) =====
+router.get(
+    '/requests/sent',
+    apiRateLimiter,
+    asyncHandler(async (req, res) => {
+        try {
+            const userId = getUserId(req);
+            if (!userId) {
+                return res.status(401).json({ success: false, message: 'Authentication required' });
+            }
+            if (!Friend) {
+                return res.status(200).json({ success: true, data: { requests: [] } });
+            }
+            const requests = await withTimeout(Friend.findAll({
+                where: { requester_id: userId, status: 'pending' },
+                include: [{ model: User, as: 'friendReceiverUser', attributes: ['id', 'username', 'avatar', 'firstName', 'lastName'], required: false }],
+                limit: 100,
+                order: [['createdAt', 'DESC']]
+            }));
+            const formattedRequests = (requests || []).map(r => ({
+                id: r.id,
+                receiverId: r.receiverId,
+                user: formatUser(r.friendReceiverUser),
+                status: r.status,
+                notes: r.notes,
+                createdAt: r.createdAt
+            })).filter(r => r.user);
+            return res.status(200).json({ success: true, data: { requests: formattedRequests } });
+        } catch (error) {
+            console.error('[Friends] /requests/sent error:', error.message);
+            return res.status(500).json({ success: false, message: 'Failed to fetch sent requests' });
+        }
+    })
+);
+
+router.get(
+    '/:friendId',
+    apiRateLimiter,
+    asyncHandler(async (req, res) => {
+        try {
+            const userId = getUserId(req);
+            
+            if (!userId) {
+                return res.status(401).json({
+                    success: false,
+                    message: 'Authentication required'
+                });
+            }
+
+            const { friendId } = req.params;
+            
+            const specialStrings = ['pinned', 'muted', 'list', 'ping', 'stats', 'suggestions', 'export', 'blocked', 'search', 'incoming', 'sent', 'synced', 'users', 'all', 'contacts', 'accepted', 'pending', 'requests', 'invites'];
+            if (specialStrings.includes(friendId)) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Invalid friend ID'
+                });
+            }
+
+            const targetId = parseInt(friendId);
+            if (isNaN(targetId)) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Invalid friend ID'
+                });
+            }
+
+            if (!friendId) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Friend ID is required'
+                });
+            }
+
+            const friend = await withTimeout(User.findByPk(targetId, {
+                attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'bio', 'status', 'lastSeen']
+            }));
+
+            if (!friend) {
+                return res.status(404).json({
+                    success: false,
+                    message: 'User not found'
+                });
+            }
+
+            let isFriend = false;
+            let friendship = null;
+            if (Friend) {
+                try {
+                    friendship = await withTimeout(Friend.findOne({
+                        where: {
+                            [Op.or]: [
+                                { requester_id: userId, receiver_id: targetId, status: 'accepted' },
+                                { requester_id: targetId, receiver_id: userId, status: 'accepted' }
+                            ]
+                        }
+                    }));
+                    isFriend = !!friendship;
+                } catch (dbError) {
+                    console.log('[Friends Route] Friend check error:', dbError.message);
+                    isFriend = false;
+                }
+            }
+
+            if (!isFriend) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'This user is not in your friends list'
+                });
+            }
+
+            return res.status(200).json({
+                success: true,
+                data: {
+                    friend: formatUser(friend),
+                    friendship: friendship ? {
+                        id: friendship.id,
+                        isPinned: friendship.isPinned || false,
+                        isMuted: friendship.isMuted || false,
+                        mutedUntil: friendship.mutedUntil || null,
+                        createdAt: friendship.createdAt,
+                        acceptedAt: friendship.acceptedAt
+                    } : null
+                }
+            });
+        } catch (error) {
+            console.error('Error fetching friend details:', error.message);
+            return res.status(500).json({
+                success: false,
+                message: 'Failed to fetch friend details'
+            });
+        }
+    })
+);
+
+// ===== GET FRIEND STATISTICS =====
 module.exports = router;
