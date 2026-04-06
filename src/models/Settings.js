@@ -4,81 +4,75 @@ module.exports = (sequelize, DataTypes) => {
     'Settings',
     {
       id: {
-        type: DataTypes.UUID,
-        defaultValue: DataTypes.UUIDV4,
+        type: DataTypes.INTEGER,  // Changed from UUID to INTEGER to match database
         primaryKey: true,
+        autoIncrement: true,
         allowNull: false
       },
       userId: {
-        type: DataTypes.UUID,
+        type: DataTypes.INTEGER,
         allowNull: false,
+        field: 'user_id',
       },
       theme: {
         type: DataTypes.STRING,
         defaultValue: 'light',
         allowNull: false,
-        validate: {
-          isIn: [['light', 'dark', 'system']]
-        }
       },
       accentColor: {
         type: DataTypes.STRING,
         defaultValue: '#000000',
-        validate: {
-          isHexColor(value) {
-            if (!/^#([A-Fa-f0-9]{6}|[A-Fa-f0-9]{3})$/.test(value)) {
-              throw new Error(`${value} is not a valid hex color!`);
-            }
-          }
-        }
+        field: 'accent_color',
       },
       notificationsEnabled: {
         type: DataTypes.BOOLEAN,
         defaultValue: true,
-        allowNull: false
+        allowNull: false,
+        field: 'notifications_enabled',
       },
       language: {
         type: DataTypes.STRING,
         defaultValue: 'en',
         allowNull: false,
-        validate: {
-          isIn: [['en', 'es', 'fr', 'de', 'zh', 'ja', 'ko', 'ru', 'ar']]
-        }
       },
       fontSize: {
         type: DataTypes.STRING,
         defaultValue: 'medium',
-        validate: {
-          isIn: [['small', 'medium', 'large']]
-        }
+        field: 'font_size',
       },
       timezone: {
         type: DataTypes.STRING,
-        defaultValue: 'UTC'
+        defaultValue: 'UTC',
       },
       emailNotifications: {
         type: DataTypes.BOOLEAN,
-        defaultValue: true
+        defaultValue: true,
+        field: 'email_notifications',
       },
       pushNotifications: {
         type: DataTypes.BOOLEAN,
-        defaultValue: true
+        defaultValue: true,
+        field: 'push_notifications',
       },
       soundEnabled: {
         type: DataTypes.BOOLEAN,
-        defaultValue: true
+        defaultValue: true,
+        field: 'sound_enabled',
       },
       vibrationEnabled: {
         type: DataTypes.BOOLEAN,
-        defaultValue: true
+        defaultValue: true,
+        field: 'vibration_enabled',
       },
       dataSaver: {
         type: DataTypes.BOOLEAN,
-        defaultValue: false
+        defaultValue: false,
+        field: 'data_saver',
       },
       autoDownload: {
         type: DataTypes.BOOLEAN,
-        defaultValue: false
+        defaultValue: false,
+        field: 'auto_download',
       },
       privacy: {
         type: DataTypes.JSONB,
@@ -97,25 +91,38 @@ module.exports = (sequelize, DataTypes) => {
           mediaQuality: 'auto',
           saveToGallery: false,
           messageBackup: true
-        }
+        },
+        field: 'chat_preferences',
+      },
+      createdAt: {
+        type: DataTypes.DATE,
+        allowNull: false,
+        defaultValue: DataTypes.NOW,
+        field: 'createdAt',
+      },
+      updatedAt: {
+        type: DataTypes.DATE,
+        allowNull: false,
+        defaultValue: DataTypes.NOW,
+        field: 'updatedAt',
       }
     },
     {
       tableName: 'settings',
       modelName: 'Settings',
       timestamps: true,
-      underscored: true,
+      underscored: false,
       freezeTableName: true,
       indexes: [
         {
           unique: true,
-          fields: ['userId']
+          fields: ['user_id']
         }
-      ]
+      ],
     }
   );
 
-  // Static methods (PRESERVED)
+  // Static methods
   Settings.getDefaultSettings = function() {
     return {
       theme: 'light',
@@ -146,7 +153,7 @@ module.exports = (sequelize, DataTypes) => {
     };
   };
 
-  // Instance methods (PRESERVED)
+  // Instance methods
   Settings.prototype.updateSettings = async function(updates) {
     const allowedUpdates = [
       'theme', 'accentColor', 'notificationsEnabled', 'language', 'fontSize',
@@ -163,8 +170,12 @@ module.exports = (sequelize, DataTypes) => {
     return await this.save();
   };
 
-  // FIXED: Associations with unique aliases
+  // Associations
   Settings.associate = (models) => {
+    if (this.associations && Object.keys(this.associations).length > 0) {
+      return;
+    }
+    
     if (models.Users) {
       Settings.belongsTo(models.Users, {
         foreignKey: 'userId',

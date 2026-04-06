@@ -36,6 +36,27 @@ module.exports = (sequelize, DataTypes) => {
         defaultValue: true,
         allowNull: false,
       },
+      isArchived: {
+        type: DataTypes.BOOLEAN,
+        defaultValue: false,
+        allowNull: false,
+      },
+      archivedBy: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+      },
+      archivedAt: {
+        type: DataTypes.DATE,
+        allowNull: true,
+      },
+      deletedAt: {
+        type: DataTypes.DATE,
+        allowNull: true,
+      },
+      deletedBy: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+      },
       lastMessageId: {
         type: DataTypes.INTEGER,
         allowNull: true,
@@ -90,6 +111,12 @@ module.exports = (sequelize, DataTypes) => {
         {
           fields: ['createdBy'],
         },
+        {
+          fields: ['isArchived'],
+        },
+        {
+          fields: ['isActive'],
+        },
       ],
     }
   );
@@ -142,7 +169,6 @@ module.exports = (sequelize, DataTypes) => {
   };
 
   Chats.getUserChats = async function (userId) {
-    // Check if models exist
     if (!this.sequelize.models.ChatParticipant) {
       console.error('[Chats] ChatParticipant model not found');
       return [];
@@ -158,7 +184,6 @@ module.exports = (sequelize, DataTypes) => {
       }
     ];
 
-    // Only add Messages include if the model exists
     if (this.sequelize.models.Messages) {
       const messagesInclude = {
         model: this.sequelize.models.Messages,
@@ -169,7 +194,6 @@ module.exports = (sequelize, DataTypes) => {
         order: [['createdAt', 'DESC']]
       };
       
-      // Add user include only if Users model exists
       if (this.sequelize.models.Users) {
         messagesInclude.include = [
           {
@@ -193,7 +217,6 @@ module.exports = (sequelize, DataTypes) => {
       });
     } catch (error) {
       console.error('[Chats] Error fetching chats:', error.message);
-      // Fallback without the messages include
       return await this.findAll({
         include: [
           {
@@ -214,10 +237,8 @@ module.exports = (sequelize, DataTypes) => {
 
   // Associations
   Chats.associate = function (models) {
-    // CRITICAL: Prevent duplicate associations (alias conflict fix)
     if (this.associations && Object.keys(this.associations).length > 0) {
-        // Skip if associations already defined to prevent alias conflicts
-        return;
+      return;
     }
         
     if (models.Messages) {

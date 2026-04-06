@@ -62,6 +62,53 @@ const ALLOWED_MSG_TYPES = ['text', 'image', 'file', 'audio', 'video', 'document'
 console.log('✅ Messages routes initialized');
 
 // ============================================================================
+// GET /api/messages/unread-counts - Get unread counts for all user's chats
+// ============================================================================
+router.get('/unread-counts', apiRateLimiter, asyncHandler(async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const sequelize = req.app.locals.db;
+
+    // Real unread counts using ReadReceipts table
+    const unreadCounts = await sequelize.query(
+      `SELECT 
+        m."chatId",
+        COUNT(*) as unread_count
+      FROM "Messages" m
+      LEFT JOIN "ReadReceipts" rr 
+        ON rr."messageId" = m.id 
+        AND rr."userId" = :userId
+      WHERE m."chatId" IN (
+        SELECT cp."chatId" 
+        FROM chat_participants cp 
+        WHERE cp."userId" = :userId
+      )
+      AND m."isDeleted" = false
+      AND m."senderId" != :userId
+      AND rr.id IS NULL
+      GROUP BY m."chatId"`,
+      { 
+        replacements: { userId }, 
+        type: sequelize.QueryTypes.SELECT 
+      }
+    );
+
+    const formatted = {};
+    unreadCounts.forEach(item => {
+      formatted[item.chatId] = parseInt(item.unread_count);
+    });
+
+    res.status(200).json({ 
+      success: true, 
+      data: formatted 
+    });
+  } catch (error) {
+    console.error('Error fetching unread counts:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+}));
+
+// ============================================================================
 // GET /api/messages/chats - Get all conversations for current user
 // ============================================================================
 router.get('/chats', apiRateLimiter, asyncHandler(async (req, res) => {
@@ -79,7 +126,10 @@ router.get('/chats', apiRateLimiter, asyncHandler(async (req, res) => {
         c."createdAt",
         (
           SELECT jsonb_build_object(
-            'id', m.id, 'content', m.content, 'senderId', m."senderId", 'createdAt', m."createdAt",
+            'id', m.id, 
+            'content', m.content, 
+            'senderId', m."senderId", 
+            'createdAt', m."createdAt",
             'sender', jsonb_build_object('id', u.id, 'username', u.username, 'avatar', u.avatar)
           )
           FROM "Messages" m
@@ -92,9 +142,23 @@ router.get('/chats', apiRateLimiter, asyncHandler(async (req, res) => {
           FROM chat_participants cp
           JOIN "Users" p ON p.id = cp."userId"
           WHERE cp."chatId" = c.id AND cp."userId" != :userId
-        ) as participants
+        ) as participants,
+        (
+          SELECT COUNT(*)
+          FROM "Messages" m
+          LEFT JOIN "ReadReceipts" rr 
+            ON rr."messageId" = m.id 
+            AND rr."userId" = :userId
+          WHERE m."chatId" = c.id 
+            AND m."isDeleted" = false
+            AND m."senderId" != :userId
+            AND rr.id IS NULL
+        ) as "unreadCount"
       FROM chats c
-      WHERE EXISTS (SELECT 1 FROM chat_participants cp WHERE cp."chatId" = c.id AND cp."userId" = :userId)
+      WHERE EXISTS (
+        SELECT 1 FROM chat_participants cp 
+        WHERE cp."chatId" = c.id AND cp."userId" = :userId
+      )
       ORDER BY c."updatedAt" DESC`,
       { replacements: { userId }, type: sequelize.QueryTypes.SELECT }
     );
@@ -105,7 +169,7 @@ router.get('/chats', apiRateLimiter, asyncHandler(async (req, res) => {
       type: conv.chatType || 'direct',
       participants: conv.participants || [],
       lastMessage: conv.lastMessage,
-      unreadCount: 0,
+      unreadCount: parseInt(conv.unreadCount || 0),
       updatedAt: conv.updatedAt,
       createdAt: conv.createdAt,
     }));
@@ -125,6 +189,7 @@ router.post('/mark-read/batch', apiRateLimiter, asyncHandler(async (req, res) =>
   try {
     const { messageIds, chatId } = req.body;
     const safeChatId = safeInt(chatId);
+    const userId = req.user.id;
 
     if (!Array.isArray(messageIds) || messageIds.length === 0) {
       return res.status(400).json({ success: false, message: 'messageIds array is required' });
@@ -135,9 +200,10 @@ router.post('/mark-read/batch', apiRateLimiter, asyncHandler(async (req, res) =>
 
     const sequelize = req.app.locals.db;
 
+    // Verify user is a chat participant
     const isParticipant = await sequelize.query(
       `SELECT 1 FROM chat_participants WHERE "chatId" = :chatId AND "userId" = :userId LIMIT 1`,
-      { replacements: { chatId: safeChatId, userId: req.user.id }, type: sequelize.QueryTypes.SELECT }
+      { replacements: { chatId: safeChatId, userId }, type: sequelize.QueryTypes.SELECT }
     );
 
     if (!isParticipant || isParticipant.length === 0) {
@@ -145,6 +211,21 @@ router.post('/mark-read/batch', apiRateLimiter, asyncHandler(async (req, res) =>
     }
 
     const safeIds = messageIds.map(safeInt).filter(Boolean);
+    
+    if (safeIds.length === 0) {
+      return res.status(400).json({ success: false, message: 'No valid message IDs provided' });
+    }
+
+    // Build values for bulk insert
+    const values = safeIds.map(id => `(${id}, ${userId}, NOW(), NOW())`).join(',');
+    
+    // Insert read receipts with ON CONFLICT DO NOTHING to avoid duplicates
+    await sequelize.query(
+      `INSERT INTO "ReadReceipts" ("messageId", "userId", "readAt", "createdAt")
+       VALUES ${values}
+       ON CONFLICT ("messageId", "userId") DO NOTHING`,
+      { type: sequelize.QueryTypes.INSERT }
+    );
 
     res.status(200).json({
       status: 'success',
@@ -192,17 +273,24 @@ router.get('/', apiRateLimiter, asyncHandler(async (req, res) => {
 
     if (req.query.before) {
       const d = new Date(req.query.before);
-      if (!isNaN(d.getTime())) { beforeClause = 'AND m."createdAt" < :before'; replacements.before = d.toISOString(); }
+      if (!isNaN(d.getTime())) { 
+        beforeClause = 'AND m."createdAt" < :before'; 
+        replacements.before = d.toISOString(); 
+      }
     }
     if (req.query.after) {
       const d = new Date(req.query.after);
-      if (!isNaN(d.getTime())) { afterClause = 'AND m."createdAt" > :after'; replacements.after = d.toISOString(); }
+      if (!isNaN(d.getTime())) { 
+        afterClause = 'AND m."createdAt" > :after'; 
+        replacements.after = d.toISOString(); 
+      }
     }
 
     const messages = await sequelize.query(
       `SELECT m.id, m."chatId", m."senderId", m.content,
               m.type as "messageType", m.reactions, m."isEdited",
               m."editedAt", m."isDeleted", m."createdAt", m."updatedAt",
+              m."replyToId",
               jsonb_build_object('id', u.id, 'username', u.username, 'avatar', u.avatar) as sender
        FROM "Messages" m
        LEFT JOIN "Users" u ON u.id = m."senderId"
@@ -238,9 +326,10 @@ router.get('/', apiRateLimiter, asyncHandler(async (req, res) => {
 // ============================================================================
 router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
   try {
-    const { receiverId, content, type = 'text', chatId: existingChatId } = req.body;
+    const { receiverId, content, type = 'text', chatId: existingChatId, replyToId } = req.body;
     const senderId = req.user.id;
 
+    // Validate content
     if (!content || content.trim().length === 0) {
       return res.status(400).json({ success: false, message: 'Message content is required' });
     }
@@ -251,6 +340,23 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
     const messageType = ALLOWED_MSG_TYPES.includes(type) ? type : 'text';
     const sequelize = req.app.locals.db;
     let chatId = existingChatId ? safeInt(existingChatId) : null;
+    const safeReplyToId = replyToId ? safeInt(replyToId) : null;
+
+    // If replyToId is provided, verify the replied message exists and is in the same chat
+    if (safeReplyToId && chatId) {
+      const repliedMessage = await sequelize.query(
+        `SELECT id, "chatId" FROM "Messages" WHERE id = :replyToId AND "isDeleted" = false LIMIT 1`,
+        { replacements: { replyToId: safeReplyToId }, type: sequelize.QueryTypes.SELECT }
+      );
+      
+      if (!repliedMessage || repliedMessage.length === 0) {
+        return res.status(404).json({ success: false, message: 'Replied message not found' });
+      }
+      
+      if (repliedMessage[0].chatId !== chatId) {
+        return res.status(400).json({ success: false, message: 'Replied message must be in the same chat' });
+      }
+    }
 
     // Find or create direct chat when no chatId given
     if (!chatId && receiverId) {
@@ -260,6 +366,16 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
       }
       if (safeReceiverId === senderId) {
         return res.status(400).json({ success: false, message: 'Cannot message yourself' });
+      }
+
+      // Check if user exists
+      const receiverExists = await sequelize.query(
+        `SELECT id FROM "Users" WHERE id = :receiverId LIMIT 1`,
+        { replacements: { receiverId: safeReceiverId }, type: sequelize.QueryTypes.SELECT }
+      );
+      
+      if (!receiverExists || receiverExists.length === 0) {
+        return res.status(404).json({ success: false, message: 'Receiver not found' });
       }
 
       const existing = await sequelize.query(
@@ -305,11 +421,17 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
 
     // Insert message fully parameterized
     const msgResult = await sequelize.query(
-      `INSERT INTO "Messages" ("chatId","senderId",content,type,reactions,"sentAt","deliveredAt","createdAt","updatedAt")
-       VALUES (:chatId,:senderId,:content,:type,'{}',NOW(),NOW(),NOW(),NOW())
-       RETURNING id,"chatId","senderId",content,type,"createdAt"`,
+      `INSERT INTO "Messages" ("chatId","senderId",content,type,reactions,"replyToId","sentAt","deliveredAt","createdAt","updatedAt")
+       VALUES (:chatId,:senderId,:content,:type,'{}',:replyToId,NOW(),NOW(),NOW(),NOW())
+       RETURNING id,"chatId","senderId",content,type,"replyToId","createdAt"`,
       {
-        replacements: { chatId, senderId, content: content.trim(), type: messageType },
+        replacements: { 
+          chatId, 
+          senderId, 
+          content: content.trim(), 
+          type: messageType,
+          replyToId: safeReplyToId
+        },
         type: sequelize.QueryTypes.INSERT,
       }
     );
@@ -333,6 +455,7 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
       content: content.trim(),
       type: messageType,
       reactions: {},
+      replyToId: safeReplyToId,
       sentAt: new Date().toISOString(),
       deliveredAt: new Date().toISOString(),
       createdAt: new Date().toISOString(),
@@ -388,17 +511,24 @@ router.get('/:chatId', apiRateLimiter, asyncHandler(async (req, res) => {
 
     if (req.query.before) {
       const d = new Date(req.query.before);
-      if (!isNaN(d.getTime())) { beforeClause = 'AND m."createdAt" < :before'; replacements.before = d.toISOString(); }
+      if (!isNaN(d.getTime())) { 
+        beforeClause = 'AND m."createdAt" < :before'; 
+        replacements.before = d.toISOString(); 
+      }
     }
     if (req.query.after) {
       const d = new Date(req.query.after);
-      if (!isNaN(d.getTime())) { afterClause = 'AND m."createdAt" > :after'; replacements.after = d.toISOString(); }
+      if (!isNaN(d.getTime())) { 
+        afterClause = 'AND m."createdAt" > :after'; 
+        replacements.after = d.toISOString(); 
+      }
     }
 
     const messages = await sequelize.query(
       `SELECT m.id, m."chatId", m."senderId", m.content,
               m.type as "messageType", m.reactions, m."isEdited",
               m."editedAt", m."isDeleted", m."createdAt", m."updatedAt",
+              m."replyToId",
               jsonb_build_object('id', u.id, 'username', u.username, 'avatar', u.avatar) as sender
        FROM "Messages" m
        LEFT JOIN "Users" u ON u.id = m."senderId"
@@ -677,7 +807,7 @@ router.post('/:messageId/react', apiRateLimiter, asyncHandler(async (req, res) =
     }
 
     const reactions = msg.reactions || {};
-    const emojiKey = emoji.trim().substring(0, 10); // limit emoji key length
+    const emojiKey = emoji.trim().substring(0, 10);
 
     if (!reactions[emojiKey]) reactions[emojiKey] = [];
 

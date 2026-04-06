@@ -53,6 +53,17 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.INTEGER,
         allowNull: true,
       },
+      // ===== ADD MISSING COLUMNS =====
+      isRead: {
+        type: DataTypes.BOOLEAN,
+        defaultValue: false,
+        allowNull: false,
+      },
+      readAt: {
+        type: DataTypes.DATE,
+        allowNull: true,
+      },
+      // ===== END ADDED COLUMNS =====
       reactions: {
         type: DataTypes.JSONB,
         defaultValue: {},
@@ -109,11 +120,14 @@ module.exports = (sequelize, DataTypes) => {
         {
           fields: ['chatId', 'createdAt'],
         },
+        {
+          fields: ['isRead'],  // Add index for isRead
+        },
       ],
     }
   );
 
-  // Instance methods (PRESERVED)
+  // Instance methods
   Messages.prototype.edit = async function (newContent) {
     this.content = newContent;
     this.isEdited = true;
@@ -125,6 +139,12 @@ module.exports = (sequelize, DataTypes) => {
     this.isDeleted = true;
     this.deletedAt = new Date();
     this.deletedBy = deletedBy;
+    return await this.save();
+  };
+
+  Messages.prototype.markAsRead = async function () {
+    this.isRead = true;
+    this.readAt = new Date();
     return await this.save();
   };
 
@@ -156,7 +176,7 @@ module.exports = (sequelize, DataTypes) => {
     return await this.save();
   };
 
-  // Static methods (PRESERVED)
+  // Static methods
   Messages.getChatMessages = async function (chatId, options = {}) {
     const where = {
       chatId: chatId,
@@ -221,11 +241,35 @@ module.exports = (sequelize, DataTypes) => {
     });
   };
 
-  // FIXED: Use a static boolean flag instead of checking Object.keys(this.associations).
-  // The old guard checked Object.keys(this.associations).length > 0, but Sequelize
-  // may initialise associations to a non-empty object before associate() is called
-  // (e.g. during hot-reloads or when another model calls associate first), causing
-  // this model to silently skip all its own association definitions.
+  Messages.markAllAsRead = async function (chatId, userId) {
+    const [affectedRows] = await this.update(
+      { 
+        isRead: true,
+        readAt: new Date()
+      },
+      {
+        where: {
+          chatId: chatId,
+          senderId: { [Op.ne]: userId },
+          isRead: false
+        }
+      }
+    );
+    return affectedRows;
+  };
+
+  Messages.getUnreadCount = async function (chatId, userId) {
+    return await this.count({
+      where: {
+        chatId: chatId,
+        senderId: { [Op.ne]: userId },
+        isRead: false,
+        isDeleted: false
+      }
+    });
+  };
+
+  // Associations
   Messages.associate = function(models) {
     if (Messages._associationsDefined) return;
     Messages._associationsDefined = true;

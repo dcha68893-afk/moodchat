@@ -64,6 +64,11 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.STRING(100),
         allowNull: true,
       },
+      purpose: {
+        type: DataTypes.STRING(100),
+        allowNull: true,
+        defaultValue: 'general',
+      },
       isVerified: {
         type: DataTypes.BOOLEAN,
         defaultValue: false,
@@ -106,6 +111,9 @@ module.exports = (sequelize, DataTypes) => {
         },
         {
           fields: ['isPublic'],
+        },
+        {
+          fields: ['purpose'],
         },
         {
           fields: ['tags'],
@@ -163,9 +171,7 @@ module.exports = (sequelize, DataTypes) => {
 
   // FIXED: Associations with unique aliases
   Groups.associate = function(models) {
-    // CRITICAL: Prevent duplicate associations (alias conflict fix)
     if (this.associations && Object.keys(this.associations).length > 0) {
-        // Skip if associations already defined to prevent alias conflicts
         return;
     }
         

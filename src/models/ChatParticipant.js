@@ -76,7 +76,7 @@ module.exports = (sequelize, DataTypes) => {
     }
   );
 
-  // Instance methods (PRESERVED)
+  // Instance methods
   ChatParticipant.prototype.promoteToAdmin = async function () {
     this.role = 'admin';
     return await this.save();
@@ -113,7 +113,7 @@ module.exports = (sequelize, DataTypes) => {
     };
   };
 
-  // Static methods (PRESERVED)
+  // Static methods
   ChatParticipant.getChatParticipants = async function (chatId, options = {}) {
     const where = { chatId };
 
@@ -295,10 +295,8 @@ module.exports = (sequelize, DataTypes) => {
 
   // FIXED: Associations with unique aliases
   ChatParticipant.associate = function (models) {
-    // CRITICAL: Prevent duplicate associations (alias conflict fix)
     if (this.associations && Object.keys(this.associations).length > 0) {
-        // Skip if associations already defined to prevent alias conflicts
-        return;
+      return;
     }
         
     if (models.Users) {

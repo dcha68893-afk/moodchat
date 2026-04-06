@@ -1,4 +1,4 @@
-// routes/groups.js - Complete Group Management Routes
+﻿// routes/groups.js - Complete Group Management Routes
 // Full implementation with all features - NO SUMMARIZATION
 // Includes: Group CRUD, Members, Invites, Invite Links, Settings, Public Groups, Search, Purposes
 
@@ -1660,22 +1660,35 @@ router.get('/search', groupController.searchGroups.bind(groupController));
 
 // /moods - static list, no DB needed, must be BEFORE /:groupId
 router.get('/moods', (req, res) => {
+  // Send response immediately to avoid timeout
+  const moods = [
+    { id: 'happy', name: 'Happy', label: 'Happy', emoji: '😊', icon: '😊', color: '#FFD700', value: 'happy' },
+    { id: 'excited', name: 'Excited', label: 'Excited', emoji: '🤩', icon: '🤩', color: '#FF6B6B', value: 'excited' },
+    { id: 'calm', name: 'Calm', label: 'Calm', emoji: '😌', icon: '😌', color: '#4ECDC4', value: 'calm' },
+    { id: 'focused', name: 'Focused', label: 'Focused', emoji: '🎯', icon: '🎯', color: '#45B7D1', value: 'focused' },
+    { id: 'sad', name: 'Sad', label: 'Sad', emoji: '😢', icon: '😢', color: '#74B9FF', value: 'sad' },
+    { id: 'angry', name: 'Angry', label: 'Angry', emoji: '😠', icon: '😠', color: '#FF7675', value: 'angry' },
+    { id: 'anxious', name: 'Anxious', label: 'Anxious', emoji: '😰', icon: '😰', color: '#A29BFE', value: 'anxious' },
+    { id: 'grateful', name: 'Grateful', label: 'Grateful', emoji: '🙏', icon: '🙏', color: '#FD79A8', value: 'grateful' },
+    { id: 'bored', name: 'Bored', label: 'Bored', emoji: '😑', icon: '😑', color: '#B2BEC3', value: 'bored' },
+    { id: 'tired', name: 'Tired', label: 'Tired', emoji: '😴', icon: '😴', color: '#636E72', value: 'tired' },
+    { id: 'energetic', name: 'Energetic', label: 'Energetic', emoji: '⚡', icon: '⚡', color: '#FDCB6E', value: 'energetic' },
+    { id: 'relaxed', name: 'Relaxed', label: 'Relaxed', emoji: '🧘', icon: '🧘', color: '#00CEC9', value: 'relaxed' },
+    { id: 'nostalgic', name: 'Nostalgic', label: 'Nostalgic', emoji: '📸', icon: '📸', color: '#A29BFE', value: 'nostalgic' },
+    { id: 'romantic', name: 'Romantic', label: 'Romantic', emoji: '💕', icon: '💕', color: '#FF6B6B', value: 'romantic' },
+    { id: 'lonely', name: 'Lonely', label: 'Lonely', emoji: '🫂', icon: '🫂', color: '#74B9FF', value: 'lonely' },
+    { id: 'confused', name: 'Confused', label: 'Confused', emoji: '🤔', icon: '🤔', color: '#B2BEC3', value: 'confused' },
+    { id: 'proud', name: 'Proud', label: 'Proud', emoji: '🦁', icon: '🦁', color: '#FDCB6E', value: 'proud' },
+    { id: 'hopeful', name: 'Hopeful', label: 'Hopeful', emoji: '🌈', icon: '🌈', color: '#00CEC9', value: 'hopeful' },
+    { id: 'sick', name: 'Sick', label: 'Sick', emoji: '🤒', icon: '🤒', color: '#636E72', value: 'sick' },
+    { id: 'neutral', name: 'Neutral', label: 'Neutral', emoji: '😐', icon: '😐', color: '#B2BEC3', value: 'neutral' }
+  ];
+  
+  // Return in the format the frontend expects
   res.status(200).json({
     success: true,
-    data: {
-      moods: [
-        { id: 'happy',    label: 'Happy',    emoji: '??', color: '#FFD700' },
-        { id: 'excited',  label: 'Excited',  emoji: '??', color: '#FF6B6B' },
-        { id: 'calm',     label: 'Calm',     emoji: '??', color: '#4ECDC4' },
-        { id: 'focused',  label: 'Focused',  emoji: '??', color: '#45B7D1' },
-        { id: 'sad',      label: 'Sad',      emoji: '??', color: '#74B9FF' },
-        { id: 'angry',    label: 'Angry',    emoji: '??', color: '#FF7675' },
-        { id: 'anxious',  label: 'Anxious',  emoji: '??', color: '#A29BFE' },
-        { id: 'grateful', label: 'Grateful', emoji: '??', color: '#FD79A8' },
-        { id: 'bored',    label: 'Bored',    emoji: '??', color: '#B2BEC3' },
-        { id: 'tired',    label: 'Tired',    emoji: '??', color: '#636E72' }
-      ]
-    }
+    data: moods,
+    status: 'success'
   });
 });
 

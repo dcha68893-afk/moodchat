@@ -2,17 +2,28 @@
 const asyncHandler = require('express-async-handler');
 const express = require('express');
 const router = express.Router();
-
-// Import database models
+const { Op } = require('sequelize');
 const db = require('../models');
-const User = db.User || db.Users;
-const Chat = db.Chat || db.Chats;
-const Message = db.Message || db.Messages;
 
+// These will now work correctly with the new getters
+const User = db.User;
+const Chat = db.Chat;
+const Message = db.Message;
+const ChatParticipant = db.ChatParticipant;
+
+// Add validation
+if (!Chat || !User || !Message || !ChatParticipant) {
+    console.error('[Chats] Missing models:', {
+        Chat: !!Chat,
+        User: !!User,
+        Message: !!Message,
+        ChatParticipant: !!ChatParticipant
+    });
+}
 // Import middleware
 const { apiRateLimiter } = require('../middleware/rateLimiter');
 
-console.log('✅ Chats routes initialized');
+console.log('✅ Chats routes initialized (v2.0.0 - Complete CRUD)');
 
 // Helper function to get user ID with validation
 const getUserId = (req) => {
@@ -23,7 +34,54 @@ const getUserId = (req) => {
     return req.user.userId || req.user.id;
 };
 
-// ===== GET ALL CHATS (FIXED with raw SQL) =====
+// Helper function to check models
+const checkModels = (res) => {
+    if (!Chat || !User || !Message || !ChatParticipant) {
+        console.error('[Chats] Required models not loaded');
+        res.status(500).json({
+            status: 'error',
+            message: 'Chat service temporarily unavailable'
+        });
+        return false;
+    }
+    return true;
+};
+
+// Helper function to get participant user IDs for a chat
+const getChatParticipantIds = async (chatId) => {
+    const participants = await ChatParticipant.findAll({
+        where: { chatId: chatId },
+        attributes: ['userId']
+    });
+    return participants.map(p => p.userId);
+};
+
+// Helper function to broadcast to chat participants
+const broadcastToChat = async (req, chatId, event, data) => {
+    if (!req.io) return;
+    
+    try {
+        const participantIds = await getChatParticipantIds(chatId);
+        const users = await User.findAll({
+            where: { id: participantIds },
+            attributes: ['id', 'socketIds']
+        });
+        
+        users.forEach(user => {
+            if (user.socketIds && Array.isArray(user.socketIds) && user.socketIds.length > 0) {
+                user.socketIds.forEach(socketId => {
+                    req.io.to(socketId).emit(event, data);
+                });
+            }
+        });
+    } catch (error) {
+        console.error(`[Chats] Error broadcasting ${event}:`, error.message);
+    }
+};
+
+// ============================================================================
+// GET ALL CHATS FOR CURRENT USER
+// ============================================================================
 router.get(
     '/',
     apiRateLimiter,
@@ -38,107 +96,124 @@ router.get(
                 });
             }
             
+            if (!checkModels(res)) return;
+            
             console.log('[Chats] Fetching chats for user:', userId);
 
-            const sequelize = req.app.locals.db;
+            const { page = 1, limit = 50, includeArchived = false } = req.query;
+            const offset = (parseInt(page) - 1) * parseInt(limit);
             
-            // Get all chats where user is a participant using raw SQL
-            const chats = await sequelize.query(`
-                SELECT 
-                    c.id,
-                    c.type,
-                    c.name,
-                    c."createdBy",
-                    c."isActive",
-                    c."lastMessageId",
-                    c."lastMessageAt",
-                    c."createdAt",
-                    c."updatedAt",
-                    (
-                        SELECT jsonb_build_object(
-                            'id', m.id,
-                            'content', m.content,
-                            'type', m.type,
-                            'senderId', m."senderId",
-                            'createdAt', m."createdAt",
-                            'sender', jsonb_build_object(
-                                'id', u.id,
-                                'username', u.username,
-                                'avatar', u.avatar
-                            )
-                        )
-                        FROM "Messages" m
-                        LEFT JOIN "Users" u ON u.id = m."senderId"
-                        WHERE m."chatId" = c.id AND m."isDeleted" = false
-                        ORDER BY m."createdAt" DESC
-                        LIMIT 1
-                    ) as "lastMessage",
-                    (
-                        SELECT jsonb_agg(
-                            jsonb_build_object(
-                                'id', p.id,
-                                'username', p.username,
-                                'avatar', p.avatar,
-                                'firstName', p."firstName",
-                                'lastName', p."lastName",
-                                'status', p.status
-                            )
-                        )
-                        FROM chat_participants cp
-                        JOIN "Users" p ON p.id = cp."userId"
-                        WHERE cp."chatId" = c.id
-                    ) as participants
-                FROM chats c
-                WHERE EXISTS (
-                    SELECT 1 FROM chat_participants cp 
-                    WHERE cp."chatId" = c.id AND cp."userId" = ${userId}
-                )
-                ORDER BY c."updatedAt" DESC
-            `, { type: sequelize.QueryTypes.SELECT });
+            const whereCondition = includeArchived === 'true' ? {} : { isArchived: false };
+            
+            const { count, rows: chats } = await Chat.findAndCountAll({
+                where: whereCondition,
+                include: [
+                    {
+                        model: ChatParticipant,
+                        as: 'chatParticipants',
+                        where: { userId: userId },
+                        required: true,
+                        attributes: ['userId', 'joinedAt']
+                    },
+                    {
+                        model: User,
+                        as: 'chatCreator',
+                        attributes: ['id', 'username', 'avatar', 'firstName', 'lastName']
+                    },
+                    {
+                        model: Message,
+                        as: 'chatMessages',
+                        required: false,
+                        limit: 1,
+                        order: [['createdAt', 'DESC']],
+                        attributes: ['id', 'content', 'type', 'createdAt', 'senderId']
+                    }
+                ],
+                order: [['updatedAt', 'DESC']],
+                offset,
+                limit: parseInt(limit),
+                distinct: true,
+                subQuery: false
+            });
             
             // Format chats for response
-            const formattedChats = chats.map(chat => {
-                const participants = chat.participants || [];
+            const formattedChats = await Promise.all((chats || []).map(async (chat) => {
+                const chatObj = chat.toJSON ? chat.toJSON() : chat;
+                
+                // FIXED: Use correct alias 'chatParticipantUser' instead of 'user'
+                const participants = await ChatParticipant.findAll({
+                    where: { chatId: chat.id },
+                    include: [{
+                        model: User,
+                        as: 'chatParticipantUser',
+                        attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'email']
+                    }]
+                });
+                
+                // FIXED: Use the correct alias 'chatParticipantUser'
+                chatObj.participants = participants.map(p => p.chatParticipantUser).filter(p => p !== null);
+                
+                // Calculate unread count for this user
+                const unreadCount = await Message.count({
+                    where: {
+                        chatId: chat.id,
+                        isRead: false,
+                        senderId: { [Op.ne]: userId }
+                    }
+                });
+                chatObj.unreadCount = unreadCount || 0;
                 
                 // For direct chats, get the other participant
-                if (chat.type === 'direct') {
-                    const otherParticipant = participants.find(p => p.id !== userId);
+                if (chatObj.type === 'direct') {
+                    const otherParticipant = chatObj.participants?.find(p => p && p.id !== userId);
                     if (otherParticipant) {
                         const displayName = [otherParticipant.firstName, otherParticipant.lastName].filter(Boolean).join(' ').trim() || otherParticipant.username;
-                        chat.otherParticipant = {
+                        chatObj.otherParticipant = {
                             id: otherParticipant.id,
                             username: otherParticipant.username,
                             avatar: otherParticipant.avatar,
                             displayName: displayName,
-                            status: otherParticipant.status || 'offline'
+                            status: otherParticipant.status || 'offline',
+                            lastSeen: otherParticipant.lastSeen
                         };
-                        chat.chatName = displayName;
-                        chat.avatar = otherParticipant.avatar;
+                        chatObj.chatName = displayName;
+                        chatObj.avatar = otherParticipant.avatar;
                     }
+                } else if (chatObj.type === 'group') {
+                    chatObj.chatName = chatObj.name;
+                    chatObj.participantCount = chatObj.participants?.length || 0;
                 }
                 
-                chat.unreadCount = 0;
-                return chat;
-            });
-
+                return chatObj;
+            }));
+            
             res.status(200).json({
                 status: 'success',
                 data: {
                     chats: formattedChats,
-                    pagination: { total: chats.length, page: 1, limit: 50, pages: 1 }
+                    pagination: {
+                        total: count,
+                        page: parseInt(page),
+                        limit: parseInt(limit),
+                        pages: Math.ceil(count / parseInt(limit))
+                    }
                 }
             });
         } catch (error) {
             console.error('[Chats] Error fetching chats:', error.message);
-            res.status(200).json({
-                status: 'success',
-                data: { chats: [] }
+            console.error('[Chats] Stack:', error.stack);
+            res.status(500).json({
+                status: 'error',
+                message: 'Failed to fetch chats',
+                error: process.env.NODE_ENV === 'development' ? error.message : undefined
             });
         }
     })
 );
 
-// ===== GET SINGLE CHAT (FIXED with raw SQL) =====
+// ============================================================================
+// GET SINGLE CHAT BY ID
+// ============================================================================
 router.get(
     '/:chatId',
     apiRateLimiter,
@@ -152,7 +227,9 @@ router.get(
                     message: 'Authentication required'
                 });
             }
-
+            
+            if (!checkModels(res)) return;
+            
             const { chatId } = req.params;
             
             if (!chatId) {
@@ -161,86 +238,93 @@ router.get(
                     message: 'Chat ID is required'
                 });
             }
-
-            const sequelize = req.app.locals.db;
             
-            // Check if user is in this chat
-            const isParticipant = await sequelize.query(`
-                SELECT 1 FROM chat_participants 
-                WHERE "chatId" = ${chatId} AND "userId" = ${userId}
-                LIMIT 1
-            `, { type: sequelize.QueryTypes.SELECT });
-
-            if (!isParticipant || isParticipant.length === 0) {
-                return res.status(404).json({
+            // Check if user is participant
+            const isParticipant = await ChatParticipant.findOne({
+                where: {
+                    chatId: chatId,
+                    userId: userId
+                }
+            });
+            
+            if (!isParticipant) {
+                return res.status(403).json({
                     status: 'error',
-                    message: 'Chat not found or access denied'
+                    message: 'Access denied to this chat'
                 });
             }
-
-            // Get chat details
-            const chats = await sequelize.query(`
-                SELECT 
-                    c.id,
-                    c.type,
-                    c.name,
-                    c."createdBy",
-                    c."isActive",
-                    c."lastMessageId",
-                    c."lastMessageAt",
-                    c."createdAt",
-                    c."updatedAt",
-                    (
-                        SELECT jsonb_agg(
-                            jsonb_build_object(
-                                'id', p.id,
-                                'username', p.username,
-                                'avatar', p.avatar,
-                                'firstName', p."firstName",
-                                'lastName', p."lastName",
-                                'status', p.status,
-                                'lastSeen', p."lastSeen"
-                            )
-                        )
-                        FROM chat_participants cp
-                        JOIN "Users" p ON p.id = cp."userId"
-                        WHERE cp."chatId" = c.id
-                    ) as participants
-                FROM chats c
-                WHERE c.id = ${chatId}
-            `, { type: sequelize.QueryTypes.SELECT });
             
-            if (!chats || chats.length === 0) {
+            const chat = await Chat.findByPk(chatId, {
+                include: [
+                    {
+                        model: User,
+                        as: 'chatCreator',
+                        attributes: ['id', 'username', 'avatar', 'firstName', 'lastName']
+                    }
+                ]
+            });
+            
+            if (!chat) {
                 return res.status(404).json({
                     status: 'error',
                     message: 'Chat not found'
                 });
             }
             
-            const chat = chats[0];
-            const participants = chat.participants || [];
+            const chatObj = chat.toJSON ? chat.toJSON() : chat;
             
-            chat.unreadCount = 0;
-
-            if (chat.type === 'direct') {
-                const otherParticipant = participants.find(p => p.id !== userId);
-                chat.otherParticipant = otherParticipant || null;
-                if (!chat.name && otherParticipant) {
+            // FIXED: Use correct alias 'chatParticipantUser'
+            const participants = await ChatParticipant.findAll({
+                where: { chatId: chat.id },
+                include: [{
+                    model: User,
+                    as: 'chatParticipantUser',
+                    attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'email']
+                }]
+            });
+            
+            // FIXED: Use the correct alias 'chatParticipantUser'
+            chatObj.participants = participants.map(p => p.chatParticipantUser).filter(p => p !== null);
+            
+            // Calculate unread count
+            const unreadCount = await Message.count({
+                where: {
+                    chatId: chat.id,
+                    isRead: false,
+                    senderId: { [Op.ne]: userId }
+                }
+            });
+            chatObj.unreadCount = unreadCount || 0;
+            
+            // For direct chats, get the other participant
+            if (chatObj.type === 'direct') {
+                const otherParticipant = chatObj.participants?.find(p => p && p.id !== userId);
+                if (otherParticipant) {
                     const displayName = [otherParticipant.firstName, otherParticipant.lastName].filter(Boolean).join(' ').trim() || otherParticipant.username;
-                    chat.chatName = displayName;
+                    chatObj.otherParticipant = {
+                        id: otherParticipant.id,
+                        username: otherParticipant.username,
+                        avatar: otherParticipant.avatar,
+                        displayName: displayName,
+                        status: otherParticipant.status || 'offline',
+                        lastSeen: otherParticipant.lastSeen,
+                        email: otherParticipant.email
+                    };
+                    chatObj.chatName = displayName;
+                    chatObj.avatar = otherParticipant.avatar;
                 }
-            } else if (chat.type === 'group') {
-                if (!chat.chatName && chat.name) {
-                    chat.chatName = chat.name;
-                }
+            } else if (chatObj.type === 'group') {
+                chatObj.chatName = chatObj.name;
+                chatObj.participantCount = chatObj.participants?.length || 0;
+                chatObj.isCreator = chatObj.createdBy === userId;
             }
-
+            
             res.status(200).json({
                 status: 'success',
-                data: { chat: chat },
+                data: { chat: chatObj }
             });
         } catch (error) {
-            console.error('Error fetching chat:', error.message);
+            console.error('[Chats] Error fetching chat:', error.message);
             res.status(500).json({
                 status: 'error',
                 message: 'Failed to fetch chat'
@@ -249,9 +333,11 @@ router.get(
     })
 );
 
-// ===== CREATE DIRECT CHAT (FIXED with raw SQL) =====
+// ============================================================================
+// START DIRECT MESSAGE CHAT (FIND-OR-CREATE) - NO DUPLICATES
+// ============================================================================
 router.post(
-    '/direct',
+    '/start',
     apiRateLimiter,
     asyncHandler(async (req, res) => {
         try {
@@ -263,125 +349,199 @@ router.post(
                     message: 'Authentication required'
                 });
             }
-
+            
+            if (!checkModels(res)) return;
+            
             const { userId: otherUserId } = req.body;
-
+            
             if (!otherUserId) {
                 return res.status(400).json({
                     status: 'error',
                     message: 'User ID is required'
                 });
             }
-
+            
             if (otherUserId === userId) {
                 return res.status(400).json({
                     status: 'error',
-                    message: 'Cannot create chat with yourself'
+                    message: 'Cannot start a chat with yourself'
                 });
             }
-
-            const sequelize = req.app.locals.db;
             
-            // Check if other user exists
-            const otherUser = await sequelize.query(`
-                SELECT id, username, avatar, "firstName", "lastName" FROM "Users" WHERE id = ${otherUserId}
-            `, { type: sequelize.QueryTypes.SELECT });
-
-            if (!otherUser || otherUser.length === 0) {
+            // Verify other user exists
+            const otherUser = await User.findByPk(otherUserId, {
+                attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'socketIds']
+            });
+            
+            if (!otherUser) {
                 return res.status(404).json({
                     status: 'error',
                     message: 'User not found'
                 });
             }
-
-            // Check if direct chat already exists
-            const existingChats = await sequelize.query(`
-                SELECT c.id, c.type, c.name
-                FROM chats c
-                JOIN chat_participants cp1 ON cp1."chatId" = c.id AND cp1."userId" = ${userId}
-                JOIN chat_participants cp2 ON cp2."chatId" = c.id AND cp2."userId" = ${otherUserId}
-                WHERE c.type = 'direct'
-                LIMIT 1
-            `, { type: sequelize.QueryTypes.SELECT });
-
-            if (existingChats && existingChats.length > 0) {
-                const existingChat = existingChats[0];
-                const otherUserData = otherUser[0];
-                const displayName = [otherUserData.firstName, otherUserData.lastName].filter(Boolean).join(' ').trim() || otherUserData.username;
-                
-                return res.status(200).json({
-                    status: 'success',
-                    message: 'Chat already exists',
-                    data: { 
-                        chat: {
-                            id: existingChat.id,
-                            type: 'direct',
-                            otherParticipant: {
-                                id: otherUserData.id,
-                                username: otherUserData.username,
-                                avatar: otherUserData.avatar,
-                                displayName: displayName
-                            },
-                            chatName: displayName,
-                            unreadCount: 0
-                        }
-                    },
-                });
-            }
-
-            // Create new chat
-            const newChat = await sequelize.query(`
-                INSERT INTO chats (type, "createdBy", "isActive", "createdAt", "updatedAt")
-                VALUES ('direct', ${userId}, true, NOW(), NOW())
-                RETURNING id, type, name, "createdBy", "createdAt", "updatedAt"
-            `, { type: sequelize.QueryTypes.INSERT });
             
-            const chatId = newChat[0][0].id;
+            // Check if direct chat already exists
+            const existingParticipant1 = await ChatParticipant.findAll({
+                where: { userId: userId },
+                attributes: ['chatId']
+            });
+            
+            const existingParticipant2 = await ChatParticipant.findAll({
+                where: { userId: otherUserId },
+                attributes: ['chatId']
+            });
+            
+            const userChatIds = new Set(existingParticipant1.map(p => p.chatId));
+            const otherChatIds = new Set(existingParticipant2.map(p => p.chatId));
+            
+            // Find common chat IDs
+            const commonChatIds = [...userChatIds].filter(id => otherChatIds.has(id));
+            
+            if (commonChatIds.length > 0) {
+                // Check if any common chat is a direct chat
+                for (const chatId of commonChatIds) {
+                    const chat = await Chat.findByPk(chatId);
+                    if (chat && chat.type === 'direct' && chat.isActive === true) {
+                        const displayName = [otherUser.firstName, otherUser.lastName].filter(Boolean).join(' ').trim() || otherUser.username;
+                        
+                        return res.status(200).json({
+                            status: 'success',
+                            message: 'Existing direct chat found',
+                            data: {
+                                chat: {
+                                    id: chat.id,
+                                    type: 'direct',
+                                    otherParticipant: {
+                                        id: otherUser.id,
+                                        username: otherUser.username,
+                                        avatar: otherUser.avatar,
+                                        displayName: displayName,
+                                        status: otherUser.status || 'offline',
+                                        lastSeen: otherUser.lastSeen
+                                    },
+                                    chatName: displayName,
+                                    avatar: otherUser.avatar,
+                                    createdAt: chat.createdAt,
+                                    updatedAt: chat.updatedAt,
+                                    unreadCount: 0
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+            
+            // No existing direct chat found - create new one
+            const newChat = await Chat.create({
+                type: 'direct',
+                createdBy: userId,
+                isActive: true,
+                createdAt: new Date(),
+                updatedAt: new Date()
+            });
             
             // Add participants
-            await sequelize.query(`
-                INSERT INTO chat_participants ("chatId", "userId", "joinedAt", "createdAt", "updatedAt")
-                VALUES 
-                    (${chatId}, ${userId}, NOW(), NOW(), NOW()),
-                    (${chatId}, ${otherUserId}, NOW(), NOW(), NOW())
-            `);
-
-            const otherUserData = otherUser[0];
-            const displayName = [otherUserData.firstName, otherUserData.lastName].filter(Boolean).join(' ').trim() || otherUserData.username;
-
+            await ChatParticipant.bulkCreate([
+                {
+                    chatId: newChat.id,
+                    userId: userId,
+                    joinedAt: new Date(),
+                    createdAt: new Date(),
+                    updatedAt: new Date()
+                },
+                {
+                    chatId: newChat.id,
+                    userId: otherUserId,
+                    joinedAt: new Date(),
+                    createdAt: new Date(),
+                    updatedAt: new Date()
+                }
+            ]);
+            
+            const displayName = [otherUser.firstName, otherUser.lastName].filter(Boolean).join(' ').trim() || otherUser.username;
+            
+            // Broadcast to both users
+            if (req.io) {
+                const chatData = {
+                    id: newChat.id,
+                    type: 'direct',
+                    otherParticipant: {
+                        id: otherUser.id,
+                        username: otherUser.username,
+                        avatar: otherUser.avatar,
+                        displayName: displayName,
+                        status: otherUser.status || 'offline'
+                    },
+                    chatName: displayName,
+                    createdAt: newChat.createdAt,
+                    updatedAt: newChat.updatedAt
+                };
+                
+                // Notify current user
+                const currentUserSockets = await User.findByPk(userId, { attributes: ['socketIds'] });
+                if (currentUserSockets && currentUserSockets.socketIds) {
+                    currentUserSockets.socketIds.forEach(socketId => {
+                        req.io.to(socketId).emit('chat:created', chatData);
+                    });
+                }
+                
+                // Notify other user
+                if (otherUser.socketIds && Array.isArray(otherUser.socketIds)) {
+                    otherUser.socketIds.forEach(socketId => {
+                        const otherUserChatData = {
+                            ...chatData,
+                            otherParticipant: {
+                                id: userId,
+                                username: req.user?.username || 'User',
+                                avatar: req.user?.avatar || null,
+                                displayName: req.user?.username || 'User'
+                            }
+                        };
+                        req.io.to(socketId).emit('chat:created', otherUserChatData);
+                    });
+                }
+            }
+            
             res.status(201).json({
                 status: 'success',
-                message: 'Chat created successfully',
-                data: { 
+                message: 'Direct chat created successfully',
+                data: {
                     chat: {
-                        id: chatId,
+                        id: newChat.id,
                         type: 'direct',
                         otherParticipant: {
-                            id: otherUserData.id,
-                            username: otherUserData.username,
-                            avatar: otherUserData.avatar,
-                            displayName: displayName
+                            id: otherUser.id,
+                            username: otherUser.username,
+                            avatar: otherUser.avatar,
+                            displayName: displayName,
+                            status: otherUser.status || 'offline',
+                            lastSeen: otherUser.lastSeen
                         },
                         chatName: displayName,
-                        createdAt: new Date().toISOString(),
-                        updatedAt: new Date().toISOString(),
+                        avatar: otherUser.avatar,
+                        createdAt: newChat.createdAt,
+                        updatedAt: newChat.updatedAt,
                         unreadCount: 0
                     }
-                },
+                }
             });
         } catch (error) {
-            console.error('Error creating direct chat:', error.message);
+            console.error('[Chats] Error starting direct chat:', error.message);
+            console.error('[Chats] Stack:', error.stack);
             res.status(500).json({
                 status: 'error',
-                message: 'Failed to create direct chat'
+                message: 'Failed to start direct chat',
+                error: process.env.NODE_ENV === 'development' ? error.message : undefined
             });
         }
     })
 );
 
-// ===== CREATE GROUP CHAT =====
+// ============================================================================
+// CREATE GROUP CHAT
+// ============================================================================
 router.post(
-    '/group',
+    '/',
     apiRateLimiter,
     asyncHandler(async (req, res) => {
         try {
@@ -393,94 +553,117 @@ router.post(
                     message: 'Authentication required'
                 });
             }
-
+            
             if (!checkModels(res)) return;
-
+            
             const { name, participantIds, description, avatar } = req.body;
-
+            
             if (!name || !name.trim()) {
                 return res.status(400).json({
                     status: 'error',
                     message: 'Group name is required'
                 });
             }
-
+            
             if (name.length > 100) {
                 return res.status(400).json({
                     status: 'error',
                     message: 'Group name must be less than 100 characters'
                 });
             }
-
+            
             if (!Array.isArray(participantIds) || participantIds.length === 0) {
                 return res.status(400).json({
                     status: 'error',
                     message: 'At least one participant is required'
                 });
             }
-
+            
+            // Ensure unique participants and include creator
             const allParticipants = [...new Set([userId, ...participantIds])];
-
+            
+            // Verify all participants exist
             const participants = await User.findAll({
                 where: { id: allParticipants },
                 attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'socketIds']
             });
-
+            
             if (participants.length !== allParticipants.length) {
+                const foundIds = participants.map(p => p.id);
+                const missingIds = allParticipants.filter(id => !foundIds.includes(id));
                 return res.status(404).json({
                     status: 'error',
-                    message: 'One or more participants not found'
+                    message: `Users not found: ${missingIds.join(', ')}`
                 });
             }
-
-            const currentUser = await User.findByPk(userId);
-
-            // Create chat
+            
+            const currentUser = participants.find(p => p.id === userId);
+            
+            // Create group chat
             const chat = await Chat.create({
                 type: 'group',
                 name: name.trim(),
-                description: description?.trim(),
-                avatar: avatar,
+                description: description?.trim() || null,
+                avatar: avatar || null,
                 createdBy: userId,
-                isActive: true
+                isActive: true,
+                createdAt: new Date(),
+                updatedAt: new Date()
             });
-
+            
             if (!chat) {
                 return res.status(500).json({
                     status: 'error',
-                    message: 'Failed to create group'
+                    message: 'Failed to create group chat'
                 });
             }
-
+            
             // Add participants
-            if (ChatParticipant) {
-                const participantRecords = allParticipants.map(participantId => ({
-                    chatId: chat.id,
-                    userId: participantId
-                }));
-                await ChatParticipant.bulkCreate(participantRecords);
-            }
-
-            const populatedChat = await Chat.findByPk(chat.id, {
+            const participantRecords = allParticipants.map(participantId => ({
+                chatId: chat.id,
+                userId: participantId,
+                joinedAt: new Date(),
+                createdAt: new Date(),
+                updatedAt: new Date()
+            }));
+            
+            await ChatParticipant.bulkCreate(participantRecords);
+            
+            // Fetch created chat with details
+            const createdChat = await Chat.findByPk(chat.id, {
                 include: [
                     {
                         model: User,
                         as: 'chatCreator',
-                        attributes: ['id', 'username', 'avatar']
+                        attributes: ['id', 'username', 'avatar', 'firstName', 'lastName']
                     }
                 ]
             });
-
-            if (req.io && participants) {
+            
+            const chatObj = createdChat.toJSON ? createdChat.toJSON() : createdChat;
+            
+            // Add participants to response
+            chatObj.participants = participants.map(p => ({
+                id: p.id,
+                username: p.username,
+                avatar: p.avatar,
+                firstName: p.firstName,
+                lastName: p.lastName
+            }));
+            chatObj.participantCount = participants.length;
+            chatObj.isCreator = true;
+            
+            // Broadcast to all participants
+            if (req.io) {
                 const notificationData = {
-                    chat: populatedChat.toJSON ? populatedChat.toJSON() : populatedChat,
+                    chat: chatObj,
                     addedBy: {
                         id: userId,
-                        username: currentUser.username,
-                        avatar: currentUser.avatar,
-                    },
+                        username: currentUser?.username || req.user?.username,
+                        avatar: currentUser?.avatar || req.user?.avatar
+                    }
                 };
-
+                
                 participants.forEach(participant => {
                     if (participant.socketIds && Array.isArray(participant.socketIds) && participant.socketIds.length > 0) {
                         participant.socketIds.forEach(socketId => {
@@ -489,23 +672,27 @@ router.post(
                     }
                 });
             }
-
+            
             res.status(201).json({
                 status: 'success',
                 message: 'Group chat created successfully',
-                data: { chat: populatedChat },
+                data: { chat: chatObj }
             });
         } catch (error) {
-            console.error('Error creating group chat:', error.message);
+            console.error('[Chats] Error creating group chat:', error.message);
+            console.error('[Chats] Stack:', error.stack);
             res.status(500).json({
                 status: 'error',
-                message: 'Failed to create group chat'
+                message: 'Failed to create group chat',
+                error: process.env.NODE_ENV === 'development' ? error.message : undefined
             });
         }
     })
 );
 
-// ===== UPDATE CHAT =====
+// ============================================================================
+// UPDATE CHAT (GROUP ONLY - NAME, DESCRIPTION, AVATAR)
+// ============================================================================
 router.patch(
     '/:chatId',
     apiRateLimiter,
@@ -519,87 +706,82 @@ router.patch(
                     message: 'Authentication required'
                 });
             }
-
+            
             if (!checkModels(res)) return;
-
+            
             const { chatId } = req.params;
             const { name, description, avatar } = req.body;
-
+            
             if (!chatId) {
                 return res.status(400).json({
                     status: 'error',
                     message: 'Chat ID is required'
                 });
             }
-
-            const chat = await Chat.findOne({
-                where: {
-                    id: chatId,
-                    type: 'group',
-                    createdBy: userId,
-                    isActive: true
-                }
-            });
-
+            
+            const chat = await Chat.findByPk(chatId);
+            
             if (!chat) {
                 return res.status(404).json({
                     status: 'error',
-                    message: 'Group chat not found or access denied'
+                    message: 'Chat not found'
                 });
             }
-
+            
+            // Only group chats can be updated
+            if (chat.type !== 'group') {
+                return res.status(400).json({
+                    status: 'error',
+                    message: 'Only group chats can be updated'
+                });
+            }
+            
+            // Check if user is creator
+            if (chat.createdBy !== userId) {
+                return res.status(403).json({
+                    status: 'error',
+                    message: 'Only group creator can update chat settings'
+                });
+            }
+            
             const updates = {};
             if (name && name.trim()) updates.name = name.trim();
-            if (description !== undefined) updates.description = description?.trim();
+            if (description !== undefined) updates.description = description?.trim() || null;
             if (avatar !== undefined) updates.avatar = avatar;
-
+            updates.updatedAt = new Date();
+            
             await chat.update(updates);
-
+            
             const updatedChat = await Chat.findByPk(chatId, {
                 include: [
                     {
                         model: User,
                         as: 'chatCreator',
-                        attributes: ['id', 'username', 'avatar']
+                        attributes: ['id', 'username', 'avatar', 'firstName', 'lastName']
                     }
                 ]
             });
-
-            // Get all participants for broadcasting
-            const participants = await ChatParticipant.findAll({
-                where: { chatId: chat.id },
-                attributes: ['userId']
-            });
             
-            const participantUsers = await User.findAll({
-                where: { id: participants.map(p => p.userId) },
-                attributes: ['id', 'socketIds']
-            });
-
-            if (req.io && updatedChat) {
-                participantUsers.forEach(participant => {
-                    if (participant.socketIds && Array.isArray(participant.socketIds) && participant.socketIds.length > 0) {
-                        participant.socketIds.forEach(socketId => {
-                            req.io.to(socketId).emit('group:updated', {
-                                chatId: chat.id,
-                                updates,
-                                updatedBy: {
-                                    id: userId,
-                                    username: req.user.username,
-                                },
-                            });
-                        });
-                    }
+            // Broadcast updates to all participants
+            if (req.io) {
+                await broadcastToChat(req, chatId, 'group:updated', {
+                    chatId: chat.id,
+                    updates: updates,
+                    updatedBy: {
+                        id: userId,
+                        username: req.user?.username
+                    },
+                    timestamp: new Date().toISOString()
                 });
             }
-
+            
             res.status(200).json({
                 status: 'success',
                 message: 'Chat updated successfully',
-                data: { chat: updatedChat },
+                data: { chat: updatedChat }
             });
         } catch (error) {
-            console.error('Error updating chat:', error.message);
+            console.error('[Chats] Error updating chat:', error.message);
             res.status(500).json({
                 status: 'error',
                 message: 'Failed to update chat'
@@ -608,7 +790,9 @@ router.patch(
     })
 );
 
-// ===== ADD PARTICIPANTS TO GROUP =====
+// ============================================================================
+// ADD PARTICIPANTS TO GROUP CHAT
+// ============================================================================
 router.post(
     '/:chatId/participants',
     apiRateLimiter,
@@ -622,41 +806,43 @@ router.post(
                     message: 'Authentication required'
                 });
             }
-
+            
             if (!checkModels(res)) return;
-
+            
             const { chatId } = req.params;
             const { participantIds } = req.body;
-
+            
             if (!chatId) {
                 return res.status(400).json({
                     status: 'error',
                     message: 'Chat ID is required'
                 });
             }
-
+            
             if (!Array.isArray(participantIds) || participantIds.length === 0) {
                 return res.status(400).json({
                     status: 'error',
                     message: 'Participant IDs are required'
                 });
             }
-
-            const chat = await Chat.findOne({
-                where: {
-                    id: chatId,
-                    type: 'group',
-                    isActive: true
-                }
-            });
-
+            
+            const chat = await Chat.findByPk(chatId);
+            
             if (!chat) {
                 return res.status(404).json({
                     status: 'error',
-                    message: 'Group chat not found'
+                    message: 'Chat not found'
                 });
             }
-
+            
+            // Only group chats can have participants added
+            if (chat.type !== 'group') {
+                return res.status(400).json({
+                    status: 'error',
+                    message: 'Only group chats support adding participants'
+                });
+            }
+            
             // Check if user is creator
             if (chat.createdBy !== userId) {
                 return res.status(403).json({
@@ -664,87 +850,123 @@ router.post(
                     message: 'Only group creator can add participants'
                 });
             }
-
+            
             // Get existing participants
             const existingParticipants = await ChatParticipant.findAll({
                 where: { chatId: chat.id },
                 attributes: ['userId']
             });
-            const existingParticipantIds = existingParticipants.map(p => p.userId);
+            const existingParticipantIds = new Set(existingParticipants.map(p => p.userId));
             
-            const newParticipants = participantIds.filter(id => !existingParticipantIds.includes(id));
-
-            if (newParticipants.length === 0) {
+            // Filter out users already in chat
+            const newParticipantIds = participantIds.filter(id => !existingParticipantIds.has(id));
+            
+            if (newParticipantIds.length === 0) {
                 return res.status(400).json({
                     status: 'error',
-                    message: 'All users are already in the chat'
+                    message: 'All specified users are already in the chat'
                 });
             }
-
-            // Add new participants
-            const newParticipantRecords = newParticipants.map(participantId => ({
-                chatId: chat.id,
-                userId: participantId
-            }));
-            await ChatParticipant.bulkCreate(newParticipantRecords);
-
-            const newParticipantUsers = await User.findAll({
-                where: { id: newParticipants },
-                attributes: ['id', 'username', 'avatar', 'socketIds']
+            
+            // Verify new participants exist
+            const newParticipants = await User.findAll({
+                where: { id: newParticipantIds },
+                attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'socketIds']
             });
-
-            const currentUser = await User.findByPk(userId);
-
-            if (req.io && currentUser) {
-                newParticipantUsers.forEach(participant => {
+            
+            if (newParticipants.length !== newParticipantIds.length) {
+                const foundIds = newParticipants.map(p => p.id);
+                const missingIds = newParticipantIds.filter(id => !foundIds.includes(id));
+                return res.status(404).json({
+                    status: 'error',
+                    message: `Users not found: ${missingIds.join(', ')}`
+                });
+            }
+            
+            // Add new participants
+            const participantRecords = newParticipants.map(participant => ({
+                chatId: chat.id,
+                userId: participant.id,
+                joinedAt: new Date(),
+                createdAt: new Date(),
+                updatedAt: new Date()
+            }));
+            
+            await ChatParticipant.bulkCreate(participantRecords);
+            
+            const currentUser = await User.findByPk(userId, {
+                attributes: ['id', 'username', 'avatar']
+            });
+            
+            // Broadcast to all participants
+            if (req.io) {
+                // Notify new participants
+                newParticipants.forEach(participant => {
                     if (participant.socketIds && Array.isArray(participant.socketIds) && participant.socketIds.length > 0) {
                         participant.socketIds.forEach(socketId => {
                             req.io.to(socketId).emit('group:joined', {
-                                chat: chat.toJSON ? chat.toJSON() : chat,
+                                chat: {
+                                    id: chat.id,
+                                    name: chat.name,
+                                    type: chat.type,
+                                    avatar: chat.avatar
+                                },
                                 addedBy: {
                                     id: userId,
-                                    username: currentUser.username,
-                                    avatar: currentUser.avatar,
-                                },
+                                    username: currentUser?.username || req.user?.username,
+                                    avatar: currentUser?.avatar || req.user?.avatar
+                                }
                             });
                         });
                     }
                 });
-
+                
+                // Notify existing participants
+                const existingUserIds = Array.from(existingParticipantIds);
                 const existingUsers = await User.findAll({
-                    where: { id: existingParticipantIds },
+                    where: { id: existingUserIds },
                     attributes: ['id', 'socketIds']
                 });
-
+                
                 existingUsers.forEach(user => {
                     if (user.socketIds && Array.isArray(user.socketIds) && user.socketIds.length > 0) {
                         user.socketIds.forEach(socketId => {
                             req.io.to(socketId).emit('group:participants-added', {
                                 chatId: chat.id,
-                                addedParticipants: newParticipantUsers.map(p => ({
+                                addedParticipants: newParticipants.map(p => ({
                                     id: p.id,
                                     username: p.username,
                                     avatar: p.avatar,
+                                    firstName: p.firstName,
+                                    lastName: p.lastName
                                 })),
                                 addedBy: {
                                     id: userId,
-                                    username: currentUser.username,
+                                    username: currentUser?.username || req.user?.username
                                 },
+                                timestamp: new Date().toISOString()
                             });
                         });
                     }
                 });
             }
-
+            
             res.status(200).json({
                 status: 'success',
                 message: 'Participants added successfully',
                 data: {
                     addedCount: newParticipants.length,
-                },
+                    addedParticipants: newParticipants.map(p => ({
+                        id: p.id,
+                        username: p.username,
+                        avatar: p.avatar,
+                        firstName: p.firstName,
+                        lastName: p.lastName
+                    }))
+                }
             });
         } catch (error) {
-            console.error('Error adding participants:', error.message);
+            console.error('[Chats] Error adding participants:', error.message);
             res.status(500).json({
                 status: 'error',
                 message: 'Failed to add participants'
@@ -753,7 +975,9 @@ router.post(
     })
 );
 
-// ===== REMOVE PARTICIPANT FROM GROUP =====
+// ============================================================================
+// REMOVE PARTICIPANT FROM GROUP CHAT
+// ============================================================================
 router.delete(
     '/:chatId/participants/:userId',
     apiRateLimiter,
@@ -767,43 +991,53 @@ router.delete(
                     message: 'Authentication required'
                 });
             }
-
+            
             if (!checkModels(res)) return;
-
+            
             const { chatId, userId: targetUserId } = req.params;
-
+            
             if (!chatId || !targetUserId) {
                 return res.status(400).json({
                     status: 'error',
                     message: 'Chat ID and User ID are required'
                 });
             }
-
-            const chat = await Chat.findOne({
-                where: {
-                    id: chatId,
-                    type: 'group',
-                    isActive: true
-                }
-            });
-
+            
+            const chat = await Chat.findByPk(chatId);
+            
             if (!chat) {
                 return res.status(404).json({
                     status: 'error',
-                    message: 'Group chat not found'
+                    message: 'Chat not found'
                 });
             }
-
-            const isSelfRemoval = targetUserId === currentUserId;
+            
+            // Only group chats support participant removal
+            if (chat.type !== 'group') {
+                return res.status(400).json({
+                    status: 'error',
+                    message: 'Only group chats support participant removal'
+                });
+            }
+            
+            const isSelfRemoval = parseInt(targetUserId) === parseInt(currentUserId);
             const isCreator = chat.createdBy === currentUserId;
-
+            
             if (!isCreator && !isSelfRemoval) {
                 return res.status(403).json({
                     status: 'error',
                     message: 'Only group creator can remove other participants'
                 });
             }
-
+            
+            // Cannot remove creator
+            if (parseInt(targetUserId) === chat.createdBy && !isSelfRemoval) {
+                return res.status(400).json({
+                    status: 'error',
+                    message: 'Cannot remove group creator'
+                });
+            }
+            
             // Check if user is in chat
             const participant = await ChatParticipant.findOne({
                 where: {
@@ -811,67 +1045,76 @@ router.delete(
                     userId: targetUserId
                 }
             });
-
+            
             if (!participant) {
                 return res.status(400).json({
                     status: 'error',
-                    message: 'User is not in this chat'
+                    message: 'User is not a member of this chat'
                 });
             }
-
+            
             await participant.destroy();
-
-            const removedUser = await User.findByPk(targetUserId);
-            const currentUser = await User.findByPk(currentUserId);
-
+            
+            const removedUser = await User.findByPk(targetUserId, {
+                attributes: ['id', 'username', 'avatar', 'socketIds']
+            });
+            const currentUser = await User.findByPk(currentUserId, {
+                attributes: ['id', 'username', 'avatar']
+            });
+            
+            // Broadcast to remaining participants
             if (req.io && removedUser && currentUser) {
+                // Notify removed user
                 if (removedUser.socketIds && Array.isArray(removedUser.socketIds) && removedUser.socketIds.length > 0) {
                     removedUser.socketIds.forEach(socketId => {
                         req.io.to(socketId).emit('group:removed', {
                             chatId: chat.id,
-                            removedBy: isSelfRemoval
-                                ? 'self'
-                                : {
-                                    id: currentUserId,
-                                    username: currentUser.username,
-                                  },
+                            chatName: chat.name,
+                            removedBy: isSelfRemoval ? 'self' : {
+                                id: currentUserId,
+                                username: currentUser.username
+                            },
+                            timestamp: new Date().toISOString()
                         });
                     });
                 }
-
+                
+                // Notify remaining participants
                 const remainingParticipants = await ChatParticipant.findAll({
                     where: { chatId: chat.id },
                     attributes: ['userId']
                 });
                 
+                const remainingUserIds = remainingParticipants.map(p => p.userId);
                 const remainingUsers = await User.findAll({
-                    where: { id: remainingParticipants.map(p => p.userId) },
+                    where: { id: remainingUserIds },
                     attributes: ['id', 'socketIds']
                 });
-
+                
                 remainingUsers.forEach(user => {
                     if (user.socketIds && Array.isArray(user.socketIds) && user.socketIds.length > 0) {
                         user.socketIds.forEach(socketId => {
                             req.io.to(socketId).emit('group:participant-removed', {
                                 chatId: chat.id,
-                                removedUserId: targetUserId,
+                                removedUserId: parseInt(targetUserId),
                                 removedUsername: removedUser.username,
                                 removedBy: {
                                     id: currentUserId,
-                                    username: currentUser.username,
+                                    username: currentUser.username
                                 },
+                                timestamp: new Date().toISOString()
                             });
                         });
                     }
                 });
             }
-
+            
             res.status(200).json({
                 status: 'success',
-                message: 'Participant removed successfully',
+                message: isSelfRemoval ? 'Left group chat successfully' : 'Participant removed successfully'
             });
         } catch (error) {
-            console.error('Error removing participant:', error.message);
+            console.error('[Chats] Error removing participant:', error.message);
             res.status(500).json({
                 status: 'error',
                 message: 'Failed to remove participant'
@@ -880,7 +1123,9 @@ router.delete(
     })
 );
 
-// ===== LEAVE GROUP CHAT =====
+// ============================================================================
+// LEAVE GROUP CHAT (Alias for DELETE /:chatId/participants/:userId with self)
+// ============================================================================
 router.post(
     '/:chatId/leave',
     apiRateLimiter,
@@ -894,33 +1139,43 @@ router.post(
                     message: 'Authentication required'
                 });
             }
-
+            
             if (!checkModels(res)) return;
-
+            
             const { chatId } = req.params;
-
+            
             if (!chatId) {
                 return res.status(400).json({
                     status: 'error',
                     message: 'Chat ID is required'
                 });
             }
-
-            const chat = await Chat.findOne({
-                where: {
-                    id: chatId,
-                    type: 'group',
-                    isActive: true
-                }
-            });
-
+            
+            const chat = await Chat.findByPk(chatId);
+            
             if (!chat) {
                 return res.status(404).json({
                     status: 'error',
-                    message: 'Group chat not found'
+                    message: 'Chat not found'
                 });
             }
-
+            
+            // Only group chats support leaving
+            if (chat.type !== 'group') {
+                return res.status(400).json({
+                    status: 'error',
+                    message: 'Only group chats can be left'
+                });
+            }
+            
+            // Creator cannot leave
+            if (chat.createdBy === userId) {
+                return res.status(400).json({
+                    status: 'error',
+                    message: 'Group creator cannot leave. Delete the group instead.'
+                });
+            }
+            
             // Check if user is in chat
             const participant = await ChatParticipant.findOne({
                 where: {
@@ -928,37 +1183,33 @@ router.post(
                     userId: userId
                 }
             });
-
+            
             if (!participant) {
                 return res.status(400).json({
                     status: 'error',
                     message: 'You are not a member of this group'
                 });
             }
-
-            // Check if user is creator - cannot leave if creator
-            if (chat.createdBy === userId) {
-                return res.status(400).json({
-                    status: 'error',
-                    message: 'Group creator cannot leave. Delete the group instead.'
-                });
-            }
-
+            
             await participant.destroy();
-
-            const currentUser = await User.findByPk(userId);
-
+            
+            const currentUser = await User.findByPk(userId, {
+                attributes: ['id', 'username', 'avatar', 'socketIds']
+            });
+            
+            // Broadcast to remaining participants
             if (req.io && currentUser) {
                 const remainingParticipants = await ChatParticipant.findAll({
                     where: { chatId: chat.id },
                     attributes: ['userId']
                 });
                 
+                const remainingUserIds = remainingParticipants.map(p => p.userId);
                 const remainingUsers = await User.findAll({
-                    where: { id: remainingParticipants.map(p => p.userId) },
+                    where: { id: remainingUserIds },
                     attributes: ['id', 'socketIds']
                 });
-
+                
                 remainingUsers.forEach(user => {
                     if (user.socketIds && Array.isArray(user.socketIds) && user.socketIds.length > 0) {
                         user.socketIds.forEach(socketId => {
@@ -966,18 +1217,19 @@ router.post(
                                 chatId: chat.id,
                                 userId: userId,
                                 username: currentUser.username,
+                                timestamp: new Date().toISOString()
                             });
                         });
                     }
                 });
             }
-
+            
             res.status(200).json({
                 status: 'success',
-                message: 'Left group chat successfully',
+                message: 'Left group chat successfully'
             });
         } catch (error) {
-            console.error('Error leaving group chat:', error.message);
+            console.error('[Chats] Error leaving group chat:', error.message);
             res.status(500).json({
                 status: 'error',
                 message: 'Failed to leave group chat'
@@ -986,7 +1238,109 @@ router.post(
     })
 );
 
-// ===== ARCHIVE CHAT =====
+// ============================================================================
+// DELETE CHAT (Soft delete - mark as inactive)
+// ============================================================================
+router.delete(
+    '/:chatId',
+    apiRateLimiter,
+    asyncHandler(async (req, res) => {
+        try {
+            const userId = getUserId(req);
+            
+            if (!userId) {
+                return res.status(401).json({
+                    status: 'error',
+                    message: 'Authentication required'
+                });
+            }
+            
+            if (!checkModels(res)) return;
+            
+            const { chatId } = req.params;
+            
+            if (!chatId) {
+                return res.status(400).json({
+                    status: 'error',
+                    message: 'Chat ID is required'
+                });
+            }
+            
+            const chat = await Chat.findByPk(chatId);
+            
+            if (!chat) {
+                return res.status(404).json({
+                    status: 'error',
+                    message: 'Chat not found'
+                });
+            }
+            
+            // Check permissions
+            if (chat.type === 'group') {
+                // Only group creator can delete group
+                if (chat.createdBy !== userId) {
+                    return res.status(403).json({
+                        status: 'error',
+                        message: 'Only group creator can delete the group'
+                    });
+                }
+            } else {
+                // For direct chats, either participant can "delete" (archive for themselves)
+                const isParticipant = await ChatParticipant.findOne({
+                    where: {
+                        chatId: chat.id,
+                        userId: userId
+                    }
+                });
+                
+                if (!isParticipant) {
+                    return res.status(403).json({
+                        status: 'error',
+                        message: 'You are not a participant of this chat'
+                    });
+                }
+            }
+            
+            // Soft delete - mark as inactive
+            await chat.update({
+                isActive: false,
+                deletedAt: new Date(),
+                deletedBy: userId
+            });
+            
+            // Broadcast deletion to all participants
+            if (req.io) {
+                await broadcastToChat(req, chat.id, 'chat:deleted', {
+                    chatId: chat.id,
+                    deletedBy: userId,
+                    timestamp: new Date().toISOString()
+                });
+            }
+            
+            // For group chats, also remove all participants
+            if (chat.type === 'group') {
+                await ChatParticipant.destroy({
+                    where: { chatId: chat.id }
+                });
+            }
+            
+            res.status(200).json({
+                status: 'success',
+                message: 'Chat deleted successfully'
+            });
+        } catch (error) {
+            console.error('[Chats] Error deleting chat:', error.message);
+            res.status(500).json({
+                status: 'error',
+                message: 'Failed to delete chat'
+            });
+        }
+    })
+);
+
+// ============================================================================
+// ARCHIVE CHAT
+// ============================================================================
 router.post(
     '/:chatId/archive',
     apiRateLimiter,
@@ -1000,52 +1354,55 @@ router.post(
                     message: 'Authentication required'
                 });
             }
-
+            
             if (!checkModels(res)) return;
-
+            
             const { chatId } = req.params;
-
+            
             if (!chatId) {
                 return res.status(400).json({
                     status: 'error',
                     message: 'Chat ID is required'
                 });
             }
-
-            const chat = await Chat.findOne({
+            
+            // Check if user is participant
+            const isParticipant = await ChatParticipant.findOne({
                 where: {
-                    id: chatId,
-                    isArchived: false,
-                    '$chatParticipants.userId$': userId
-                },
-                include: [{
-                    model: ChatParticipant,
-                    as: 'chatParticipants',
-                    attributes: ['userId'],
-                    where: { userId: userId },
-                    required: true
-                }]
+                    chatId: chatId,
+                    userId: userId
+                }
             });
-
+            
+            if (!isParticipant) {
+                return res.status(403).json({
+                    status: 'error',
+                    message: 'You are not a participant of this chat'
+                });
+            }
+            
+            const chat = await Chat.findByPk(chatId);
+            
             if (!chat) {
                 return res.status(404).json({
                     status: 'error',
-                    message: 'Chat not found or already archived'
+                    message: 'Chat not found'
                 });
             }
-
+            
             await chat.update({
                 isArchived: true,
                 archivedBy: userId,
-                archivedAt: new Date()
+                archivedAt: new Date(),
+                updatedAt: new Date()
             });
-
+            
             res.status(200).json({
                 status: 'success',
-                message: 'Chat archived successfully',
+                message: 'Chat archived successfully'
             });
         } catch (error) {
-            console.error('Error archiving chat:', error.message);
+            console.error('[Chats] Error archiving chat:', error.message);
             res.status(500).json({
                 status: 'error',
                 message: 'Failed to archive chat'
@@ -1054,7 +1411,9 @@ router.post(
     })
 );
 
-// ===== UNARCHIVE CHAT =====
+// ============================================================================
+// UNARCHIVE CHAT
+// ============================================================================
 router.post(
     '/:chatId/unarchive',
     apiRateLimiter,
@@ -1068,52 +1427,55 @@ router.post(
                     message: 'Authentication required'
                 });
             }
-
+            
             if (!checkModels(res)) return;
-
+            
             const { chatId } = req.params;
-
+            
             if (!chatId) {
                 return res.status(400).json({
                     status: 'error',
                     message: 'Chat ID is required'
                 });
             }
-
-            const chat = await Chat.findOne({
+            
+            // Check if user is participant
+            const isParticipant = await ChatParticipant.findOne({
                 where: {
-                    id: chatId,
-                    isArchived: true,
-                    '$chatParticipants.userId$': userId
-                },
-                include: [{
-                    model: ChatParticipant,
-                    as: 'chatParticipants',
-                    attributes: ['userId'],
-                    where: { userId: userId },
-                    required: true
-                }]
+                    chatId: chatId,
+                    userId: userId
+                }
             });
-
+            
+            if (!isParticipant) {
+                return res.status(403).json({
+                    status: 'error',
+                    message: 'You are not a participant of this chat'
+                });
+            }
+            
+            const chat = await Chat.findByPk(chatId);
+            
             if (!chat) {
                 return res.status(404).json({
                     status: 'error',
-                    message: 'Chat not found or not archived'
+                    message: 'Chat not found'
                 });
             }
-
+            
             await chat.update({
                 isArchived: false,
                 archivedBy: null,
-                archivedAt: null
+                archivedAt: null,
+                updatedAt: new Date()
             });
-
+            
             res.status(200).json({
                 status: 'success',
-                message: 'Chat unarchived successfully',
+                message: 'Chat unarchived successfully'
             });
         } catch (error) {
-            console.error('Error unarchiving chat:', error.message);
+            console.error('[Chats] Error unarchiving chat:', error.message);
             res.status(500).json({
                 status: 'error',
                 message: 'Failed to unarchive chat'
@@ -1122,7 +1484,9 @@ router.post(
     })
 );
 
-// ===== MARK CHAT AS READ =====
+// ============================================================================
+// MARK CHAT AS READ
+// ============================================================================
 router.post(
     '/:chatId/read',
     apiRateLimiter,
@@ -1136,59 +1500,61 @@ router.post(
                     message: 'Authentication required'
                 });
             }
-
+            
             if (!checkModels(res)) return;
-
+            
             const { chatId } = req.params;
-
+            
             if (!chatId) {
                 return res.status(400).json({
                     status: 'error',
                     message: 'Chat ID is required'
                 });
             }
-
-            const chat = await Chat.findOne({
+            
+            // Check if user is participant
+            const isParticipant = await ChatParticipant.findOne({
                 where: {
-                    id: chatId,
-                    '$chatParticipants.userId$': userId
-                },
-                include: [{
-                    model: ChatParticipant,
-                    as: 'chatParticipants',
-                    attributes: ['userId'],
-                    where: { userId: userId },
-                    required: true
-                }]
+                    chatId: chatId,
+                    userId: userId
+                }
             });
-
-            if (!chat) {
-                return res.status(404).json({
+            
+            if (!isParticipant) {
+                return res.status(403).json({
                     status: 'error',
-                    message: 'Chat not found or access denied'
+                    message: 'You are not a participant of this chat'
                 });
             }
-
+            
             // Mark all unread messages as read
-            if (Message) {
-                await Message.update(
-                    { isRead: true, readAt: new Date() },
-                    {
-                        where: {
-                            chatId: chat.id,
-                            isRead: false,
-                            senderId: { [Op.ne]: userId }
-                        }
+            await Message.update(
+                { 
+                    isRead: true, 
+                    readAt: new Date(),
+                    updatedAt: new Date()
+                },
+                {
+                    where: {
+                        chatId: chatId,
+                        isRead: false,
+                        senderId: { [Op.ne]: userId }
                     }
-                );
-            }
-
+                }
+            );
+            
+            // Update chat's updatedAt
+            await Chat.update(
+                { updatedAt: new Date() },
+                { where: { id: chatId } }
+            );
+            
             res.status(200).json({
                 status: 'success',
-                message: 'Chat marked as read',
+                message: 'Chat marked as read'
             });
         } catch (error) {
-            console.error('Error marking chat as read:', error.message);
+            console.error('[Chats] Error marking chat as read:', error.message);
             res.status(500).json({
                 status: 'error',
                 message: 'Failed to mark chat as read'
@@ -1197,7 +1563,9 @@ router.post(
     })
 );
 
-// ===== GET ARCHIVED CHATS =====
+// ============================================================================
+// GET ARCHIVED CHATS
+// ============================================================================
 router.get(
     '/archived/list',
     apiRateLimiter,
@@ -1211,12 +1579,12 @@ router.get(
                     message: 'Authentication required'
                 });
             }
-
+            
             if (!checkModels(res)) return;
-
+            
             const { page = 1, limit = 20 } = req.query;
             const offset = (parseInt(page) - 1) * parseInt(limit);
-
+            
             const { count, rows: chats } = await Chat.findAndCountAll({
                 where: {
                     isArchived: true
@@ -1235,7 +1603,12 @@ router.get(
                         required: false,
                         limit: 1,
                         order: [['createdAt', 'DESC']],
-                        attributes: ['id', 'content', 'messageType', 'createdAt', 'senderId']
+                        attributes: ['id', 'content', 'type', 'createdAt', 'senderId']
+                    },
+                    {
+                        model: User,
+                        as: 'chatCreator',
+                        attributes: ['id', 'username', 'avatar', 'firstName', 'lastName']
                     }
                 ],
                 order: [['archivedAt', 'DESC']],
@@ -1243,27 +1616,55 @@ router.get(
                 limit: parseInt(limit),
                 distinct: true
             });
-
-            const formattedChats = (chats || []).map(chat => {
+            
+            const formattedChats = await Promise.all((chats || []).map(async (chat) => {
                 const chatObj = chat.toJSON ? chat.toJSON() : chat;
+                
+                // FIXED: Use correct alias for archived chats too
+                const participants = await ChatParticipant.findAll({
+                    where: { chatId: chat.id },
+                    include: [{
+                        model: User,
+                        as: 'chatParticipantUser',
+                        attributes: ['id', 'username', 'avatar', 'firstName', 'lastName']
+                    }]
+                });
+                chatObj.participants = participants.map(p => p.chatParticipantUser).filter(p => p !== null);
                 chatObj.unreadCount = 0;
+                
+                if (chatObj.type === 'direct') {
+                    const otherParticipant = chatObj.participants?.find(p => p && p.id !== userId);
+                    if (otherParticipant) {
+                        const displayName = [otherParticipant.firstName, otherParticipant.lastName].filter(Boolean).join(' ').trim() || otherParticipant.username;
+                        chatObj.otherParticipant = {
+                            id: otherParticipant.id,
+                            username: otherParticipant.username,
+                            avatar: otherParticipant.avatar,
+                            displayName: displayName
+                        };
+                        chatObj.chatName = displayName;
+                    }
+                } else if (chatObj.type === 'group') {
+                    chatObj.chatName = chatObj.name;
+                }
+                
                 return chatObj;
-            });
-
+            }));
+            
             res.status(200).json({
                 status: 'success',
                 data: {
                     chats: formattedChats,
                     pagination: {
-                        total: count || 0,
+                        total: count,
                         page: parseInt(page),
                         limit: parseInt(limit),
-                        pages: count ? Math.ceil(count / parseInt(limit)) : 0,
-                    },
-                },
+                        pages: Math.ceil(count / parseInt(limit))
+                    }
+                }
             });
         } catch (error) {
-            console.error('Error fetching archived chats:', error.message);
+            console.error('[Chats] Error fetching archived chats:', error.message);
             res.status(500).json({
                 status: 'error',
                 message: 'Failed to fetch archived chats'

@@ -1,5 +1,7 @@
 ﻿// services/friendService.js
 // Full implementation — matches Friend model column names and associations exactly.
+// Version: 2.0.0 - Fixed naming consistency (requesterId, receiverId only)
+// NO snake_case in ORM queries - all camelCase
 
 'use strict';
 
@@ -126,8 +128,8 @@ async function getFriends(userId, status = 'accepted') {
     const friendships = await Friend.findAll({
         where: {
             [Op.or]: [
-                { requesterId: userId, status },
-                { receiverId:  userId, status }
+                { requesterId: userId, status: status },
+                { receiverId:  userId, status: status }
             ]
         },
         include: FRIEND_INCLUDES,
@@ -256,10 +258,10 @@ async function blockUser(userId, targetId) {
         friendship = await Friend.create({
             requesterId: userId,
             receiverId:  targetId,
-            status:       'blocked',
-            blockedAt:    new Date(),
-            createdAt:    new Date(),
-            updatedAt:    new Date()
+            status:      'blocked',
+            blockedAt:   new Date(),
+            createdAt:   new Date(),
+            updatedAt:   new Date()
         });
     }
 
@@ -338,8 +340,6 @@ async function getFriendsCount(userId) {
  */
 async function getMutualFriends(userId, targetId) {
     // Collect friend-id sets for each user then intersect.
-    // FIXED: Use camelCase JS aliases in .where() so Sequelize field mapping works correctly.
-    // Use raw:true with the actual DB column names in attributes for consistent reads.
     const [userFriendships, targetFriendships] = await Promise.all([
         Friend.findAll({
             where: {
@@ -349,8 +349,7 @@ async function getMutualFriends(userId, targetId) {
                     { receiverId:  userId }
                 ]
             },
-            attributes: ['requester_id', 'receiver_id'],
-            raw: true
+            attributes: ['requesterId', 'receiverId']
         }),
         Friend.findAll({
             where: {
@@ -360,13 +359,12 @@ async function getMutualFriends(userId, targetId) {
                     { receiverId:  targetId }
                 ]
             },
-            attributes: ['requester_id', 'receiver_id'],
-            raw: true
+            attributes: ['requesterId', 'receiverId']
         })
     ]);
 
     const friendIdsOf = (list, self) =>
-        new Set(list.map(f => f.requester_id === self ? f.receiver_id : f.requester_id));
+        new Set(list.map(f => f.requesterId === self ? f.receiverId : f.requesterId));
 
     const userFriendIds   = friendIdsOf(userFriendships,   userId);
     const targetFriendIds = friendIdsOf(targetFriendships, targetId);
@@ -381,6 +379,92 @@ async function getMutualFriends(userId, targetId) {
     });
 
     return users.map(formatUser).filter(u => u && u.id);
+}
+
+/**
+ * Check if a pending friend request exists between two users
+ */
+async function hasPendingRequest(userId1, userId2) {
+    const request = await Friend.findOne({
+        where: {
+            status: 'pending',
+            [Op.or]: [
+                { requesterId: userId1, receiverId: userId2 },
+                { requesterId: userId2, receiverId: userId1 }
+            ]
+        }
+    });
+    return !!request;
+}
+
+/**
+ * Get friend request by ID
+ */
+async function getFriendRequestById(requestId) {
+    const request = await Friend.findByPk(requestId, {
+        include: FRIEND_INCLUDES
+    });
+    
+    if (!request) {
+        throw Object.assign(new Error('Friend request not found'), { status: 404 });
+    }
+    
+    return request;
+}
+
+/**
+ * Cancel a sent friend request
+ */
+async function cancelFriendRequest(requestId, requesterId) {
+    const request = await Friend.findOne({
+        where: {
+            id: requestId,
+            requesterId: requesterId,
+            status: 'pending'
+        }
+    });
+    
+    if (!request) {
+        throw Object.assign(new Error('Friend request not found or already responded'), { status: 404 });
+    }
+    
+    await request.destroy();
+}
+
+/**
+ * Get friendship status between two users
+ */
+async function getFriendshipStatus(userId1, userId2) {
+    const friendship = await Friend.findOne({
+        where: {
+            [Op.or]: [
+                { requesterId: userId1, receiverId: userId2 },
+                { requesterId: userId2, receiverId: userId1 }
+            ]
+        }
+    });
+    
+    if (!friendship) {
+        return { status: 'none', friendship: null };
+    }
+    
+    let relationship = 'none';
+    if (friendship.status === 'accepted') {
+        relationship = 'friends';
+    } else if (friendship.status === 'pending') {
+        if (friendship.requesterId === userId1) {
+            relationship = 'request_sent';
+        } else {
+            relationship = 'request_received';
+        }
+    } else if (friendship.status === 'blocked') {
+        relationship = 'blocked';
+    }
+    
+    return {
+        status: relationship,
+        friendship: friendship.toJSON ? friendship.toJSON() : friendship
+    };
 }
 
 // ─── exports ───────────────────────────────────────────────────────────────────
@@ -398,5 +482,9 @@ module.exports = {
     areFriends,
     isBlocked,
     getFriendsCount,
-    getMutualFriends
+    getMutualFriends,
+    hasPendingRequest,
+    getFriendRequestById,
+    cancelFriendRequest,
+    getFriendshipStatus
 };

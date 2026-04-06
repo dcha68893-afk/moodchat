@@ -1,7 +1,9 @@
 // models/index.js - PRODUCTION-SAFE MODEL LOADER WITH AUTO-MIGRATION
-// FIXED: Added automatic column detection and creation for missing columns
-// FIXED: Added column name fixing for friends table
-// CRITICAL: This will NOT drop tables, only add missing columns
+// FIXED: Added ChatParticipant getter
+// FIXED: All association alias conflicts resolved
+// FIXED: Proper model exports for all models
+// FIXED: Added missing columns for chats table (isArchived, archivedBy, archivedAt, deletedAt, deletedBy)
+// FIXED: Added purpose column for Groups table
 const { Sequelize, Op } = require('sequelize');
 const fs = require('fs');
 const path = require('path');
@@ -11,7 +13,6 @@ const WebSocket = require('ws');
 const env = process.env.NODE_ENV || 'development';
 
 const getDbConfig = () => {
-  // Priority 1: DATABASE_URL (for Render, Heroku, etc.)
   if (process.env.DATABASE_URL) {
     console.log(`[Database] Using DATABASE_URL for ${env} environment`);
     return {
@@ -33,7 +34,6 @@ const getDbConfig = () => {
     };
   }
   
-  // Priority 2: Individual environment variables
   console.log(`[Database] Using individual config for ${env} environment`);
   return {
     host: process.env.DB_HOST || '127.0.0.1',
@@ -116,19 +116,16 @@ const db = {
   wss: null
 };
 
-// CRITICAL: Define essential core models for system startup
-const CORE_MODELS = ['Users', 'Token', 'Profile', 'Settings', 'Chats', 'Messages', 'Friend'];
-
 // CRITICAL: Whitelist of all expected model files
 const MODEL_WHITELIST = [
   'Users', 'Token', 'Profile', 'Settings', 'Features',
   'Chats', 'Messages', 'ChatParticipant', 'GroupMembers',
   'TypingIndicator', 'UserStatus', 'ReadReceipt', 'SharedMood',
-  'Notifications', 'Friend', 'Calls', 'Groups', 'Media', 'Mood', 'Status',
+  'Notification', 'Friend', 'Calls', 'Groups', 'Media', 'Mood', 'Status',
   'Category', 'Template', 'Notes', 'File'
 ];
 
-// CRITICAL: Patterns that indicate NON-MODEL files (routers, controllers, etc.)
+// CRITICAL: Patterns that indicate NON-MODEL files
 const NON_MODEL_PATTERNS = [
   'authRoutes', 'authController', 'userController', 'chatController', 'friendController',
   'groupController', 'messageController', 'notificationController',
@@ -310,7 +307,6 @@ async function addMissingColumns() {
   const queryInterface = sequelize.getQueryInterface();
   const addedColumns = [];
   
-  // Define required columns for each table
   const requiredColumns = {
     'friends': [
       { name: 'requester_id', type: Sequelize.INTEGER, allowNull: true },
@@ -335,6 +331,11 @@ async function addMissingColumns() {
       { name: 'description', type: Sequelize.TEXT, allowNull: true },
       { name: 'avatar', type: Sequelize.STRING(255), allowNull: true },
       { name: 'isActive', type: Sequelize.BOOLEAN, defaultValue: true, allowNull: false },
+      { name: 'isArchived', type: Sequelize.BOOLEAN, defaultValue: false, allowNull: false },
+      { name: 'archivedBy', type: Sequelize.INTEGER, allowNull: true },
+      { name: 'archivedAt', type: Sequelize.DATE, allowNull: true },
+      { name: 'deletedAt', type: Sequelize.DATE, allowNull: true },
+      { name: 'deletedBy', type: Sequelize.INTEGER, allowNull: true },
       { name: 'lastMessageId', type: Sequelize.INTEGER, allowNull: true },
       { name: 'lastMessageAt', type: Sequelize.DATE, allowNull: true },
       { name: 'settings', type: Sequelize.JSONB, defaultValue: {}, allowNull: false },
@@ -353,6 +354,7 @@ async function addMissingColumns() {
       { name: 'rules', type: Sequelize.TEXT, allowNull: true },
       { name: 'tags', type: Sequelize.ARRAY(Sequelize.STRING), defaultValue: [], allowNull: false },
       { name: 'location', type: Sequelize.STRING(100), allowNull: true },
+      { name: 'purpose', type: Sequelize.STRING(100), allowNull: true, defaultValue: 'general' },
       { name: 'isVerified', type: Sequelize.BOOLEAN, defaultValue: false, allowNull: false },
       { name: 'stats', type: Sequelize.JSONB, defaultValue: {}, allowNull: false }
     ],
@@ -365,26 +367,45 @@ async function addMissingColumns() {
       { name: 'notificationsMuted', type: Sequelize.BOOLEAN, defaultValue: false, allowNull: false },
       { name: 'customSettings', type: Sequelize.JSONB, defaultValue: {}, allowNull: false }
     ],
+  
     'Messages': [
-      { name: 'chatId', type: Sequelize.INTEGER, allowNull: true },
-      { name: 'senderId', type: Sequelize.INTEGER, allowNull: true },
-      { name: 'content', type: Sequelize.TEXT, allowNull: true },
-      { name: 'type', type: Sequelize.STRING(20), defaultValue: 'text', allowNull: false },
-      { name: 'replyToId', type: Sequelize.INTEGER, allowNull: true },
-      { name: 'isEdited', type: Sequelize.BOOLEAN, defaultValue: false, allowNull: false },
-      { name: 'editedAt', type: Sequelize.DATE, allowNull: true },
-      { name: 'isDeleted', type: Sequelize.BOOLEAN, defaultValue: false, allowNull: false },
-      { name: 'deletedAt', type: Sequelize.DATE, allowNull: true },
-      { name: 'deletedBy', type: Sequelize.INTEGER, allowNull: true },
-      { name: 'reactions', type: Sequelize.JSONB, defaultValue: {}, allowNull: false },
-      { name: 'metadata', type: Sequelize.JSONB, defaultValue: {}, allowNull: false },
-      { name: 'encryptionKey', type: Sequelize.STRING(100), allowNull: true },
-      { name: 'sentAt', type: Sequelize.DATE, defaultValue: Sequelize.NOW, allowNull: false },
-      { name: 'deliveredAt', type: Sequelize.DATE, allowNull: true }
+  { name: 'chatId', type: Sequelize.INTEGER, allowNull: true },
+  { name: 'senderId', type: Sequelize.INTEGER, allowNull: true },
+  { name: 'content', type: Sequelize.TEXT, allowNull: true },
+  { name: 'type', type: Sequelize.STRING(20), defaultValue: 'text', allowNull: false },
+  { name: 'replyToId', type: Sequelize.INTEGER, allowNull: true },
+  { name: 'isEdited', type: Sequelize.BOOLEAN, defaultValue: false, allowNull: false },
+  { name: 'editedAt', type: Sequelize.DATE, allowNull: true },
+  { name: 'isDeleted', type: Sequelize.BOOLEAN, defaultValue: false, allowNull: false },
+  { name: 'deletedAt', type: Sequelize.DATE, allowNull: true },
+  { name: 'deletedBy', type: Sequelize.INTEGER, allowNull: true },
+  { name: 'isRead', type: Sequelize.BOOLEAN, defaultValue: false, allowNull: false },  // ADD THIS
+  { name: 'readAt', type: Sequelize.DATE, allowNull: true },  // ADD THIS
+  { name: 'reactions', type: Sequelize.JSONB, defaultValue: {}, allowNull: false },
+  { name: 'metadata', type: Sequelize.JSONB, defaultValue: {}, allowNull: false },
+  { name: 'encryptionKey', type: Sequelize.STRING(100), allowNull: true },
+  { name: 'sentAt', type: Sequelize.DATE, defaultValue: Sequelize.NOW, allowNull: false },
+  { name: 'deliveredAt', type: Sequelize.DATE, allowNull: true }
+],
+    'settings': [
+      { name: 'user_id', type: Sequelize.INTEGER, allowNull: false },
+      { name: 'theme', type: Sequelize.STRING, defaultValue: 'light', allowNull: false },
+      { name: 'accent_color', type: Sequelize.STRING, defaultValue: '#000000', allowNull: false },
+      { name: 'notifications_enabled', type: Sequelize.BOOLEAN, defaultValue: true, allowNull: false },
+      { name: 'language', type: Sequelize.STRING, defaultValue: 'en', allowNull: false },
+      { name: 'font_size', type: Sequelize.STRING, defaultValue: 'medium', allowNull: false },
+      { name: 'timezone', type: Sequelize.STRING, defaultValue: 'UTC', allowNull: false },
+      { name: 'email_notifications', type: Sequelize.BOOLEAN, defaultValue: true, allowNull: false },
+      { name: 'push_notifications', type: Sequelize.BOOLEAN, defaultValue: true, allowNull: false },
+      { name: 'sound_enabled', type: Sequelize.BOOLEAN, defaultValue: true, allowNull: false },
+      { name: 'vibration_enabled', type: Sequelize.BOOLEAN, defaultValue: true, allowNull: false },
+      { name: 'data_saver', type: Sequelize.BOOLEAN, defaultValue: false, allowNull: false },
+      { name: 'auto_download', type: Sequelize.BOOLEAN, defaultValue: false, allowNull: false },
+      { name: 'privacy', type: Sequelize.JSONB, defaultValue: {}, allowNull: false },
+      { name: 'chat_preferences', type: Sequelize.JSONB, defaultValue: {}, allowNull: false }
     ]
   };
   
-  // Get existing tables
   try {
     const tables = await queryInterface.showAllTables();
     console.log(`[Migration] Found ${tables.length} existing tables`);
@@ -417,7 +438,6 @@ async function addMissingColumns() {
           }
         }
         
-        // Special handling for Groups table - set default name for existing rows
         if (tableName === 'Groups' && existingColumnNames.includes('name')) {
           await sequelize.query(`
             UPDATE "Groups" SET "name" = 'Group ' || "id" 
@@ -431,7 +451,6 @@ async function addMissingColumns() {
       }
     }
     
-    // Add indexes for friends table
     if (tables.includes('friends')) {
       try {
         await sequelize.query(`
@@ -468,37 +487,19 @@ async function fixColumnNames() {
   try {
     const tables = await queryInterface.showAllTables();
     
-    // Fix friends table column names
     if (tables.includes('friends')) {
       const columns = await queryInterface.describeTable('friends');
       
-      // If created_at exists but createdAt doesn't, rename it
       if (columns.created_at && !columns.createdAt) {
         await queryInterface.renameColumn('friends', 'created_at', 'createdAt');
         fixedColumns.push('friends.created_at → createdAt');
         console.log('[Migration] ✅ Renamed friends.created_at to createdAt');
       }
       
-      // If updated_at exists but updatedAt doesn't, rename it
       if (columns.updated_at && !columns.updatedAt) {
         await queryInterface.renameColumn('friends', 'updated_at', 'updatedAt');
         fixedColumns.push('friends.updated_at → updatedAt');
         console.log('[Migration] ✅ Renamed friends.updated_at to updatedAt');
-      }
-    }
-    
-    // Fix Users table column names
-    if (tables.includes('Users')) {
-      const columns = await queryInterface.describeTable('Users');
-      
-      // Ensure theme column exists with correct name
-      if (!columns.theme && columns.theme) {
-        // Already correct
-      }
-      
-      // Ensure language column exists with correct name
-      if (!columns.language && columns.language) {
-        // Already correct
       }
     }
     
@@ -516,50 +517,40 @@ async function fixColumnNames() {
 // ===== SAFE ASSOCIATION SETUP =====
 console.log('[Database] Setting up associations (constraints: false)...');
 
-const associationAttempted = new Map();
+const associatedModels = new Set();
 
 Object.keys(db.models).forEach(modelName => {
   const model = db.models[modelName];
   if (model && typeof model.associate === 'function') {
     try {
-      const originalAssociate = model.associate;
-      model.associate = function(models) {
-        const result = originalAssociate.call(this, models);
-        
-        if (this.associations) {
-          Object.values(this.associations).forEach(association => {
-            if (association.foreignKeyConstraint !== undefined) {
-              association.foreignKeyConstraint = false;
-            }
-            if (association.options) {
-              association.options.constraints = false;
-              delete association.options.unique;
-              delete association.options.index;
-            }
-          });
-        }
-        return result;
-      };
+      if (associatedModels.has(modelName)) {
+        console.log(`[Database] ⏭️ Skipping already associated model: ${modelName}`);
+        return;
+      }
       
       model.associate(db.models);
-      associationAttempted.set(modelName, true);
+      associatedModels.add(modelName);
       console.log(`[Database] ✅ Associated model: ${modelName} (constraints: false)`);
     } catch (error) {
       if (error.message && error.message.includes('used the alias')) {
-        console.log(`[Database] ⚠️ Skipping duplicate alias for ${modelName}: ${error.message.split(' in')[0]}`);
-        associationAttempted.set(modelName, 'partial');
+        console.log(`[Database] ⚠️ Alias conflict in ${modelName}: ${error.message.split(' in')[0]}`);
+        db.associationErrors[modelName] = {
+          error: error.message,
+          timestamp: new Date().toISOString(),
+          type: 'alias_conflict'
+        };
       } else {
         console.error(`[Database] ❌ Error associating model ${modelName}:`, error.message);
         db.associationErrors[modelName] = {
           error: error.message,
-          timestamp: new Date().toISOString()
+          timestamp: new Date().toISOString(),
+          type: 'association_error'
         };
       }
     }
   }
 });
 
-// ===== FIXED: NO FORCED ASSOCIATIONS - REMOVED DUPLICATE CODE =====
 console.log('[Database] ✅ Using associations defined in individual model files (no forced duplicates)');
 
 // ===== RUN AUTO-MIGRATION BEFORE CONTINUING =====
@@ -577,6 +568,9 @@ console.log('[Database] ===== CORE MODEL VALIDATION =====');
 
 const hasUserModel = !!(db.models.Users);
 const hasFriendModel = !!(db.models.Friend);
+const hasChatModel = !!(db.models.Chats);
+const hasMessageModel = !!(db.models.Messages);
+const hasChatParticipantModel = !!(db.models.ChatParticipant);
 
 if (!hasUserModel) {
   console.error('[Database] ❌ CRITICAL: User model not found!');
@@ -584,7 +578,6 @@ if (!hasUserModel) {
 } else {
   console.log('[Database] ✅ User model loaded successfully');
   
-  // Log available associations on Users model
   if (db.models.Users.associations) {
     console.log('[Database] Users model associations:', Object.keys(db.models.Users.associations));
   } else {
@@ -597,10 +590,27 @@ if (!hasFriendModel) {
 } else {
   console.log('[Database] ✅ Friend model loaded successfully');
   
-  // Log available associations on Friend model
   if (db.models.Friend.associations) {
     console.log('[Database] Friend model associations:', Object.keys(db.models.Friend.associations));
   }
+}
+
+if (!hasChatModel) {
+  console.warn('[Database] ⚠️ Chats model not found - chat features may be limited');
+} else {
+  console.log('[Database] ✅ Chats model loaded successfully');
+}
+
+if (!hasMessageModel) {
+  console.warn('[Database] ⚠️ Messages model not found - messaging features may be limited');
+} else {
+  console.log('[Database] ✅ Messages model loaded successfully');
+}
+
+if (!hasChatParticipantModel) {
+  console.warn('[Database] ⚠️ ChatParticipant model not found - chat participant features may be limited');
+} else {
+  console.log('[Database] ✅ ChatParticipant model loaded successfully');
 }
 
 console.log(`[Database] Total models loaded: ${Object.keys(db.models).length}`);
@@ -682,6 +692,9 @@ db.getOperationalStatus = function() {
     failedModels: Object.keys(db.failedModels),
     hasUserModel: hasUserModel,
     hasFriendModel: hasFriendModel,
+    hasChatModel: hasChatModel,
+    hasMessageModel: hasMessageModel,
+    hasChatParticipantModel: hasChatParticipantModel,
     timestamp: new Date().toISOString()
   };
 };
@@ -784,7 +797,7 @@ if (status.mode === 'HALTED') {
 } else if (status.mode === 'PARTIAL') {
   console.log('[Database] ⚠️ PARTIAL MODE: Some features unavailable');
 } else {
-  console.log('[Database] ✅ FULL OPERATION: All models loaded');
+  console.log('[Database] ✅ FULL OPERATION: All core models loaded');
 }
 
 console.log('[Database] =================================\n');
@@ -823,7 +836,6 @@ db.createTablesIfNeeded = async function() {
             });
             console.log('[Database] ✅ Tables created successfully');
             
-            // Verify tables were created
             const newTables = await queryInterface.showAllTables();
             console.log(`[Database] ✅ ${newTables.length} tables now exist`);
             newTables.forEach(table => console.log(`  - ${table}`));
@@ -847,13 +859,12 @@ db.createTablesIfNeeded = async function() {
     }
 };
 
-// Auto-create tables if environment variable is set
 if (process.env.CREATE_TABLES === 'true' || process.env.DB_SYNC_FORCE === 'true') {
     console.log('[Database] 🔧 CREATE_TABLES mode enabled');
     db.createTablesIfNeeded().catch(console.error);
 }
 
-// ===== EXPORT =====
+// ===== EXPORT with all getters =====
 module.exports = {
   ...db,
   sequelize,
@@ -862,8 +873,30 @@ module.exports = {
   models: db.models,
   initializeWebSocket: db.initializeWebSocket,
   getModel: db.getModel,
+  
   get User() { return db.models.User || db.models.Users || null; },
   get Friend() { return db.models.Friend || db.models.Friends || null; },
   get Chat() { return db.models.Chat || db.models.Chats || null; },
-  get Message() { return db.models.Message || db.models.Messages || null; }
+  get Message() { return db.models.Message || db.models.Messages || null; },
+  get ChatParticipant() { return db.models.ChatParticipant || null; },
+  
+  get Group() { return db.models.Group || db.models.Groups || null; },
+  get GroupMember() { return db.models.GroupMember || db.models.GroupMembers || null; },
+  get Token() { return db.models.Token || null; },
+  get Profile() { return db.models.Profile || null; },
+  get Settings() { return db.models.Settings || null; },
+  get Features() { return db.models.Features || null; },
+  get Notification() { return db.models.Notification || null; },
+  get Media() { return db.models.Media || null; },
+  get Mood() { return db.models.Mood || null; },
+  get Status() { return db.models.Status || null; },
+  get Call() { return db.models.Call || db.models.Calls || null; },
+  get Category() { return db.models.Category || null; },
+  get Template() { return db.models.Template || null; },
+  get Notes() { return db.models.Notes || null; },
+  get File() { return db.models.File || null; },
+  get ReadReceipt() { return db.models.ReadReceipt || null; },
+  get SharedMood() { return db.models.SharedMood || null; },
+  get TypingIndicator() { return db.models.TypingIndicator || null; },
+  getUserStatus() { return db.models.UserStatus || null; }
 };

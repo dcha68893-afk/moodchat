@@ -72,23 +72,44 @@ router.get(
                 { username: 'User', email: 'user@example.com' }
             );
 
-            // Get or create settings
-            let settings = await safeDbQuery(
-                () => Settings.findOne({ where: { userId: userId } }),
-                null
-            );
-
-            if (!settings && Settings) {
-                settings = await Settings.create({
-                    userId: userId,
-                    theme: 'light',
-                    language: 'en',
-                    notificationsEnabled: true,
-                    emailNotifications: true,
-                    pushNotifications: true,
-                    soundEnabled: true,
-                    vibrationEnabled: true
+            // Get or create settings - FIXED: Use findOrCreate to avoid manual ID
+            let settings = null;
+            if (Settings) {
+                const [foundSettings, created] = await Settings.findOrCreate({
+                    where: { userId: userId },
+                    defaults: {
+                        userId: userId,
+                        theme: 'light',
+                        language: 'en',
+                        notificationsEnabled: true,
+                        emailNotifications: true,
+                        pushNotifications: true,
+                        soundEnabled: true,
+                        vibrationEnabled: true,
+                        accentColor: '#000000',
+                        fontSize: 'medium',
+                        timezone: 'UTC',
+                        dataSaver: false,
+                        autoDownload: false,
+                        privacy: {
+                            profileVisibility: 'public',
+                            readReceipts: true,
+                            typingIndicators: true,
+                            onlineStatus: true,
+                            lastSeen: true
+                        },
+                        chatPreferences: {
+                            enterToSend: true,
+                            mediaQuality: 'auto',
+                            saveToGallery: false,
+                            messageBackup: true
+                        }
+                    }
                 });
+                settings = foundSettings;
+                if (created) {
+                    console.log(`[Settings] Created new settings for user ${userId}`);
+                }
             }
 
             res.status(200).json({
@@ -140,6 +161,7 @@ router.get(
             });
         } catch (error) {
             console.error('Error getting settings:', error);
+            // Return default settings on error
             res.status(200).json({
                 status: 'success',
                 data: {
