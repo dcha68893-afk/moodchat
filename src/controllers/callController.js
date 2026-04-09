@@ -5,10 +5,87 @@ const logger = require('../utils/logger');
 class CallController {
   async initiateCall(req, res, next) {
     try {
-      const userId = req.user.id;
-      const { chatId, type = 'audio' } = req.body;
+      const callerId = req.user.id;
+      const { calleeId, calleeIds, chatId, type = 'audio' } = req.body;
+      
+      // Group call path
+      if (Array.isArray(calleeIds) && calleeIds.length > 1) {
+        const call = await callService.initiateGroupCall(
+          callerId, 
+          calleeIds.map(Number), 
+          type, 
+          chatId ? parseInt(chatId) : null
+        );
+        
+        // Notify all participants
+        const wsService = require('../services/webSocketService');
+        calleeIds.forEach(id => {
+          wsService.notifyCallInitiated(parseInt(id), {
+            callId: call.id,
+            callerId: callerId,
+            callerName: req.user.username || 'Unknown',
+            callerAvatar: req.user.avatar || null,
+            isGroupCall: true,
+            callType: type,
+            chatId: chatId ? parseInt(chatId) : null,
+            timestamp: Date.now()
+          });
+        });
+        
+        return res.status(201).json({
+          success: true,
+          message: 'Group call initiated successfully',
+          data: { call }
+        });
+      }
+      
+      // Validate required fields for 1:1 call
+      if (!calleeId) {
+        throw new AppError('calleeId is required', 400);
+      }
 
-      const call = await callService.initiateCall(parseInt(chatId), userId, type);
+      const wsService = require('../services/webSocketService');
+      const isOnline = wsService.isUserOnline(parseInt(calleeId));
+      
+      if (!isOnline) {
+        // Still create the call record as 'missed' for history
+        const call = await callService.initiateCall(
+          callerId, 
+          parseInt(calleeId), 
+          type, 
+          chatId ? parseInt(chatId) : null
+        );
+        
+        // Immediately mark as missed since receiver is offline
+        if (call.update) {
+          await call.update({ status: 'missed', endedAt: new Date() });
+        }
+        
+        return res.status(200).json({
+          success: false,
+          offline: true,
+          message: 'User is currently offline. They will be notified when they come back online.',
+          data: { call }
+        });
+      }
+
+      const call = await callService.initiateCall(
+        callerId, 
+        parseInt(calleeId), 
+        type, 
+        chatId ? parseInt(chatId) : null
+      );
+      
+      // Notify callee via WebSocket
+      wsService.notifyCallInitiated(parseInt(calleeId), {
+        callId: call.id,
+        callerId: callerId,
+        callerName: call.callInitiatorUser?.username || req.user.username,
+        callerAvatar: call.callInitiatorUser?.avatar || req.user.avatar || null,
+        callType: type,
+        chatId: chatId ? parseInt(chatId) : null,
+        timestamp: Date.now()
+      });
 
       res.status(201).json({
         success: true,
@@ -171,8 +248,11 @@ class CallController {
       const call = await callService.getCallDetails(callId);
 
       // Check if user is participant
-      if (!call.participants.includes(userId)) {
-        throw new AppError('Not authorized to view this call', 403);
+      if (!call.participants || !call.participants.includes(userId)) {
+        // Also check initiatorId as fallback
+        if (call.initiatorId !== userId) {
+          throw new AppError('Not authorized to view this call', 403);
+        }
       }
 
       res.json({
@@ -196,7 +276,7 @@ class CallController {
 
       // Filter calls where user is participant
       const userCalls = calls.filter(
-        call => call.participants.includes(userId) || call.initiatorId === userId
+        call => (call.participants && call.participants.includes(userId)) || call.initiatorId === userId
       );
 
       res.json({
@@ -218,7 +298,7 @@ class CallController {
       const { page = 1, limit = 20, status, type } = req.query;
 
       const options = {
-        offset: (page - 1) * limit,
+        offset: (parseInt(page) - 1) * parseInt(limit),
         limit: parseInt(limit),
       };
 
@@ -230,21 +310,125 @@ class CallController {
         options.type = type;
       }
 
-      const calls = await callService.getUserCalls(userId, options);
+      const result = await callService.getUserCalls(userId, options);
 
       res.json({
         success: true,
         data: {
-          calls,
+          calls: result.calls || result,
           pagination: {
             page: parseInt(page),
             limit: parseInt(limit),
-            total: calls.length,
+            total: result.total || (result.calls ? result.calls.length : result.length),
           },
         },
       });
     } catch (error) {
       logger.error('Get user calls controller error:', error);
+      next(error);
+    }
+  }
+
+  async getCallLink(req, res, next) {
+    try {
+      const { callId } = req.params;
+      const call = await callService.getCallById(callId, req.user.id);
+      
+      const linkToken = Buffer.from(`${callId}:${Date.now()}:${req.user.id}`).toString('base64');
+      const callLink = `${process.env.FRONTEND_URL || window.location.origin}/join-call?token=${linkToken}&callId=${callId}`;
+      
+      res.json({ 
+        success: true, 
+        data: { 
+          callLink, 
+          callId,
+          expiresIn: 3600 // 1 hour
+        } 
+      });
+    } catch (error) {
+      logger.error('Get call link controller error:', error);
+      next(error);
+    }
+  }
+
+  async joinViaLink(req, res, next) {
+    try {
+      const { callId, token } = req.query;
+      const userId = req.user.id;
+      
+      if (!callId) {
+        throw new AppError('callId is required', 400);
+      }
+      
+      // Verify token
+      if (token) {
+        try {
+          const decoded = Buffer.from(token, 'base64').toString();
+          const [tokenCallId, timestamp, tokenUserId] = decoded.split(':');
+          
+          if (tokenCallId !== callId) {
+            throw new AppError('Invalid call link', 403);
+          }
+          
+          // Check if link expired (1 hour)
+          const linkTime = parseInt(timestamp);
+          if (Date.now() - linkTime > 3600000) {
+            throw new AppError('Call link has expired', 403);
+          }
+        } catch (err) {
+          if (err instanceof AppError) throw err;
+          throw new AppError('Invalid call link token', 403);
+        }
+      }
+      
+      const call = await callService.joinCall(callId, userId);
+      
+      res.json({ 
+        success: true, 
+        data: { 
+          call,
+          message: 'Successfully joined call via link'
+        } 
+      });
+    } catch (error) {
+      logger.error('Join via link controller error:', error);
+      next(error);
+    }
+  }
+
+  async getMissedCalls(req, res, next) {
+    try {
+      const userId = req.user.id;
+      const { limit = 50 } = req.query;
+      
+      const missedCalls = await callService.getMissedCalls(userId, parseInt(limit));
+      
+      res.json({
+        success: true,
+        data: {
+          calls: missedCalls,
+          count: missedCalls.length
+        }
+      });
+    } catch (error) {
+      logger.error('Get missed calls controller error:', error);
+      next(error);
+    }
+  }
+
+  async markCallAsRead(req, res, next) {
+    try {
+      const userId = req.user.id;
+      const { callId } = req.params;
+      
+      await callService.markCallAsRead(callId, userId);
+      
+      res.json({
+        success: true,
+        message: 'Call marked as read successfully'
+      });
+    } catch (error) {
+      logger.error('Mark call as read controller error:', error);
       next(error);
     }
   }

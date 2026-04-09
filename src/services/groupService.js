@@ -1,566 +1,463 @@
-const mongoose = require('mongoose');
-const Group = require('../models/Group');
-const User = require('../models/Users');
-const Conversation = require('../models/Chats');
-const { ServerError, ValidationError, NotFoundError, ForbiddenError } = require('../utils/errors');
-const { MAX_GROUP_MEMBERS, DEFAULT_GROUP_PICTURE } = process.env;
+// groupService.js
+// FIXED: Rewritten from Mongoose to Sequelize.
+// Original used mongoose sessions, Group.findById(), populate() etc. — all MongoDB/Mongoose APIs.
+// Your database is PostgreSQL/Sequelize, so all of those would throw on every call.
 
-/**
- * Group Service
- * Handles all business logic for group operations
- */
+let db, Groups, GroupMembers, Users, Chats;
+try {
+    db = require('../models');
+    const m = db.models || {};
+    Groups       = m.Groups       || m.Group       || db.Groups       || db.Group;
+    GroupMembers = m.GroupMembers || m.GroupMember || db.GroupMembers || db.GroupMember;
+    Users        = m.Users        || m.User        || db.Users        || db.User;
+    Chats        = m.Chats        || m.Chat        || db.Chats        || db.Chat;
+} catch (e) {
+    console.error('[GroupService] ❌ Model load failed:', e.message);
+}
+
+const { Op } = require('sequelize');
+
+const withTimeout = (promise, ms = 5000) => {
+    let tid;
+    const t = new Promise((_, reject) => { tid = setTimeout(() => reject(new Error('Timeout')), ms); });
+    return Promise.race([promise, t]).finally(() => { if (tid) clearTimeout(tid); });
+};
+
+const formatGroup = (g) => {
+    if (!g) return null;
+    const d = g.toJSON ? g.toJSON() : g;
+    return {
+        id: d.id,
+        name: d.name || '',
+        description: d.description || '',
+        avatar: d.avatar || null,
+        isPublic: d.isPublic !== undefined ? d.isPublic : true,
+        purpose: d.purpose || 'social',
+        maxMembers: d.maxMembers || 100,
+        tags: d.tags || [],
+        rules: d.rules || '',
+        location: d.location || '',
+        createdBy: d.createdBy,
+        createdAt: d.createdAt,
+        updatedAt: d.updatedAt,
+        isVerified: d.isVerified || false,
+        settings: d.settings || {},
+        stats: d.stats || { totalMembers: 0, totalMessages: 0 },
+    };
+};
+
 class GroupService {
-  /**
-   * Create a new group
-   * @param {Object} groupData - Group data including name, creator, and initial members
-   * @returns {Promise<Object>} Created group with conversation
-   */
-  async createGroup(groupData) {
-    const session = await mongoose.startSession();
-    session.startTransaction();
 
-    try {
-      const { name, creatorId, memberIds = [], description = '', isPublic = false } = groupData;
-
-      // Validate required fields
-      if (!name || !creatorId) {
-        throw new ValidationError('Group name and creator ID are required');
-      }
-
-      // Validate name length
-      if (name.length < 3 || name.length > 100) {
-        throw new ValidationError('Group name must be between 3 and 100 characters');
-      }
-
-      // Validate description length
-      if (description.length > 500) {
-        throw new ValidationError('Description cannot exceed 500 characters');
-      }
-
-      // Include creator in member list
-      const allMemberIds = [...new Set([creatorId, ...memberIds])];
-
-      // Check member limit
-      const maxMembers = parseInt(MAX_GROUP_MEMBERS) || 100;
-      if (allMemberIds.length > maxMembers) {
-        throw new ValidationError(`Group cannot have more than ${maxMembers} members`);
-      }
-
-      // Verify all users exist
-      const users = await User.find({ _id: { $in: allMemberIds } }).session(session);
-      if (users.length !== allMemberIds.length) {
-        throw new NotFoundError('One or more users not found');
-      }
-
-      // Create group
-      const group = new Group({
-        name,
-        description,
-        createdBy: new mongoose.Types.ObjectId(creatorId),
-        members: allMemberIds.map(id => new mongoose.Types.ObjectId(id)),
-        admins: [new mongoose.Types.ObjectId(creatorId)],
-        isPublic,
-        picture: DEFAULT_GROUP_PICTURE || '/default-group.png',
-      });
-
-      // Create corresponding conversation
-      const conversation = new Conversation({
-        type: 'group',
-        groupId: group._id,
-        participants: allMemberIds.map(id => new mongoose.Types.ObjectId(id)),
-        createdBy: new mongoose.Types.ObjectId(creatorId),
-      });
-
-      // Save both documents in transaction
-      await group.save({ session });
-      await conversation.save({ session });
-
-      // Link conversation to group
-      group.conversationId = conversation._id;
-      await group.save({ session });
-
-      await session.commitTransaction();
-
-      // Populate fields for response
-      await group.populate([
-        { path: 'members', select: '_id username email profilePicture' },
-        { path: 'admins', select: '_id username email profilePicture' },
-        { path: 'createdBy', select: '_id username email profilePicture' },
-      ]);
-
-      return {
-        group,
-        conversation: {
-          _id: conversation._id,
-          type: conversation.type,
-          participants: conversation.participants,
-        },
-      };
-    } catch (error) {
-      await session.abortTransaction();
-
-      if (error instanceof ValidationError || error instanceof NotFoundError) {
-        throw error;
-      }
-      console.error('Error creating group:', error);
-      throw new ServerError('Failed to create group');
-    } finally {
-      session.endSession();
-    }
-  }
-
-  /**
-   * Get group details by ID
-   * @param {string} groupId - Group ID
-   * @param {string} userId - User ID for permission check
-   * @returns {Promise<Object>} Group details
-   */
-  async getGroupById(groupId, userId) {
-    try {
-      if (!groupId || !userId) {
-        throw new ValidationError('Group ID and user ID are required');
-      }
-
-      const group = await Group.findById(groupId).populate([
-        { path: 'members', select: '_id username email profilePicture' },
-        { path: 'admins', select: '_id username email profilePicture' },
-        { path: 'createdBy', select: '_id username email profilePicture' },
-        { path: 'conversationId', select: '_id type' },
-      ]);
-
-      if (!group) {
-        throw new NotFoundError('Group not found');
-      }
-
-      // Check if user is a member (unless group is public)
-      const isMember = group.members.some(member => member._id.toString() === userId);
-
-      if (!group.isPublic && !isMember) {
-        throw new ForbiddenError('You do not have permission to view this group');
-      }
-
-      return group;
-    } catch (error) {
-      if (
-        error instanceof ValidationError ||
-        error instanceof NotFoundError ||
-        error instanceof ForbiddenError
-      ) {
-        throw error;
-      }
-      console.error('Error fetching group:', error);
-      throw new ServerError('Failed to fetch group details');
-    }
-  }
-
-  /**
-   * Update group information
-   * @param {string} groupId - Group ID
-   * @param {string} userId - User ID (must be admin)
-   * @param {Object} updates - Fields to update
-   * @returns {Promise<Object>} Updated group
-   */
-  async updateGroup(groupId, userId, updates) {
-    try {
-      if (!groupId || !userId) {
-        throw new ValidationError('Group ID and user ID are required');
-      }
-
-      const group = await Group.findById(groupId);
-      if (!group) {
-        throw new NotFoundError('Group not found');
-      }
-
-      // Check if user is admin
-      const isAdmin = group.admins.some(adminId => adminId.toString() === userId);
-      if (!isAdmin) {
-        throw new ForbiddenError('Only group admins can update group information');
-      }
-
-      // Validate updates
-      const allowedUpdates = ['name', 'description', 'picture', 'isPublic'];
-      const updateFields = {};
-
-      for (const [key, value] of Object.entries(updates)) {
-        if (allowedUpdates.includes(key)) {
-          if (key === 'name' && (value.length < 3 || value.length > 100)) {
-            throw new ValidationError('Group name must be between 3 and 100 characters');
-          }
-          if (key === 'description' && value.length > 500) {
-            throw new ValidationError('Description cannot exceed 500 characters');
-          }
-          updateFields[key] = value;
+    // ===== Create a new group =====
+    async createGroup(groupData) {
+        if (!Groups) throw new Error('Service unavailable');
+        const { name, description = '', creatorId, isPublic = false, purpose = 'social', maxMembers = 100, tags = [], privacy, avatar } = groupData;
+        if (!name || !name.trim()) throw new Error('Group name is required');
+        if (name.length < 2 || name.length > 100) throw new Error('Group name must be between 2 and 100 characters');
+        if (description.length > 500) throw new Error('Description cannot exceed 500 characters');
+        if (!creatorId) throw new Error('Creator ID is required');
+        try {
+            const group = await Groups.create({
+                name: name.trim(), description, createdBy: creatorId,
+                isPublic: privacy === 'public' || isPublic,
+                purpose, maxMembers, tags, avatar: avatar || null,
+            });
+            if (GroupMembers) {
+                await GroupMembers.create({ groupId: group.id, userId: creatorId, role: 'owner', joinedAt: new Date() });
+            }
+            console.log(`[GroupService] ✅ Group created: "${group.name}" (id: ${group.id})`);
+            return { group: formatGroup(group) };
+        } catch (e) {
+            console.error('[GroupService] ❌ createGroup failed:', e.message);
+            throw new Error('Failed to create group');
         }
-      }
-
-      // Apply updates
-      Object.assign(group, updateFields);
-      await group.save();
-
-      await group.populate([
-        { path: 'members', select: '_id username email profilePicture' },
-        { path: 'admins', select: '_id username email profilePicture' },
-        { path: 'createdBy', select: '_id username email profilePicture' },
-      ]);
-
-      return group;
-    } catch (error) {
-      if (
-        error instanceof ValidationError ||
-        error instanceof NotFoundError ||
-        error instanceof ForbiddenError
-      ) {
-        throw error;
-      }
-      console.error('Error updating group:', error);
-      throw new ServerError('Failed to update group');
     }
-  }
 
-  /**
-   * Add members to group
-   * @param {string} groupId - Group ID
-   * @param {string} userId - User ID (must be admin)
-   * @param {Array<string>} newMemberIds - IDs of users to add
-   * @returns {Promise<Object>} Updated group
-   */
-  async addMembers(groupId, userId, newMemberIds) {
-    const session = await mongoose.startSession();
-    session.startTransaction();
-
-    try {
-      if (!groupId || !userId || !newMemberIds?.length) {
-        throw new ValidationError('Group ID, user ID, and member IDs are required');
-      }
-
-      const group = await Group.findById(groupId).session(session);
-      if (!group) {
-        throw new NotFoundError('Group not found');
-      }
-
-      // Check if user is admin
-      const isAdmin = group.admins.some(adminId => adminId.toString() === userId);
-      if (!isAdmin) {
-        throw new ForbiddenError('Only group admins can add members');
-      }
-
-      // Remove duplicates and existing members
-      const existingMemberIds = group.members.map(m => m.toString());
-      const uniqueNewMemberIds = [...new Set(newMemberIds)].filter(
-        id => !existingMemberIds.includes(id)
-      );
-
-      if (uniqueNewMemberIds.length === 0) {
-        throw new ValidationError('All users are already group members');
-      }
-
-      // Check member limit
-      const maxMembers = parseInt(MAX_GROUP_MEMBERS) || 100;
-      if (group.members.length + uniqueNewMemberIds.length > maxMembers) {
-        throw new ValidationError(`Cannot exceed maximum of ${maxMembers} members`);
-      }
-
-      // Verify new users exist
-      const newUsers = await User.find({
-        _id: { $in: uniqueNewMemberIds },
-      }).session(session);
-
-      if (newUsers.length !== uniqueNewMemberIds.length) {
-        throw new NotFoundError('One or more users not found');
-      }
-
-      // Add to group members
-      const memberObjectIds = uniqueNewMemberIds.map(id => new mongoose.Types.ObjectId(id));
-      group.members.push(...memberObjectIds);
-      await group.save({ session });
-
-      // Add to conversation participants
-      await Conversation.findByIdAndUpdate(
-        group.conversationId,
-        { $addToSet: { participants: { $each: memberObjectIds } } },
-        { session }
-      );
-
-      await session.commitTransaction();
-
-      await group.populate([
-        { path: 'members', select: '_id username email profilePicture' },
-        { path: 'admins', select: '_id username email profilePicture' },
-      ]);
-
-      return group;
-    } catch (error) {
-      await session.abortTransaction();
-
-      if (
-        error instanceof ValidationError ||
-        error instanceof NotFoundError ||
-        error instanceof ForbiddenError
-      ) {
-        throw error;
-      }
-      console.error('Error adding members:', error);
-      throw new ServerError('Failed to add members');
-    } finally {
-      session.endSession();
-    }
-  }
-
-  /**
-   * Remove members from group
-   * @param {string} groupId - Group ID
-   * @param {string} userId - User ID (must be admin or the member themselves)
-   * @param {Array<string>} memberIdsToRemove - IDs of users to remove
-   * @returns {Promise<Object>} Updated group
-   */
-  async removeMembers(groupId, userId, memberIdsToRemove) {
-    const session = await mongoose.startSession();
-    session.startTransaction();
-
-    try {
-      if (!groupId || !userId || !memberIdsToRemove?.length) {
-        throw new ValidationError('Group ID, user ID, and member IDs are required');
-      }
-
-      const group = await Group.findById(groupId).session(session);
-      if (!group) {
-        throw new NotFoundError('Group not found');
-      }
-
-      // Check if user is admin or removing themselves
-      const isAdmin = group.admins.some(adminId => adminId.toString() === userId);
-      const isSelfRemoval = memberIdsToRemove.length === 1 && memberIdsToRemove[0] === userId;
-
-      if (!isAdmin && !isSelfRemoval) {
-        throw new ForbiddenError('You do not have permission to remove members');
-      }
-
-      // Prevent removing the last admin
-      const memberObjectIdsToRemove = memberIdsToRemove.map(id => new mongoose.Types.ObjectId(id));
-
-      if (isAdmin) {
-        const remainingAdmins = group.admins.filter(
-          adminId => !memberObjectIdsToRemove.some(id => id.equals(adminId))
-        );
-        if (remainingAdmins.length === 0) {
-          throw new ValidationError('Group must have at least one admin');
+    // ===== Get group by ID =====
+    async getGroupById(groupId, userId) {
+        if (!Groups) throw new Error('Service unavailable');
+        try {
+            const group = await withTimeout(Groups.findByPk(groupId, {
+                attributes: ['id','name','description','avatar','isPublic','purpose','maxMembers','tags','rules','location','createdBy','createdAt','updatedAt','isVerified','settings','stats'],
+            }));
+            if (!group) throw new Error('Group not found');
+            const isMember = GroupMembers ? !!(await GroupMembers.findOne({ where: { groupId, userId } })) : false;
+            if (!group.isPublic && !isMember) throw new Error('You do not have permission to view this group');
+            return formatGroup(group);
+        } catch (e) {
+            if (['not found','permission'].some(s => e.message.includes(s))) throw e;
+            console.error('[GroupService] ❌ getGroupById failed:', e.message);
+            throw new Error('Failed to fetch group details');
         }
-      }
-
-      // Remove from group members
-      group.members = group.members.filter(
-        memberId => !memberObjectIdsToRemove.some(id => id.equals(memberId))
-      );
-
-      // Remove from admins if they were admins
-      group.admins = group.admins.filter(
-        adminId => !memberObjectIdsToRemove.some(id => id.equals(adminId))
-      );
-
-      await group.save({ session });
-
-      // Remove from conversation participants
-      await Conversation.findByIdAndUpdate(
-        group.conversationId,
-        { $pull: { participants: { $in: memberObjectIdsToRemove } } },
-        { session }
-      );
-
-      await session.commitTransaction();
-
-      await group.populate([
-        { path: 'members', select: '_id username email profilePicture' },
-        { path: 'admins', select: '_id username email profilePicture' },
-      ]);
-
-      return group;
-    } catch (error) {
-      await session.abortTransaction();
-
-      if (
-        error instanceof ValidationError ||
-        error instanceof NotFoundError ||
-        error instanceof ForbiddenError
-      ) {
-        throw error;
-      }
-      console.error('Error removing members:', error);
-      throw new ServerError('Failed to remove members');
-    } finally {
-      session.endSession();
     }
-  }
 
-  /**
-   * Add or remove group admins
-   * @param {string} groupId - Group ID
-   * @param {string} userId - User ID (must be admin)
-   * @param {Array<string>} adminIds - IDs to set as admins
-   * @returns {Promise<Object>} Updated group
-   */
-  async updateAdmins(groupId, userId, adminIds) {
-    try {
-      if (!groupId || !userId || !adminIds?.length) {
-        throw new ValidationError('Group ID, user ID, and admin IDs are required');
-      }
-
-      const group = await Group.findById(groupId);
-      if (!group) {
-        throw new NotFoundError('Group not found');
-      }
-
-      // Check if user is admin
-      const isAdmin = group.admins.some(adminId => adminId.toString() === userId);
-      if (!isAdmin) {
-        throw new ForbiddenError('Only group admins can modify admin list');
-      }
-
-      // Verify all new admins are group members
-      const adminObjectIds = adminIds.map(id => new mongoose.Types.ObjectId(id));
-      const allAdminsAreMembers = adminObjectIds.every(adminId =>
-        group.members.some(memberId => memberId.equals(adminId))
-      );
-
-      if (!allAdminsAreMembers) {
-        throw new ValidationError('All admins must be group members');
-      }
-
-      // Update admins
-      group.admins = adminObjectIds;
-      await group.save();
-
-      await group.populate([
-        { path: 'members', select: '_id username email profilePicture' },
-        { path: 'admins', select: '_id username email profilePicture' },
-      ]);
-
-      return group;
-    } catch (error) {
-      if (
-        error instanceof ValidationError ||
-        error instanceof NotFoundError ||
-        error instanceof ForbiddenError
-      ) {
-        throw error;
-      }
-      console.error('Error updating admins:', error);
-      throw new ServerError('Failed to update group admins');
+    // ===== Update group =====
+    async updateGroup(groupId, userId, updates) {
+        if (!Groups) throw new Error('Service unavailable');
+        try {
+            const group = await Groups.findByPk(groupId);
+            if (!group) throw new Error('Group not found');
+            let canEdit = group.createdBy === userId || String(group.createdBy) === String(userId);
+            if (!canEdit && GroupMembers) {
+                const m = await GroupMembers.findOne({ where: { groupId, userId } });
+                canEdit = m && ['owner','admin'].includes(m.role);
+            }
+            if (!canEdit) throw new Error('You do not have permission to update this group');
+            const allowed = ['name','description','avatar','isPublic','purpose','maxMembers','tags','rules','location'];
+            const fields = {};
+            for (const [k, v] of Object.entries(updates)) {
+                if (allowed.includes(k)) {
+                    if (k === 'name' && (v.length < 2 || v.length > 100)) throw new Error('Group name must be between 2 and 100 characters');
+                    if (k === 'description' && v.length > 500) throw new Error('Description cannot exceed 500 characters');
+                    fields[k] = v;
+                }
+            }
+            await group.update(fields);
+            console.log(`[GroupService] ✅ Group ${groupId} updated`);
+            return formatGroup(group);
+        } catch (e) {
+            if (['not found','permission','characters'].some(s => e.message.includes(s))) throw e;
+            console.error('[GroupService] ❌ updateGroup failed:', e.message);
+            throw new Error('Failed to update group');
+        }
     }
-  }
 
-  /**
-   * Get user's groups with pagination
-   * @param {string} userId - User ID
-   * @param {number} page - Page number
-   * @param {number} limit - Items per page
-   * @returns {Promise<Object>} Groups and pagination info
-   */
-  async getUserGroups(userId, page = 1, limit = 20) {
-    try {
-      if (!userId) {
-        throw new ValidationError('User ID is required');
-      }
-
-      page = parseInt(page);
-      limit = parseInt(limit);
-
-      if (page < 1 || limit < 1 || limit > 50) {
-        throw new ValidationError('Invalid pagination parameters');
-      }
-
-      const skip = (page - 1) * limit;
-
-      // Get groups where user is a member
-      const [groups, total] = await Promise.all([
-        Group.find({ members: userId })
-          .sort({ updatedAt: -1 })
-          .skip(skip)
-          .limit(limit)
-          .populate([
-            { path: 'members', select: '_id username profilePicture' },
-            { path: 'admins', select: '_id username profilePicture' },
-            { path: 'conversationId', select: '_id type' },
-          ]),
-        Group.countDocuments({ members: userId }),
-      ]);
-
-      const totalPages = Math.ceil(total / limit);
-
-      return {
-        groups,
-        pagination: {
-          currentPage: page,
-          totalPages,
-          totalGroups: total,
-          hasNext: page < totalPages,
-          hasPrevious: page > 1,
-        },
-      };
-    } catch (error) {
-      if (error instanceof ValidationError) {
-        throw error;
-      }
-      console.error('Error fetching user groups:', error);
-      throw new ServerError('Failed to fetch user groups');
+    // ===== Delete group =====
+    async deleteGroup(groupId, userId) {
+        if (!Groups) throw new Error('Service unavailable');
+        try {
+            const group = await Groups.findByPk(groupId);
+            if (!group) throw new Error('Group not found');
+            if (String(group.createdBy) !== String(userId)) throw new Error('Only the group owner can delete this group');
+            await group.destroy();
+            console.log(`[GroupService] ✅ Group ${groupId} deleted`);
+            return true;
+        } catch (e) {
+            if (['not found','permission','owner'].some(s => e.message.includes(s))) throw e;
+            console.error('[GroupService] ❌ deleteGroup failed:', e.message);
+            throw new Error('Failed to delete group');
+        }
     }
-  }
 
-  /**
-   * Search for public groups
-   * @param {string} searchTerm - Search term
-   * @param {number} page - Page number
-   * @param {number} limit - Items per page
-   * @returns {Promise<Object>} Search results
-   */
-  async searchPublicGroups(searchTerm, page = 1, limit = 20) {
-    try {
-      page = parseInt(page);
-      limit = parseInt(limit);
-
-      if (page < 1 || limit < 1 || limit > 50) {
-        throw new ValidationError('Invalid pagination parameters');
-      }
-
-      const skip = (page - 1) * limit;
-
-      const query = { isPublic: true };
-      if (searchTerm) {
-        query.$or = [
-          { name: { $regex: searchTerm, $options: 'i' } },
-          { description: { $regex: searchTerm, $options: 'i' } },
-        ];
-      }
-
-      const [groups, total] = await Promise.all([
-        Group.find(query)
-          .sort({ membersCount: -1, createdAt: -1 })
-          .skip(skip)
-          .limit(limit)
-          .select('_id name description picture membersCount createdAt')
-          .populate('createdBy', '_id username profilePicture'),
-        Group.countDocuments(query),
-      ]);
-
-      const totalPages = Math.ceil(total / limit);
-
-      return {
-        groups,
-        pagination: {
-          currentPage: page,
-          totalPages,
-          totalGroups: total,
-          hasNext: page < totalPages,
-          hasPrevious: page > 1,
-        },
-      };
-    } catch (error) {
-      if (error instanceof ValidationError) {
-        throw error;
-      }
-      console.error('Error searching groups:', error);
-      throw new ServerError('Failed to search groups');
+    // ===== Add single member =====
+    async addMember(groupId, requestingUserId, memberId, role = 'member') {
+        if (!GroupMembers) throw new Error('Service unavailable');
+        try {
+            const group = await Groups?.findByPk(groupId);
+            if (!group) throw new Error('Group not found');
+            // Check requester has permission
+            const requester = await GroupMembers.findOne({ where: { groupId, userId: requestingUserId } });
+            if (!requester || !['owner','admin'].includes(requester.role)) throw new Error('Only group admins can add members');
+            const existing = await GroupMembers.findOne({ where: { groupId, userId: memberId } });
+            if (existing) throw new Error('User is already a member of this group');
+            // Check max members
+            const count = await GroupMembers.count({ where: { groupId } });
+            if (count >= (group.maxMembers || 100)) throw new Error('Group has reached maximum member limit');
+            const membership = await GroupMembers.create({ groupId, userId: memberId, role, joinedAt: new Date() });
+            console.log(`[GroupService] ✅ Member ${memberId} added to group ${groupId}`);
+            return membership;
+        } catch (e) {
+            if (['not found','already a member','admins can','maximum'].some(s => e.message.includes(s))) throw e;
+            console.error('[GroupService] ❌ addMember failed:', e.message);
+            throw new Error('Failed to add member');
+        }
     }
-  }
+
+    // ===== Remove member =====
+    async removeMember(groupId, requestingUserId, memberId) {
+        if (!GroupMembers) throw new Error('Service unavailable');
+        try {
+            const requester = await GroupMembers.findOne({ where: { groupId, userId: requestingUserId } });
+            if (!requester || !['owner','admin'].includes(requester.role)) throw new Error('Only group admins can remove members');
+            const membership = await GroupMembers.findOne({ where: { groupId, userId: memberId } });
+            if (!membership) throw new Error('Member not found in this group');
+            if (membership.role === 'owner') throw new Error('Cannot remove the group owner');
+            await membership.destroy();
+            console.log(`[GroupService] ✅ Member ${memberId} removed from group ${groupId}`);
+            return true;
+        } catch (e) {
+            if (['not found','admins can','owner'].some(s => e.message.includes(s))) throw e;
+            console.error('[GroupService] ❌ removeMember failed:', e.message);
+            throw new Error('Failed to remove member');
+        }
+    }
+
+    // ===== Update member role =====
+    async updateMemberRole(groupId, requestingUserId, memberId, role) {
+        if (!GroupMembers) throw new Error('Service unavailable');
+        const validRoles = ['member','moderator','admin','owner'];
+        if (!validRoles.includes(role)) throw new Error('Invalid role');
+        try {
+            const requester = await GroupMembers.findOne({ where: { groupId, userId: requestingUserId } });
+            if (!requester || !['owner','admin'].includes(requester.role)) throw new Error('Only group admins can update roles');
+            const membership = await GroupMembers.findOne({ where: { groupId, userId: memberId } });
+            if (!membership) throw new Error('Member not found in this group');
+            membership.role = role;
+            await membership.save();
+            console.log(`[GroupService] ✅ Member ${memberId} role → ${role} in group ${groupId}`);
+            return membership;
+        } catch (e) {
+            if (['Invalid','not found','admins can'].some(s => e.message.includes(s))) throw e;
+            console.error('[GroupService] ❌ updateMemberRole failed:', e.message);
+            throw new Error('Failed to update member role');
+        }
+    }
+
+    // ===== Leave group =====
+    async leaveGroup(groupId, userId) {
+        if (!GroupMembers) throw new Error('Service unavailable');
+        try {
+            const membership = await GroupMembers.findOne({ where: { groupId, userId } });
+            if (!membership) throw new Error('You are not a member of this group');
+            if (membership.role === 'owner') throw new Error('Group owner cannot leave. Transfer ownership first.');
+            await membership.destroy();
+            console.log(`[GroupService] ✅ User ${userId} left group ${groupId}`);
+            return true;
+        } catch (e) {
+            if (['not a member','cannot leave','owner'].some(s => e.message.toLowerCase().includes(s))) throw e;
+            console.error('[GroupService] ❌ leaveGroup failed:', e.message);
+            throw new Error('Failed to leave group');
+        }
+    }
+
+    // ===== Get user's groups with pagination =====
+    async getUserGroups(userId, options = {}) {
+        if (!Groups || !GroupMembers) return { groups: [], pagination: { currentPage: 1, totalPages: 0, totalGroups: 0, hasNext: false, hasPrevious: false } };
+        const { page = 1, limit = 20 } = options;
+        const pageNum = Math.max(1, parseInt(page));
+        const limitNum = Math.min(100, Math.max(1, parseInt(limit)));
+        const offset = (pageNum - 1) * limitNum;
+        try {
+            const memberships = await withTimeout(GroupMembers.findAll({
+                where: { userId, leftAt: null },
+                include: [{ model: Groups, as: 'userGroup', required: true, attributes: ['id','name','description','avatar','purpose','isPublic','maxMembers','createdBy','createdAt','updatedAt'] }],
+                limit: limitNum,
+                offset,
+                order: [['joinedAt', 'DESC']],
+            }));
+            const groups = memberships.map(m => formatGroup(m.userGroup)).filter(Boolean);
+            const total = await GroupMembers.count({ where: { userId, leftAt: null } });
+            const totalPages = Math.ceil(total / limitNum);
+            return { groups, pagination: { currentPage: pageNum, totalPages, totalGroups: total, hasNext: pageNum < totalPages, hasPrevious: pageNum > 1 } };
+        } catch (e) {
+            console.error('[GroupService] ❌ getUserGroups failed:', e.message);
+            return { groups: [], pagination: { currentPage: 1, totalPages: 0, totalGroups: 0, hasNext: false, hasPrevious: false } };
+        }
+    }
+
+    // ===== Search public groups =====
+    async searchGroups(userId, options = {}) {
+        if (!Groups) return { groups: [], pagination: { currentPage: 1, totalPages: 0, totalGroups: 0 } };
+        const { query = '', page = 1, limit = 20, privacy } = options;
+        const pageNum = Math.max(1, parseInt(page));
+        const limitNum = Math.min(50, Math.max(1, parseInt(limit)));
+        const offset = (pageNum - 1) * limitNum;
+        try {
+            const where = { isPublic: true };
+            if (query) { where[Op.or] = [{ name: { [Op.iLike]: `%${query}%` } }, { description: { [Op.iLike]: `%${query}%` } }]; }
+            const { count, rows } = await withTimeout(Groups.findAndCountAll({ where, limit: limitNum, offset, order: [['createdAt', 'DESC']], attributes: ['id','name','description','avatar','purpose','isPublic','maxMembers','createdBy','createdAt'] }));
+            const totalPages = Math.ceil(count / limitNum);
+            return { groups: rows.map(formatGroup), pagination: { currentPage: pageNum, totalPages, totalGroups: count, hasNext: pageNum < totalPages, hasPrevious: pageNum > 1 } };
+        } catch (e) {
+            console.error('[GroupService] ❌ searchGroups failed:', e.message);
+            return { groups: [], pagination: { currentPage: 1, totalPages: 0, totalGroups: 0 } };
+        }
+    }
+
+    // ===== Get group members =====
+    async getGroupMembers(groupId, userId, options = {}) {
+        if (!GroupMembers) return { members: [], pagination: { currentPage: 1, totalPages: 0, totalMembers: 0 } };
+        const { page = 1, limit = 50, role, online } = options;
+        const pageNum = Math.max(1, parseInt(page));
+        const limitNum = Math.min(100, Math.max(1, parseInt(limit)));
+        const offset = (pageNum - 1) * limitNum;
+        try {
+            const where = { groupId };
+            if (role) where.role = role;
+            const { count, rows } = await withTimeout(GroupMembers.findAndCountAll({
+                where,
+                include: [{ model: Users, as: 'groupMemberUser', attributes: ['id','username','avatar','firstName','lastName','status','lastSeen'], required: false }],
+                limit: limitNum, offset,
+                order: [['role', 'ASC'], ['joinedAt', 'ASC']],
+            }));
+            const members = rows.map(m => ({
+                userId: m.userId, role: m.role, joinedAt: m.joinedAt,
+                user: m.groupMemberUser ? { id: m.groupMemberUser.id, username: m.groupMemberUser.username, avatar: m.groupMemberUser.avatar || null, status: m.groupMemberUser.status || 'offline' } : null,
+            }));
+            const totalPages = Math.ceil(count / limitNum);
+            return { members, pagination: { currentPage: pageNum, totalPages, totalMembers: count } };
+        } catch (e) {
+            console.error('[GroupService] ❌ getGroupMembers failed:', e.message);
+            return { members: [], pagination: { currentPage: 1, totalPages: 0, totalMembers: 0 } };
+        }
+    }
+
+    // ===== Update group settings =====
+    async updateGroupSettings(groupId, userId, settings) {
+        if (!Groups) throw new Error('Service unavailable');
+        try {
+            const group = await Groups.findByPk(groupId);
+            if (!group) throw new Error('Group not found');
+            let canEdit = String(group.createdBy) === String(userId);
+            if (!canEdit && GroupMembers) {
+                const m = await GroupMembers.findOne({ where: { groupId, userId } });
+                canEdit = m && ['owner','admin'].includes(m.role);
+            }
+            if (!canEdit) throw new Error('You do not have permission to update settings');
+            const allowed = ['allowMedia','allowCalls','allowReactions','allowReplies','allowEditing','allowDeleting','slowMode','requireAdminApproval'];
+            const filtered = {};
+            for (const k of allowed) { if (settings[k] !== undefined) filtered[k] = settings[k]; }
+            await group.update({ settings: { ...(group.settings || {}), ...filtered } });
+            return formatGroup(group);
+        } catch (e) {
+            if (['not found','permission'].some(s => e.message.includes(s))) throw e;
+            console.error('[GroupService] ❌ updateGroupSettings failed:', e.message);
+            throw new Error('Failed to update settings');
+        }
+    }
+
+    // ===== Transfer ownership =====
+    async transferOwnership(groupId, userId, newOwnerId) {
+        if (!GroupMembers) throw new Error('Service unavailable');
+        try {
+            const ownerMembership = await GroupMembers.findOne({ where: { groupId, userId } });
+            if (!ownerMembership || ownerMembership.role !== 'owner') throw new Error('Only the group owner can transfer ownership');
+            const newOwnerMembership = await GroupMembers.findOne({ where: { groupId, userId: newOwnerId } });
+            if (!newOwnerMembership) throw new Error('New owner must be a group member');
+            ownerMembership.role = 'admin';
+            await ownerMembership.save();
+            newOwnerMembership.role = 'owner';
+            await newOwnerMembership.save();
+            if (Groups) {
+                await Groups.update({ createdBy: newOwnerId }, { where: { id: groupId } });
+            }
+            console.log(`[GroupService] ✅ Group ${groupId} ownership transferred to ${newOwnerId}`);
+            return { transferred: true, groupId, newOwnerId };
+        } catch (e) {
+            if (['owner','must be'].some(s => e.message.includes(s))) throw e;
+            console.error('[GroupService] ❌ transferOwnership failed:', e.message);
+            throw new Error('Failed to transfer ownership');
+        }
+    }
+
+    // ===== Get group statistics =====
+    async getGroupStatistics(groupId, userId) {
+        if (!Groups || !GroupMembers) return { totalMembers: 0, totalAdmins: 0 };
+        try {
+            const group = await Groups.findByPk(groupId);
+            if (!group) throw new Error('Group not found');
+            const [totalMembers, totalAdmins] = await Promise.all([
+                GroupMembers.count({ where: { groupId, leftAt: null } }),
+                GroupMembers.count({ where: { groupId, leftAt: null, role: { [Op.in]: ['owner','admin'] } } }),
+            ]);
+            return { totalMembers, totalAdmins, groupId, groupName: group.name, isPublic: group.isPublic, purpose: group.purpose, createdAt: group.createdAt };
+        } catch (e) {
+            if (e.message.includes('not found')) throw e;
+            console.error('[GroupService] ❌ getGroupStatistics failed:', e.message);
+            throw new Error('Failed to get group statistics');
+        }
+    }
+
+    // ===== Archive group =====
+    async archiveGroup(groupId, userId, archived = true) {
+        if (!Groups) throw new Error('Service unavailable');
+        try {
+            const group = await Groups.findByPk(groupId);
+            if (!group) throw new Error('Group not found');
+            if (String(group.createdBy) !== String(userId)) throw new Error('Only the group owner can archive/unarchive');
+            const settings = { ...(group.settings || {}), archived };
+            await group.update({ settings });
+            console.log(`[GroupService] ✅ Group ${groupId} ${archived ? 'archived' : 'unarchived'}`);
+            return formatGroup(group);
+        } catch (e) {
+            if (['not found','owner'].some(s => e.message.includes(s))) throw e;
+            console.error('[GroupService] ❌ archiveGroup failed:', e.message);
+            throw new Error('Failed to archive group');
+        }
+    }
+
+    // ===== Get invitations for user =====
+    async getGroupInvitations(userId, options = {}) {
+        let Invites;
+        try { const db2 = require('../models'); Invites = db2.models?.Invites || db2.Invites; } catch (_) {}
+        if (!Invites) return { invitations: [], pagination: { currentPage: 1, totalPages: 0, total: 0 } };
+        const { page = 1, limit = 20, status = 'pending' } = options;
+        const pageNum = Math.max(1, parseInt(page));
+        const limitNum = Math.min(50, parseInt(limit));
+        const offset = (pageNum - 1) * limitNum;
+        try {
+            const where = { targetUserId: userId };
+            if (status !== 'all') where.status = status;
+            const { count, rows } = await withTimeout(Invites.findAndCountAll({
+                where,
+                include: [{ model: Groups, as: 'userGroup', attributes: ['id','name','avatar','description','purpose'], required: false }],
+                limit: limitNum, offset, order: [['createdAt', 'DESC']],
+            }));
+            return { invitations: rows, pagination: { currentPage: pageNum, totalPages: Math.ceil(count / limitNum), total: count } };
+        } catch (e) {
+            console.error('[GroupService] ❌ getGroupInvitations failed:', e.message);
+            return { invitations: [], pagination: { currentPage: 1, totalPages: 0, total: 0 } };
+        }
+    }
+
+    // ===== Send invitation =====
+    async sendInvitation(groupId, userId, inviteeId, role = 'member', message = '') {
+        let Invites;
+        try { const db2 = require('../models'); Invites = db2.models?.Invites || db2.Invites; } catch (_) {}
+        if (!Invites) throw new Error('Invite service unavailable');
+        try {
+            const already = await GroupMembers?.findOne({ where: { groupId, userId: inviteeId } });
+            if (already) throw new Error('User is already a member of this group');
+            const existingInvite = await Invites.findOne({ where: { groupId, targetUserId: inviteeId, status: 'pending' } });
+            if (existingInvite) throw new Error('User is already invited to this group');
+            const invitation = await Invites.create({ groupId, inviterId: userId, targetUserId: inviteeId, message, status: 'pending', expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) });
+            console.log(`[GroupService] ✅ Invitation sent to user ${inviteeId} for group ${groupId}`);
+            return invitation;
+        } catch (e) {
+            if (['already a member','already invited'].some(s => e.message.includes(s))) throw e;
+            console.error('[GroupService] ❌ sendInvitation failed:', e.message);
+            throw new Error('Failed to send invitation');
+        }
+    }
+
+    // ===== Respond to invitation =====
+    async respondToInvitation(invitationId, userId, accept) {
+        let Invites;
+        try { const db2 = require('../models'); Invites = db2.models?.Invites || db2.Invites; } catch (_) {}
+        if (!Invites) throw new Error('Service unavailable');
+        try {
+            const invitation = await Invites.findOne({ where: { id: invitationId, targetUserId: userId, status: 'pending' } });
+            if (!invitation) throw new Error('Invitation not found or already responded');
+            if (accept && GroupMembers) {
+                await GroupMembers.create({ groupId: invitation.groupId, userId, role: 'member', joinedAt: new Date() });
+            }
+            invitation.status = accept ? 'accepted' : 'rejected';
+            await invitation.save();
+            console.log(`[GroupService] ✅ Invitation ${invitationId} ${accept ? 'accepted' : 'rejected'} by user ${userId}`);
+            return { accepted: accept, group: accept ? await Groups?.findByPk(invitation.groupId) : null };
+        } catch (e) {
+            if (e.message.includes('not found')) throw e;
+            console.error('[GroupService] ❌ respondToInvitation failed:', e.message);
+            throw new Error('Failed to respond to invitation');
+        }
+    }
+
+    // ===== Cancel invitation =====
+    async cancelInvitation(invitationId, userId) {
+        let Invites;
+        try { const db2 = require('../models'); Invites = db2.models?.Invites || db2.Invites; } catch (_) {}
+        if (!Invites) throw new Error('Service unavailable');
+        try {
+            const invitation = await Invites.findOne({ where: { id: invitationId, inviterId: userId } });
+            if (!invitation) throw new Error('Invitation not found or you do not have permission to cancel it');
+            await invitation.destroy();
+            return true;
+        } catch (e) {
+            if (e.message.includes('not found')) throw e;
+            console.error('[GroupService] ❌ cancelInvitation failed:', e.message);
+            throw new Error('Failed to cancel invitation');
+        }
+    }
 }
 
 module.exports = new GroupService();

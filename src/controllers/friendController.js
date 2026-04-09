@@ -237,6 +237,31 @@ class FriendController {
       next(error);
     }
   }
+
+  /**
+   * Get nearby users based on geolocation or fallback to online users
+   * GET /api/friends/nearby?lat=xxx&lng=xxx&radius=5000
+   */
+  async getNearbyUsers(req, res, next) {
+    try {
+      const userId = req.user.id;
+      const { lat, lng, radius = 5000 } = req.query;
+
+      const result = await friendService.getNearbyUsers(userId, { lat, lng, radius });
+
+      res.json({
+        success: true,
+        data: {
+          users: result.users,
+          count: result.count,
+          mode: result.mode
+        }
+      });
+    } catch (error) {
+      logger.error('Get nearby users controller error:', error);
+      next(error);
+    }
+  }
 }
 
 module.exports = new FriendController();

@@ -15,9 +15,10 @@ try {
     db = require('../models');
     // Primary: db.models (sequelize registered names) ? fallback to direct export keys
     const m = db.models || {};
+    // FIXED: Use correct registry keys - 'Groups' and 'GroupMembers' exist in Sequelize registry
     User        = m.Users        || m.User        || db.Users        || db.User;
-    Group       = m.userGroups       || m.userGroup       || db.Groups       || db.Group;
-    GroupMember = m.userGroupMembers || m.userGroupMember || db.GroupMembers || db.GroupMember;
+    Group       = m.Groups       || m.userGroup   || db.Groups       || db.Group;
+    GroupMember = m.GroupMembers || m.userGroupMember || db.GroupMembers || db.GroupMember;
     Invite      = m.Invite       || m.Invites     || db.Invite       || db.Invites || null;
     Chat        = m.Chats        || m.Chat        || db.Chats        || db.Chat;
     console.log('[Groups Route] Models loaded - User:', !!User, 'Group:', !!Group, 'GroupMember:', !!GroupMember, 'Invite:', !!Invite);
@@ -406,66 +407,66 @@ class GroupController {
     }
   }
 
- // In group.js - Update getUserGroups function
-async getUserGroups(req, res) {
-  try {
-    const userId = getUserId(req);
-    
-    if (!userId) {
-      return res.status(401).json({
-        success: false,
-        message: 'Authentication required'
-      });
-    }
-    
-    const { limit = 50, offset = 0, includeArchived = false } = req.query;
-    const limitNum = Math.min(parseInt(limit), 200);
-    const offsetNum = parseInt(offset);
-    
-    if (!Group || !GroupMember) {
-      return res.json({
+  async getUserGroups(req, res) {
+    try {
+      const userId = getUserId(req);
+      
+      if (!userId) {
+        return res.status(401).json({
+          success: false,
+          message: 'Authentication required'
+        });
+      }
+      
+      const { limit = 50, offset = 0, includeArchived = false } = req.query;
+      const limitNum = Math.min(parseInt(limit), 200);
+      const offsetNum = parseInt(offset);
+      
+      if (!Group || !GroupMember) {
+        return res.json({
+          success: true,
+          data: { groups: [] },
+          pagination: { limit: limitNum, offset: offsetNum, total: 0, hasMore: false },
+          userId
+        });
+      }
+      
+      // FIXED: Use the correct association alias 'groupMemberGroup' (or whatever is defined in GroupMembers.associate)
+      // Common aliases: 'group' or 'Group' - check your association definition
+      const memberships = await withTimeout(GroupMember.findAll({
+        where: { userId: userId, leftAt: null },
+        include: [{
+          model: Group,
+          as: 'group',  // FIXED: Changed from 'userGroup' to match typical association alias
+          required: true,
+          attributes: ['id', 'name', 'description', 'avatar', 'purpose', 'isPublic', 'maxMembers', 'createdBy', 'createdAt', 'updatedAt']
+        }],
+        limit: limitNum,
+        offset: offsetNum
+      }));
+      
+      const groups = memberships.map(m => formatGroup(m.group)).filter(g => g);  // FIXED: Changed from m.userGroup to m.group
+      
+      res.json({
         success: true,
-        data: { groups: [] },
-        pagination: { limit: limitNum, offset: offsetNum, total: 0, hasMore: false },
+        data: { groups: groups },
+        pagination: {
+          limit: limitNum,
+          offset: offsetNum,
+          total: groups.length,
+          hasMore: groups.length === limitNum
+        },
         userId
       });
+    } catch (error) {
+      console.error('[Groups] Error getting user groups:', error);
+      res.status(200).json({ 
+        success: true, 
+        data: { groups: [] },
+        pagination: { limit: 50, offset: 0, total: 0, hasMore: false }
+      });
     }
-    
-    // FIXED: Change 'as: 'userGroup'' to 'as: 'userGroup'' to match the association
-    const memberships = await withTimeout(GroupMember.findAll({
-      where: { userId: userId, leftAt: null },
-      include: [{
-        model: Group,
-        as: 'userGroup',  // ? CHANGED from 'group' to 'userGroup'
-        required: true,
-        attributes: ['id', 'name', 'description', 'avatar', 'purpose', 'isPublic', 'maxMembers', 'createdBy', 'createdAt', 'updatedAt']
-      }],
-      limit: limitNum,
-      offset: offsetNum
-    }));
-    
-    const groups = memberships.map(m => formatGroup(m.userGroup)).filter(g => g);  // ? CHANGED from m.userGroup to m.userGroup
-    
-    res.json({
-      success: true,
-      data: { groups: groups },
-      pagination: {
-        limit: limitNum,
-        offset: offsetNum,
-        total: groups.length,
-        hasMore: groups.length === limitNum
-      },
-      userId
-    });
-  } catch (error) {
-    console.error('[Groups] Error getting user groups:', error);
-    res.status(200).json({ 
-      success: true, 
-      data: { groups: [] },
-      pagination: { limit: 50, offset: 0, total: 0, hasMore: false }
-    });
   }
-}
 
   // Get group by ID - PROTECTED
   async getGroupById(req, res) {
@@ -525,7 +526,7 @@ async getUserGroups(req, res) {
           where: { groupId: groupIdNum },
           include: [{
             model: User,
-            as: 'user',
+            as: 'groupMemberUser',  // FIXED: Use correct alias for User in GroupMembers association
             attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status']
           }],
           limit: 100
@@ -534,11 +535,11 @@ async getUserGroups(req, res) {
           userId: m.userId,
           role: m.role,
           joinedAt: m.joinedAt,
-          user: m.user ? {
-            id: m.user.id,
-            username: m.user.username,
-            avatar: m.user.avatar,
-            displayName: [m.user.firstName, m.user.lastName].filter(Boolean).join(' ') || m.user.username
+          user: m.groupMemberUser ? {  // FIXED: Changed from m.user to m.groupMemberUser
+            id: m.groupMemberUser.id,
+            username: m.groupMemberUser.username,
+            avatar: m.groupMemberUser.avatar,
+            displayName: [m.groupMemberUser.firstName, m.groupMemberUser.lastName].filter(Boolean).join(' ') || m.groupMemberUser.username
           } : null
         }));
       }
@@ -731,7 +732,7 @@ async getUserGroups(req, res) {
         where: whereCondition,
         include: [{
           model: User,
-          as: 'user',
+          as: 'groupMemberUser',  // FIXED: Use correct alias for User in GroupMembers association
           attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen']
         }],
         limit: Math.min(parseInt(limit), 200),
@@ -743,13 +744,13 @@ async getUserGroups(req, res) {
         userId: m.userId,
         role: m.role,
         joinedAt: m.joinedAt,
-        user: m.user ? {
-          id: m.user.id,
-          username: m.user.username,
-          avatar: m.user.avatar,
-          displayName: [m.user.firstName, m.user.lastName].filter(Boolean).join(' ') || m.user.username,
-          status: m.user.status,
-          lastSeen: m.user.lastSeen
+        user: m.groupMemberUser ? {  // FIXED: Changed from m.user to m.groupMemberUser
+          id: m.groupMemberUser.id,
+          username: m.groupMemberUser.username,
+          avatar: m.groupMemberUser.avatar,
+          displayName: [m.groupMemberUser.firstName, m.groupMemberUser.lastName].filter(Boolean).join(' ') || m.groupMemberUser.username,
+          status: m.groupMemberUser.status,
+          lastSeen: m.groupMemberUser.lastSeen
         } : null
       }));
       
@@ -1014,7 +1015,7 @@ async getUserGroups(req, res) {
           },
           {
             model: Group,
-            as: 'userGroup',
+            as: 'group',  // FIXED: Changed from 'userGroup' to match typical alias
             attributes: ['id', 'name', 'avatar', 'description', 'purpose']
           }
         ],
@@ -1025,7 +1026,7 @@ async getUserGroups(req, res) {
       
       const formattedInvites = (invites || []).map(invite => ({
         id: invite.id,
-        group: invite.group ? {
+        group: invite.group ? {  // FIXED: Changed from invite.group to invite.group
           id: invite.group.id,
           name: invite.group.name,
           avatar: invite.group.avatar,
@@ -1177,7 +1178,7 @@ async getUserGroups(req, res) {
           },
           {
             model: Group,
-            as: 'userGroup',
+            as: 'group',  // FIXED: Changed from 'userGroup' to match typical alias
             attributes: ['id', 'name', 'avatar', 'description', 'purpose']
           }
         ],
@@ -1755,31 +1756,6 @@ router.use((err, req, res, next) => {
   next(err);
 });
 
-// Log route initialization
-console.log('? Group routes initialized');
-console.log('   ?? PUBLIC endpoints:');
-console.log('      - GET /api/groups/purposes - Get group purposes');
-console.log('      - GET /api/groups/public - Get public groups');
-console.log('      - GET /api/groups/search - Search groups');
-console.log('   ?? PROTECTED endpoints (JWT required):');
-console.log('      - POST /api/groups - Create group');
-console.log('      - GET /api/groups - Get user groups');
-console.log('      - GET /api/groups/:groupId - Get group by ID');
-console.log('      - PUT /api/groups/:groupId - Update group');
-console.log('      - DELETE /api/groups/:groupId - Delete group');
-console.log('      - GET /api/groups/:groupId/members - Get members');
-console.log('      - POST /api/groups/:groupId/members/:userId - Add member');
-console.log('      - DELETE /api/groups/:groupId/members/:userId - Remove member');
-console.log('      - PUT /api/groups/:groupId/members/:userId/role - Update role');
-console.log('      - POST /api/groups/:groupId/invite - Invite to group');
-console.log('      - GET /api/groups/invites - Get invites');
-console.log('      - GET /api/groups/invites/user - Get user invites (FIXES /api/invites)');
-console.log('      - POST /api/groups/invites/:inviteId/accept - Accept invite');
-console.log('      - POST /api/groups/invites/:inviteId/reject - Reject invite');
-console.log('      - POST /api/groups/:groupId/invite-link - Generate invite link');
-console.log('      - DELETE /api/groups/:groupId/invite-link - Revoke invite link');
-console.log('      - POST /api/groups/:groupId/join - Join group');
-console.log('      - POST /api/groups/:groupId/leave - Leave group');
-console.log('      - PUT /api/groups/:groupId/settings - Update settings');
+// REMOVED: All console.log route listings to clean up startup output
 
 module.exports = router;

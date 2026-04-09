@@ -13,7 +13,7 @@ module.exports = (sequelize, DataTypes) => {
       },
       chatId: {
         type: DataTypes.INTEGER,
-        allowNull: false,
+        allowNull: true,   // null when call started directly via participantIds (chat created lazily)
       },
       callerId: {
         type: DataTypes.INTEGER,
@@ -101,6 +101,31 @@ module.exports = (sequelize, DataTypes) => {
         defaultValue: {},
         allowNull: false,
       },
+      // ── NEW: tracks who answered / declined / read this call ──────────────
+      answeredBy: {
+        type: DataTypes.ARRAY(DataTypes.INTEGER),
+        defaultValue: [],
+        allowNull: false,
+        comment: 'User IDs that answered this call',
+      },
+      declinedBy: {
+        type: DataTypes.ARRAY(DataTypes.INTEGER),
+        defaultValue: [],
+        allowNull: false,
+        comment: 'User IDs that declined / rejected this call',
+      },
+      readBy: {
+        type: DataTypes.ARRAY(DataTypes.INTEGER),
+        defaultValue: [],
+        allowNull: false,
+        comment: 'User IDs that have read/acknowledged a missed call notification',
+      },
+      isGroupCall: {
+        type: DataTypes.BOOLEAN,
+        defaultValue: false,
+        allowNull: false,
+      },
+      // ─────────────────────────────────────────────────────────────────────
       errorReason: {
         type: DataTypes.STRING(200),
         allowNull: true,
@@ -294,13 +319,12 @@ module.exports = (sequelize, DataTypes) => {
   };
 
   // FIXED: Associations with unique aliases
+  // Use a module-level flag to prevent double-association on hot-reload
+  let _associationsSetUp = false;
   Calls.associate = function (models) {
-    // CRITICAL: Prevent duplicate associations (alias conflict fix)
-    if (this.associations && Object.keys(this.associations).length > 0) {
-        // Skip if associations already defined to prevent alias conflicts
-        return;
-    }
-        
+    if (_associationsSetUp) return;
+    _associationsSetUp = true;
+
     if (models.Chats) {
       Calls.belongsTo(models.Chats, {
         foreignKey: 'chatId',
@@ -310,7 +334,7 @@ module.exports = (sequelize, DataTypes) => {
         onUpdate: 'CASCADE',
       });
     }
-    
+
     if (models.Users) {
       Calls.belongsTo(models.Users, {
         foreignKey: 'callerId',
@@ -319,7 +343,7 @@ module.exports = (sequelize, DataTypes) => {
         onDelete: 'SET NULL',
         onUpdate: 'CASCADE',
       });
-      
+
       Calls.belongsTo(models.Users, {
         foreignKey: 'receiverId',
         as: 'callTargetUser',
@@ -328,7 +352,7 @@ module.exports = (sequelize, DataTypes) => {
         onUpdate: 'CASCADE',
       });
     }
-    
+
     if (models.Groups) {
       Calls.belongsTo(models.Groups, {
         foreignKey: 'groupId',

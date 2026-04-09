@@ -68,6 +68,36 @@ class WebSocketService {
       timestamp: new Date().toISOString(),
     });
 
+    // Check for missed calls while offline (BUG 8 fix)
+    setTimeout(async () => {
+      try {
+        const { Calls } = require('../models');
+        const missedCalls = await Calls.findAll({
+          where: {
+            receiverId: userId,
+            status: 'missed',
+            readBy: { [Op.not]: { [Op.contains]: [userId] } },
+            createdAt: { [Op.gt]: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) } // last 7 days
+          },
+          limit: 10,
+          order: [['createdAt', 'DESC']]
+        });
+        
+        if (missedCalls.length > 0) {
+          socket.emit('missed_calls_on_reconnect', {
+            calls: missedCalls.map(c => ({
+              callId: c.id,
+              callerId: c.callerId,
+              callType: c.type,
+              timestamp: c.createdAt
+            }))
+          });
+        }
+      } catch(e) {
+        logger.error('Error checking missed calls on reconnect:', e);
+      }
+    }, 2000);
+
     logger.info(`User ${userId} connected (socket: ${socketId})`);
   }
 
@@ -240,12 +270,21 @@ class WebSocketService {
     const { callId, targetUserId, candidate } = data;
     const userId = socket.user.id;
 
-    // Forward ICE candidate to target user
+    // Send directly to target user sockets
     this.sendToUser(targetUserId, 'ice_candidate', {
       callId,
       fromUserId: userId,
       candidate,
     });
+
+    // Also broadcast to call room if active (for group calls or multi-device scenarios)
+    if (callId) {
+      this.io.to(`call:${callId}`).except(socket.id).emit('ice_candidate', {
+        callId,
+        fromUserId: userId,
+        candidate,
+      });
+    }
   }
 
   async handlePresenceUpdate(socket, data) {
@@ -364,6 +403,10 @@ class WebSocketService {
 
   notifyCallMissed(chatId, data) {
     this.io.to(`chat:${chatId}`).emit('call_missed', data);
+  }
+
+  notifyCallTimeout(userId, data) {
+    this.sendToUser(userId, 'call_timeout', data);
   }
 
   forwardIceCandidate(chatId, data) {

@@ -467,6 +467,126 @@ async function getFriendshipStatus(userId1, userId2) {
     };
 }
 
+/**
+ * Get nearby users based on geolocation or fallback to online users
+ * @param {number} userId - Current user ID
+ * @param {Object} options - Location options
+ * @param {number} options.lat - Latitude
+ * @param {number} options.lng - Longitude
+ * @param {number} options.radius - Radius in meters (default 5000)
+ * @returns {Promise<{users: Array, count: number, mode: string}>}
+ */
+async function getNearbyUsers(userId, options = {}) {
+    const { lat, lng, radius = 5000 } = options;
+    
+    // Get IDs of users blocked by current user
+    const blockedRelations = await Friend.findAll({
+        where: {
+            status: 'blocked',
+            [Op.or]: [{ requesterId: userId }, { receiverId: userId }]
+        },
+        attributes: ['requesterId', 'receiverId'],
+        raw: true
+    });
+    
+    const excludeIds = [userId];
+    blockedRelations.forEach(f => {
+        const rid = f.requesterId;
+        const rcid = f.receiverId;
+        excludeIds.push(rid === userId ? rcid : rid);
+    });
+    
+    const whereClause = { id: { [Op.notIn]: excludeIds } };
+    const hasCoords = lat && lng && !isNaN(parseFloat(lat)) && !isNaN(parseFloat(lng));
+    
+    // If no coordinates, return online/recently active users
+    if (!hasCoords) {
+        const thirtyMinutesAgo = new Date(Date.now() - 30 * 60 * 1000);
+        const onlineUsers = await User.findAll({
+            where: {
+                id: { [Op.notIn]: excludeIds },
+                [Op.or]: [
+                    { status: 'online' },
+                    { status: 'away' },
+                    { lastSeen: { [Op.gte]: thirtyMinutesAgo } }
+                ]
+            },
+            attributes: USER_ATTRS,
+            limit: 100,
+            order: [
+                ['status', 'DESC'],
+                ['lastSeen', 'DESC']
+            ]
+        });
+        
+        const formattedUsers = onlineUsers.map(formatUser).filter(u => u && u.id);
+        
+        return {
+            users: formattedUsers,
+            count: formattedUsers.length,
+            mode: 'online'
+        };
+    }
+    
+    // Has coordinates - location-based search
+    const latF = parseFloat(lat);
+    const lngF = parseFloat(lng);
+    const radM = Math.min(50000, parseInt(radius));
+    // Approximate degrees for lat/lng filtering (rough conversion)
+    const radDeg = radM / 111320;
+    
+    whereClause.latitude = { [Op.between]: [latF - radDeg, latF + radDeg] };
+    whereClause.longitude = { [Op.between]: [lngF - radDeg * 1.5, lngF + radDeg * 1.5] };
+    
+    const nearbyUsers = await User.findAll({
+        where: whereClause,
+        attributes: USER_ATTRS,
+        limit: 100,
+        order: [
+            ['status', 'DESC'],
+            ['lastSeen', 'DESC']
+        ]
+    });
+    
+    // Get friendship statuses for returned users
+    let friendshipMap = {};
+    if (nearbyUsers && nearbyUsers.length > 0) {
+        const userIds = nearbyUsers.map(u => u.id);
+        const relations = await Friend.findAll({
+            where: {
+                [Op.or]: [
+                    { requesterId: userId, receiverId: { [Op.in]: userIds } },
+                    { requesterId: { [Op.in]: userIds }, receiverId: userId }
+                ]
+            },
+            attributes: ['requesterId', 'receiverId', 'status'],
+            raw: true
+        });
+        
+        relations.forEach(r => {
+            const rid = r.requesterId;
+            const rcid = r.receiverId;
+            const other = rid === userId ? rcid : rid;
+            let rel = 'none';
+            if (r.status === 'accepted') rel = 'friends';
+            else if (r.status === 'pending') rel = rid === userId ? 'request_sent' : 'request_received';
+            else if (r.status === 'blocked') rel = 'blocked';
+            friendshipMap[other] = rel;
+        });
+    }
+    
+    const formattedUsers = nearbyUsers.map(u => ({
+        ...formatUser(u),
+        friendshipStatus: friendshipMap[u.id] || 'none'
+    })).filter(u => u && u.id);
+    
+    return {
+        users: formattedUsers,
+        count: formattedUsers.length,
+        mode: 'location'
+    };
+}
+
 // ─── exports ───────────────────────────────────────────────────────────────────
 
 module.exports = {
@@ -486,5 +606,6 @@ module.exports = {
     hasPendingRequest,
     getFriendRequestById,
     cancelFriendRequest,
-    getFriendshipStatus
+    getFriendshipStatus,
+    getNearbyUsers
 };

@@ -6,14 +6,15 @@ const router = express.Router();
 let db, User, Friend, Chat, Message, Call, Group, GroupMember, Invite;
 try {
     db = require('../models');
-    User = db.User || db.Users;
-    Friend = db.Friend || db.Friends;
-    Chat = db.Chat || db.Chats;
-    Message = db.Message || db.Messages;
-    Call = db.Call || db.Calls;
-    Group = db.Group || db.Groups;
-    GroupMember = db.GroupMember || db.GroupMembers;
-    Invite = db.Invite || db.Invites;
+    // Use proper model access patterns
+    User = db.models?.Users || db.User || db.Users;
+    Friend = db.models?.Friends || db.Friend || db.Friends;
+    Chat = db.models?.Chats || db.Chat || db.Chats;
+    Message = db.models?.Messages || db.Message || db.Messages;
+    Call = db.models?.Calls || db.Call || db.Calls;
+    Group = db.models?.Groups || db.Group || db.Groups;
+    GroupMember = db.models?.GroupMembers || db.GroupMember || db.GroupMembers;
+    Invite = db.models?.Invites || db.Invite || db.Invites;
     console.log('[Friends Route] Models loaded - User:', !!User, 'Friend:', !!Friend, 'Invite:', !!Invite);
 } catch (error) {
     console.error('[Friends Route] Error loading models:', error.message);
@@ -25,7 +26,26 @@ const { Op } = Sequelize;
 const asyncHandler = require('express-async-handler');
 const { apiRateLimiter } = require('../middleware/rateLimiter');
 
+// ===== AUTHENTICATION MIDDLEWARE IMPORT =====
+let authenticateToken;
+try {
+    const authMiddleware = require('../middleware/auth');
+    authenticateToken = authMiddleware.authenticateToken || authMiddleware;
+    console.log('[Friends Route] Auth middleware loaded');
+} catch (error) {
+    console.error('[Friends Route] Failed to load auth middleware:', error.message);
+    // Fallback mock middleware for development
+    authenticateToken = (req, res, next) => {
+        console.warn('[Friends Route] Using fallback auth - no real authentication');
+        next();
+    };
+}
+
 console.log('✅ Friends routes initialized');
+
+// ===== APPLY AUTHENTICATION GLOBALLY =====
+// This ensures req.user is always populated for all routes
+router.use(authenticateToken);
 
 const formatUser = (user) => {
     if (!user) return null;
@@ -45,8 +65,13 @@ const formatUser = (user) => {
 };
 
 const getUserId = (req) => {
-    if (!req.user) { console.error('[Friends] req.user is undefined!'); return null; }
-    return req.user.userId || req.user.id;
+    if (!req.user) { 
+        console.error('[Friends] req.user is undefined! Auth middleware may not be working');
+        return null; 
+    }
+    const id = req.user.userId || req.user.id;
+    // Return as integer for consistent DB comparison
+    return id ? parseInt(id, 10) : null;
 };
 
 const withTimeout = (promise, timeoutMs = 8000) => {
@@ -89,8 +114,11 @@ router.get('/', apiRateLimiter, asyncHandler(async (req, res) => {
         const friendIds = friendships.map(f => {
             const rid = f.requesterId || f.requester_id;
             const rcid = f.receiverId || f.receiver_id;
-            return rid === userId ? rcid : rid;
-        }).filter(id => id && id !== userId);
+            // Use loose equality to handle string/int mismatch from raw query
+            // eslint-disable-next-line eqeqeq
+            return rid == userId ? rcid : rid;
+            // eslint-disable-next-line eqeqeq
+        }).filter(id => id && id != userId);
 
         if (!friendIds.length) return res.json({ success: true, data: { friends: [] } });
 
@@ -254,19 +282,43 @@ router.get('/nearby', apiRateLimiter, asyncHandler(async (req, res) => {
         }
 
         const whereClause = { id: { [Op.notIn]: excludeIds } };
-
         const hasCoords = lat && lng && !isNaN(parseFloat(lat)) && !isNaN(parseFloat(lng));
-        const userAttrs = User.rawAttributes || {};
-        const hasLocationCols = !!(userAttrs.latitude && userAttrs.longitude);
 
-        if (hasCoords && hasLocationCols) {
-            const latF = parseFloat(lat);
-            const lngF = parseFloat(lng);
-            const radM = Math.min(50000, parseInt(radius));
-            const radDeg = radM / 111320;
-            whereClause.latitude  = { [Op.between]: [latF - radDeg,       latF + radDeg] };
-            whereClause.longitude = { [Op.between]: [lngF - radDeg * 1.5, lngF + radDeg * 1.5] };
+        // If no coordinates, return online/recently active users
+        if (!hasCoords) {
+            const onlineUsers = await withTimeout(User.findAll({
+                where: {
+                    id: { [Op.notIn]: excludeIds },
+                    [Op.or]: [
+                        { status: 'online' },
+                        { lastSeen: { [Op.gte]: new Date(Date.now() - 30 * 60 * 1000) } }
+                    ]
+                },
+                attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen'],
+                limit: 50,
+                order: [
+                    [Sequelize.literal("CASE WHEN status = 'online' THEN 0 ELSE 1 END"), 'ASC'],
+                    ['lastSeen', 'DESC NULLS LAST']
+                ]
+            }));
+            
+            return res.json({
+                success: true,
+                data: {
+                    users: (onlineUsers || []).map(formatUser),
+                    count: (onlineUsers || []).length,
+                    mode: 'online'
+                }
+            });
         }
+
+        // Has coordinates - location-based search
+        const latF = parseFloat(lat);
+        const lngF = parseFloat(lng);
+        const radM = Math.min(50000, parseInt(radius));
+        const radDeg = radM / 111320;
+        whereClause.latitude = { [Op.between]: [latF - radDeg, latF + radDeg] };
+        whereClause.longitude = { [Op.between]: [lngF - radDeg * 1.5, lngF + radDeg * 1.5] };
 
         const users = await withTimeout(User.findAll({
             where: whereClause,
@@ -278,7 +330,7 @@ router.get('/nearby', apiRateLimiter, asyncHandler(async (req, res) => {
             ]
         }));
 
-        // Get friendship statuses for the returned users
+        // Get friendship statuses for returned users
         let friendshipMap = {};
         if (Friend && users && users.length > 0) {
             try {
@@ -315,7 +367,7 @@ router.get('/nearby', apiRateLimiter, asyncHandler(async (req, res) => {
             data: {
                 users: formatted,
                 count: formatted.length,
-                mode: (hasCoords && hasLocationCols) ? 'location' : 'all'
+                mode: 'location'
             }
         });
     } catch (e) {
@@ -433,16 +485,29 @@ router.get('/incoming', apiRateLimiter, asyncHandler(async (req, res) => {
 
         const requests = await withTimeout(Friend.findAll({
             where: { receiverId: userId, status: 'pending' },
-            include: [{ model: User, as: 'friendRequesterUser', attributes: ['id','username','avatar','firstName','lastName'], required: false }],
-            limit: 100, order: [['createdAt', 'DESC']]
+            include: [
+                { 
+                    model: User, 
+                    as: 'friendRequesterUser',
+                    attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen'],
+                    required: false 
+                }
+            ],
+            order: [['createdAt', 'DESC']], 
+            limit: 200
         }));
 
-        return res.json({
-            success: true,
-            data: {
-                requests: (requests || []).map(r => ({ id: r.id, senderId: r.requesterId, user: formatUser(r.friendRequesterUser), status: r.status, notes: r.notes, createdAt: r.createdAt })).filter(r => r.user)
-            }
-        });
+        const formatted = (requests || []).map(r => ({
+            id: r.id,
+            senderId: r.requesterId,
+            receiverId: r.receiverId,
+            status: r.status,
+            notes: r.notes,
+            createdAt: r.createdAt,
+            user: r.friendRequesterUser ? formatUser(r.friendRequesterUser) : null
+        }));
+
+        return res.json({ success: true, data: { requests: formatted } });
     } catch (e) {
         console.error('[Friends GET /incoming]', e.message);
         return res.json({ success: true, data: { requests: [] } });
@@ -458,16 +523,29 @@ router.get('/sent', apiRateLimiter, asyncHandler(async (req, res) => {
 
         const requests = await withTimeout(Friend.findAll({
             where: { requesterId: userId, status: 'pending' },
-            include: [{ model: User, as: 'friendReceiverUser', attributes: ['id','username','avatar','firstName','lastName'], required: false }],
-            limit: 100, order: [['createdAt', 'DESC']]
+            include: [
+                { 
+                    model: User, 
+                    as: 'friendReceiverUser',
+                    attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen'],
+                    required: false 
+                }
+            ],
+            order: [['createdAt', 'DESC']], 
+            limit: 200
         }));
 
-        return res.json({
-            success: true,
-            data: {
-                requests: (requests || []).map(r => ({ id: r.id, receiverId: r.receiverId, user: formatUser(r.friendReceiverUser), status: r.status, notes: r.notes, createdAt: r.createdAt })).filter(r => r.user)
-            }
-        });
+        const formatted = (requests || []).map(r => ({
+            id: r.id,
+            senderId: r.requesterId,
+            receiverId: r.receiverId,
+            status: r.status,
+            notes: r.notes,
+            createdAt: r.createdAt,
+            user: r.friendReceiverUser ? formatUser(r.friendReceiverUser) : null
+        }));
+
+        return res.json({ success: true, data: { requests: formatted } });
     } catch (e) {
         console.error('[Friends GET /sent]', e.message);
         return res.json({ success: true, data: { requests: [] } });
@@ -629,6 +707,29 @@ router.get('/synced', apiRateLimiter, asyncHandler(async (req, res) => {
         return res.json({ success: true, data: { synced: true, contacts } });
     } catch (e) {
         console.error('[Friends GET /synced]', e.message);
+        return res.json({ success: true, data: { synced: false, contacts: [] } });
+    }
+}));
+
+// ===== CONTACTS SYNCED (ALIAS for frontend that calls /contacts/synced) =====
+router.get('/contacts/synced', apiRateLimiter, asyncHandler(async (req, res) => {
+    try {
+        const userId = getUserId(req);
+        if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
+        if (!Friend) return res.json({ success: true, data: { synced: false, contacts: [] } });
+
+        const friendships = await withTimeout(Friend.findAll({
+            where: { [Op.or]: [{ requesterId: userId, status: 'accepted' }, { receiverId: userId, status: 'accepted' }] },
+            include: [
+                { model: User, as: 'friendRequesterUser', attributes: ['id','username','avatar','firstName','lastName','bio','status','lastSeen'], required: false },
+                { model: User, as: 'friendReceiverUser',  attributes: ['id','username','avatar','firstName','lastName','bio','status','lastSeen'], required: false }
+            ], limit: 200
+        }));
+
+        const contacts = (friendships || []).map(f => f.requesterId === userId ? formatUser(f.friendReceiverUser) : formatUser(f.friendRequesterUser)).filter(f => f && f.id);
+        return res.json({ success: true, data: { synced: true, contacts } });
+    } catch (e) {
+        console.error('[Friends GET /contacts/synced]', e.message);
         return res.json({ success: true, data: { synced: false, contacts: [] } });
     }
 }));
@@ -956,11 +1057,36 @@ router.post('/requests/:requestId/accept', apiRateLimiter, asyncHandler(async (r
         if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
         if (!Friend) return res.status(503).json({ success: false, message: 'Friend service temporarily unavailable' });
 
-        const friendRequest = await withTimeout(Friend.findOne({ where: { id: req.params.requestId, receiverId: userId, status: 'pending' } }));
-        if (!friendRequest) return res.status(404).json({ success: false, message: 'Friend request not found' });
+        // 🔴 FIX: Use integer directly for DB comparison, not string
+        const friendRequest = await withTimeout(Friend.findOne({ 
+            where: { 
+                id: parseInt(req.params.requestId), 
+                status: 'pending',
+                receiverId: userId
+            } 
+        }));
+        
+        if (!friendRequest) {
+            return res.status(404).json({ success: false, message: 'Friend request not found' });
+        }
 
-        friendRequest.status = 'accepted'; friendRequest.acceptedAt = new Date();
+        friendRequest.status = 'accepted'; 
+        friendRequest.acceptedAt = new Date();
         await friendRequest.save();
+
+        // 🔴 FIX: Add Socket.IO notifications to update both users in real-time
+        const io = req.io || (req.app && req.app.get('io'));
+        if (io) {
+            const payload = {
+                friendshipId: friendRequest.id,
+                friendship: {
+                    ...friendRequest.toJSON(),
+                    status: 'accepted'
+                }
+            };
+            io.to(`user_${friendRequest.requesterId}`).emit('friend:accepted', payload);
+            io.to(`user_${userId}`).emit('friend:accepted', payload);
+        }
 
         return res.json({ success: true, data: { friendship: friendRequest }, message: 'Friend request accepted successfully' });
     } catch (e) {
