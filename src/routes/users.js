@@ -49,7 +49,7 @@ const ensureModels = (req, res, next) => {
 
 router.use(ensureModels);
 
-console.log('âœ… Users routes initialized');
+console.log('✅ Users routes initialized');
 
 // ===== GET ALL USERS =====
 router.get(
@@ -283,7 +283,99 @@ router.post(
   })
 );
 
+// ===== SEARCH USERS (DEDICATED ROUTE - MUST BE BEFORE /:identifier) =====
+// FIX FOR BUG 1: This route handles empty q as "get all users" fallback
+router.get(
+  '/search',
+  apiRateLimiter,
+  asyncHandler(async (req, res) => {
+    try {
+      const { q = '', limit = 50, page = 1 } = req.query;
+      const offset = (parseInt(page) - 1) * parseInt(limit);
+
+      let whereCondition = {
+        id: { [sequelize.Op.ne]: req.user.id }
+      };
+
+      // If search query is provided and not empty, filter by username/displayName
+      if (q && q.trim().length > 0) {
+        const searchTerm = q.trim();
+        whereCondition = {
+          ...whereCondition,
+          [sequelize.Op.or]: [
+            { username: { [sequelize.Op.iLike]: `%${searchTerm}%` } },
+            { displayName: { [sequelize.Op.iLike]: `%${searchTerm}%` } },
+            { firstName: { [sequelize.Op.iLike]: `%${searchTerm}%` } },
+            { lastName: { [sequelize.Op.iLike]: `%${searchTerm}%` } }
+          ]
+        };
+      }
+
+      const { count, rows: users } = await User.findAndCountAll({
+        where: whereCondition,
+        attributes: ['id', 'username', 'displayName', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'bio'],
+        offset,
+        limit: parseInt(limit),
+        order: [
+          // Prioritize online users when no search query
+          ...(q && q.trim().length > 0 ? [] : [[sequelize.literal(`CASE WHEN status = 'online' THEN 0 ELSE 1 END`), 'ASC']]),
+          ['username', 'ASC']
+        ]
+      });
+
+      // Add friendship status for each user
+      let usersWithFriendship = users;
+      if (Friend && users.length > 0) {
+        try {
+          const friendships = await Friend.findAll({
+            where: {
+              [sequelize.Op.or]: [
+                { requester_id: req.user.id, status: 'accepted' },
+                { receiver_id: req.user.id, status: 'accepted' }
+              ]
+            }
+          });
+          
+          const friendIds = new Set();
+          friendships.forEach(f => {
+            if (f.requester_id === req.user.id) friendIds.add(f.receiver_id);
+            else if (f.receiver_id === req.user.id) friendIds.add(f.requester_id);
+          });
+
+          usersWithFriendship = users.map(user => {
+            const userJson = user.toJSON ? user.toJSON() : user;
+            userJson.friendshipStatus = friendIds.has(user.id) ? 'friends' : 'none';
+            return userJson;
+          });
+        } catch (dbError) {
+          console.log('[Users Route] Friendship check error:', dbError.message);
+        }
+      }
+
+      return res.status(200).json({
+        status: 'success',
+        data: {
+          users: usersWithFriendship || [],
+          pagination: {
+            total: count || 0,
+            page: parseInt(page),
+            limit: parseInt(limit),
+            pages: Math.ceil((count || 0) / parseInt(limit)),
+          },
+        },
+      });
+    } catch (error) {
+      console.error('Error searching users:', error.message);
+      return res.status(500).json({
+        status: 'error',
+        message: 'Failed to search users'
+      });
+    }
+  })
+);
+
 // ===== GET USER BY ID OR USERNAME =====
+// NOTE: This must come AFTER all specific routes like /search, /me, etc.
 router.get(
   '/:identifier',
   apiRateLimiter,
@@ -291,7 +383,9 @@ router.get(
     try {
       const { identifier } = req.params;
       
-      const specialStrings = ['pinned', 'muted', 'all', 'me', 'friends', 'search', 'blocked', 'stats', 'suggestions', 'export'];
+      // Special strings that should NOT be treated as user identifiers
+      // FIX FOR BUG 1: 'search' is now handled by dedicated /search route
+      const specialStrings = ['pinned', 'muted', 'all', 'me', 'friends', 'blocked', 'stats', 'suggestions', 'export'];
       if (specialStrings.includes(identifier)) {
         return res.status(400).json({
           status: 'error',
@@ -327,8 +421,8 @@ router.get(
           const isFriend = await Friend.findOne({
             where: {
               [sequelize.Op.or]: [
-                { userId: req.user.id, friendId: user.id },
-                { userId: user.id, friendId: req.user.id }
+                { requester_id: req.user.id, receiver_id: user.id },
+                { requester_id: user.id, receiver_id: req.user.id }
               ],
               status: 'accepted'
             }
@@ -356,7 +450,7 @@ router.get(
   })
 );
 
-// ===== SEARCH USERS =====
+// ===== LEGACY SEARCH ROUTE (DEPRECATED - kept for backward compatibility) =====
 router.get(
   '/search/:query',
   apiRateLimiter,
@@ -364,17 +458,22 @@ router.get(
     try {
       const { query } = req.params;
       const { limit = 20, page = 1 } = req.query;
-
       const offset = (parseInt(page) - 1) * parseInt(limit);
 
+      const whereCondition = {
+        id: { [sequelize.Op.ne]: req.user.id }
+      };
+
+      if (query && query.trim().length > 0) {
+        const searchTerm = query.trim();
+        whereCondition[sequelize.Op.or] = [
+          { username: { [sequelize.Op.iLike]: `%${searchTerm}%` } },
+          { displayName: { [sequelize.Op.iLike]: `%${searchTerm}%` } }
+        ];
+      }
+
       const { count, rows: users } = await User.findAndCountAll({
-        where: {
-          [sequelize.Op.or]: [
-            { username: { [sequelize.Op.iLike]: `%${query}%` } },
-            { displayName: { [sequelize.Op.iLike]: `%${query}%` } }
-          ],
-          id: { [sequelize.Op.ne]: req.user.id }
-        },
+        where: whereCondition,
         attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'bio'],
         offset,
         limit: parseInt(limit),
@@ -422,8 +521,8 @@ router.get(
         const friendships = await Friend.findAll({
           where: {
             [sequelize.Op.or]: [
-             { requester_id: userId, status: 'accepted' },
-             { receiver_id: userId, status: 'accepted' }
+              { requester_id: userId, status: 'accepted' },
+              { receiver_id: userId, status: 'accepted' }
             ]
           },
           include: [
@@ -434,15 +533,15 @@ router.get(
             },
             {
               model: User,
-               as: 'receiver',
+              as: 'receiver',
               attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'bio', 'status', 'lastSeen']
             }
           ]
         });
 
         const friends = friendships.map(f => {
-          if (f.userId === userId) return f.friend;
-          return f.user;
+          if (f.requester_id === userId) return f.receiver;
+          return f.requester;
         }).filter(f => f);
 
         return res.status(200).json({
@@ -484,7 +583,7 @@ router.get(
       try {
         const friendRequests = await Friend.findAll({
           where: {
-            friendId: userId,
+            receiver_id: userId,
             status: 'pending'
           },
           include: [{
@@ -494,7 +593,7 @@ router.get(
           }]
         });
 
-        const requestsData = friendRequests.map(fr => fr.user).filter(u => u);
+        const requestsData = friendRequests.map(fr => fr.requester).filter(u => u);
 
         return res.status(200).json({
           status: 'success',
@@ -532,7 +631,7 @@ router.post(
         });
       }
 
-      if (userId === req.user.id) {
+      if (parseInt(userId) === parseInt(req.user.id)) {
         return res.status(400).json({
           status: 'error',
           message: 'Cannot send friend request to yourself'
@@ -555,8 +654,8 @@ router.post(
         const existingFriendship = await Friend.findOne({
           where: {
             [sequelize.Op.or]: [
-              { userId: req.user.id, friendId: userId },
-              { userId: userId, friendId: req.user.id }
+              { requester_id: req.user.id, receiver_id: userId },
+              { requester_id: userId, receiver_id: req.user.id }
             ]
           }
         });
@@ -568,7 +667,7 @@ router.post(
               message: 'Already friends with this user'
             });
           } else if (existingFriendship.status === 'pending') {
-            if (existingFriendship.userId === req.user.id) {
+            if (existingFriendship.requester_id === req.user.id) {
               return res.status(409).json({
                 status: 'error',
                 message: 'Friend request already sent'
@@ -583,8 +682,8 @@ router.post(
         }
 
         await Friend.create({
-          userId: req.user.id,
-          friendId: userId,
+          requester_id: req.user.id,
+          receiver_id: userId,
           status: 'pending'
         });
       } catch (dbError) {
@@ -639,8 +738,8 @@ router.post(
       try {
         const friendRequest = await Friend.findOne({
           where: {
-            userId: userId,
-            friendId: req.user.id,
+            requester_id: userId,
+            receiver_id: req.user.id,
             status: 'pending'
           }
         });
@@ -653,12 +752,6 @@ router.post(
         }
 
         await friendRequest.update({ status: 'accepted' });
-
-        await Friend.create({
-          userId: req.user.id,
-          friendId: userId,
-          status: 'accepted'
-        });
       } catch (dbError) {
         console.log('[Users Route] Accept friend request error:', dbError.message);
         return res.status(500).json({
@@ -699,8 +792,8 @@ router.post(
       try {
         const friendRequest = await Friend.findOne({
           where: {
-            userId: userId,
-            friendId: req.user.id,
+            requester_id: userId,
+            receiver_id: req.user.id,
             status: 'pending'
           }
         });
@@ -766,8 +859,8 @@ router.delete(
         const friendships = await Friend.findAll({
           where: {
             [sequelize.Op.or]: [
-              { userId: req.user.id, friendId: userId },
-              { userId: userId, friendId: req.user.id }
+              { requester_id: req.user.id, receiver_id: userId },
+              { requester_id: userId, receiver_id: req.user.id }
             ],
             status: 'accepted'
           }
@@ -822,17 +915,24 @@ router.get(
         const friendships = await Friend.findAll({
           where: {
             [sequelize.Op.or]: [
-             { requester_id: userId, status: 'accepted' },
-             { receiver_id: userId, status: 'accepted' }
+              { requester_id: userId, status: 'accepted' },
+              { receiver_id: userId, status: 'accepted' }
             ]
           }
         });
 
-        const friendIds = friendships.map(f => f.userId === userId ? f.friendId : f.userId);
+        const friendIds = friendships.map(f => f.requester_id === userId ? f.receiver_id : f.requester_id);
+
+        const onlineFriends = await User.count({
+          where: {
+            id: { [sequelize.Op.in]: friendIds },
+            status: 'online'
+          }
+        });
 
         return res.status(200).json({
           status: 'success',
-          data: { onlineCount: 0 }
+          data: { onlineCount: onlineFriends || 0 }
         });
       } catch (dbError) {
         console.log('[Users Route] Online count error:', dbError.message);

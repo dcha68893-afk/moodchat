@@ -190,6 +190,7 @@ router.post(
   })
 );
 
+// ========== FIXED /history ROUTE ==========
 router.get(
   '/history',
   apiRateLimiter,
@@ -213,6 +214,7 @@ router.get(
       } = req.query;
 
       const offset = (parseInt(page) - 1) * parseInt(limit);
+      const parsedLimit = parseInt(limit);
 
       // FIXED: Use Op.contains for ARRAY column
       const where = {
@@ -220,8 +222,8 @@ router.get(
         endedAt: { [Op.ne]: null },
       };
 
-      if (callType) {
-        where.type = callType; // FIXED: Use 'type' not 'callType'
+      if (callType && callType !== 'all') {
+        where.type = callType;
       }
 
       if (direction) {
@@ -236,12 +238,12 @@ router.get(
 
       if (participantId) {
         where[Op.and] = [
-          { participants: { [Op.contains]: [participantId] } },
+          { participants: { [Op.contains]: [parseInt(participantId)] } },
           { participants: { [Op.contains]: [userId] } }
         ];
       }
 
-      if (status) {
+      if (status && status !== 'all') {
         where.status = status;
       }
 
@@ -251,106 +253,124 @@ router.get(
         if (endDate) where.startedAt[Op.lte] = new Date(endDate);
       }
 
+      // FIXED: Simplified query - removed problematic statistics subquery
       const { count, rows: calls } = await Call.findAndCountAll({
         where,
         include: [
           {
             model: User,
             as: 'caller',
-            attributes: ['username', 'avatar', 'displayName']
+            attributes: ['id', 'username', 'avatar', 'displayName']
           },
           {
             model: User,
             as: 'participants',
-            attributes: ['username', 'avatar', 'displayName'],
+            attributes: ['id', 'username', 'avatar', 'displayName'],
             through: { attributes: [] }
           },
           {
             model: Chat,
             as: 'chat',
-            attributes: ['chatName', 'chatType']
+            attributes: ['id', 'chatName', 'chatType']
           }
         ],
         order: [['startedAt', 'DESC']],
         offset,
-        limit: parseInt(limit),
+        limit: parsedLimit,
         distinct: true
       });
 
+      // FIXED: Safe duration calculation with error handling
       const enrichedCalls = (calls || []).map(call => {
-        const callObj = call.toJSON ? call.toJSON() : call;
-        
-        if (call.callerId === userId) {
-          callObj.direction = 'outgoing';
-        } else {
-          callObj.direction = 'incoming';
-        }
+        try {
+          const callObj = call.toJSON ? call.toJSON() : call;
+          
+          if (call.callerId === userId) {
+            callObj.direction = 'outgoing';
+          } else {
+            callObj.direction = 'incoming';
+          }
 
-        if (call.startedAt && call.endedAt) {
-          callObj.duration = Math.floor((new Date(call.endedAt) - new Date(call.startedAt)) / 1000);
-        } else {
-          callObj.duration = 0;
-        }
+          // Safe duration calculation
+          if (call.startedAt && call.endedAt) {
+            const startTime = new Date(call.startedAt);
+            const endTime = new Date(call.endedAt);
+            const durationMs = endTime - startTime;
+            callObj.duration = durationMs > 0 ? Math.floor(durationMs / 1000) : 0;
+          } else {
+            callObj.duration = 0;
+          }
 
-        callObj.otherParticipants = (callObj.participants || []).filter(p => p.id !== userId);
-        return callObj;
+          callObj.otherParticipants = (callObj.participants || []).filter(p => p && p.id !== userId);
+          return callObj;
+        } catch (err) {
+          console.error('Error enriching call:', err.message);
+          return call;
+        }
       });
 
-      const thirtyDaysAgo = new Date();
-      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+      // FIXED: Separate statistics query - safer and more reliable
+      let stats = {
+        totalCalls: 0,
+        totalDuration: 0,
+        completedCalls: 0,
+        missedCalls: 0,
+      };
 
-      const stats = await Call.findAll({
-        where: {
-          participants: { [Op.contains]: [userId] },
-          startedAt: { [Op.gte]: thirtyDaysAgo }
-        },
-        raw: true,
-        attributes: [
-          [fn('COUNT', col('id')), 'totalCalls'],
-          [
-            fn('SUM',
-              literal("EXTRACT(EPOCH FROM (endedAt - startedAt))")
-            ),
-            'totalDuration'
-          ],
-          [
-            fn('SUM',
-              literal("CASE WHEN status = 'completed' THEN 1 ELSE 0 END")
-            ),
-            'completedCalls'
-          ],
-          [
-            fn('SUM',
-              literal("CASE WHEN status = 'missed' THEN 1 ELSE 0 END")
-            ),
-            'missedCalls'
-          ]
-        ]
-      });
+      try {
+        const thirtyDaysAgo = new Date();
+        thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+        const allCalls = await Call.findAll({
+          where: {
+            participants: { [Op.contains]: [userId] },
+            startedAt: { [Op.gte]: thirtyDaysAgo },
+            endedAt: { [Op.ne]: null }
+          },
+          attributes: ['status', 'startedAt', 'endedAt']
+        });
+
+        if (allCalls && allCalls.length > 0) {
+          stats.totalCalls = allCalls.length;
+          stats.completedCalls = allCalls.filter(c => c.status === 'completed').length;
+          stats.missedCalls = allCalls.filter(c => c.status === 'missed').length;
+          
+          let totalDuration = 0;
+          for (const call of allCalls) {
+            if (call.startedAt && call.endedAt && call.status === 'completed') {
+              const durationMs = new Date(call.endedAt) - new Date(call.startedAt);
+              if (durationMs > 0) {
+                totalDuration += Math.floor(durationMs / 1000);
+              }
+            }
+          }
+          stats.totalDuration = totalDuration;
+        }
+      } catch (statsError) {
+        console.error('Error calculating statistics:', statsError.message);
+        // Continue with empty stats
+      }
 
       res.status(200).json({
         status: 'success',
         data: {
           calls: enrichedCalls,
-          statistics: (stats && stats[0]) || {
-            totalCalls: 0,
-            totalDuration: 0,
-            completedCalls: 0,
-            missedCalls: 0,
-          },
+          statistics: stats,
           pagination: {
             total: count || 0,
             page: parseInt(page),
-            limit: parseInt(limit),
-            pages: count ? Math.ceil(count / parseInt(limit)) : 0,
+            limit: parsedLimit,
+            pages: count ? Math.ceil(count / parsedLimit) : 0,
           },
         },
       });
     } catch (error) {
       console.error('Error getting call history:', error.message);
+      console.error('Stack:', error.stack);
       res.status(500).json({
         status: 'error',
-        message: 'Failed to fetch call history'
+        message: 'Failed to fetch call history',
+        error: process.env.NODE_ENV === 'development' ? error.message : undefined
       });
     }
   })
@@ -390,75 +410,68 @@ router.get(
           });
       }
 
-      const stats = await Call.findAll({
+      // FIXED: Simplified statistics query
+      const calls = await Call.findAll({
         where: {
           participants: { [Op.contains]: [userId] },
           startedAt: { [Op.gte]: startDate },
           endedAt: { [Op.ne]: null }
         },
-        attributes: [
-          [fn('COUNT', col('id')), 'totalCalls'],
-          [
-            fn('SUM',
-              literal("EXTRACT(EPOCH FROM (endedAt - startedAt))")
-            ),
-            'totalDuration'
-          ],
-          [
-            fn('AVG',
-              literal("EXTRACT(EPOCH FROM (endedAt - startedAt))")
-            ),
-            'avgDuration'
-          ],
-          [
-            fn('MAX',
-              literal("EXTRACT(EPOCH FROM (endedAt - startedAt))")
-            ),
-            'longestCall'
-          ],
-          [
-            fn('MIN',
-              literal("EXTRACT(EPOCH FROM (endedAt - startedAt))")
-            ),
-            'shortestCall'
-          ]
-        ],
-        raw: true
+        attributes: ['status', 'type', 'startedAt', 'endedAt']
       });
 
-      const overallStats = stats[0] || {
-        totalCalls: 0,
+      const overallStats = {
+        totalCalls: calls.length,
         totalDuration: 0,
         avgDuration: 0,
         longestCall: 0,
-        shortestCall: 0
+        shortestCall: Infinity
       };
 
-      const typeBreakdown = await Call.findAll({
-        where: {
-          participants: { [Op.contains]: [userId] },
-          startedAt: { [Op.gte]: startDate }
-        },
-        attributes: [
-          'type',
-          [fn('COUNT', col('id')), 'count'],
-          [
-            fn('AVG',
-              literal("EXTRACT(EPOCH FROM (endedAt - startedAt))")
-            ),
-            'avgDuration'
-          ]
-        ],
-        group: ['type'],
-        raw: true
-      });
+      let typeMap = new Map();
+
+      for (const call of calls) {
+        let duration = 0;
+        if (call.startedAt && call.endedAt) {
+          duration = Math.floor((new Date(call.endedAt) - new Date(call.startedAt)) / 1000);
+          if (duration > 0) {
+            overallStats.totalDuration += duration;
+            overallStats.longestCall = Math.max(overallStats.longestCall, duration);
+            overallStats.shortestCall = Math.min(overallStats.shortestCall, duration);
+          }
+        }
+
+        // Type breakdown
+        const callType = call.type || 'audio';
+        if (!typeMap.has(callType)) {
+          typeMap.set(callType, { count: 0, totalDuration: 0 });
+        }
+        const typeStats = typeMap.get(callType);
+        typeStats.count++;
+        if (duration > 0) {
+          typeStats.totalDuration += duration;
+        }
+      }
+
+      if (overallStats.totalCalls > 0) {
+        overallStats.avgDuration = Math.floor(overallStats.totalDuration / overallStats.totalCalls);
+      }
+      if (overallStats.shortestCall === Infinity) {
+        overallStats.shortestCall = 0;
+      }
+
+      const typeBreakdown = Array.from(typeMap.entries()).map(([type, stats]) => ({
+        type,
+        count: stats.count,
+        avgDuration: stats.count > 0 ? Math.floor(stats.totalDuration / stats.count) : 0
+      }));
 
       res.status(200).json({
         status: 'success',
         data: {
           period,
           overall: overallStats,
-          typeBreakdown: typeBreakdown || [],
+          typeBreakdown: typeBreakdown,
         },
       });
     } catch (error) {
@@ -532,7 +545,7 @@ router.get(
 
         return {
           callId: callJSON.id,
-          callType: callJSON.type, // FIXED: Use 'type'
+          callType: callJSON.type,
           status: callJSON.status,
           startedAt: callJSON.startedAt,
           endedAt: callJSON.endedAt,
@@ -784,15 +797,13 @@ router.post(
         participants = participantUsers.map(p => p.id);
       }
 
-      // FIXED: Use correct field names - 'type' not 'callType', no 'isGroupCall' column
-      // FIXED: Store participants in ARRAY column directly on creation
       const call = await Call.create({
         callerId: userId,
         receiverId: participants.length === 1 ? participants[0] : null,
         chatId: chatId || null,
-        type: callType, // model field is 'type' (ENUM 'audio'/'video')
+        type: callType,
         status: 'ringing',
-        participants: [userId, ...participants], // ARRAY column
+        participants: [userId, ...participants],
         startedAt: new Date(),
         answeredBy: [],
         declinedBy: [],
@@ -811,12 +822,12 @@ router.post(
           {
             model: User,
             as: 'caller',
-            attributes: ['username', 'avatar', 'displayName', 'socketIds']
+            attributes: ['id', 'username', 'avatar', 'displayName', 'socketIds']
           },
           {
             model: User,
             as: 'participants',
-            attributes: ['username', 'avatar', 'displayName', 'socketIds'],
+            attributes: ['id', 'username', 'avatar', 'displayName', 'socketIds'],
             through: { attributes: [] }
           }
         ]
@@ -838,7 +849,6 @@ router.post(
           timestamp: new Date(),
         };
 
-        // FIXED: Use notifyUser helper
         for (const participant of populatedCall.participants) {
           if (participant.id !== userId) {
             await notifyUser(req.io, participant.id, 'call:incoming', callData);
@@ -893,7 +903,6 @@ router.get(
         });
       }
 
-      // FIXED: Use Op.contains for ARRAY column
       const call = await Call.findOne({
         where: {
           id: callId,
@@ -903,12 +912,12 @@ router.get(
           {
             model: User,
             as: 'caller',
-            attributes: ['username', 'avatar', 'displayName']
+            attributes: ['id', 'username', 'avatar', 'displayName']
           },
           {
             model: User,
             as: 'participants',
-            attributes: ['username', 'avatar', 'displayName'],
+            attributes: ['id', 'username', 'avatar', 'displayName'],
             through: { attributes: [] }
           },
           {
@@ -983,7 +992,6 @@ router.post(
         });
       }
 
-      // FIXED: Use Op.contains for ARRAY column
       const call = await Call.findOne({
         where: {
           id: callId,
@@ -1005,7 +1013,6 @@ router.post(
         });
       }
 
-      // FIXED: Use helper to update array field
       await updateArrayField(call, 'answeredBy', userId, 'add');
 
       const answeredBy = call.answeredBy || [];
@@ -1019,12 +1026,12 @@ router.post(
           {
             model: User,
             as: 'caller',
-            attributes: ['username', 'avatar', 'socketIds']
+            attributes: ['id', 'username', 'avatar', 'socketIds']
           },
           {
             model: User,
             as: 'participants',
-            attributes: ['username', 'avatar', 'socketIds'],
+            attributes: ['id', 'username', 'avatar', 'socketIds'],
             through: { attributes: [] }
           }
         ]
@@ -1033,7 +1040,6 @@ router.post(
       const user = await User.findByPk(userId);
 
       if (req.io && updatedCall && updatedCall.participants) {
-        // FIXED: Use notifyUser helper
         for (const participant of updatedCall.participants) {
           await notifyUser(req.io, participant.id, 'call:answered', {
             callId: call.id,
@@ -1084,7 +1090,6 @@ router.post(
         });
       }
 
-      // FIXED: Use Op.contains for ARRAY column
       const call = await Call.findOne({
         where: {
           id: callId,
@@ -1106,7 +1111,6 @@ router.post(
         });
       }
 
-      // FIXED: Use helper to update array field
       await updateArrayField(call, 'declinedBy', userId, 'add');
 
       if (call.callerId === userId) {
@@ -1142,7 +1146,6 @@ router.post(
         });
 
         if (callData && callData.participants) {
-          // FIXED: Use notifyUser helper
           for (const participant of callData.participants) {
             await notifyUser(req.io, participant.id, 'call:rejected', {
               callId: call.id,
@@ -1194,7 +1197,6 @@ router.post(
         });
       }
 
-      // FIXED: Use Op.contains for ARRAY column
       const call = await Call.findOne({
         where: {
           id: callId,
@@ -1242,7 +1244,6 @@ router.post(
       if (req.io && populatedCall && populatedCall.participants) {
         const user = await User.findByPk(userId);
 
-        // FIXED: Use notifyUser helper
         for (const participant of populatedCall.participants) {
           await notifyUser(req.io, participant.id, 'call:ended', {
             callId: call.id,

@@ -64,6 +64,7 @@ const formatUser = (user) => {
     };
 };
 
+// 🔴 BUG 3 FIX: getUserId now always returns integer for consistent DB comparison
 const getUserId = (req) => {
     if (!req.user) { 
         console.error('[Friends] req.user is undefined! Auth middleware may not be working');
@@ -111,6 +112,7 @@ router.get('/', apiRateLimiter, asyncHandler(async (req, res) => {
 
         if (!friendships || friendships.length === 0) return res.json({ success: true, data: { friends: [] } });
 
+        // 🔴 BUG 3 FIX: Handle both camelCase and snake_case from raw queries
         const friendIds = friendships.map(f => {
             const rid = f.requesterId || f.requester_id;
             const rcid = f.receiverId || f.receiver_id;
@@ -255,6 +257,7 @@ router.get('/users/all', apiRateLimiter, asyncHandler(async (req, res) => {
 }));
 
 // ===== NEARBY USERS =====
+// 🔴 BUG 5 FIX: Improved nearby with better fallback and friendship status
 router.get('/nearby', apiRateLimiter, asyncHandler(async (req, res) => {
     try {
         const userId = getUserId(req);
@@ -284,13 +287,14 @@ router.get('/nearby', apiRateLimiter, asyncHandler(async (req, res) => {
         const whereClause = { id: { [Op.notIn]: excludeIds } };
         const hasCoords = lat && lng && !isNaN(parseFloat(lat)) && !isNaN(parseFloat(lng));
 
-        // If no coordinates, return online/recently active users
+        // 🔴 BUG 5 FIX: If no coordinates, return online AND recently active users (not just strictly online)
         if (!hasCoords) {
             const onlineUsers = await withTimeout(User.findAll({
                 where: {
                     id: { [Op.notIn]: excludeIds },
                     [Op.or]: [
                         { status: 'online' },
+                        { status: 'away' },
                         { lastSeen: { [Op.gte]: new Date(Date.now() - 30 * 60 * 1000) } }
                     ]
                 },
@@ -302,11 +306,43 @@ router.get('/nearby', apiRateLimiter, asyncHandler(async (req, res) => {
                 ]
             }));
             
+            // Get friendship statuses for returned users
+            let friendshipMap = {};
+            if (Friend && onlineUsers && onlineUsers.length > 0) {
+                try {
+                    const uids = onlineUsers.map(u => u.id);
+                    const relations = await withTimeout(Friend.findAll({
+                        where: {
+                            [Op.or]: [
+                                { requesterId: userId, receiverId: { [Op.in]: uids } },
+                                { requesterId: { [Op.in]: uids }, receiverId: userId }
+                            ]
+                        },
+                        attributes: ['requesterId', 'receiverId', 'status'], raw: true
+                    }));
+                    relations.forEach(r => {
+                        const rid = r.requesterId || r.requester_id;
+                        const rcid = r.receiverId || r.receiver_id;
+                        const other = rid === userId ? rcid : rid;
+                        let rel = 'none';
+                        if (r.status === 'accepted') rel = 'friends';
+                        else if (r.status === 'pending') rel = rid === userId ? 'request_sent' : 'request_received';
+                        else if (r.status === 'blocked') rel = 'blocked';
+                        friendshipMap[other] = rel;
+                    });
+                } catch (e) { /* non-fatal */ }
+            }
+
+            const formattedUsers = (onlineUsers || []).map(u => ({
+                ...formatUser(u),
+                friendshipStatus: friendshipMap[u.id] || 'none'
+            }));
+            
             return res.json({
                 success: true,
                 data: {
-                    users: (onlineUsers || []).map(formatUser),
-                    count: (onlineUsers || []).length,
+                    users: formattedUsers,
+                    count: formattedUsers.length,
                     mode: 'online'
                 }
             });
@@ -588,6 +624,7 @@ router.get('/accepted', apiRateLimiter, asyncHandler(async (req, res) => {
 
         if (!friendships || !friendships.length) return res.json({ success: true, data: { friends: [], total: 0 } });
 
+        // 🔴 BUG 3 FIX: Handle both camelCase and snake_case from raw queries
         const friendIds = friendships.map(f => {
             const rid = f.requesterId || f.requester_id;
             const rcid = f.receiverId || f.receiver_id;
@@ -623,6 +660,7 @@ router.get('/blocked', apiRateLimiter, asyncHandler(async (req, res) => {
 
         if (!blockedRelations || !blockedRelations.length) return res.json({ success: true, data: { blocked: [], total: 0 } });
 
+        // 🔴 BUG 3 FIX: Handle both camelCase and snake_case from raw queries
         const blockedIds = blockedRelations.map(f => {
             const rcid = f.receiverId || f.receiver_id;
             return rcid;
@@ -748,6 +786,7 @@ router.get('/stats', apiRateLimiter, asyncHandler(async (req, res) => {
 
         if (!friendships || !friendships.length) return res.json({ success: true, data: { total: 0, online: 0, offline: 0, recentlyActive: 0, pinned: 0, muted: 0 } });
 
+        // 🔴 BUG 3 FIX: Handle both camelCase and snake_case from raw queries
         const friendIds = friendships.map(f => {
             const rid = f.requesterId || f.requester_id;
             const rcid = f.receiverId || f.receiver_id;
@@ -1051,13 +1090,14 @@ router.post('/requests/send', apiRateLimiter, asyncHandler(async (req, res) => {
 }));
 
 // ===== ACCEPT FRIEND REQUEST =====
+// 🔴 BUG 2 & 4 FIX: Parse requestId as integer and add Socket.IO notifications
 router.post('/requests/:requestId/accept', apiRateLimiter, asyncHandler(async (req, res) => {
     try {
         const userId = getUserId(req);
         if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
         if (!Friend) return res.status(503).json({ success: false, message: 'Friend service temporarily unavailable' });
 
-        // 🔴 FIX: Use integer directly for DB comparison, not string
+        // 🔴 BUG 2 FIX: Use integer directly for DB comparison, not string
         const friendRequest = await withTimeout(Friend.findOne({ 
             where: { 
                 id: parseInt(req.params.requestId), 
@@ -1074,7 +1114,7 @@ router.post('/requests/:requestId/accept', apiRateLimiter, asyncHandler(async (r
         friendRequest.acceptedAt = new Date();
         await friendRequest.save();
 
-        // 🔴 FIX: Add Socket.IO notifications to update both users in real-time
+        // 🔴 BUG 2 FIX: Add Socket.IO notifications to update both users in real-time
         const io = req.io || (req.app && req.app.get('io'));
         if (io) {
             const payload = {
@@ -1102,7 +1142,8 @@ router.post('/requests/:requestId/reject', apiRateLimiter, asyncHandler(async (r
         if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
         if (!Friend) return res.status(503).json({ success: false, message: 'Friend service temporarily unavailable' });
 
-        const friendRequest = await withTimeout(Friend.findOne({ where: { id: req.params.requestId, receiverId: userId, status: 'pending' } }));
+        // 🔴 BUG 4 FIX: Parse requestId as integer for consistent DB comparison
+        const friendRequest = await withTimeout(Friend.findOne({ where: { id: parseInt(req.params.requestId), receiverId: userId, status: 'pending' } }));
         if (!friendRequest) return res.status(404).json({ success: false, message: 'Friend request not found' });
 
         await friendRequest.destroy();

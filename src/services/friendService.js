@@ -1,6 +1,6 @@
 ﻿// services/friendService.js
 // Full implementation — matches Friend model column names and associations exactly.
-// Version: 2.0.0 - Fixed naming consistency (requesterId, receiverId only)
+// Version: 2.1.0 - Fixed nearby users with location column check + friendship status in all modes
 // NO snake_case in ORM queries - all camelCase
 
 'use strict';
@@ -499,8 +499,23 @@ async function getNearbyUsers(userId, options = {}) {
     const whereClause = { id: { [Op.notIn]: excludeIds } };
     const hasCoords = lat && lng && !isNaN(parseFloat(lat)) && !isNaN(parseFloat(lng));
     
-    // If no coordinates, return online/recently active users
-    if (!hasCoords) {
+    // Check if coordinates columns exist in User table
+    let hasLocationColumns = false;
+    try {
+        const userTable = User.tableName || 'Users';
+        const [results] = await db.sequelize.query(
+            `SELECT COUNT(*) as count FROM information_schema.COLUMNS 
+             WHERE TABLE_NAME = :tableName AND COLUMN_NAME IN ('latitude', 'longitude')`,
+            { replacements: { tableName: userTable }, type: db.sequelize.QueryTypes.SELECT }
+        );
+        hasLocationColumns = results && parseInt(results.count) >= 2;
+    } catch (err) {
+        console.warn('Could not verify location columns existence:', err.message);
+        hasLocationColumns = false;
+    }
+    
+    // If no coordinates OR location columns don't exist, return online/recently active users
+    if (!hasCoords || !hasLocationColumns) {
         const thirtyMinutesAgo = new Date(Date.now() - 30 * 60 * 1000);
         const onlineUsers = await User.findAll({
             where: {
@@ -519,7 +534,37 @@ async function getNearbyUsers(userId, options = {}) {
             ]
         });
         
-        const formattedUsers = onlineUsers.map(formatUser).filter(u => u && u.id);
+        // Get friendship statuses for returned users
+        let friendshipMap = {};
+        if (onlineUsers && onlineUsers.length > 0) {
+            const userIds = onlineUsers.map(u => u.id);
+            const relations = await Friend.findAll({
+                where: {
+                    [Op.or]: [
+                        { requesterId: userId, receiverId: { [Op.in]: userIds } },
+                        { requesterId: { [Op.in]: userIds }, receiverId: userId }
+                    ]
+                },
+                attributes: ['requesterId', 'receiverId', 'status'],
+                raw: true
+            });
+            
+            relations.forEach(r => {
+                const rid = r.requesterId;
+                const rcid = r.receiverId;
+                const other = rid === userId ? rcid : rid;
+                let rel = 'none';
+                if (r.status === 'accepted') rel = 'friends';
+                else if (r.status === 'pending') rel = rid === userId ? 'request_sent' : 'request_received';
+                else if (r.status === 'blocked') rel = 'blocked';
+                friendshipMap[other] = rel;
+            });
+        }
+        
+        const formattedUsers = onlineUsers.map(u => ({
+            ...formatUser(u),
+            friendshipStatus: friendshipMap[u.id] || 'none'
+        })).filter(u => u && u.id);
         
         return {
             users: formattedUsers,
@@ -528,7 +573,7 @@ async function getNearbyUsers(userId, options = {}) {
         };
     }
     
-    // Has coordinates - location-based search
+    // Has coordinates and location columns exist - location-based search
     const latF = parseFloat(lat);
     const lngF = parseFloat(lng);
     const radM = Math.min(50000, parseInt(radius));
