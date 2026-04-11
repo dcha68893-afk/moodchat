@@ -37,7 +37,11 @@ module.exports = (sequelize, DataTypes) => {
       },
       customSettings: {
         type: DataTypes.JSONB,
-        defaultValue: {},
+        defaultValue: {
+          bannedAt: null,
+          banReason: null,
+          banExpiry: null,
+        },
         allowNull: false,
       },
       createdAt: {

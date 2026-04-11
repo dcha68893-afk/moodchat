@@ -950,6 +950,381 @@ class ToolsController {
       next(error);
     }
   }
+
+  // ═══════════════════════════════════════════════════════════════
+  // MARKETPLACE CONTROLLERS
+  // ═══════════════════════════════════════════════════════════════
+
+  async getListings(req, res, next) {
+    try {
+      const { page = 1, limit = 20, category, type, search, minPrice, maxPrice, sort = 'newest' } = req.query;
+      const db = require('../models');
+      const result = await db.Tool.getListings({
+        page: parseInt(page), limit: parseInt(limit),
+        category, type, search,
+        minPrice: minPrice ? parseFloat(minPrice) : undefined,
+        maxPrice: maxPrice ? parseFloat(maxPrice) : undefined,
+        sort
+      });
+      res.status(200).json({ success: true, message: 'Listings retrieved', data: result });
+    } catch (error) {
+      logger.error('getListings error:', error);
+      next(error);
+    }
+  }
+
+  async getMyListings(req, res, next) {
+    try {
+      const db = require('../models');
+      const listings = await db.Tool.getMyListings(req.user.id);
+      res.status(200).json({ success: true, message: 'My listings retrieved', data: { listings, total: listings.length } });
+    } catch (error) {
+      logger.error('getMyListings error:', error);
+      next(error);
+    }
+  }
+
+  async getSavedListings(req, res, next) {
+    try {
+      const db = require('../models');
+      const listings = await db.Tool.getSavedListings(req.user.id);
+      res.status(200).json({ success: true, message: 'Saved listings retrieved', data: { listings, total: listings.length } });
+    } catch (error) {
+      logger.error('getSavedListings error:', error);
+      next(error);
+    }
+  }
+
+  async getPremiumListings(req, res, next) {
+    try {
+      const { limit = 20 } = req.query;
+      const db = require('../models');
+      const listings = await db.Tool.getPremiumListings(parseInt(limit));
+      res.status(200).json({ success: true, message: 'Premium listings retrieved', data: { listings, total: listings.length } });
+    } catch (error) {
+      logger.error('getPremiumListings error:', error);
+      next(error);
+    }
+  }
+
+  async getListing(req, res, next) {
+    try {
+      const { listingId } = req.params;
+      const db = require('../models');
+      const listing = await db.Tool.findByPk(listingId, {
+        include: db.Tool.associations.seller
+          ? [{ association: db.Tool.associations.seller, attributes: ['id', 'username', 'avatar', 'displayName'] }]
+          : []
+      });
+      if (!listing || listing.status === 'deleted') {
+        return res.status(404).json({ success: false, message: 'Listing not found' });
+      }
+      res.status(200).json({ success: true, data: { listing } });
+    } catch (error) {
+      logger.error('getListing error:', error);
+      next(error);
+    }
+  }
+
+  async createListing(req, res, next) {
+    try {
+      const { title, description, price, category, type, images, tags, stock, currency, metadata } = req.body;
+      if (!title || price === undefined) {
+        throw new AppError('title and price are required', 400);
+      }
+      const db = require('../models');
+      const listing = await db.Tool.create({
+        sellerId: req.user.id,
+        title, description, price: parseFloat(price),
+        category: category || 'other',
+        type: type || 'physical',
+        images: images || [],
+        tags: tags || [],
+        stock: stock !== undefined ? parseInt(stock) : null,
+        currency: currency || 'USD',
+        metadata: metadata || {},
+        status: 'active',
+        available: true
+      });
+      res.status(201).json({ success: true, message: 'Listing created', data: { listing } });
+    } catch (error) {
+      logger.error('createListing error:', error);
+      next(error);
+    }
+  }
+
+  async bulkCreateListings(req, res, next) {
+    try {
+      const { listings } = req.body;
+      if (!Array.isArray(listings) || listings.length === 0) {
+        throw new AppError('listings array is required', 400);
+      }
+      const db = require('../models');
+      const created = await db.Tool.bulkCreate(
+        listings.map(l => ({
+          ...l,
+          sellerId: req.user.id,
+          price: parseFloat(l.price || 0),
+          images: l.images || [],
+          tags: l.tags || [],
+          status: 'active',
+          available: true
+        })),
+        { returning: true }
+      );
+      res.status(201).json({ success: true, message: 'Listings created', data: { listings: created, total: created.length } });
+    } catch (error) {
+      logger.error('bulkCreateListings error:', error);
+      next(error);
+    }
+  }
+
+  async updateListing(req, res, next) {
+    try {
+      const { listingId } = req.params;
+      const db = require('../models');
+      const listing = await db.Tool.findOne({ where: { id: listingId, sellerId: req.user.id } });
+      if (!listing) return res.status(404).json({ success: false, message: 'Listing not found or not yours' });
+      const allowed = ['title', 'description', 'price', 'category', 'type', 'images', 'tags', 'available', 'stock', 'currency', 'metadata'];
+      allowed.forEach(field => { if (req.body[field] !== undefined) listing[field] = req.body[field]; });
+      await listing.save();
+      res.status(200).json({ success: true, message: 'Listing updated', data: { listing } });
+    } catch (error) {
+      logger.error('updateListing error:', error);
+      next(error);
+    }
+  }
+
+  async deleteListing(req, res, next) {
+    try {
+      const { listingId } = req.params;
+      const db = require('../models');
+      const listing = await db.Tool.findOne({ where: { id: listingId, sellerId: req.user.id } });
+      if (!listing) return res.status(404).json({ success: false, message: 'Listing not found or not yours' });
+      listing.status = 'deleted';
+      await listing.save();
+      res.status(200).json({ success: true, message: 'Listing deleted' });
+    } catch (error) {
+      logger.error('deleteListing error:', error);
+      next(error);
+    }
+  }
+
+  async recordListingView(req, res, next) {
+    try {
+      const { listingId } = req.params;
+      const db = require('../models');
+      const listing = await db.Tool.findByPk(listingId);
+      if (listing) await listing.incrementViews();
+      res.status(200).json({ success: true, message: 'View recorded' });
+    } catch (error) {
+      logger.error('recordListingView error:', error);
+      next(error);
+    }
+  }
+
+  async toggleSaveListing(req, res, next) {
+    try {
+      const { listingId } = req.params;
+      const db = require('../models');
+      const listing = await db.Tool.findByPk(listingId);
+      if (!listing) return res.status(404).json({ success: false, message: 'Listing not found' });
+      await listing.toggleSave(req.user.id);
+      const saved = listing.isSavedBy(req.user.id);
+      res.status(200).json({ success: true, message: saved ? 'Listing saved' : 'Listing unsaved', data: { saved } });
+    } catch (error) {
+      logger.error('toggleSaveListing error:', error);
+      next(error);
+    }
+  }
+
+  async purchaseListing(req, res, next) {
+    try {
+      const { listingId } = req.params;
+      const db = require('../models');
+      const listing = await db.Tool.findByPk(listingId);
+      if (!listing || !listing.available) return res.status(404).json({ success: false, message: 'Listing not available' });
+      const purchased = listing.purchasedBy || [];
+      listing.purchasedBy = [...purchased, req.user.id];
+      if (listing.stock !== null) {
+        listing.stock = Math.max(0, listing.stock - 1);
+        if (listing.stock === 0) { listing.available = false; listing.status = 'sold'; }
+      }
+      await listing.save();
+      res.status(200).json({ success: true, message: 'Purchase recorded', data: { listing } });
+    } catch (error) {
+      logger.error('purchaseListing error:', error);
+      next(error);
+    }
+  }
+
+  async rateListing(req, res, next) {
+    try {
+      const { listingId } = req.params;
+      const { rating } = req.body;
+      if (!rating || rating < 1 || rating > 5) throw new AppError('Rating must be between 1 and 5', 400);
+      const db = require('../models');
+      const listing = await db.Tool.findByPk(listingId);
+      if (!listing) return res.status(404).json({ success: false, message: 'Listing not found' });
+      await listing.addRating(parseFloat(rating));
+      res.status(200).json({ success: true, message: 'Rating submitted', data: { rating: listing.rating, ratingCount: listing.ratingCount } });
+    } catch (error) {
+      logger.error('rateListing error:', error);
+      next(error);
+    }
+  }
+
+  async getSpotlightListings(req, res, next) {
+    try {
+      const { limit = 10 } = req.query;
+      const db = require('../models');
+      const listings = await db.Tool.getSpotlight(parseInt(limit));
+      res.status(200).json({ success: true, message: 'Spotlight listings retrieved', data: { listings, total: listings.length } });
+    } catch (error) {
+      logger.error('getSpotlightListings error:', error);
+      next(error);
+    }
+  }
+
+  async addToSpotlight(req, res, next) {
+    try {
+      const { listingId } = req.body;
+      if (!listingId) throw new AppError('listingId is required', 400);
+      const db = require('../models');
+      const listing = await db.Tool.findOne({ where: { id: listingId, sellerId: req.user.id } });
+      if (!listing) return res.status(404).json({ success: false, message: 'Listing not found or not yours' });
+      listing.isSpotlight = true;
+      await listing.save();
+      res.status(200).json({ success: true, message: 'Listing added to spotlight', data: { listing } });
+    } catch (error) {
+      logger.error('addToSpotlight error:', error);
+      next(error);
+    }
+  }
+
+  async boostListing(req, res, next) {
+    try {
+      const { listingId, duration = '24h' } = req.body;
+      if (!listingId) throw new AppError('listingId is required', 400);
+      const db = require('../models');
+      const listing = await db.Tool.findOne({ where: { id: listingId, sellerId: req.user.id } });
+      if (!listing) return res.status(404).json({ success: false, message: 'Listing not found or not yours' });
+      const hours = parseInt(duration) || 24;
+      listing.isBoosted = true;
+      listing.boostExpiresAt = new Date(Date.now() + hours * 3600000);
+      await listing.save();
+      res.status(200).json({ success: true, message: 'Listing boosted', data: { listing, boostExpiresAt: listing.boostExpiresAt } });
+    } catch (error) {
+      logger.error('boostListing error:', error);
+      next(error);
+    }
+  }
+
+  async getLeaderboard(req, res, next) {
+    try {
+      const { limit = 20 } = req.query;
+      const db = require('../models');
+      const rawLeaderboard = await db.Tool.getLeaderboard(parseInt(limit));
+      // Normalize snake_case SQL results to camelCase for frontend
+      const leaderboard = rawLeaderboard.map(r => ({
+        userId:       r.seller_id  || r.userId,
+        sellerId:     r.seller_id  || r.sellerId,
+        listingCount: parseInt(r.listing_count || r.listingCount || 0),
+        totalViews:   parseInt(r.total_views   || r.totalViews   || 0),
+        avgRating:    parseFloat(r.avg_rating  || r.avgRating    || 0),
+        totalSales:   parseInt(r.total_sales   || r.totalSales   || 0)
+      }));
+      res.status(200).json({ success: true, message: 'Leaderboard retrieved', data: { leaderboard } });
+    } catch (error) {
+      logger.error('getLeaderboard error:', error);
+      next(error);
+    }
+  }
+
+  async sendTip(req, res, next) {
+    try {
+      const { sellerId, amount, listingId, message } = req.body;
+      if (!sellerId || !amount) throw new AppError('sellerId and amount are required', 400);
+      // Record tip — extend with payment processor as needed
+      res.status(200).json({
+        success: true,
+        message: 'Tip sent successfully',
+        data: { sellerId, amount, listingId, message, sentAt: new Date().toISOString() }
+      });
+    } catch (error) {
+      logger.error('sendTip error:', error);
+      next(error);
+    }
+  }
+
+  async getMarketplaceStats(req, res, next) {
+    try {
+      const db = require('../models');
+      const { Op } = require('sequelize');
+      const [totalListings, myListings, totalViews] = await Promise.all([
+        db.Tool.count({ where: { status: 'active' } }),
+        db.Tool.count({ where: { sellerId: req.user.id, status: { [Op.ne]: 'deleted' } } }),
+        db.Tool.sum('views', { where: { sellerId: req.user.id } })
+      ]);
+      res.status(200).json({
+        success: true,
+        message: 'Marketplace stats retrieved',
+        data: { totalListings, myListings, totalViews: totalViews || 0 }
+      });
+    } catch (error) {
+      logger.error('getMarketplaceStats error:', error);
+      next(error);
+    }
+  }
+
+  async getPremiumFeatures(req, res, next) {
+    try {
+      const features = [
+        { id: 'spotlight', name: 'PRO Spotlight', description: 'Feature your listing at the top', price: 9.99 },
+        { id: 'boost', name: 'Boost Listing', description: 'Boost visibility for 24 hours', price: 4.99 },
+        { id: 'premium_badge', name: 'Premium Badge', description: 'Show a premium seller badge', price: 19.99 },
+        { id: 'analytics', name: 'Advanced Analytics', description: 'Detailed listing analytics', price: 14.99 }
+      ];
+      res.status(200).json({ success: true, data: { features } });
+    } catch (error) {
+      logger.error('getPremiumFeatures error:', error);
+      next(error);
+    }
+  }
+
+  async processPayment(req, res, next) {
+    try {
+      const { amount, currency = 'USD', listingId, paymentMethod } = req.body;
+      if (!amount || !listingId) throw new AppError('amount and listingId are required', 400);
+      // Integrate with Stripe/PayPal here — stub for now
+      res.status(200).json({
+        success: true,
+        message: 'Payment processed',
+        data: { transactionId: `txn_${Date.now()}`, amount, currency, listingId, status: 'completed' }
+      });
+    } catch (error) {
+      logger.error('processPayment error:', error);
+      next(error);
+    }
+  }
+
+  async getUserSubscription(req, res, next) {
+    try {
+      // Extend with real subscription logic / DB lookup
+      res.status(200).json({
+        success: true,
+        data: {
+          plan: 'free',
+          features: [],
+          expiresAt: null,
+          userId: req.user.id
+        }
+      });
+    } catch (error) {
+      logger.error('getUserSubscription error:', error);
+      next(error);
+    }
+  }
 }
 
 module.exports = new ToolsController();

@@ -57,18 +57,47 @@ class GroupService {
         if (description.length > 500) throw new Error('Description cannot exceed 500 characters');
         if (!creatorId) throw new Error('Creator ID is required');
         try {
-            const group = await Groups.create({
-                name: name.trim(), description, createdBy: creatorId,
-                isPublic: privacy === 'public' || isPublic,
-                purpose, maxMembers, tags, avatar: avatar || null,
+            // FIXED: Groups.chatId is NOT NULL — must create a Chats record first
+            if (!Chats) throw new Error('Chats model unavailable');
+            const chat = await Chats.create({
+                name: name.trim(),
+                type: 'group',
+                description,
+                avatar: avatar || null,
+                createdBy: creatorId,
             });
+
+            const group = await Groups.create({
+                name: name.trim(),
+                description,
+                createdBy: creatorId,
+                chatId: chat.id,
+                isPublic: privacy === 'public' || isPublic,
+                purpose,
+                maxMembers,
+                tags,
+                avatar: avatar || null,
+            });
+
             if (GroupMembers) {
                 await GroupMembers.create({ groupId: group.id, userId: creatorId, role: 'owner', joinedAt: new Date() });
             }
-            console.log(`[GroupService] ✅ Group created: "${group.name}" (id: ${group.id})`);
+
+            // Add creator as chat participant
+            let ChatParticipant;
+            try {
+                const db2 = require('../models');
+                ChatParticipant = db2.models?.ChatParticipant || db2.ChatParticipants || db2.ChatParticipant;
+            } catch (_) {}
+            if (ChatParticipant) {
+                await ChatParticipant.create({ chatId: chat.id, userId: creatorId }).catch(() => {});
+            }
+
+            console.log(`[GroupService] ✅ Group created: "${group.name}" (id: ${group.id}, chatId: ${chat.id})`);
             return { group: formatGroup(group) };
         } catch (e) {
             console.error('[GroupService] ❌ createGroup failed:', e.message);
+            if (['required','unavailable','characters'].some(s => e.message.includes(s))) throw e;
             throw new Error('Failed to create group');
         }
     }
@@ -304,10 +333,27 @@ class GroupService {
                 canEdit = m && ['owner','admin'].includes(m.role);
             }
             if (!canEdit) throw new Error('You do not have permission to update settings');
-            const allowed = ['allowMedia','allowCalls','allowReactions','allowReplies','allowEditing','allowDeleting','slowMode','requireAdminApproval'];
-            const filtered = {};
-            for (const k of allowed) { if (settings[k] !== undefined) filtered[k] = settings[k]; }
-            await group.update({ settings: { ...(group.settings || {}), ...filtered } });
+            // FIXED: Map all incoming settings fields (including nested moderationSettings) to flat JSONB column
+            const existing = group.settings || {};
+            const mod = settings.moderationSettings || {};
+            const filtered = {
+                allowMedia:           settings.allowMedia           ?? mod.allowMediaSharing      ?? existing.allowMedia           ?? true,
+                allowCalls:           settings.allowCalls           ?? existing.allowCalls          ?? true,
+                allowReactions:       settings.allowReactions       ?? existing.allowReactions      ?? true,
+                allowReplies:         settings.allowReplies         ?? existing.allowReplies        ?? true,
+                allowEditing:         settings.allowEditing         ?? existing.allowEditing        ?? true,
+                allowDeleting:        settings.allowDeleting        ?? existing.allowDeleting       ?? true,
+                slowMode:             settings.slowMode             ?? existing.slowMode            ?? 0,
+                requireAdminApproval: settings.requireAdminApproval ?? mod.approveNewMembers        ?? existing.requireAdminApproval ?? false,
+                allowInvites:         settings.allowInvites         ?? mod.allowInvites             ?? existing.allowInvites         ?? true,
+                onlyAdminsCanPost:    settings.onlyAdminsCanPost    ?? mod.onlyAdminsCanPost        ?? existing.onlyAdminsCanPost    ?? false,
+                disappearingMessages: settings.disappearingMessages ?? mod.disappearingMessages     ?? existing.disappearingMessages ?? false,
+                archived:             settings.archived             ?? existing.archived            ?? false,
+            };
+            // Also persist privacy change on the group itself
+            const updatePayload = { settings: { ...existing, ...filtered } };
+            if (settings.privacy !== undefined) updatePayload.isPublic = settings.privacy === 'public';
+            await group.update(updatePayload);
             return formatGroup(group);
         } catch (e) {
             if (['not found','permission'].some(s => e.message.includes(s))) throw e;

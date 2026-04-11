@@ -1,6 +1,7 @@
 // src/routes/index.js - MAIN ROUTER AGGREGATION
 // FIXED: Auth routes are now properly mounted (removed from ignored files)
 // FIXED: All routes are correctly mounted with proper auth
+// UPDATED: Status routes now have explicit public/protected endpoint documentation
 
 const express = require('express');
 const fs = require('fs');
@@ -29,7 +30,12 @@ const PUBLIC_PATHS = [
   '/api/status/public',
   '/api/status/trending',
   '/api/status/search',
-  '/api/status/mood',
+  '/api/status/mood/:moodType',
+  '/api/status/:statusId',
+  '/api/status/:statusId/comments',
+  '/api/status/:statusId/likes',
+  '/api/status/view',
+  '/api/status/:statusId/view',
   '/api/info',
   '/api/cors-info',
   '/api/public',
@@ -37,6 +43,35 @@ const PUBLIC_PATHS = [
   '/ping',
   '/'
 ];
+
+// ===== STATUS ROUTE PUBLIC/PROTECTED BREAKDOWN =====
+// Status router handles its own auth internally. Here's the breakdown:
+// 
+// 🔓 PUBLIC endpoints (no auth required):
+//    GET  /api/status/health
+//    GET  /api/status/
+//    GET  /api/status/public
+//    GET  /api/status/trending
+//    GET  /api/status/search
+//    GET  /api/status/mood/:moodType
+//    GET  /api/status/:statusId
+//    GET  /api/status/:statusId/comments
+//    GET  /api/status/:statusId/likes
+//    POST /api/status/view
+//    POST /api/status/:statusId/view
+//
+// 🔒 PROTECTED endpoints (JWT required):
+//    POST   /api/status/
+//    GET    /api/status/my
+//    GET    /api/status/friends
+//    GET    /api/status/stats
+//    GET    /api/status/user/:userId
+//    PUT    /api/status/:statusId
+//    DELETE /api/status/:statusId
+//    POST   /api/status/:statusId/like
+//    DELETE /api/status/:statusId/like
+//    POST   /api/status/:statusId/comment
+//    DELETE /api/status/:statusId/comment/:commentId
 
 // ===== CUSTOM ROUTE MAPPING =====
 const ROUTE_MAPPING = {
@@ -152,10 +187,10 @@ function isPublicRoute(mountPath, filename) {
   }
   
   // Status route has public endpoints, but protected ones need auth
-  // We handle this by mounting the entire status router with auth,
-  // but the status router itself will handle public endpoints internally
+  // We handle this by mounting the entire status router WITHOUT auth middleware,
+  // because the status router itself handles auth internally for protected endpoints
   if (mountPath === '/api/status') {
-    return false; // Status router handles its own auth internally
+    return true; // Mount without auth - status router handles its own auth
   }
   
   return false;
@@ -208,13 +243,21 @@ function scanAndMountRouters() {
         if (filename === 'auth.js') {
           console.log(`🔓 ${mountPath} - PUBLIC (Auth routes - no auth required)`);
           router.use(mountPath, routerInstance);
-          results.publicRoutes.push({ filename, path: mountPath });
+          results.publicRoutes.push({ 
+            filename, 
+            path: mountPath,
+            note: 'All auth endpoints are public (login, register, refresh, etc.)'
+          });
         }
-        // Status routes - mount without auth middleware (handles its own auth)
+        // Status routes - mount WITHOUT auth middleware (handles its own auth internally)
         else if (filename === 'status.js') {
-          console.log(`🔓 ${mountPath} - PUBLIC/INTERNAL AUTH (Status router handles its own auth)`);
+          console.log(`🔓 ${mountPath} - HYBRID (Status router handles its own auth - see breakdown below)`);
           router.use(mountPath, routerInstance);
-          results.publicRoutes.push({ filename, path: mountPath });
+          results.publicRoutes.push({ 
+            filename, 
+            path: mountPath,
+            note: 'HYBRID ROUTER - Some endpoints public, some protected. See /api/status/auth-info for details.'
+          });
         }
         // Other routes - apply auth middleware for protected routes
         else if (!isPublic) {
@@ -287,14 +330,82 @@ console.log('🔐 ROUTE AUTHENTICATION STATUS:');
 console.log('-'.repeat(80));
 console.log('   🔓 PUBLIC ROUTES (No auth required):');
 mountResults.publicRoutes.forEach(route => {
-  console.log(`      - ${route.path}`);
+  console.log(`      - ${route.path}${route.note ? ` (${route.note})` : ''}`);
 });
 console.log('');
 console.log('   🔒 PROTECTED ROUTES (JWT required):');
 mountResults.protectedRoutes.forEach(route => {
   console.log(`      - ${route.path}`);
 });
+console.log('');
+
+// Print detailed status route breakdown
+console.log('📋 DETAILED STATUS ROUTE AUTH BREAKDOWN:');
+console.log('-'.repeat(80));
+console.log('   🔓 PUBLIC Status Endpoints (no auth required):');
+console.log('      GET    /api/status/health');
+console.log('      GET    /api/status/');
+console.log('      GET    /api/status/public');
+console.log('      GET    /api/status/trending');
+console.log('      GET    /api/status/search');
+console.log('      GET    /api/status/mood/:moodType');
+console.log('      GET    /api/status/:statusId');
+console.log('      GET    /api/status/:statusId/comments');
+console.log('      GET    /api/status/:statusId/likes');
+console.log('      POST   /api/status/view');
+console.log('      POST   /api/status/:statusId/view');
+console.log('');
+console.log('   🔒 PROTECTED Status Endpoints (JWT required):');
+console.log('      POST   /api/status/');
+console.log('      GET    /api/status/my');
+console.log('      GET    /api/status/friends');
+console.log('      GET    /api/status/stats');
+console.log('      GET    /api/status/user/:userId');
+console.log('      PUT    /api/status/:statusId');
+console.log('      DELETE /api/status/:statusId');
+console.log('      POST   /api/status/:statusId/like');
+console.log('      DELETE /api/status/:statusId/like');
+console.log('      POST   /api/status/:statusId/comment');
+console.log('      DELETE /api/status/:statusId/comment/:commentId');
 console.log('='.repeat(80) + '\n');
+
+// ===== STATUS AUTH INFO ENDPOINT =====
+router.get('/api/status/auth-info', (req, res) => {
+  res.status(200).json({
+    success: true,
+    message: 'Status API Authentication Information',
+    routerAuthMode: 'INTERNAL - Status router handles its own authentication',
+    note: 'No auth middleware is applied at the router level in index.js',
+    publicEndpoints: [
+      { method: 'GET', path: '/api/status/health', description: 'Health check' },
+      { method: 'GET', path: '/api/status/', description: 'Get all active public statuses' },
+      { method: 'GET', path: '/api/status/public', description: 'Alias for public statuses' },
+      { method: 'GET', path: '/api/status/trending', description: 'Get trending statuses (last 24h)' },
+      { method: 'GET', path: '/api/status/search', description: 'Search public statuses', queryParams: ['q'] },
+      { method: 'GET', path: '/api/status/mood/:moodType', description: 'Filter statuses by mood' },
+      { method: 'GET', path: '/api/status/:statusId', description: 'Get single status (public if isPublic=true)' },
+      { method: 'GET', path: '/api/status/:statusId/comments', description: 'Get comments on a status' },
+      { method: 'GET', path: '/api/status/:statusId/likes', description: 'Get likes on a status' },
+      { method: 'POST', path: '/api/status/view', description: 'Record a view (body: { statusId })' },
+      { method: 'POST', path: '/api/status/:statusId/view', description: 'Record a view via URL param' }
+    ],
+    protectedEndpoints: [
+      { method: 'POST', path: '/api/status/', description: 'Create a new status', auth: 'JWT Required' },
+      { method: 'GET', path: '/api/status/my', description: 'Get current user\'s statuses', auth: 'JWT Required' },
+      { method: 'GET', path: '/api/status/friends', description: 'Get friends\' statuses', auth: 'JWT Required' },
+      { method: 'GET', path: '/api/status/stats', description: 'Get user status statistics', auth: 'JWT Required' },
+      { method: 'GET', path: '/api/status/user/:userId', description: 'Get specific user\'s statuses', auth: 'JWT Required' },
+      { method: 'PUT', path: '/api/status/:statusId', description: 'Update a status', auth: 'JWT Required (owner only)' },
+      { method: 'DELETE', path: '/api/status/:statusId', description: 'Delete a status', auth: 'JWT Required (owner only)' },
+      { method: 'POST', path: '/api/status/:statusId/like', description: 'Like a status', auth: 'JWT Required' },
+      { method: 'DELETE', path: '/api/status/:statusId/like', description: 'Unlike a status', auth: 'JWT Required' },
+      { method: 'POST', path: '/api/status/:statusId/comment', description: 'Comment on a status', auth: 'JWT Required' },
+      { method: 'DELETE', path: '/api/status/:statusId/comment/:commentId', description: 'Delete a comment', auth: 'JWT Required (owner only)' }
+    ],
+    authenticationMethod: 'JWT Bearer Token in Authorization header',
+    headerExample: 'Authorization: Bearer <your_jwt_token>'
+  });
+});
 
 // ===== TEST ENDPOINT =====
 router.get('/api/test', (req, res) => {
@@ -310,7 +421,8 @@ router.get('/api/test', (req, res) => {
     })),
     publicRoutes: mountResults.publicRoutes.map(r => r.path),
     protectedRoutes: mountResults.protectedRoutes.map(r => r.path),
-    note: 'Auth is applied at route level. Protected routes require JWT token.'
+    statusAuthInfo: '/api/status/auth-info',
+    note: 'Auth is applied at route level. Protected routes require JWT token. Status router handles its own auth internally.'
   });
 });
 
@@ -332,14 +444,14 @@ router.get('/', (req, res) => {
       publicPaths: [
         '/api/auth/*',
         '/api/health',
-        '/api/status',
-        '/api/status/* (public endpoints)',
+        '/api/status (HYBRID - see /api/status/auth-info)',
         '/api/info',
         '/api/cors-info',
         '/'
       ],
       protectedRoutes: mountResults.protectedRoutes.map(r => r.path),
-      note: 'Status router handles its own auth internally for public/protected distinction'
+      statusAuthInfo: '/api/status/auth-info - Detailed breakdown of public/protected status endpoints',
+      note: 'Status router handles its own auth internally for public/protected distinction. No auth middleware applied at router level.'
     }
   });
 });
@@ -372,6 +484,10 @@ router.get('/api/info', (req, res) => {
       public: mountResults.publicRoutes.map(r => r.path),
       protected: mountResults.protectedRoutes.map(r => r.path)
     },
+    statusEndpoints: {
+      info: '/api/status/auth-info',
+      note: 'Status API has mixed public/protected endpoints - check the auth-info endpoint for details'
+    },
     authentication: {
       type: 'JWT Bearer Token',
       header: 'Authorization: Bearer <token>',
@@ -382,11 +498,7 @@ router.get('/api/info', (req, res) => {
         'POST /api/auth/forgot-password',
         'POST /api/auth/reset-password',
         'GET /api/health',
-        'GET /api/status',
-        'GET /api/status/public',
-        'GET /api/status/trending',
-        'GET /api/status/search',
-        'GET /api/status/mood/:moodType',
+        'GET /api/status/* (public endpoints only - see auth-info)',
         'GET /api/info',
         'GET /api/cors-info'
       ]
@@ -412,7 +524,8 @@ router.get('/api/cors-info', (req, res) => {
 router.use('*', (req, res) => {
   const availableRoutes = [
     ...mountResults.publicRoutes.map(r => r.path),
-    ...mountResults.protectedRoutes.map(r => r.path)
+    ...mountResults.protectedRoutes.map(r => r.path),
+    '/api/status/auth-info'
   ];
   
   res.status(404).json({
@@ -427,11 +540,13 @@ router.use('*', (req, res) => {
         '/api/auth/login',
         '/api/auth/register',
         '/api/health',
-        '/api/status',
+        '/api/status (HYBRID)',
+        '/api/status/auth-info',
         '/api/info',
         '/'
       ],
-      protectedRoutes: mountResults.protectedRoutes.map(r => r.path)
+      protectedRoutes: mountResults.protectedRoutes.map(r => r.path),
+      statusAuthInfo: 'GET /api/status/auth-info for detailed status endpoint breakdown'
     }
   });
 });

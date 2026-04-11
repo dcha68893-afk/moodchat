@@ -74,6 +74,24 @@ module.exports = (sequelize, DataTypes) => {
         defaultValue: false,
         allowNull: false,
       },
+      settings: {
+        type: DataTypes.JSONB,
+        defaultValue: {
+          allowMedia: true,
+          allowCalls: true,
+          allowReactions: true,
+          allowReplies: true,
+          allowEditing: true,
+          allowDeleting: true,
+          slowMode: 0,
+          requireAdminApproval: false,
+          allowInvites: true,
+          onlyAdminsCanPost: false,
+          disappearingMessages: false,
+          archived: false,
+        },
+        allowNull: false,
+      },
       stats: {
         type: DataTypes.JSONB,
         defaultValue: {

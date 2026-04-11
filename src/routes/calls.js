@@ -253,55 +253,54 @@ router.get(
         if (endDate) where.startedAt[Op.lte] = new Date(endDate);
       }
 
-      // FIXED: Simplified query - removed problematic statistics subquery
+      // FIXED: Simplified query - removed broken association includes
       const { count, rows: calls } = await Call.findAndCountAll({
         where,
-        include: [
-          {
-            model: User,
-            as: 'caller',
-            attributes: ['id', 'username', 'avatar', 'displayName']
-          },
-          {
-            model: User,
-            as: 'participants',
-            attributes: ['id', 'username', 'avatar', 'displayName'],
-            through: { attributes: [] }
-          },
-          {
-            model: Chat,
-            as: 'chat',
-            attributes: ['id', 'chatName', 'chatType']
-          }
-        ],
         order: [['startedAt', 'DESC']],
         offset,
         limit: parsedLimit,
         distinct: true
       });
 
-      // FIXED: Safe duration calculation with error handling
+      // Collect all unique participant IDs across all calls
+      const allParticipantIds = [...new Set(
+        (calls || []).flatMap(c => c.participants || [])
+      )];
+      const participantMap = {};
+      if (allParticipantIds.length > 0) {
+        const users = await User.findAll({
+          where: { id: allParticipantIds },
+          attributes: ['id', 'username', 'avatar']
+        });
+        users.forEach(u => { participantMap[u.id] = u; });
+      }
+
+      // FIXED: Safe duration calculation with participantMap enrichment
       const enrichedCalls = (calls || []).map(call => {
         try {
-          const callObj = call.toJSON ? call.toJSON() : call;
-          
-          if (call.callerId === userId) {
-            callObj.direction = 'outgoing';
-          } else {
-            callObj.direction = 'incoming';
-          }
+          const callObj = call.toJSON ? call.toJSON() : { ...call.dataValues };
 
-          // Safe duration calculation
+          callObj.direction = call.callerId === userId ? 'outgoing' : 'incoming';
+
           if (call.startedAt && call.endedAt) {
-            const startTime = new Date(call.startedAt);
-            const endTime = new Date(call.endedAt);
-            const durationMs = endTime - startTime;
+            const durationMs = new Date(call.endedAt) - new Date(call.startedAt);
             callObj.duration = durationMs > 0 ? Math.floor(durationMs / 1000) : 0;
           } else {
             callObj.duration = 0;
           }
 
-          callObj.otherParticipants = (callObj.participants || []).filter(p => p && p.id !== userId);
+          // Format duration as mm:ss
+          const mins = Math.floor(callObj.duration / 60);
+          const secs = callObj.duration % 60;
+          callObj.displayDuration = `${mins}:${secs.toString().padStart(2, '0')}`;
+
+          // Enrich participants with user objects
+          const participantIds = callObj.participants || [];
+          callObj.participantUsers = participantIds.map(id => participantMap[id] || { id, username: 'Unknown' });
+          callObj.otherParticipants = callObj.participantUsers.filter(p => p.id !== userId);
+          callObj.caller = participantMap[call.callerId] || { id: call.callerId, username: 'Unknown' };
+          callObj.isMissed = callObj.status === 'missed';
+
           return callObj;
         } catch (err) {
           console.error('Error enriching call:', err.message);
@@ -511,37 +510,33 @@ router.get(
 
       const calls = await Call.findAll({
         where,
-        include: [
-          {
-            model: User,
-            as: 'caller',
-            attributes: ['username', 'email']
-          },
-          {
-            model: User,
-            as: 'participants',
-            attributes: ['username', 'email'],
-            through: { attributes: [] }
-          }
-        ],
         order: [['startedAt', 'DESC']]
       });
 
+      // Fetch all participant users separately
+      const allExportIds = [...new Set((calls || []).flatMap(c => c.participants || []))];
+      const exportUserMap = {};
+      if (allExportIds.length > 0) {
+        const users = await User.findAll({ where: { id: allExportIds }, attributes: ['id', 'username', 'email'] });
+        users.forEach(u => { exportUserMap[u.id] = u; });
+      }
+
       const exportData = (calls || []).map(call => {
-        const callJSON = call.toJSON ? call.toJSON() : call;
-        const participants = (callJSON.participants || []).map(p => ({
-          id: p.id,
-          username: p.username,
-          email: p.email,
+        const callJSON = call.toJSON ? call.toJSON() : { ...call.dataValues };
+        const participantIds = callJSON.participants || [];
+        const participants = participantIds.map(id => ({
+          id,
+          username: exportUserMap[id]?.username || 'Unknown',
+          email: exportUserMap[id]?.email || '',
         }));
 
         const answeredBy = (callJSON.answeredBy || [])
-          ?.map(id => participants.find(p => p.id === id))
-          .filter(Boolean) || [];
-
+          .map(id => participants.find(p => p.id === id))
+          .filter(Boolean);
         const declinedBy = (callJSON.declinedBy || [])
-          ?.map(id => participants.find(p => p.id === id))
-          .filter(Boolean) || [];
+          .map(id => participants.find(p => p.id === id))
+          .filter(Boolean);
+        const callerUser = exportUserMap[callJSON.callerId];
 
         return {
           callId: callJSON.id,
@@ -551,9 +546,9 @@ router.get(
           endedAt: callJSON.endedAt,
           duration: callJSON.duration,
           caller: {
-            id: callJSON.caller?.id,
-            username: callJSON.caller?.username,
-            email: callJSON.caller?.email,
+            id: callJSON.callerId,
+            username: callerUser?.username || 'Unknown',
+            email: callerUser?.email || '',
           },
           participants,
           answeredBy,
@@ -817,51 +812,45 @@ router.post(
         });
       }
 
-      const populatedCall = await Call.findByPk(call.id, {
-        include: [
-          {
-            model: User,
-            as: 'caller',
-            attributes: ['id', 'username', 'avatar', 'displayName', 'socketIds']
-          },
-          {
-            model: User,
-            as: 'participants',
-            attributes: ['id', 'username', 'avatar', 'displayName', 'socketIds'],
-            through: { attributes: [] }
-          }
-        ]
+      // Fetch caller info separately (no broken association)
+      const caller = await User.findByPk(userId, {
+        attributes: ['id', 'username', 'avatar']
       });
 
-      const caller = await User.findByPk(userId);
+      // Fetch all participant user objects
+      const participantUsers = await User.findAll({
+        where: { id: [userId, ...participants] },
+        attributes: ['id', 'username', 'avatar']
+      });
 
-      if (req.io && populatedCall && populatedCall.participants) {
-        const callData = {
+      const callData = {
+        id: call.id,
+        callerId: call.callerId,
+        receiverId: call.receiverId,
+        chatId: call.chatId,
+        type: call.type,
+        status: call.status,
+        isGroupCall: call.isGroupCall,
+        participants: participantUsers,
+        startedAt: call.startedAt,
+        answeredBy: call.answeredBy || [],
+        declinedBy: call.declinedBy || [],
+        readBy: call.readBy || [],
+        caller: caller ? { id: caller.id, username: caller.username, avatar: caller.avatar } : null
+      };
+
+      if (req.io) {
+        const incomingData = {
           callId: call.id,
-          caller: {
-            id: caller.id,
-            username: caller.username,
-            avatar: caller.avatar,
-          },
+          caller: callData.caller,
           callType,
           isGroupCall,
           chatId: chatId,
           timestamp: new Date(),
         };
 
-        for (const participant of populatedCall.participants) {
-          if (participant.id !== userId) {
-            await notifyUser(req.io, participant.id, 'call:incoming', callData);
-          }
-        }
-
-        if (caller && caller.socketIds && Array.isArray(caller.socketIds)) {
-          caller.socketIds.forEach(socketId => {
-            req.io.to(socketId).emit('call:ringing', {
-              callId: call.id,
-              participants: participants.length,
-            });
-          });
+        for (const pid of participants) {
+          await notifyUser(req.io, pid, 'call:incoming', incomingData);
         }
       }
 
@@ -869,7 +858,7 @@ router.post(
         status: 'success',
         message: 'Call started',
         data: {
-          call: populatedCall,
+          call: callData,
           callId: call.id,
         },
       });
@@ -907,31 +896,7 @@ router.get(
         where: {
           id: callId,
           participants: { [Op.contains]: [userId] }
-        },
-        include: [
-          {
-            model: User,
-            as: 'caller',
-            attributes: ['id', 'username', 'avatar', 'displayName']
-          },
-          {
-            model: User,
-            as: 'participants',
-            attributes: ['id', 'username', 'avatar', 'displayName'],
-            through: { attributes: [] }
-          },
-          {
-            model: Chat,
-            as: 'chat',
-            attributes: ['chatName', 'chatType'],
-            include: [{
-              model: User,
-              as: 'participants',
-              attributes: ['id', 'username'],
-              through: { attributes: [] }
-            }]
-          }
-        ]
+        }
       });
 
       if (!call) {
@@ -941,22 +906,32 @@ router.get(
         });
       }
 
-      const callData = call.toJSON ? call.toJSON() : call;
+      // Fetch participant users separately
+      const participantIds = call.participants || [];
+      const participantUsers = participantIds.length > 0 ? await User.findAll({
+        where: { id: participantIds },
+        attributes: ['id', 'username', 'avatar']
+      }) : [];
+      const pMap = {};
+      participantUsers.forEach(u => { pMap[u.id] = { id: u.id, username: u.username, avatar: u.avatar }; });
+
+      const callData = call.toJSON ? call.toJSON() : { ...call.dataValues };
       callData.direction = call.callerId === userId ? 'outgoing' : 'incoming';
+      callData.caller = pMap[call.callerId] || { id: call.callerId, username: 'Unknown' };
+      callData.participantUsers = participantIds.map(id => pMap[id] || { id, username: 'Unknown' });
+      callData.otherParticipants = callData.participantUsers.filter(p => p.id !== userId);
 
       if (call.startedAt && call.endedAt) {
         callData.duration = Math.floor((new Date(call.endedAt) - new Date(call.startedAt)) / 1000);
       } else {
         callData.duration = 0;
       }
-
-      callData.answeredParticipants = (callData.participants || []).filter(
-        p => call.answeredBy && call.answeredBy.includes(p.id)
-      );
-
-      callData.declinedParticipants = (callData.participants || []).filter(
-        p => call.declinedBy && call.declinedBy.includes(p.id)
-      );
+      const mins = Math.floor(callData.duration / 60);
+      const secs = callData.duration % 60;
+      callData.displayDuration = `${mins}:${secs.toString().padStart(2, '0')}`;
+      callData.isMissed = callData.status === 'missed';
+      callData.answeredParticipants = (call.answeredBy || []).map(id => pMap[id] || { id });
+      callData.declinedParticipants = (call.declinedBy || []).map(id => pMap[id] || { id });
 
       res.status(200).json({
         status: 'success',
@@ -997,13 +972,7 @@ router.post(
           id: callId,
           participants: { [Op.contains]: [userId] },
           status: 'ringing'
-        },
-        include: [{
-          model: User,
-          as: 'participants',
-          attributes: ['id', 'socketIds'],
-          through: { attributes: [] }
-        }]
+        }
       });
 
       if (!call) {
@@ -1015,39 +984,19 @@ router.post(
 
       await updateArrayField(call, 'answeredBy', userId, 'add');
 
-      const answeredBy = call.answeredBy || [];
-      if (answeredBy.length === 1) {
-        call.status = 'ongoing';
+      if ((call.answeredBy || []).length === 1) {
+        call.status = 'in-progress';
         await call.save();
       }
 
-      const updatedCall = await Call.findByPk(callId, {
-        include: [
-          {
-            model: User,
-            as: 'caller',
-            attributes: ['id', 'username', 'avatar', 'socketIds']
-          },
-          {
-            model: User,
-            as: 'participants',
-            attributes: ['id', 'username', 'avatar', 'socketIds'],
-            through: { attributes: [] }
-          }
-        ]
-      });
+      const user = await User.findByPk(userId, { attributes: ['id', 'username', 'avatar'] });
 
-      const user = await User.findByPk(userId);
-
-      if (req.io && updatedCall && updatedCall.participants) {
-        for (const participant of updatedCall.participants) {
-          await notifyUser(req.io, participant.id, 'call:answered', {
+      // Notify all participants via WebSocket
+      if (req.io) {
+        for (const pid of (call.participants || [])) {
+          await notifyUser(req.io, pid, 'call:answered', {
             callId: call.id,
-            answeredBy: {
-              id: user.id,
-              username: user.username,
-              avatar: user.avatar,
-            },
+            answeredBy: { id: user.id, username: user.username, avatar: user.avatar },
             status: call.status,
             timestamp: new Date(),
           });
@@ -1057,7 +1006,7 @@ router.post(
       res.status(200).json({
         status: 'success',
         message: 'Call accepted',
-        data: { call: updatedCall },
+        data: { call: { id: call.id, status: call.status, callId: call.id } },
       });
     } catch (error) {
       console.error('Error accepting call:', error.message);
@@ -1094,14 +1043,8 @@ router.post(
         where: {
           id: callId,
           participants: { [Op.contains]: [userId] },
-          status: { [Op.in]: ['ringing', 'ongoing'] }
-        },
-        include: [{
-          model: User,
-          as: 'participants',
-          attributes: ['id', 'socketIds'],
-          through: { attributes: [] }
-        }]
+          status: { [Op.in]: ['ringing', 'ongoing', 'in-progress'] }
+        }
       });
 
       if (!call) {
@@ -1136,28 +1079,14 @@ router.post(
       const user = await User.findByPk(userId);
 
       if (req.io) {
-        const callData = await Call.findByPk(callId, {
-          include: [{
-            model: User,
-            as: 'participants',
-            attributes: ['id', 'socketIds'],
-            through: { attributes: [] }
-          }]
-        });
-
-        if (callData && callData.participants) {
-          for (const participant of callData.participants) {
-            await notifyUser(req.io, participant.id, 'call:rejected', {
-              callId: call.id,
-              rejectedBy: {
-                id: user.id,
-                username: user.username,
-              },
-              reason,
-              status: call.status,
-              timestamp: new Date(),
-            });
-          }
+        for (const pid of (call.participants || [])) {
+          await notifyUser(req.io, pid, 'call:rejected', {
+            callId: call.id,
+            rejectedBy: { id: user.id, username: user.username },
+            reason,
+            status: call.status,
+            timestamp: new Date(),
+          });
         }
       }
 
@@ -1188,7 +1117,7 @@ router.post(
       if (!checkModels(res)) return;
 
       const { callId } = req.params;
-      const { duration } = req.body;
+      const { duration, status: callEndStatus } = req.body;
 
       if (!callId) {
         return res.status(400).json({
@@ -1197,62 +1126,60 @@ router.post(
         });
       }
 
+      // Allow any status for ending - not just ringing/ongoing
       const call = await Call.findOne({
         where: {
           id: callId,
-          participants: { [Op.contains]: [userId] },
-          status: { [Op.in]: ['ringing', 'ongoing'] }
+          participants: { [Op.contains]: [userId] }
         }
       });
 
       if (!call) {
         return res.status(404).json({
           status: 'error',
-          message: 'Call not found or already ended'
+          message: 'Call not found'
         });
       }
 
-      if (duration && (duration < 0 || duration > MAX_CALL_DURATION)) {
-        return res.status(400).json({
-          status: 'error',
-          message: `Duration must be between 0 and ${MAX_CALL_DURATION} seconds`
-        });
+      // Calculate actual duration
+      let actualDuration = duration;
+      if (!actualDuration && call.startedAt) {
+        const endTime = call.endedAt || new Date();
+        actualDuration = Math.floor((new Date(endTime) - new Date(call.startedAt)) / 1000);
+        if (actualDuration < 0) actualDuration = 0;
       }
 
-      const actualDuration = duration || 
-        (call.startedAt ? Math.floor((new Date() - new Date(call.startedAt)) / 1000) : 0);
+      // Determine final status
+      let finalStatus = call.status;
+      
+      if (callEndStatus) {
+        finalStatus = callEndStatus;
+      } else if (call.status === 'ringing' && (!call.answeredBy || call.answeredBy.length === 0)) {
+        // Check if enough time passed to mark as missed
+        const callAge = Date.now() - new Date(call.startedAt).getTime();
+        finalStatus = callAge > 60000 ? 'missed' : 'cancelled';
+      } else if (call.status === 'ongoing' || call.status === 'in-progress') {
+        finalStatus = actualDuration > 0 ? 'completed' : 'failed';
+      }
 
-      call.status = 'completed';
+      // Update call record
+      call.status = finalStatus;
       call.endedAt = new Date();
-      call.duration = actualDuration;
-
-      if (call.status === 'ringing' && (!call.answeredBy || call.answeredBy.length === 0)) {
-        call.status = 'missed';
+      if (actualDuration > 0) {
+        call.duration = actualDuration;
       }
 
       await call.save();
 
-      const populatedCall = await Call.findByPk(callId, {
-        include: [{
-          model: User,
-          as: 'participants',
-          attributes: ['id', 'username', 'avatar', 'socketIds'],
-          through: { attributes: [] }
-        }]
-      });
-
-      if (req.io && populatedCall && populatedCall.participants) {
-        const user = await User.findByPk(userId);
-
-        for (const participant of populatedCall.participants) {
-          await notifyUser(req.io, participant.id, 'call:ended', {
+      // Notify all participants about call end
+      if (req.io) {
+        const user = await User.findByPk(userId, { attributes: ['id', 'username'] });
+        for (const pid of (call.participants || [])) {
+          await notifyUser(req.io, pid, 'call:ended', {
             callId: call.id,
-            endedBy: {
-              id: user.id,
-              username: user.username,
-            },
+            endedBy: { id: user.id, username: user.username },
             duration: actualDuration,
-            status: call.status,
+            status: finalStatus,
             timestamp: new Date(),
           });
         }
@@ -1264,7 +1191,7 @@ router.post(
         data: {
           callId: call.id,
           duration: actualDuration,
-          status: call.status,
+          status: finalStatus,
         },
       });
     } catch (error) {
