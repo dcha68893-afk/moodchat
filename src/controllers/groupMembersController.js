@@ -352,7 +352,11 @@ class GroupMembersController {
     try {
       const { groupId } = req.params;
       const userId = req.user.id;
-      const { inviteeId, role = 'member', message } = req.body;
+      // Accept both inviteeId and targetUserId (frontend uses both field names)
+      const rawBody = req.body;
+      const inviteeId = rawBody.inviteeId || rawBody.targetUserId;
+      const role = rawBody.role || 'member';
+      const message = rawBody.message || '';
 
       if (!groupId) {
         throw new AppError('Group ID is required', 400);
@@ -1257,6 +1261,47 @@ class GroupMembersController {
       } else {
         next(new AppError('Failed to export members list', 500));
       }
+    }
+  }
+
+
+  /**
+   * Get all invitations received by the current user across all groups
+   * GET /api/group-members/invitations  (called by invitation panel)
+   */
+  async getUserInvitations(req, res, next) {
+    try {
+      const userId = req.user.id;
+      const { status = 'pending' } = req.query;
+      const result = await groupMembersService.getUserInvitations(userId, status);
+      res.status(200).json({
+        success: true,
+        message: 'User invitations retrieved successfully',
+        data: result
+      });
+    } catch (error) {
+      logger.error('Get user invitations controller error:', error);
+      next(new (require('../middleware/errorHandler').AppError)('Failed to get user invitations', 500));
+    }
+  }
+
+  /**
+   * Get all invitations SENT by the current user for a group
+   * GET /api/group-members/:groupId/invitations/sent
+   */
+  async getSentInvitations(req, res, next) {
+    try {
+      const { groupId } = req.params;
+      const userId = req.user.id;
+      const result = await groupMembersService.getSentInvitations(groupId, userId);
+      res.status(200).json({
+        success: true,
+        message: 'Sent invitations retrieved successfully',
+        data: result
+      });
+    } catch (error) {
+      logger.error('Get sent invitations controller error:', error);
+      next(new (require('../middleware/errorHandler').AppError)('Failed to get sent invitations', 500));
     }
   }
 }

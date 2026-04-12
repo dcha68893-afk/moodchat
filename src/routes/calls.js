@@ -5,9 +5,9 @@ const router = express.Router();
 
 // Import database models
 const db = require('../models');
-const User = db.User || db.Users;
-const Chat = db.Chat;
-const Call = db.Call;
+const User = db.Users || db.User;
+const Chat = db.Chats || db.Chat;
+const Call = db.Calls || db.Call;
 
 // Import middleware
 const { apiRateLimiter } = require('../middleware/rateLimiter');
@@ -24,10 +24,11 @@ console.log('✅ Calls routes initialized');
 // Helper function to check authentication
 const checkAuth = (req, res) => {
   if (!req.user || (!req.user.userId && !req.user.id)) {
-    return res.status(401).json({
+    res.status(401).json({
       status: 'error',
       message: 'Authentication required'
     });
+    return null; // signal failure with null
   }
   const userId = req.user.userId || req.user.id;
   return { userId };
@@ -97,7 +98,7 @@ router.get(
   asyncHandler(async (req, res) => {
     try {
       const auth = checkAuth(req, res);
-      if (auth.status) return auth;
+      if (!auth) return;
       const userId = auth.userId;
 
       if (!checkModels(res)) return;
@@ -135,7 +136,7 @@ router.post(
   asyncHandler(async (req, res) => {
     try {
       const auth = checkAuth(req, res);
-      if (auth.status) return auth;
+      if (!auth) return;
       const userId = auth.userId;
 
       if (!checkModels(res)) return;
@@ -190,6 +191,114 @@ router.post(
   })
 );
 
+// ========== ROOT POST / — called by chat.html CALL_INITIATE handler ==========
+// chat.html does: POST /calls  (no sub-path).  This handler is the entry point
+// for every outgoing call started from the friends / messages modules.
+router.post(
+  '/',
+  apiRateLimiter,
+  asyncHandler(async (req, res) => {
+    try {
+      const auth = checkAuth(req, res);
+      if (!auth) return;
+      const userId = auth.userId;
+
+      if (!checkModels(res)) return;
+
+      // Normalise call type: frontend sends 'voice' but DB stores 'audio'
+      const rawType  = req.body.callType || req.body.type || 'audio';
+      const callType = rawType === 'voice' ? 'audio' : rawType;
+
+      const isGroupCall    = req.body.isGroupCall || false;
+      const participantIds = req.body.participantIds;              // array sent by parent
+      const calleeId       = req.body.calleeId ||
+        (Array.isArray(participantIds) && participantIds.length === 1
+          ? participantIds[0]
+          : null);
+
+      if (!calleeId && !isGroupCall) {
+        return res.status(400).json({
+          success: false,
+          message: 'calleeId or participantIds is required'
+        });
+      }
+
+      // Lazy-require to avoid circular-dependency issues at startup
+      const wsService   = require('../services/webSocketService');
+      const callService = require('../services/callService');
+
+      // ── Group call path ──────────────────────────────────────────────────
+      if (isGroupCall && Array.isArray(participantIds) && participantIds.length > 1) {
+        const call = await callService.initiateGroupCall(
+          userId,
+          participantIds.map(Number),
+          callType,
+          null
+        );
+
+        participantIds.forEach(id => {
+          wsService.notifyCallInitiated(parseInt(id), {
+            callId:       call.id,
+            callerId:     userId,
+            callerName:   req.user.username || 'Unknown',
+            callerAvatar: req.user.avatar   || null,
+            isGroupCall:  true,
+            callType,
+            timestamp:    Date.now()
+          });
+        });
+
+        return res.status(201).json({
+          success: true,
+          message: 'Group call initiated successfully',
+          data: { call }
+        });
+      }
+
+      // ── 1-to-1 call path ────────────────────────────────────────────────
+      const targetId = parseInt(calleeId);
+      const isOnline = wsService.isUserOnline(targetId);
+
+      const call = await callService.initiateCall(userId, targetId, callType, null);
+
+      if (!isOnline) {
+        // Receiver offline — record as missed so history still shows it
+        if (call && call.update) {
+          await call.update({ status: 'missed', endedAt: new Date() });
+        }
+        return res.status(200).json({
+          success: false,
+          offline: true,
+          message: 'User is currently offline. They will be notified when they reconnect.',
+          data: { call }
+        });
+      }
+
+      wsService.notifyCallInitiated(targetId, {
+        callId:       call.id,
+        callerId:     userId,
+        callerName:   call.callInitiatorUser?.username || req.user.username || 'Unknown',
+        callerAvatar: call.callInitiatorUser?.avatar   || req.user.avatar   || null,
+        callType,
+        timestamp:    Date.now()
+      });
+
+      return res.status(201).json({
+        success: true,
+        message: 'Call initiated successfully',
+        data: { call }
+      });
+
+    } catch (error) {
+      console.error('[POST /calls] Error:', error.message);
+      return res.status(500).json({
+        success: false,
+        message: error.message || 'Failed to initiate call'
+      });
+    }
+  })
+);
+
 // ========== FIXED /history ROUTE ==========
 router.get(
   '/history',
@@ -197,7 +306,7 @@ router.get(
   asyncHandler(async (req, res) => {
     try {
       const auth = checkAuth(req, res);
-      if (auth.status) return auth;
+      if (!auth) return;
       const userId = auth.userId;
 
       if (!checkModels(res)) return;
@@ -216,10 +325,10 @@ router.get(
       const offset = (parseInt(page) - 1) * parseInt(limit);
       const parsedLimit = parseInt(limit);
 
-      // FIXED: Use Op.contains for ARRAY column
+      // Include all terminated calls (endedAt set OR terminal status)
       const where = {
         participants: { [Op.contains]: [userId] },
-        endedAt: { [Op.ne]: null },
+        status: { [Op.in]: ['completed', 'missed', 'cancelled', 'rejected', 'failed'] },
       };
 
       if (callType && callType !== 'all') {
@@ -381,7 +490,7 @@ router.get(
   asyncHandler(async (req, res) => {
     try {
       const auth = checkAuth(req, res);
-      if (auth.status) return auth;
+      if (!auth) return;
       const userId = auth.userId;
 
       if (!checkModels(res)) return;
@@ -489,7 +598,7 @@ router.get(
   asyncHandler(async (req, res) => {
     try {
       const auth = checkAuth(req, res);
-      if (auth.status) return auth;
+      if (!auth) return;
       const userId = auth.userId;
 
       if (!checkModels(res)) return;
@@ -616,7 +725,7 @@ router.delete(
   asyncHandler(async (req, res) => {
     try {
       const auth = checkAuth(req, res);
-      if (auth.status) return auth;
+      if (!auth) return;
       const userId = auth.userId;
 
       if (!checkModels(res)) return;
@@ -700,7 +809,7 @@ router.post(
   asyncHandler(async (req, res) => {
     try {
       const auth = checkAuth(req, res);
-      if (auth.status) return auth;
+      if (!auth) return;
       const userId = auth.userId;
 
       if (!checkModels(res)) return;
@@ -878,7 +987,7 @@ router.get(
   asyncHandler(async (req, res) => {
     try {
       const auth = checkAuth(req, res);
-      if (auth.status) return auth;
+      if (!auth) return;
       const userId = auth.userId;
 
       if (!checkModels(res)) return;
@@ -953,7 +1062,7 @@ router.post(
   asyncHandler(async (req, res) => {
     try {
       const auth = checkAuth(req, res);
-      if (auth.status) return auth;
+      if (!auth) return;
       const userId = auth.userId;
 
       if (!checkModels(res)) return;
@@ -1024,7 +1133,7 @@ router.post(
   asyncHandler(async (req, res) => {
     try {
       const auth = checkAuth(req, res);
-      if (auth.status) return auth;
+      if (!auth) return;
       const userId = auth.userId;
 
       if (!checkModels(res)) return;
@@ -1111,7 +1220,7 @@ router.post(
   asyncHandler(async (req, res) => {
     try {
       const auth = checkAuth(req, res);
-      if (auth.status) return auth;
+      if (!auth) return;
       const userId = auth.userId;
 
       if (!checkModels(res)) return;

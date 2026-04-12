@@ -104,18 +104,21 @@ module.exports = (sequelize, DataTypes) => {
       // ── NEW: tracks who answered / declined / read this call ──────────────
       answeredBy: {
         type: DataTypes.ARRAY(DataTypes.INTEGER),
+        field: 'answered_by',
         defaultValue: [],
         allowNull: false,
         comment: 'User IDs that answered this call',
       },
       declinedBy: {
         type: DataTypes.ARRAY(DataTypes.INTEGER),
+        field: 'declined_by',
         defaultValue: [],
         allowNull: false,
         comment: 'User IDs that declined / rejected this call',
       },
       readBy: {
         type: DataTypes.ARRAY(DataTypes.INTEGER),
+        field: 'read_by',
         defaultValue: [],
         allowNull: false,
         comment: 'User IDs that have read/acknowledged a missed call notification',
@@ -148,18 +151,12 @@ module.exports = (sequelize, DataTypes) => {
       underscored: false,
       freezeTableName: true,
       indexes: [
-        {
-          fields: ['chatId'],
-        },
-        {
-          fields: ['callerId'],
-        },
-        {
-          fields: ['receiverId'],
-        },
-        {
-          fields: ['status'],
-        }
+        { fields: ['chatId'] },
+        { fields: ['callerId'] },
+        { fields: ['receiverId'] },
+        { fields: ['status'] },
+        { fields: ['createdAt'] },
+        { fields: ['receiverId', 'status'], name: 'calls_receiver_status_idx' }
       ],
     }
   );
@@ -222,7 +219,7 @@ module.exports = (sequelize, DataTypes) => {
   // Static methods (PRESERVED)
   Calls.getActiveCalls = async function (chatId = null) {
     const where = {
-      status: ['initiated', 'ringing', 'in-progress'],
+      status: { [Op.in]: ['initiated', 'ringing', 'in-progress'] },
     };
 
     if (chatId) {
@@ -313,7 +310,7 @@ module.exports = (sequelize, DataTypes) => {
     return await this.findOne({
       where: {
         chatId: chatId,
-        status: ['initiated', 'ringing', 'in-progress'],
+        status: { [Op.in]: ['initiated', 'ringing', 'in-progress'] },
       },
     });
   };

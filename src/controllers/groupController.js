@@ -416,12 +416,14 @@ async getUserGroups(req, res, next) {
         sortOrder = 'desc'
       } = req.query;
 
-      if (!query) {
-        throw new AppError('Search query is required', 400);
+      // query is optional when called from Discover panel (browsing all public groups)
+      // Only reject if query is provided but invalid
+      if (query !== undefined && query !== null && typeof query !== 'string') {
+        throw new AppError('Invalid search query', 400);
       }
 
       const options = {
-        query,
+        query: query || '',
         page: parseInt(page),
         limit: parseInt(limit),
         privacy,

@@ -72,20 +72,22 @@ class WebSocketService {
     setTimeout(async () => {
       try {
         const { Calls } = require('../models');
+        const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
         const missedCalls = await Calls.findAll({
           where: {
             receiverId: userId,
             status: 'missed',
-            readBy: { [Op.not]: { [Op.contains]: [userId] } },
-            createdAt: { [Op.gt]: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) } // last 7 days
+            createdAt: { [Op.gt]: sevenDaysAgo }
           },
           limit: 10,
           order: [['createdAt', 'DESC']]
         });
+        // Filter out ones already read by this user (readBy is an array column)
+        const unreadMissed = missedCalls.filter(c => !c.readBy || !c.readBy.includes(userId));
         
-        if (missedCalls.length > 0) {
+        if (unreadMissed.length > 0) {
           socket.emit('missed_calls_on_reconnect', {
-            calls: missedCalls.map(c => ({
+            calls: unreadMissed.map(c => ({
               callId: c.id,
               callerId: c.callerId,
               callType: c.type,

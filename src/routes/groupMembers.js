@@ -6,11 +6,19 @@ const groupMembersController = require('../controllers/groupMembersController');
 const { authenticateToken } = require(path.join(__dirname, '../middleware/auth'));
 const { apiRateLimiter } = require('../middleware/rateLimiter');
 
-// FIXED: Use the unified authentication middleware
-
+// FIXED: Apply authentication middleware to ALL routes below
+router.use(authenticateToken);
 
 console.log('✅ Group Members routes initialized');
 
+// ── USER-LEVEL INVITATION ROUTES ─────────────────────────────────────────────
+// These must come BEFORE /:groupId routes to avoid Express treating
+// "invitations" as a groupId parameter.
+
+// GET /api/group-members/invitations?status=pending  — user's received invites
+router.get('/invitations', apiRateLimiter, groupMembersController.getUserInvitations);
+
+// ── GROUP-SCOPED ROUTES ───────────────────────────────────────────────────────
 // Get group members
 router.get('/:groupId/members', apiRateLimiter, groupMembersController.getGroupMembers);
 

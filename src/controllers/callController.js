@@ -6,7 +6,11 @@ class CallController {
   async initiateCall(req, res, next) {
     try {
       const callerId = req.user.id;
-      const { calleeId, calleeIds, chatId, type = 'audio' } = req.body;
+      const rawType = req.body.callType || req.body.type || 'audio';
+      const type = rawType === 'voice' ? 'audio' : rawType;
+      const chatId = req.body.chatId;
+      const calleeIds = req.body.calleeIds || (Array.isArray(req.body.participantIds) && req.body.participantIds.length > 1 ? req.body.participantIds : null);
+      const calleeId = req.body.calleeId || (Array.isArray(req.body.participantIds) && req.body.participantIds.length === 1 ? req.body.participantIds[0] : null);
       
       // Group call path
       if (Array.isArray(calleeIds) && calleeIds.length > 1) {
@@ -311,15 +315,18 @@ class CallController {
       }
 
       const result = await callService.getUserCalls(userId, options);
+      const callsList = Array.isArray(result) ? result : (result.calls || []);
+      const total = result.total || callsList.length;
 
       res.json({
         success: true,
         data: {
-          calls: result.calls || result,
+          calls: callsList,
           pagination: {
             page: parseInt(page),
             limit: parseInt(limit),
-            total: result.total || (result.calls ? result.calls.length : result.length),
+            total: total,
+            pages: Math.ceil(total / parseInt(limit)),
           },
         },
       });
@@ -429,6 +436,21 @@ class CallController {
       });
     } catch (error) {
       logger.error('Mark call as read controller error:', error);
+      next(error);
+    }
+  }
+
+  async getCallHistory(req, res, next) {
+    try {
+      const userId = req.user.id;
+      const { page = 1, limit = 50 } = req.query;
+      const result = await callService.getCallHistory
+        ? await callService.getCallHistory(userId, parseInt(page), parseInt(limit))
+        : await callService.getUserCalls(userId, { offset: (parseInt(page) - 1) * parseInt(limit), limit: parseInt(limit) });
+      const callsList = Array.isArray(result) ? result : (result.calls || []);
+      res.json({ success: true, data: { calls: callsList } });
+    } catch (error) {
+      logger.error('Get call history controller error:', error);
       next(error);
     }
   }

@@ -480,6 +480,82 @@ class GroupMembersService {
             throw new Error('Failed to export members list');
         }
     }
+
+    /**
+     * Get all invitations received by a user across all groups
+     * Used by: GET /api/group-members/invitations (invitation panel)
+     */
+    async getUserInvitations(userId, status = 'pending') {
+        let Invite;
+        try { const db2 = require('../models'); Invite = db2.models?.Invites || db2.Invites || db2.models?.Invite || db2.Invite; } catch (_) {}
+        if (!Invite) return { invitations: [], total: 0 };
+        try {
+            const where = { targetUserId: userId };
+            if (status && status !== 'all') where.status = status;
+            const rows = await Invite.findAll({
+                where,
+                include: [
+                    { model: Groups, as: 'group', attributes: ['id','name','description','avatar','purpose'], required: false },
+                    { model: Users,  as: 'inviter', attributes: ['id','username','avatar'], required: false },
+                ],
+                order: [['createdAt', 'DESC']],
+                limit: 50,
+            });
+            const invitations = rows.map(inv => {
+                const d = inv.toJSON ? inv.toJSON() : inv;
+                return {
+                    id: d.id,
+                    groupId: d.groupId,
+                    group: d.group || null,
+                    groupName: d.group?.name,
+                    inviter: d.inviter || null,
+                    inviterName: d.inviter?.username,
+                    status: d.status,
+                    role: d.role || 'member',
+                    message: d.message || '',
+                    createdAt: d.createdAt,
+                };
+            });
+            return { invitations, total: invitations.length };
+        } catch (e) {
+            return { invitations: [], total: 0 };
+        }
+    }
+
+    /**
+     * Get sent invitations for a group
+     */
+    async getSentInvitations(groupId, senderId) {
+        let Invite;
+        try { const db2 = require('../models'); Invite = db2.models?.Invites || db2.Invites || db2.models?.Invite || db2.Invite; } catch (_) {}
+        if (!Invite) return { invitations: [], total: 0 };
+        try {
+            const rows = await Invite.findAll({
+                where: { groupId, inviterId: senderId },
+                include: [
+                    { model: Users, as: 'targetUser', attributes: ['id','username','avatar'], required: false },
+                ],
+                order: [['createdAt', 'DESC']],
+                limit: 50,
+            });
+            const invitations = rows.map(inv => {
+                const d = inv.toJSON ? inv.toJSON() : inv;
+                return {
+                    id: d.id,
+                    groupId: d.groupId,
+                    targetUserId: d.targetUserId,
+                    targetUser: d.targetUser || null,
+                    status: d.status,
+                    role: d.role || 'member',
+                    createdAt: d.createdAt,
+                };
+            });
+            return { invitations, total: invitations.length };
+        } catch (e) {
+            return { invitations: [], total: 0 };
+        }
+    }
+
 }
 
 module.exports = new GroupMembersService();

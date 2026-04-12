@@ -164,14 +164,22 @@ class CallService {
   async endCall(callId, userId) {
     if (!callId || !userId) throw new Error('callId and userId are required');
 
+    // Allow ending calls in any non-terminal state
     const call = await Call.findOne({
       where: {
         id:           callId,
-        participants: { [Op.contains]: [parseInt(userId)] },
-        status:       { [Op.in]: ['in-progress', 'ringing', 'initiated'] },
+        [Op.or]: [
+          { participants: { [Op.contains]: [parseInt(userId)] } },
+          { callerId: parseInt(userId) },
+          { receiverId: parseInt(userId) },
+        ],
       },
     });
     if (!call) throw new Error('Call not found or not in progress');
+    // If already ended, just return it without error
+    if (['completed','missed','cancelled','rejected','failed'].includes(call.status)) {
+      return this._format(call);
+    }
 
     const endedAt = new Date();
     const start   = call.startedAt ? new Date(call.startedAt) : endedAt;
@@ -288,22 +296,30 @@ class CallService {
 
     const { status, limit = 50, offset = 0 } = options;
     const whereClause = {
-      participants: { [Op.contains]: [parseInt(userId)] },
+      [Op.or]: [
+        { callerId: parseInt(userId) },
+        { receiverId: parseInt(userId) },
+        { participants: { [Op.contains]: [parseInt(userId)] } },
+      ],
     };
 
     if (status) {
       whereClause.status = status;
     }
 
-    const calls = await Call.findAll({
+    const { count, rows } = await Call.findAndCountAll({
       where: whereClause,
       include: this._buildIncludes(),
-      order: [['startedAt', 'DESC']],
+      order: [['createdAt', 'DESC']],
       limit: parseInt(limit),
       offset: parseInt(offset),
+      distinct: true,
     });
 
-    return calls.map(call => this._format(call));
+    return {
+      calls: rows.map(call => this._format(call)),
+      total: count,
+    };
   }
 
   // ── initiateGroupCall ───────────────────────────────────────────────────────
@@ -461,6 +477,41 @@ class CallService {
     }
   }
 
+
+  // ── getMissedCalls ──────────────────────────────────────────────────────────
+  async getMissedCalls(userId, limit = 50) {
+    if (!userId) throw new Error('userId is required');
+    const calls = await Call.findAll({
+      where: {
+        receiverId: parseInt(userId),
+        status: 'missed',
+        createdAt: { [Op.gte]: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) }
+      },
+      include: this._buildIncludes(),
+      order: [['createdAt', 'DESC']],
+      limit: parseInt(limit),
+    });
+    return calls.map(c => this._format(c));
+  }
+
+  // ── markCallAsRead ──────────────────────────────────────────────────────────
+  async markCallAsRead(callId, userId) {
+    if (!callId || !userId) throw new Error('callId and userId are required');
+    const call = await Call.findOne({
+      where: {
+        id: callId,
+        participants: { [Op.contains]: [parseInt(userId)] },
+      },
+    });
+    if (!call) throw new Error('Call not found or access denied');
+    if (!call.readBy) call.readBy = [];
+    if (!call.readBy.includes(parseInt(userId))) {
+      call.readBy = [...call.readBy, parseInt(userId)];
+      await call.save();
+    }
+    return { success: true };
+  }
+
   // ── _format ─────────────────────────────────────────────────────────────────
   _format(call) {
     const obj = call.toJSON ? call.toJSON() : { ...call.dataValues };
@@ -487,6 +538,11 @@ class CallService {
     } else {
       obj.displayDuration = '0:00';
     }
+    
+    // Build otherParticipants for frontend name resolution
+    obj.otherParticipants = [];
+    if (obj.callInitiatorUser) obj.otherParticipants.push({ ...obj.callInitiatorUser, displayName: obj.callInitiatorUser.username });
+    if (obj.callTargetUser) obj.otherParticipants.push({ ...obj.callTargetUser, displayName: obj.callTargetUser.username });
     
     return obj;
   }
