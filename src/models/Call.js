@@ -361,5 +361,75 @@ module.exports = (sequelize, DataTypes) => {
     }
   };
 
+  // ── AUTO-MIGRATION: add ALL missing columns if they don't exist ───────────
+  // Covers every column added after the initial table creation so the server
+  // never crashes with "column X does not exist".
+  // Runs once per process via a flag on the sequelize instance (idempotent).
+  if (!sequelize._callsColumnsMigrated) {
+    sequelize._callsColumnsMigrated = true;
+    setImmediate(async () => {
+      try {
+        const qi = sequelize.getQueryInterface();
+        const tableDesc = await qi.describeTable('Calls').catch(() => null);
+        if (!tableDesc) return; // table doesn't exist yet — sync will create it
+
+        // ── CRITICAL: ensure chatId allows NULL (was originally NOT NULL in some migrations)
+        try {
+          await sequelize.query(`ALTER TABLE "Calls" ALTER COLUMN "chatId" DROP NOT NULL;`);
+        } catch(e) { /* already nullable — ignore */ }
+
+        // Each entry: { name: DB column name, sql: column definition, aliases: [] }
+        const colsToAdd = [
+          // ── Array tracking fields (camelCase model → snake_case DB column) ──
+          { name: 'answered_by',        sql: "INTEGER[] NOT NULL DEFAULT '{}'" },
+          { name: 'declined_by',        sql: "INTEGER[] NOT NULL DEFAULT '{}'" },
+          { name: 'read_by',            sql: "INTEGER[] NOT NULL DEFAULT '{}'" },
+          { name: 'participantsJoined', sql: "INTEGER[] NOT NULL DEFAULT '{}'" },
+          { name: 'participantsLeft',   sql: "INTEGER[] NOT NULL DEFAULT '{}'" },
+
+          // ── WebRTC signalling fields ──────────────────────────────────────
+          { name: 'sdpOffer',    sql: 'TEXT' },
+          { name: 'sdpAnswer',   sql: 'TEXT' },
+          { name: 'iceCandidates', sql: "JSONB NOT NULL DEFAULT '[]'" },
+
+          // ── Recording / transcript links ───────────────────────────────────
+          { name: 'recordingUrl',  sql: 'VARCHAR(255)' },
+          { name: 'transcriptUrl', sql: 'VARCHAR(255)' },
+
+          // ── Metadata JSONB blob ────────────────────────────────────────────
+          { name: 'metadata', sql: "JSONB NOT NULL DEFAULT '{}'" },
+
+          // ── Group-call flag ────────────────────────────────────────────────
+          { name: 'isGroupCall', sql: 'BOOLEAN NOT NULL DEFAULT FALSE' },
+
+          // ── Error reason ──────────────────────────────────────────────────
+          { name: 'errorReason', sql: 'VARCHAR(200)' },
+        ];
+
+        for (const col of colsToAdd) {
+          // Check both the exact name and common camelCase/snake_case variants
+          const present = tableDesc[col.name]
+            || tableDesc[col.name.toLowerCase()]
+            || tableDesc[col.name.replace(/([A-Z])/g, '_$1').toLowerCase().replace(/^_/, '')];
+
+          if (!present) {
+            try {
+              await sequelize.query(
+                `ALTER TABLE "Calls" ADD COLUMN IF NOT EXISTS "${col.name}" ${col.sql};`
+              );
+              console.log(`[Call model] ✅ Added missing column: ${col.name}`);
+            } catch (colErr) {
+              // Non-fatal: column may have been added by a concurrent process
+              console.warn(`[Call model] Could not add column ${col.name} (non-fatal):`, colErr.message);
+            }
+          }
+        }
+      } catch (err) {
+        console.error('[Call model] Auto-migration error (non-fatal):', err.message);
+      }
+    });
+  }
+  // ──────────────────────────────────────────────────────────────────────────
+
   return Calls;
 };

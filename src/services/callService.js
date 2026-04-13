@@ -56,14 +56,28 @@ class CallService {
     if (!caller) throw new Error('Caller not found');
     if (!callee) throw new Error('Callee not found');
 
-    // Check callee not already in an active call
+    // CRITICAL: Auto-cleanup any stale calls involving EITHER party before checking
+    // This prevents "already in call" errors from leftover records
+    await this._forceCleanupStaleCallsForUsers([parseInt(callerId), parseInt(calleeId)]);
+
+    // Check callee not already in a genuine active call
     const activeCall = await Call.findOne({
       where: {
         participants: { [Op.contains]: [parseInt(calleeId)] },
         status:       { [Op.in]: ['ringing', 'initiated', 'in-progress'] },
       },
     });
-    if (activeCall) throw new Error('Callee is already in a call');
+    if (activeCall) {
+      // One more safety check: is this call actually stale (older than timeout)?
+      const callAge = (Date.now() - new Date(activeCall.startedAt || activeCall.createdAt).getTime()) / 1000;
+      if (callAge > CALL_TIMEOUT_SECONDS + 10) {
+        // Force-terminate the stale call
+        await activeCall.update({ status: 'missed', endedAt: new Date() });
+        console.log(`[CallService] Force-terminated stale call ${activeCall.id} (age: ${callAge}s)`);
+      } else {
+        throw new Error('Callee is already in a call');
+      }
+    }
 
     const allParticipants = [parseInt(callerId), parseInt(calleeId)];
 
@@ -78,7 +92,10 @@ class CallService {
       answeredBy:   [],
       declinedBy:   [],
       readBy:       [],
-      startedAt:    new Date(),
+      // NOTE: startedAt is set when the call is ANSWERED, not when initiated.
+      // We store ringStartedAt in metadata for timeout tracking.
+      startedAt:    null,
+      metadata:     { ringStartedAt: new Date().toISOString() },
     });
 
     return this._format(call, caller, callee);
@@ -110,7 +127,8 @@ class CallService {
       call.answeredBy = [...call.answeredBy, parseInt(userId)];
     }
     call.status    = 'in-progress';
-    call.startedAt = call.startedAt || new Date();
+    // startedAt = when the call was actually answered (not when it started ringing)
+    call.startedAt = new Date();
     await call.save();
 
     return this._format(call);
@@ -331,7 +349,8 @@ class CallService {
       throw new Error(`Group call cannot have more than ${MAX_GROUP_CALL_PARTICIPANTS} participants`);
     if (!['audio', 'video'].includes(callType)) throw new Error('Invalid call type');
 
-    // Check nobody already in a call
+    // Check nobody already in a call — but first cleanup stale ones
+    await this._forceCleanupStaleCallsForUsers(allIds);
     const active = await Call.findOne({
       where: {
         participants: { [Op.overlap]: allIds },
@@ -419,17 +438,55 @@ class CallService {
     return this._format(call);
   }
 
+  // ── _forceCleanupStaleCallsForUsers ─────────────────────────────────────────
+  // Called before every new call to clear any orphaned ringing/initiated calls
+  // for the involved users. This is the main fix for "already in a call" false positives.
+  async _forceCleanupStaleCallsForUsers(userIds) {
+    try {
+      const stale = await Call.findAll({
+        where: {
+          [Op.or]: userIds.map(id => ({
+            participants: { [Op.contains]: [id] }
+          })),
+          status: { [Op.in]: ['ringing', 'initiated', 'in-progress'] },
+          // Any non-terminal call older than timeout + buffer is stale
+          createdAt: { [Op.lt]: new Date(Date.now() - (CALL_TIMEOUT_SECONDS + 30) * 1000) },
+        },
+      });
+      for (const call of stale) {
+        const wasAnswered = call.answeredBy && call.answeredBy.length > 0;
+        await call.update({
+          status: wasAnswered ? 'completed' : 'missed',
+          endedAt: new Date(),
+        });
+        console.log(`[CallService] Force-cleaned stale call ${call.id} → ${wasAnswered ? 'completed' : 'missed'}`);
+        try {
+          const wsService = require('./webSocketService');
+          for (const uid of call.participants || []) {
+            wsService.sendToUser(uid, 'call_force_ended', {
+              callId: call.id,
+              reason: 'stale_cleanup',
+              timestamp: new Date(),
+            });
+          }
+        } catch (_) {}
+      }
+    } catch (err) {
+      console.warn('[CallService] _forceCleanupStaleCallsForUsers error (non-fatal):', err.message);
+    }
+  }
+
   // ── _cleanupTimedOut ────────────────────────────────────────────────────────
-  // FIXED BUG 7: Added WebSocket notifications for timed-out calls
   async _cleanupTimedOut() {
     try {
       const cutoff = new Date(Date.now() - CALL_TIMEOUT_SECONDS * 1000);
-      
-      // Find all timed-out calls first so we can notify participants
+
+      // Find calls that have been ringing beyond timeout.
+      // Since startedAt is now set at answer time, we use createdAt for ringing-timeout.
       const timedOutCalls = await Call.findAll({
         where: {
           status: { [Op.in]: ['ringing', 'initiated'] },
-          startedAt: { [Op.lt]: cutoff },
+          createdAt: { [Op.lt]: cutoff },
           endedAt: null,
         },
         include: this._buildIncludes(),

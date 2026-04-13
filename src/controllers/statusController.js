@@ -11,7 +11,12 @@ class StatusController {
    */
   async createStatus(req, res, next) {
     try {
-      const userId = req.user.id;
+      const userId = req.user?.userId || req.user?.id;
+
+      if (!userId) {
+        throw new AppError('Authentication required', 401);
+      }
+
       const { content, mediaUrl, mediaType, background, expiresAt, privacy } = req.body;
 
       if (!content && !mediaUrl) {
@@ -69,7 +74,7 @@ class StatusController {
   async getStatusById(req, res, next) {
     try {
       const { statusId } = req.params;
-      const userId = req.user.id;
+      const userId = req.user?.userId || req.user?.id;
 
       if (!statusId) {
         throw new AppError('Status ID is required', 400);
@@ -108,7 +113,7 @@ class StatusController {
   async updateStatus(req, res, next) {
     try {
       const { statusId } = req.params;
-      const userId = req.user.id;
+      const userId = req.user?.userId || req.user?.id;
       const updateData = req.body;
 
       if (!statusId) {
@@ -164,7 +169,7 @@ class StatusController {
   async deleteStatus(req, res, next) {
     try {
       const { statusId } = req.params;
-      const userId = req.user.id;
+      const userId = req.user?.userId || req.user?.id;
 
       if (!statusId) {
         throw new AppError('Status ID is required', 400);
@@ -260,7 +265,7 @@ class StatusController {
    */
   async getTimeline(req, res, next) {
     try {
-      const userId = req.user.id;
+      const userId = req.user?.userId || req.user?.id;
       const { 
         page = 1, 
         limit = 20,
@@ -305,7 +310,7 @@ class StatusController {
   async likeStatus(req, res, next) {
     try {
       const { statusId } = req.params;
-      const userId = req.user.id;
+      const userId = req.user?.userId || req.user?.id;
 
       if (!statusId) {
         throw new AppError('Status ID is required', 400);
@@ -356,7 +361,7 @@ class StatusController {
   async unlikeStatus(req, res, next) {
     try {
       const { statusId } = req.params;
-      const userId = req.user.id;
+      const userId = req.user?.userId || req.user?.id;
 
       if (!statusId) {
         throw new AppError('Status ID is required', 400);
@@ -406,7 +411,7 @@ class StatusController {
   async commentOnStatus(req, res, next) {
     try {
       const { statusId } = req.params;
-      const userId = req.user.id;
+      const userId = req.user?.userId || req.user?.id;
       const { content, parentCommentId } = req.body;
 
       if (!statusId) {
@@ -462,7 +467,7 @@ class StatusController {
   async getStatusComments(req, res, next) {
     try {
       const { statusId } = req.params;
-      const userId = req.user.id;
+      const userId = req.user?.userId || req.user?.id;
       const { 
         page = 1, 
         limit = 50,
@@ -517,7 +522,7 @@ class StatusController {
   async deleteComment(req, res, next) {
     try {
       const { statusId, commentId } = req.params;
-      const userId = req.user.id;
+      const userId = req.user?.userId || req.user?.id;
 
       if (!statusId || !commentId) {
         throw new AppError('Status ID and Comment ID are required', 400);
@@ -564,7 +569,7 @@ class StatusController {
   async shareStatus(req, res, next) {
     try {
       const { statusId } = req.params;
-      const userId = req.user.id;
+      const userId = req.user?.userId || req.user?.id;
       const { caption, privacy } = req.body;
 
       if (!statusId) {
@@ -616,7 +621,7 @@ class StatusController {
   async getStatusStatistics(req, res, next) {
     try {
       const { statusId } = req.params;
-      const userId = req.user.id;
+      const userId = req.user?.userId || req.user?.id;
 
       if (!statusId) {
         throw new AppError('Status ID is required', 400);
@@ -655,7 +660,7 @@ class StatusController {
   async reportStatus(req, res, next) {
     try {
       const { statusId } = req.params;
-      const userId = req.user.id;
+      const userId = req.user?.userId || req.user?.id;
       const { reason, description } = req.body;
 
       if (!statusId) {
@@ -700,7 +705,7 @@ class StatusController {
    */
   async getTrendingStatuses(req, res, next) {
     try {
-      const userId = req.user.id;
+      const userId = req.user?.userId || req.user?.id;
       const { 
         page = 1, 
         limit = 20,
@@ -745,7 +750,7 @@ class StatusController {
   async pinStatus(req, res, next) {
     try {
       const { statusId } = req.params;
-      const userId = req.user.id;
+      const userId = req.user?.userId || req.user?.id;
 
       if (!statusId) {
         throw new AppError('Status ID is required', 400);
@@ -788,7 +793,7 @@ class StatusController {
   async unpinStatus(req, res, next) {
     try {
       const { statusId } = req.params;
-      const userId = req.user.id;
+      const userId = req.user?.userId || req.user?.id;
 
       if (!statusId) {
         throw new AppError('Status ID is required', 400);

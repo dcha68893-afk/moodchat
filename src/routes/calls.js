@@ -1214,6 +1214,7 @@ router.post(
   })
 );
 
+// ========== UPDATED POST /:callId/end WITH FORCE END NOTIFICATIONS ==========
 router.post(
   '/:callId/end',
   apiRateLimiter,
@@ -1280,15 +1281,29 @@ router.post(
 
       await call.save();
 
-      // Notify all participants about call end
+      // Get the user who ended the call
+      const user = await User.findByPk(userId, { attributes: ['id', 'username'] });
+      const allParticipants = call.participants || [];
+
+      // CRITICAL: Notify ALL participants about call end with both regular and force end events
       if (req.io) {
-        const user = await User.findByPk(userId, { attributes: ['id', 'username'] });
-        for (const pid of (call.participants || [])) {
+        for (const pid of allParticipants) {
+          // Send regular call:ended event
           await notifyUser(req.io, pid, 'call:ended', {
             callId: call.id,
             endedBy: { id: user.id, username: user.username },
             duration: actualDuration,
             status: finalStatus,
+            timestamp: new Date(),
+          });
+
+          // ALSO send force end event to ensure UI resets immediately on all clients
+          await notifyUser(req.io, pid, 'call:force_end', {
+            callId: call.id,
+            endedBy: { id: user.id, username: user.username },
+            duration: actualDuration,
+            status: finalStatus,
+            forceEnd: true,
             timestamp: new Date(),
           });
         }

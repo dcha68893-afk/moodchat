@@ -1029,15 +1029,29 @@ class ToolsController {
   async createListing(req, res, next) {
     try {
       const { title, description, price, category, type, images, tags, stock, currency, metadata } = req.body;
-      if (!title || price === undefined) {
-        throw new AppError('title and price are required', 400);
+      // FIX: Only require title; price can be 0 (free listing)
+      if (!title) {
+        throw new AppError('title is required', 400);
       }
       const db = require('../models');
+      
+      // FIX: Map frontend type values to backend ENUM values
+      const typeMap = { 'services': 'service', 'digital': 'digital', 'premium': 'premium', 'physical': 'physical' };
+      const normalizedType = typeMap[type] || type || 'service';
+      
+      // FIX: Map frontend category to valid enum values
+      const validCategories = ['electronics', 'furniture', 'clothing', 'books', 'services', 'digital', 'premium', 'other'];
+      const normalizedCategory = validCategories.includes(category) ? category : (
+        normalizedType === 'digital' ? 'digital' : normalizedType === 'premium' ? 'premium' : 'services'
+      );
+      
       const listing = await db.Tool.create({
         sellerId: req.user.id,
-        title, description, price: parseFloat(price),
-        category: category || 'other',
-        type: type || 'physical',
+        title,
+        description,
+        price: price !== undefined && price !== null ? parseFloat(price) : 0,
+        category: normalizedCategory,
+        type: normalizedType,
         images: images || [],
         tags: tags || [],
         stock: stock !== undefined ? parseInt(stock) : null,
@@ -1046,7 +1060,13 @@ class ToolsController {
         status: 'active',
         available: true
       });
-      res.status(201).json({ success: true, message: 'Listing created', data: { listing } });
+      
+      // FIX: Normalize response to include userId for frontend compatibility
+      const listingData = listing.toJSON ? listing.toJSON() : listing;
+      listingData.userId = listingData.sellerId;
+      listingData.user = { id: listingData.sellerId, displayName: req.user.displayName || req.user.username || 'User' };
+      
+      res.status(201).json({ success: true, message: 'Listing created', data: { listing: listingData } });
     } catch (error) {
       logger.error('createListing error:', error);
       next(error);

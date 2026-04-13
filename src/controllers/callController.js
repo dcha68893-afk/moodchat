@@ -1,6 +1,50 @@
 const callService = require('../services/callService');
 const { AppError } = require('../middleware/errorHandler');
 const logger = require('../utils/logger');
+const db = require('../models');
+
+/**
+ * Find or create a direct 1:1 chat between two users.
+ * Returns the chatId (integer). Falls back to null (safe) if Chat model
+ * is unavailable so the call can still proceed without a chatId.
+ */
+async function findOrCreateDirectChat(userId1, userId2) {
+  try {
+    const Chat = db.Chats || db.Chat;
+    const ChatParticipant = db.ChatParticipants || db.ChatParticipant;
+    if (!Chat || !ChatParticipant) return null;
+
+    // Look for an existing private chat that contains both users
+    const { Op } = require('sequelize');
+    const existing = await Chat.findOne({
+      where: { type: 'private' },
+      include: [{
+        model: ChatParticipant,
+        as: 'participants',
+        where: { userId: { [Op.in]: [parseInt(userId1), parseInt(userId2)] } },
+        required: true
+      }],
+      having: db.sequelize.literal('COUNT(DISTINCT "participants"."userId") = 2'),
+      group: ['"Chats"."id"']
+    });
+    if (existing) return existing.id;
+
+    // Create new direct chat
+    const chat = await Chat.create({
+      type: 'private',
+      name: null,
+      createdBy: parseInt(userId1)
+    });
+    await ChatParticipant.bulkCreate([
+      { chatId: chat.id, userId: parseInt(userId1), role: 'member' },
+      { chatId: chat.id, userId: parseInt(userId2), role: 'member' }
+    ]);
+    return chat.id;
+  } catch (err) {
+    logger.warn('findOrCreateDirectChat error (non-fatal):', err.message);
+    return null;
+  }
+}
 
 class CallController {
   async initiateCall(req, res, next) {
@@ -8,7 +52,7 @@ class CallController {
       const callerId = req.user.id;
       const rawType = req.body.callType || req.body.type || 'audio';
       const type = rawType === 'voice' ? 'audio' : rawType;
-      const chatId = req.body.chatId;
+      let chatId = req.body.chatId || null;
       const calleeIds = req.body.calleeIds || (Array.isArray(req.body.participantIds) && req.body.participantIds.length > 1 ? req.body.participantIds : null);
       const calleeId = req.body.calleeId || (Array.isArray(req.body.participantIds) && req.body.participantIds.length === 1 ? req.body.participantIds[0] : null);
       
@@ -48,6 +92,12 @@ class CallController {
         throw new AppError('calleeId is required', 400);
       }
 
+      // Auto-find or create a direct chat if chatId was not provided.
+      // This prevents the DB NOT NULL constraint error on the chatId column.
+      if (!chatId) {
+        chatId = await findOrCreateDirectChat(callerId, parseInt(calleeId));
+      }
+
       const wsService = require('../services/webSocketService');
       const isOnline = wsService.isUserOnline(parseInt(calleeId));
       
@@ -69,7 +119,7 @@ class CallController {
           success: false,
           offline: true,
           message: 'User is currently offline. They will be notified when they come back online.',
-          data: { call }
+          data: { call, receiverOnline: false },
         });
       }
 
@@ -96,6 +146,7 @@ class CallController {
         message: 'Call initiated successfully',
         data: {
           call,
+          receiverOnline: true,  // tells frontend to show "Ringing..." not "Calling..."
         },
       });
     } catch (error) {
@@ -339,10 +390,11 @@ class CallController {
   async getCallLink(req, res, next) {
     try {
       const { callId } = req.params;
-      const call = await callService.getCallById(callId, req.user.id);
+      await callService.getCallById(callId, req.user.id);
       
       const linkToken = Buffer.from(`${callId}:${Date.now()}:${req.user.id}`).toString('base64');
-      const callLink = `${process.env.FRONTEND_URL || window.location.origin}/join-call?token=${linkToken}&callId=${callId}`;
+      const frontendUrl = process.env.FRONTEND_URL || process.env.APP_URL || 'http://localhost:3000';
+      const callLink = `${frontendUrl}/join-call?token=${linkToken}&callId=${callId}`;
       
       res.json({ 
         success: true, 

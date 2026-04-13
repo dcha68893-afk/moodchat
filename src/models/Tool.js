@@ -210,27 +210,46 @@ module.exports = (sequelize, DataTypes) => {
     }
 
     const orderMap = {
-      newest:   [['createdAt', 'DESC']],
-      oldest:   [['createdAt', 'ASC']],
+      newest:     [['createdAt', 'DESC']],
+      oldest:     [['createdAt', 'ASC']],
       price_asc:  [['price', 'ASC']],
       price_desc: [['price', 'DESC']],
-      popular:  [['views', 'DESC']],
-      rating:   [['rating', 'DESC']],
+      popular:    [['views', 'DESC']],
+      rating:     [['rating', 'DESC']],
     };
     const order = orderMap[sort] || orderMap.newest;
     const offset = (page - 1) * limit;
+
+    // FIX: Gracefully skip seller include if association is not defined
+    const includeOpts = (Tool.associations && Tool.associations.seller)
+      ? [{ association: Tool.associations.seller, attributes: ['id', 'username', 'avatar', 'displayName'], required: false }]
+      : [];
 
     const { count, rows } = await this.findAndCountAll({
       where,
       order,
       limit,
       offset,
-      include: Tool.associations.seller
-        ? [{ association: Tool.associations.seller, attributes: ['id', 'username', 'avatar', 'displayName'] }]
-        : [],
+      include: includeOpts,
     });
 
-    return { listings: rows, total: count, page, limit, totalPages: Math.ceil(count / limit) };
+    // FIX: Normalize rows so frontend gets consistent userId/user fields
+    const listings = rows.map(row => {
+      const r = row.toJSON ? row.toJSON() : { ...row };
+      r.userId = r.sellerId;
+      if (!r.user && r.seller) {
+        r.user = {
+          id: r.seller.id,
+          displayName: r.seller.displayName || r.seller.username || 'User',
+          photoURL: r.seller.avatar || ''
+        };
+      } else if (!r.user) {
+        r.user = { id: r.sellerId, displayName: 'User', photoURL: '' };
+      }
+      return r;
+    });
+
+    return { listings, total: count, page, limit, totalPages: Math.ceil(count / limit) };
   };
 
   /**
@@ -238,13 +257,24 @@ module.exports = (sequelize, DataTypes) => {
    * Used by GET /api/marketplace/spotlight
    */
   Tool.getSpotlight = async function (limit = 10) {
-    return await this.findAll({
+    const includeOpts = (Tool.associations && Tool.associations.seller)
+      ? [{ association: Tool.associations.seller, attributes: ['id', 'username', 'avatar', 'displayName'], required: false }]
+      : [];
+    const rows = await this.findAll({
       where: { status: 'active', available: true, isSpotlight: true },
       order: [['createdAt', 'DESC']],
       limit,
-      include: Tool.associations.seller
-        ? [{ association: Tool.associations.seller, attributes: ['id', 'username', 'avatar', 'displayName'] }]
-        : [],
+      include: includeOpts,
+    });
+    return rows.map(row => {
+      const r = row.toJSON ? row.toJSON() : { ...row };
+      r.userId = r.sellerId;
+      if (!r.user && r.seller) {
+        r.user = { id: r.seller.id, displayName: r.seller.displayName || r.seller.username || 'User', photoURL: r.seller.avatar || '' };
+      } else if (!r.user) {
+        r.user = { id: r.sellerId, displayName: 'User', photoURL: '' };
+      }
+      return r;
     });
   };
 
@@ -253,13 +283,24 @@ module.exports = (sequelize, DataTypes) => {
    * Used by GET /api/marketplace/listings/premium
    */
   Tool.getPremiumListings = async function (limit = 20) {
-    return await this.findAll({
+    const includeOpts = (Tool.associations && Tool.associations.seller)
+      ? [{ association: Tool.associations.seller, attributes: ['id', 'username', 'avatar', 'displayName'], required: false }]
+      : [];
+    const rows = await this.findAll({
       where: { status: 'active', available: true, isPremium: true },
       order: [['createdAt', 'DESC']],
       limit,
-      include: Tool.associations.seller
-        ? [{ association: Tool.associations.seller, attributes: ['id', 'username', 'avatar', 'displayName'] }]
-        : [],
+      include: includeOpts,
+    });
+    return rows.map(row => {
+      const r = row.toJSON ? row.toJSON() : { ...row };
+      r.userId = r.sellerId;
+      if (!r.user && r.seller) {
+        r.user = { id: r.seller.id, displayName: r.seller.displayName || r.seller.username || 'User', photoURL: r.seller.avatar || '' };
+      } else if (!r.user) {
+        r.user = { id: r.sellerId, displayName: 'User', photoURL: '' };
+      }
+      return r;
     });
   };
 
@@ -279,15 +320,26 @@ module.exports = (sequelize, DataTypes) => {
    * Used by GET /api/marketplace/listings/saved
    */
   Tool.getSavedListings = async function (userId) {
-    return await this.findAll({
+    const includeOpts = (Tool.associations && Tool.associations.seller)
+      ? [{ association: Tool.associations.seller, attributes: ['id', 'username', 'avatar', 'displayName'], required: false }]
+      : [];
+    const rows = await this.findAll({
       where: {
         status: 'active',
         savedBy: { [Op.contains]: [userId] },
       },
       order: [['createdAt', 'DESC']],
-      include: Tool.associations.seller
-        ? [{ association: Tool.associations.seller, attributes: ['id', 'username', 'avatar', 'displayName'] }]
-        : [],
+      include: includeOpts,
+    });
+    return rows.map(row => {
+      const r = row.toJSON ? row.toJSON() : { ...row };
+      r.userId = r.sellerId;
+      if (!r.user && r.seller) {
+        r.user = { id: r.seller.id, displayName: r.seller.displayName || r.seller.username || 'User', photoURL: r.seller.avatar || '' };
+      } else if (!r.user) {
+        r.user = { id: r.sellerId, displayName: 'User', photoURL: '' };
+      }
+      return r;
     });
   };
 
