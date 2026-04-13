@@ -15,7 +15,7 @@ const User    = db.Users || db.User;
 const Chat    = db.Chats || db.Chat;
 
 const MAX_CALL_DURATION         = parseInt(process.env.MAX_CALL_DURATION)         || 3600;
-const CALL_TIMEOUT_SECONDS      = parseInt(process.env.CALL_TIMEOUT_SECONDS)      || 40; // Changed from 30 to 40 seconds
+const CALL_TIMEOUT_SECONDS      = parseInt(process.env.CALL_TIMEOUT_SECONDS)      || 120; // 2 minutes ring timeout
 const MAX_GROUP_CALL_PARTICIPANTS = parseInt(process.env.MAX_GROUP_CALL_PARTICIPANTS) || 10;
 
 // ─── helpers ─────────────────────────────────────────────────────────────────

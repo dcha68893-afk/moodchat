@@ -372,43 +372,82 @@ class WebSocketService {
   }
 
   notifyCallInitiated(userId, callData) {
+    // FIXED: emit 'call:incoming' so chat.html's wsService.on('call:incoming') fires
+    this.sendToUser(userId, 'call:incoming', callData);
+    // Also emit legacy name for any older listeners
     this.sendToUser(userId, 'call_initiated', callData);
   }
 
   notifyCallAnswered(chatId, data) {
+    // FIXED: emit both colon-format (for chat.html) and underscore (legacy)
+    this.io.to(`chat:${chatId}`).emit('call:answered', data);
     this.io.to(`chat:${chatId}`).emit('call_answered', data);
   }
 
   notifyCallRejected(targetId, data) {
     if (typeof targetId === 'number') {
+      // FIXED: emit both formats
+      this.sendToUser(targetId, 'call:rejected', data);
       this.sendToUser(targetId, 'call_rejected', data);
     } else {
+      this.io.to(`chat:${targetId}`).emit('call:rejected', data);
       this.io.to(`chat:${targetId}`).emit('call_rejected', data);
     }
   }
 
   notifyCallCancelled(chatId, data) {
+    this.io.to(`chat:${chatId}`).emit('call:cancelled', data);
     this.io.to(`chat:${chatId}`).emit('call_cancelled', data);
+    // Also notify all participants directly (chatId may be null)
+    if (data && data.participants) {
+      data.participants.forEach(uid => {
+        this.sendToUser(uid, 'call:cancelled', data);
+        this.sendToUser(uid, 'call_cancelled', data);
+      });
+    }
   }
 
   notifyCallEnded(chatId, data) {
-    this.io.to(`chat:${chatId}`).emit('call_ended', data);
+    // FIXED: emit both formats
+    if (chatId) {
+      this.io.to(`chat:${chatId}`).emit('call:ended', data);
+      this.io.to(`chat:${chatId}`).emit('call_ended', data);
+    }
+    // Also send directly to each participant for instant delivery
+    if (data && data.participants) {
+      data.participants.forEach(uid => {
+        this.sendToUser(uid, 'call:ended', data);
+        this.sendToUser(uid, 'call_ended', data);
+        this.sendToUser(uid, 'call_force_ended', data);
+      });
+    }
   }
 
   notifyCallJoined(chatId, data) {
+    this.io.to(`chat:${chatId}`).emit('call:joined', data);
     this.io.to(`chat:${chatId}`).emit('call_joined', data);
   }
 
   notifyCallLeft(chatId, data) {
+    this.io.to(`chat:${chatId}`).emit('call:left', data);
     this.io.to(`chat:${chatId}`).emit('call_left', data);
   }
 
   notifyCallMissed(chatId, data) {
-    this.io.to(`chat:${chatId}`).emit('call_missed', data);
+    if (chatId) {
+      this.io.to(`chat:${chatId}`).emit('call:missed', data);
+      this.io.to(`chat:${chatId}`).emit('call_missed', data);
+    }
+    // Also send directly to receiver
+    if (data && data.receiverId) {
+      this.sendToUser(data.receiverId, 'call:missed', data);
+      this.sendToUser(data.receiverId, 'call_missed', data);
+    }
   }
 
   notifyCallTimeout(userId, data) {
     this.sendToUser(userId, 'call_timeout', data);
+    this.sendToUser(userId, 'call:timeout', data);
   }
 
   forwardIceCandidate(chatId, data) {
