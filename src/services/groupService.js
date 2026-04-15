@@ -2,6 +2,12 @@
 // FIXED: Rewritten from Mongoose to Sequelize.
 // Original used mongoose sessions, Group.findById(), populate() etc. — all MongoDB/Mongoose APIs.
 // Your database is PostgreSQL/Sequelize, so all of those would throw on every call.
+//
+// LOCAL-FIRST ADDITIONS (v2.0):
+// Every write operation now emits a 'groupServiceMutation' event with the updated
+// group data so the groupController can push it to KynectaStore / LocalGroupStore.
+// The pattern: DB write → formatGroup() → emit event → return to controller.
+// No direct require() of browser globals — server-side safe.
 
 let db, Groups, GroupMembers, Users, Chats;
 try {
@@ -16,6 +22,13 @@ try {
 }
 
 const { Op } = require('sequelize');
+const EventEmitter = require('events');
+
+// ── Internal event bus for local-store sync notifications ────────────────────
+// groupController subscribes to this and calls LocalGroupStore.saveGroupLocal()
+// on every mutation so IDB/localStorage stays in sync with DB writes.
+const groupServiceEvents = new EventEmitter();
+groupServiceEvents.setMaxListeners(20);
 
 const withTimeout = (promise, ms = 5000) => {
     let tid;
@@ -23,7 +36,7 @@ const withTimeout = (promise, ms = 5000) => {
     return Promise.race([promise, t]).finally(() => { if (tid) clearTimeout(tid); });
 };
 
-const formatGroup = (g) => {
+const formatGroup = (g, extraFields = {}) => {
     if (!g) return null;
     const d = g.toJSON ? g.toJSON() : g;
     return {
@@ -43,6 +56,12 @@ const formatGroup = (g) => {
         isVerified: d.isVerified || false,
         settings: d.settings || {},
         stats: d.stats || { totalMembers: 0, totalMessages: 0 },
+        // LOCAL-FIRST fields
+        serverId:    d.id,          // always set for server-confirmed records
+        isLocalOnly: false,         // server records are never local-only
+        syncState:   'synced',
+        status:      'active',
+        ...extraFields,
     };
 };
 
@@ -94,7 +113,10 @@ class GroupService {
             }
 
             console.log(`[GroupService] ✅ Group created: "${group.name}" (id: ${group.id}, chatId: ${chat.id})`);
-            return { group: formatGroup(group) };
+            const formatted = formatGroup(group);
+            // ── LOCAL-FIRST: notify controller to persist to IDB/localStorage ──
+            groupServiceEvents.emit('groupMutation', { action: 'create', group: formatted, userId: creatorId });
+            return { group: formatted };
         } catch (e) {
             console.error('[GroupService] ❌ createGroup failed:', e.message);
             if (['required','unavailable','characters'].some(s => e.message.includes(s))) throw e;
@@ -143,7 +165,9 @@ class GroupService {
             }
             await group.update(fields);
             console.log(`[GroupService] ✅ Group ${groupId} updated`);
-            return formatGroup(group);
+            const formatted = formatGroup(group);
+            groupServiceEvents.emit('groupMutation', { action: 'update', group: formatted, userId });
+            return formatted;
         } catch (e) {
             if (['not found','permission','characters'].some(s => e.message.includes(s))) throw e;
             console.error('[GroupService] ❌ updateGroup failed:', e.message);
@@ -160,6 +184,7 @@ class GroupService {
             if (String(group.createdBy) !== String(userId)) throw new Error('Only the group owner can delete this group');
             await group.destroy();
             console.log(`[GroupService] ✅ Group ${groupId} deleted`);
+            groupServiceEvents.emit('groupMutation', { action: 'delete', groupId, userId });
             return true;
         } catch (e) {
             if (['not found','permission','owner'].some(s => e.message.includes(s))) throw e;
@@ -506,4 +531,10 @@ class GroupService {
     }
 }
 
-module.exports = new GroupService();
+const groupServiceInstance = new GroupService();
+
+// Export both the service and the event bus so groupController can subscribe
+// to 'groupMutation' events and call LocalGroupStore.saveGroupLocal() after
+// every DB write — keeping IDB/localStorage in sync server-confirmed records.
+module.exports = groupServiceInstance;
+module.exports.groupServiceEvents = groupServiceEvents;

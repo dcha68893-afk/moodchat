@@ -131,6 +131,25 @@ class CallService {
     call.startedAt = new Date();
     await call.save();
 
+    // ── Bug 6: emit ws events to all participants ─────────────────────────
+    try {
+      const wsService = require('./webSocketService');
+      const formatted = this._format(call);
+      const eventData = {
+        callId:     call.id,
+        callerId:   call.callerId,
+        receiverId: call.receiverId,
+        type:       call.type,
+        status:     'in-progress',
+        startedAt:  call.startedAt,
+        timestamp:  Date.now()
+      };
+      call.participants.forEach(uid => {
+        wsService.sendToUser(uid, 'call:answered',   eventData);
+        wsService.sendToUser(uid, 'call_answered',   eventData);
+      });
+    } catch(wsErr) { console.warn('[callService.answerCall] ws emit failed:', wsErr.message); }
+
     return this._format(call);
   }
 
@@ -156,6 +175,25 @@ class CallService {
     if (remaining.length === 0) { call.status = 'missed'; call.endedAt = new Date(); }
 
     await call.save();
+
+    // ── Bug 6: emit ws events to all participants ─────────────────────────
+    try {
+      const wsService = require('./webSocketService');
+      const eventData = {
+        callId:     call.id,
+        callerId:   call.callerId,
+        receiverId: call.receiverId,
+        declinedBy: call.declinedBy,
+        status:     call.status,
+        reason:     'declined',
+        timestamp:  Date.now()
+      };
+      call.participants.forEach(uid => {
+        wsService.sendToUser(uid, 'call:rejected',  eventData);
+        wsService.sendToUser(uid, 'call_rejected',  eventData);
+      });
+    } catch(wsErr) { console.warn('[callService.rejectCall] ws emit failed:', wsErr.message); }
+
     return this._format(call);
   }
 
@@ -175,6 +213,23 @@ class CallService {
     call.status  = 'cancelled';
     call.endedAt = new Date();
     await call.save();
+
+    // ── Bug 6: emit ws events to all participants ─────────────────────────
+    try {
+      const wsService = require('./webSocketService');
+      const eventData = {
+        callId:    call.id,
+        callerId:  call.callerId,
+        status:    'cancelled',
+        endedAt:   call.endedAt,
+        timestamp: Date.now()
+      };
+      call.participants.forEach(uid => {
+        wsService.sendToUser(uid, 'call:cancelled', eventData);
+        wsService.sendToUser(uid, 'call_cancelled', eventData);
+      });
+    } catch(wsErr) { console.warn('[callService.cancelCall] ws emit failed:', wsErr.message); }
+
     return this._format(call);
   }
 
@@ -209,6 +264,26 @@ class CallService {
     call.endedAt  = endedAt;
     call.duration = duration;
     await call.save();
+
+    // ── Bug 6: emit call:ended + call_force_ended to all participants ─────
+    // Bug 2 fix: use 'call_force_ended' (not 'call:force_end') consistently
+    try {
+      const wsService = require('./webSocketService');
+      const eventData = {
+        callId:    call.id,
+        callerId:  call.callerId,
+        receiverId:call.receiverId,
+        status:    call.status,
+        duration:  call.duration,
+        endedAt:   call.endedAt,
+        timestamp: Date.now()
+      };
+      call.participants.forEach(uid => {
+        wsService.sendToUser(uid, 'call:ended',        eventData);
+        wsService.sendToUser(uid, 'call_ended',        eventData);
+        wsService.sendToUser(uid, 'call_force_ended',  eventData); // Bug 2: consistent name
+      });
+    } catch(wsErr) { console.warn('[callService.endCall] ws emit failed:', wsErr.message); }
 
     return this._format(call);
   }

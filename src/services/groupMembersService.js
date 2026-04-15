@@ -22,6 +22,28 @@ const withTimeout = (promise, ms = 5000) => {
     return Promise.race([promise, t]).finally(() => { if (tid) clearTimeout(tid); });
 };
 
+const normalizePrivacySettings = (userRecord) => {
+    const settingsPrivacy = userRecord?.settings?.privacy || {};
+    const directPrivacy = userRecord?.privacySettings || {};
+    return { ...settingsPrivacy, ...directPrivacy };
+};
+
+const resolveGroupInvitePolicy = async (inviteeId) => {
+    if (!Users || !inviteeId) return 'direct_add';
+    const invitee = await Users.findByPk(inviteeId, { attributes: ['id', 'settings'] }).catch(() => null);
+    const privacy = normalizePrivacySettings(invitee);
+    if (
+        privacy.allowGroupAdds === false ||
+        privacy.allowGroupInvites === false ||
+        privacy.groupAddPolicy === 'invite_required' ||
+        privacy.groupInvitePolicy === 'invite_required'
+    ) {
+        return 'invite_required';
+    }
+    return 'direct_add';
+};
+
+
 class GroupMembersService {
 
     // ===== Get group members with user details =====
@@ -177,20 +199,73 @@ class GroupMembersService {
     async inviteToGroup(groupId, inviterId, inviteeId, role = 'member', message = '') {
         let Invite;
         try { const db2 = require('../models'); Invite = db2.models?.Invites || db2.Invites; } catch (_) {}
+        if (!GroupMembers) throw new Error('Member service unavailable');
         if (!Invite) throw new Error('Invite service unavailable');
         try {
-            const already = await GroupMembers?.findOne({ where: { groupId, userId: inviteeId } });
-            if (already) throw new Error('User is already a member of this group');
-            const invite = await Invite.create({ groupId, inviterId, targetUserId: inviteeId, message, status: 'pending', expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) });
-            console.log(`[GroupMembersService] ✅ Invite sent to ${inviteeId} for group ${groupId}`);
-            return invite;
+            const requester = await GroupMembers.findOne({ where: { groupId, userId: inviterId } });
+            if (!requester || !['owner', 'admin', 'moderator'].includes(requester.role)) {
+                throw new Error('You do not have permission to add members');
+            }
+
+            const already = await GroupMembers.findOne({ where: { groupId, userId: inviteeId } });
+            if (already) {
+                return {
+                    action: 'already_member',
+                    alreadyMember: true,
+                    member: {
+                        id: already.id,
+                        groupId,
+                        userId: inviteeId,
+                        role: already.role,
+                        joinedAt: already.joinedAt
+                    }
+                };
+            }
+
+            const existingInvite = await Invite.findOne({ where: { groupId, targetUserId: inviteeId, status: 'pending' } });
+            if (existingInvite) {
+                return {
+                    action: 'invite_sent',
+                    alreadyPending: true,
+                    invitation: existingInvite
+                };
+            }
+
+            const delivery = await resolveGroupInvitePolicy(inviteeId);
+            if (delivery === 'direct_add') {
+                const membership = await GroupMembers.create({ groupId, userId: inviteeId, role, joinedAt: new Date() });
+                console.log(`[GroupMembersService] Added member ${inviteeId} added directly to group ${groupId}`);
+                return {
+                    action: 'member_added',
+                    member: {
+                        id: membership.id,
+                        groupId,
+                        userId: inviteeId,
+                        role: membership.role,
+                        joinedAt: membership.joinedAt
+                    }
+                };
+            }
+
+            const invite = await Invite.create({
+                groupId,
+                inviterId,
+                targetUserId: inviteeId,
+                message,
+                status: 'pending',
+                expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
+            });
+            console.log(`[GroupMembersService] Invite sent to ${inviteeId} for group ${groupId}`);
+            return {
+                action: 'invite_required',
+                invitation: invite
+            };
         } catch (e) {
-            if (e.message.includes('already a member')) throw e;
-            console.error('[GroupMembersService] ❌ inviteToGroup failed:', e.message);
+            if (e.message.includes('already a member') || e.message.includes('permission')) throw e;
+            console.error('[GroupMembersService] ? inviteToGroup failed:', e.message);
             throw new Error('Failed to send invite');
         }
     }
-
     // ===== Accept invitation =====
     async acceptInvitation(invitationId, userId) {
         let Invite;
@@ -199,18 +274,22 @@ class GroupMembersService {
         try {
             const invite = await Invite.findOne({ where: { id: invitationId, targetUserId: userId, status: 'pending' } });
             if (!invite) throw new Error('Invitation not found or already processed');
-            await GroupMembers.create({ groupId: invite.groupId, userId, role: 'member', joinedAt: new Date() });
+
+            const existingMembership = await GroupMembers.findOne({ where: { groupId: invite.groupId, userId } });
+            if (!existingMembership) {
+                await GroupMembers.create({ groupId: invite.groupId, userId, role: 'member', joinedAt: new Date() });
+            }
+
             invite.status = 'accepted';
             await invite.save();
-            console.log(`[GroupMembersService] ✅ Invitation ${invitationId} accepted by user ${userId}`);
+            console.log(`[GroupMembersService] ? Invitation ${invitationId} accepted by user ${userId}`);
             return { groupId: invite.groupId, invitedBy: invite.inviterId, accepted: true };
         } catch (e) {
             if (e.message.includes('not found')) throw e;
-            console.error('[GroupMembersService] ❌ acceptInvitation failed:', e.message);
+            console.error('[GroupMembersService] ? acceptInvitation failed:', e.message);
             throw new Error('Failed to accept invitation');
         }
     }
-
     // ===== Reject invitation =====
     async rejectInvitation(invitationId, userId, reason) {
         let Invite;
@@ -559,3 +638,4 @@ class GroupMembersService {
 }
 
 module.exports = new GroupMembersService();
+

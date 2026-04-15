@@ -352,7 +352,6 @@ class GroupMembersController {
     try {
       const { groupId } = req.params;
       const userId = req.user.id;
-      // Accept both inviteeId and targetUserId (frontend uses both field names)
       const rawBody = req.body;
       const inviteeId = rawBody.inviteeId || rawBody.targetUserId;
       const role = rawBody.role || 'member';
@@ -366,25 +365,49 @@ class GroupMembersController {
         throw new AppError('Invitee ID is required', 400);
       }
 
-      const invitation = await groupMembersService.inviteToGroup(groupId, userId, inviteeId, role, message);
+      const result = await groupMembersService.inviteToGroup(groupId, userId, inviteeId, role, message);
+      const action = result?.action || 'invite_sent';
 
-      // Emit WebSocket event for invitation
       if (req.io) {
-        req.io.to(`user:${inviteeId}`).emit('group:invitation:received', {
-          groupId,
-          invitationId: invitation.id,
-          invitedBy: userId,
-          role,
-          message,
-          timestamp: new Date()
-        });
+        if (action === 'member_added' || action === 'already_member') {
+          req.io.to(`group:${groupId}`).emit('group:member:added', {
+            groupId,
+            memberId: inviteeId,
+            addedBy: userId,
+            role,
+            timestamp: new Date()
+          });
+          req.io.to(`user:${inviteeId}`).emit('group:member:added', {
+            groupId,
+            addedBy: userId,
+            role,
+            timestamp: new Date()
+          });
+        } else {
+          req.io.to(`user:${inviteeId}`).emit('group:invitation:received', {
+            groupId,
+            invitationId: result?.invitation?.id,
+            invitedBy: userId,
+            role,
+            message,
+            timestamp: new Date()
+          });
+        }
       }
 
-      res.status(201).json({
+      const statusCode = action === 'member_added' ? 200 : 201;
+      const responseMessage = action === 'member_added'
+        ? 'Member added to group successfully'
+        : action === 'already_member'
+          ? 'User is already a member of this group'
+          : 'Invitation sent successfully';
+
+      res.status(statusCode).json({
         success: true,
-        message: 'Invitation sent successfully',
+        message: responseMessage,
         data: {
-          invitation
+          action,
+          ...result
         }
       });
     } catch (error) {
@@ -1307,3 +1330,4 @@ class GroupMembersController {
 }
 
 module.exports = new GroupMembersController();
+

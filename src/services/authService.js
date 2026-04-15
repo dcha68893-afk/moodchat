@@ -193,27 +193,37 @@ class AuthService {
     }
   }
 
-  // In authService.js generateTokens method
-generateTokens(userId, userData = {}) {
-    // Use tokenService instead of direct jwt.sign
-    const user = {
-        id: userId,
-        userId: userId,
+  generateTokens(userId, userData = {}) {
+    try {
+      const tokenService = require('../services/tokenService');
+      const user = {
+        id: userId, userId: userId,
         email: userData.email || null,
         username: userData.username || null,
         role: userData.role || 'user'
-    };
-    
-    const accessToken = tokenService.generateAccessToken(user);
-    const refreshToken = tokenService.generateRefreshToken(user);
-    
-    return { 
-        accessToken, 
+      };
+      const accessToken  = tokenService.generateAccessToken(user);
+      const refreshToken = tokenService.generateRefreshToken(user);
+      return {
+        accessToken,
         refreshToken,
         tokenType: 'Bearer',
-        expiresIn: 24 * 60 * 60
-    };
-}
+        expiresIn:  24 * 60 * 60,
+        expiresAt:  new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
+      };
+    } catch(e) {
+      // Fallback using direct jwt.sign if tokenService unavailable
+      const JWT_SECRET = process.env.JWT_SECRET || process.env.JWT_ACCESS_SECRET || '3e78ab2d6cb698f95b3b8d510614058c';
+      const accessToken  = jwt.sign({ userId, id: userId, email: userData.email, username: userData.username, role: userData.role || 'user' }, JWT_SECRET, { expiresIn: '24h' });
+      const refreshToken = jwt.sign({ userId, id: userId, type: 'refresh' }, JWT_SECRET, { expiresIn: '7d' });
+      return {
+        accessToken, refreshToken,
+        tokenType: 'Bearer',
+        expiresIn:  24 * 60 * 60,
+        expiresAt:  new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
+      };
+    }
+  }
 
 async verifyToken(token) {
   try {

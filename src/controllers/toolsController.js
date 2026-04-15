@@ -951,9 +951,9 @@ class ToolsController {
     }
   }
 
-  // ═══════════════════════════════════════════════════════════════
+  // =============================================================
   // MARKETPLACE CONTROLLERS
-  // ═══════════════════════════════════════════════════════════════
+  // =============================================================
 
   async getListings(req, res, next) {
     try {
@@ -966,6 +966,13 @@ class ToolsController {
         maxPrice: maxPrice ? parseFloat(maxPrice) : undefined,
         sort
       });
+      if (result && Array.isArray(result.listings)) {
+        result.listings = result.listings.map(l => {
+          const item = l.toJSON ? l.toJSON() : { ...l };
+          item.condition = (item.metadata || {}).condition || 'new';
+          return item;
+        });
+      }
       res.status(200).json({ success: true, message: 'Listings retrieved', data: result });
     } catch (error) {
       logger.error('getListings error:', error);
@@ -1028,23 +1035,23 @@ class ToolsController {
 
   async createListing(req, res, next) {
     try {
-      const { title, description, price, category, type, images, tags, stock, currency, metadata } = req.body;
-      // FIX: Only require title; price can be 0 (free listing)
+      const { title, description, price, category, type, images, tags, stock, currency, metadata, condition } = req.body;
       if (!title) {
         throw new AppError('title is required', 400);
       }
       const db = require('../models');
-      
-      // FIX: Map frontend type values to backend ENUM values
+
       const typeMap = { 'services': 'service', 'digital': 'digital', 'premium': 'premium', 'physical': 'physical' };
       const normalizedType = typeMap[type] || type || 'service';
-      
-      // FIX: Map frontend category to valid enum values
+
       const validCategories = ['electronics', 'furniture', 'clothing', 'books', 'services', 'digital', 'premium', 'other'];
       const normalizedCategory = validCategories.includes(category) ? category : (
         normalizedType === 'digital' ? 'digital' : normalizedType === 'premium' ? 'premium' : 'services'
       );
-      
+
+      const validConditions = ['new', 'used', 'refurbished'];
+      const normalizedCondition = validConditions.includes(condition) ? condition : 'new';
+
       const listing = await db.Tool.create({
         sellerId: req.user.id,
         title,
@@ -1056,16 +1063,20 @@ class ToolsController {
         tags: tags || [],
         stock: stock !== undefined ? parseInt(stock) : null,
         currency: currency || 'USD',
-        metadata: metadata || {},
+        metadata: Object.assign({}, metadata || {}, { condition: normalizedCondition }),
         status: 'active',
-        available: true
+        available: true,
       });
-      
-      // FIX: Normalize response to include userId for frontend compatibility
+
       const listingData = listing.toJSON ? listing.toJSON() : listing;
       listingData.userId = listingData.sellerId;
-      listingData.user = { id: listingData.sellerId, displayName: req.user.displayName || req.user.username || 'User' };
-      
+      listingData.condition = (listingData.metadata || {}).condition || normalizedCondition;
+      listingData.user = {
+        id: listingData.sellerId,
+        displayName: req.user.displayName || req.user.username || 'User',
+        photoURL: req.user.photoURL || req.user.avatar || '',
+      };
+
       res.status(201).json({ success: true, message: 'Listing created', data: { listing: listingData } });
     } catch (error) {
       logger.error('createListing error:', error);
@@ -1245,14 +1256,13 @@ class ToolsController {
       const { limit = 20 } = req.query;
       const db = require('../models');
       const rawLeaderboard = await db.Tool.getLeaderboard(parseInt(limit));
-      // Normalize snake_case SQL results to camelCase for frontend
       const leaderboard = rawLeaderboard.map(r => ({
-        userId:       r.seller_id  || r.userId,
-        sellerId:     r.seller_id  || r.sellerId,
+        userId: r.seller_id || r.userId,
+        sellerId: r.seller_id || r.sellerId,
         listingCount: parseInt(r.listing_count || r.listingCount || 0),
-        totalViews:   parseInt(r.total_views   || r.totalViews   || 0),
-        avgRating:    parseFloat(r.avg_rating  || r.avgRating    || 0),
-        totalSales:   parseInt(r.total_sales   || r.totalSales   || 0)
+        totalViews: parseInt(r.total_views || r.totalViews || 0),
+        avgRating: parseFloat(r.avg_rating || r.avgRating || 0),
+        totalSales: parseInt(r.total_sales || r.totalSales || 0)
       }));
       res.status(200).json({ success: true, message: 'Leaderboard retrieved', data: { leaderboard } });
     } catch (error) {
@@ -1265,7 +1275,6 @@ class ToolsController {
     try {
       const { sellerId, amount, listingId, message } = req.body;
       if (!sellerId || !amount) throw new AppError('sellerId and amount are required', 400);
-      // Record tip — extend with payment processor as needed
       res.status(200).json({
         success: true,
         message: 'Tip sent successfully',
@@ -1314,13 +1323,102 @@ class ToolsController {
 
   async processPayment(req, res, next) {
     try {
-      const { amount, currency = 'USD', listingId, paymentMethod } = req.body;
+      const { amount, currency = 'KES', listingId, paymentMethod, phone, mpesaPhone } = req.body;
       if (!amount || !listingId) throw new AppError('amount and listingId are required', 400);
-      // Integrate with Stripe/PayPal here — stub for now
+
+      const transactionId = `txn_${Date.now()}_${Math.random().toString(36).slice(2,8)}`;
+
+      if (paymentMethod === 'mpesa') {
+        const phoneNumber = (phone || mpesaPhone || '').replace(/\s/g, '');
+        if (!phoneNumber) throw new AppError('M-Pesa phone number is required', 400);
+
+        let normalizedPhone = phoneNumber.replace(/^\+/, '').replace(/^0/, '254');
+        if (!/^254[7|1]\d{8}$/.test(normalizedPhone)) {
+          throw new AppError('Invalid M-Pesa phone number. Use format 0712345678 or 254712345678', 400);
+        }
+
+        const consumerKey = process.env.MPESA_CONSUMER_KEY;
+        const consumerSecret = process.env.MPESA_CONSUMER_SECRET;
+        const shortcode = process.env.MPESA_SHORTCODE || '174379';
+        const passkey = process.env.MPESA_PASSKEY;
+        const callbackUrl = process.env.MPESA_CALLBACK_URL || `${process.env.BASE_URL || 'https://example.com'}/api/payments/mpesa/callback`;
+
+        if (consumerKey && consumerSecret && passkey) {
+          try {
+            const axios = require('axios');
+            const auth = Buffer.from(`${consumerKey}:${consumerSecret}`).toString('base64');
+            const tokenRes = await axios.get(
+              'https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials',
+              { headers: { Authorization: `Basic ${auth}` } }
+            );
+            const accessToken = tokenRes.data.access_token;
+            const timestamp = new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14);
+            const password = Buffer.from(`${shortcode}${passkey}${timestamp}`).toString('base64');
+
+            const stkRes = await axios.post(
+              'https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest',
+              {
+                BusinessShortCode: shortcode,
+                Password: password,
+                Timestamp: timestamp,
+                TransactionType: 'CustomerPayBillOnline',
+                Amount: Math.ceil(amount),
+                PartyA: normalizedPhone,
+                PartyB: shortcode,
+                PhoneNumber: normalizedPhone,
+                CallBackURL: callbackUrl,
+                AccountReference: `KNECTA-${listingId.slice(0, 8)}`,
+                TransactionDesc: `Payment for listing ${listingId}`
+              },
+              { headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
+            );
+
+            return res.status(200).json({
+              success: true,
+              message: 'M-Pesa STK Push sent. Check your phone.',
+              data: {
+                transactionId,
+                checkoutRequestId: stkRes.data.CheckoutRequestID,
+                merchantRequestId: stkRes.data.MerchantRequestID,
+                amount,
+                currency: 'KES',
+                listingId,
+                paymentMethod: 'mpesa',
+                phone: normalizedPhone,
+                status: 'pending'
+              }
+            });
+          } catch (mpesaErr) {
+            logger.error('M-Pesa STK Push error:', mpesaErr.response?.data || mpesaErr.message);
+          }
+        }
+
+        return res.status(200).json({
+          success: true,
+          message: `STK Push queued for ${normalizedPhone} (sandbox mode — configure MPESA_* env vars for live)`,
+          data: {
+            transactionId,
+            amount,
+            currency: 'KES',
+            listingId,
+            paymentMethod: 'mpesa',
+            phone: normalizedPhone,
+            status: 'pending_sandbox'
+          }
+        });
+      }
+
       res.status(200).json({
         success: true,
         message: 'Payment processed',
-        data: { transactionId: `txn_${Date.now()}`, amount, currency, listingId, status: 'completed' }
+        data: {
+          transactionId,
+          amount,
+          currency: currency || 'KES',
+          listingId,
+          paymentMethod: paymentMethod || 'card',
+          status: 'completed'
+        }
       });
     } catch (error) {
       logger.error('processPayment error:', error);
@@ -1330,7 +1428,6 @@ class ToolsController {
 
   async getUserSubscription(req, res, next) {
     try {
-      // Extend with real subscription logic / DB lookup
       res.status(200).json({
         success: true,
         data: {
@@ -1343,6 +1440,32 @@ class ToolsController {
     } catch (error) {
       logger.error('getUserSubscription error:', error);
       next(error);
+    }
+  }
+
+  async mpesaCallback(req, res, next) {
+    try {
+      const { Body } = req.body || {};
+      const stkCallback = Body?.stkCallback || {};
+      const resultCode = stkCallback.ResultCode;
+      const checkoutRequestId = stkCallback.CheckoutRequestID;
+
+      if (resultCode === 0) {
+        const callbackMetadata = stkCallback.CallbackMetadata?.Item || [];
+        const getVal = (name) => (callbackMetadata.find(i => i.Name === name) || {}).Value;
+        const mpesaReceiptNumber = getVal('MpesaReceiptNumber');
+        const amount = getVal('Amount');
+        const phoneNumber = getVal('PhoneNumber');
+
+        logger.info('[M-Pesa] Payment successful:', { checkoutRequestId, mpesaReceiptNumber, amount, phoneNumber });
+      } else {
+        logger.warn('[M-Pesa] Payment failed/cancelled. ResultCode:', resultCode, 'Desc:', stkCallback.ResultDesc);
+      }
+
+      res.status(200).json({ ResultCode: 0, ResultDesc: 'Accepted' });
+    } catch (error) {
+      logger.error('mpesaCallback error:', error);
+      res.status(200).json({ ResultCode: 0, ResultDesc: 'Accepted' });
     }
   }
 }

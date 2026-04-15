@@ -1298,7 +1298,7 @@ router.post(
           });
 
           // ALSO send force end event to ensure UI resets immediately on all clients
-          await notifyUser(req.io, pid, 'call:force_end', {
+          await notifyUser(req.io, pid, 'call_force_ended', {
             callId: call.id,
             endedBy: { id: user.id, username: user.username },
             duration: actualDuration,

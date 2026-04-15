@@ -17,7 +17,7 @@ class AuthController {
     return jwt.sign(
       { 
         userId: user.id, 
-        id: user.id, // Add id for compatibility
+        id: user.id,
         email: user.email, 
         username: user.username,
         role: user.role || 'user'
@@ -25,6 +25,41 @@ class AuthController {
       JWT_SECRET,
       { expiresIn: JWT_EXPIRES_IN }
     );
+  }
+
+  // Generates a long-lived refresh token (7 days)
+  generateRefreshToken(user) {
+    try {
+      const tokenService = require('../services/tokenService');
+      return tokenService.generateRefreshToken(user);
+    } catch(e) {
+      // Fallback: sign with extended expiry
+      return jwt.sign(
+        { userId: user.id, id: user.id, type: 'refresh' },
+        JWT_SECRET,
+        { expiresIn: '7d' }
+      );
+    }
+  }
+
+  // Builds the standard auth response object (ensures token + refreshToken + user always present)
+  _buildAuthResponse(user, token, refreshToken) {
+    return {
+      success:      true,
+      token:        token,
+      accessToken:  token,          // alias for compatibility
+      refreshToken: refreshToken || null,
+      expiresIn:    24 * 60 * 60,   // seconds
+      expiresAt:    new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+      user: {
+        id:       user.id,
+        username: user.username,
+        email:    user.email,
+        avatar:   user.avatar   || null,
+        role:     user.role     || 'user',
+        status:   user.status   || 'online'
+      }
+    };
   }
 
   async register(req, res, next) {

@@ -1,6 +1,57 @@
 const groupService = require('../services/groupService');
+const { groupServiceEvents } = require('../services/groupService');
 const { AppError } = require('../middleware/errorHandler');
 const logger = require('../utils/logger');
+
+// ── LOCAL-FIRST SYNC HOOK ─────────────────────────────────────────────────────
+// Subscribe to groupService mutation events so EVERY DB write is immediately
+// reflected in the client-side local stores (IndexedDB + localStorage).
+//
+// Flow:
+//   groupService.createGroup() → emits 'groupMutation' → this handler fires
+//   → the API response already returns group data, but this also fires for any
+//     internal service calls (e.g. from background jobs, webhooks, etc.)
+//   → If a socket/SSE connection is present we push a 'group:localSync' event
+//     so the browser's LocalGroupStore.saveGroupLocal() is called immediately.
+//
+// This is the server-side complement to group-core.patch.js on the client.
+// Server emits → client receives via socket → client calls saveGroupLocal() → IDB updated.
+// ────────────────────────────────────────────────────────────────────────────────
+groupServiceEvents.on('groupMutation', ({ action, group, groupId, userId }) => {
+    try {
+        // Push to any open WebSocket/Socket.IO connections for this user.
+        // The client-side socket handler calls window.LocalGroupStore.saveGroupLocal()
+        // on receipt, completing the local-first guarantee.
+        const io = global.__socketIO;
+        if (io && userId) {
+            const payload = { action, group: group || null, groupId: groupId || group?.id };
+            // Emit to the specific user's socket room
+            io.to(`user:${userId}`).emit('group:localSync', payload);
+        }
+
+        // Also push to all group members for group-level events (create / update / delete)
+        if (io && group?.id && action !== 'delete') {
+            io.to(`group:${group.id}`).emit('group:localSync', { action, group });
+        }
+        if (io && (groupId || group?.id) && action === 'delete') {
+            io.to(`group:${groupId || group?.id}`).emit('group:localSync', {
+                action: 'delete',
+                groupId: groupId || group?.id
+            });
+        }
+    } catch (err) {
+        // Non-fatal — local sync is best-effort; server state is authoritative
+        logger.warn('[GroupController] localSync push failed:', err.message);
+    }
+});
+
+// ── RESPONSE HELPER ───────────────────────────────────────────────────────────
+// Appends localSync metadata to every successful group response.
+// The client reads { data, localSync: true } and calls saveGroupLocal() directly
+// from the HTTP response — covers offline-to-online reconciliation without sockets.
+function withLocalSyncMeta(data, action = 'upsert') {
+    return { ...data, _localSync: { action, timestamp: Date.now() } };
+}
 
 class GroupController {
   /**
@@ -30,12 +81,15 @@ class GroupController {
 
       const group = await groupService.createGroup(groupData);
 
+      // ── LOCAL-FIRST: push to client immediately so saveGroupLocal() fires ──
+      // groupServiceEvents already emitted 'groupMutation' inside groupService.
+      // We also include _localSync in the HTTP response body so the fetch() caller
+      // can call LocalGroupStore.saveGroupLocal(data.data.group) without waiting
+      // for the next background sync cycle.
       res.status(201).json({
         success: true,
         message: 'Group created successfully',
-        data: {
-          group
-        }
+        data: withLocalSyncMeta({ group }, 'create')
       });
     } catch (error) {
       logger.error('Create group controller error:', error);
@@ -116,9 +170,7 @@ class GroupController {
       res.status(200).json({
         success: true,
         message: 'Group updated successfully',
-        data: {
-          group
-        }
+        data: withLocalSyncMeta({ group }, 'update')
       });
     } catch (error) {
       logger.error('Update group controller error:', error);
@@ -154,10 +206,12 @@ class GroupController {
 
       await groupService.deleteGroup(groupId, userId);
 
+      // groupServiceEvents emitted 'groupMutation' with action:'delete' inside service.
+      // Include _localSync so client calls LocalGroupStore.deleteGroupLocal(groupId).
       res.status(200).json({
         success: true,
         message: 'Group deleted successfully',
-        data: null
+        data: withLocalSyncMeta({ groupId }, 'delete')
       });
     } catch (error) {
       logger.error('Delete group controller error:', error);
@@ -382,10 +436,23 @@ async getUserGroups(req, res, next) {
     // FIXED: Use correct alias 'userGroup' in the service call
     const result = await groupService.getUserGroups(userId, options);
 
+    // ── LOCAL-FIRST: push all returned groups via socket so client can batch
+    // call saveGroupLocal() for each one immediately after the API response.
+    // This is the primary mechanism that fills IndexedDB on first load.
+    try {
+        const io = global.__socketIO;
+        if (io && result.groups && result.groups.length > 0) {
+            io.to(`user:${userId}`).emit('groups:localSyncBatch', {
+                groups: result.groups,
+                timestamp: Date.now()
+            });
+        }
+    } catch (_) {}
+
     res.status(200).json({
       success: true,
       message: 'User groups retrieved successfully',
-      data: result
+      data: withLocalSyncMeta(result, 'batch')
     });
   } catch (error) {
     logger.error('Get user groups controller error:', error);
@@ -536,9 +603,7 @@ async getUserGroups(req, res, next) {
       res.status(200).json({
         success: true,
         message: 'Group settings updated successfully',
-        data: {
-          group
-        }
+        data: withLocalSyncMeta({ group }, 'update')
       });
     } catch (error) {
       logger.error('Update group settings controller error:', error);
@@ -621,9 +686,7 @@ async getUserGroups(req, res, next) {
       res.status(200).json({
         success: true,
         message: 'Group ownership transferred successfully',
-        data: {
-          group
-        }
+        data: withLocalSyncMeta({ group }, 'update')
       });
     } catch (error) {
       logger.error('Transfer ownership controller error:', error);
@@ -665,9 +728,7 @@ async getUserGroups(req, res, next) {
       res.status(200).json({
         success: true,
         message: `Group ${archived ? 'archived' : 'unarchived'} successfully`,
-        data: {
-          group
-        }
+        data: withLocalSyncMeta({ group }, archived ? 'archive' : 'unarchive')
       });
     } catch (error) {
       logger.error('Archive group controller error:', error);

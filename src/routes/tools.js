@@ -167,5 +167,6 @@ router.get('/premium/features', apiRateLimiter, toolsController.getPremiumFeatur
 
 // Payments
 router.post('/payments/process', apiRateLimiter, toolsController.processPayment);
+router.post('/payments/mpesa/callback', toolsController.mpesaCallback);  // Daraja STK Push callback
 
 module.exports = router;

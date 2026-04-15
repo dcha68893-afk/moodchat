@@ -94,15 +94,18 @@ router.post('/register', asyncHandler(async (req, res) => {
         console.log('✅ User registered:', newUser.id, newUser.username);
 
         res.status(201).json({
-            success: true,
-            token,
-            refreshToken,
+            success:      true,
+            token:        token,
+            accessToken:  token,
+            refreshToken: refreshToken,
+            expiresIn:    24 * 60 * 60,
+            expiresAt:    new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
             user: {
-                id: newUser.id,
+                id:       newUser.id,
                 username: newUser.username,
-                email: newUser.email,
-                avatar: newUser.avatar || null,
-                role: newUser.role
+                email:    newUser.email,
+                avatar:   newUser.avatar || null,
+                role:     newUser.role   || 'user'
             }
         });
     } catch (error) {
@@ -152,15 +155,18 @@ router.post('/login', asyncHandler(async (req, res) => {
         tokenService.storeRefreshToken(refreshToken, user.id);
         
         res.json({
-            success: true,
-            token: token,
+            success:      true,
+            token:        token,
+            accessToken:  token,
             refreshToken: refreshToken,
-            user: { 
-                id: user.id, 
-                username: user.username, 
-                email: user.email,
-                avatar: user.avatar,
-                role: user.role
+            expiresIn:    24 * 60 * 60,
+            expiresAt:    new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+            user: {
+                id:       user.id,
+                username: user.username,
+                email:    user.email,
+                avatar:   user.avatar || null,
+                role:     user.role   || 'user'
             }
         });
     } catch (error) {

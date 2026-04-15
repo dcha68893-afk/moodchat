@@ -3,6 +3,30 @@ const { AppError } = require('../middleware/errorHandler');
 const logger = require('../utils/logger');
 const db = require('../models');
 
+// ── Top-level wsService require (avoids circular dep / lazy-require timing) ──
+let _wsService = null;
+function getWsService() {
+    if (!_wsService) {
+        try { _wsService = require('../services/webSocketService'); } catch(e) {
+            logger.warn('[callController] wsService not available:', e.message);
+        }
+    }
+    return _wsService;
+}
+// Safe wrappers so we never throw if wsService isn't ready
+function wsIsUserOnline(userId) {
+    const ws = getWsService();
+    if (ws && typeof ws.isUserOnline === 'function') return ws.isUserOnline(parseInt(userId));
+    if (ws && ws.userSockets) return ws.userSockets.has(parseInt(userId));
+    return true; // Assume online if ws not available — let the call proceed
+}
+function wsNotifyCallInitiated(userId, data) {
+    const ws = getWsService();
+    if (ws && typeof ws.notifyCallInitiated === 'function') ws.notifyCallInitiated(parseInt(userId), data);
+    else if (ws && typeof ws.sendToUser === 'function') ws.sendToUser(parseInt(userId), 'call:incoming', data);
+    else logger.warn('[callController] wsService.notifyCallInitiated not available');
+}
+
 /**
  * Find or create a direct 1:1 chat between two users.
  * Returns the chatId (integer). Falls back to null (safe) if Chat model
@@ -66,9 +90,8 @@ class CallController {
         );
         
         // Notify all participants
-        const wsService = require('../services/webSocketService');
         calleeIds.forEach(id => {
-          wsService.notifyCallInitiated(parseInt(id), {
+          wsNotifyCallInitiated(parseInt(id), {
             callId: call.id,
             callerId: callerId,
             callerName: req.user.username || 'Unknown',
@@ -98,8 +121,8 @@ class CallController {
         chatId = await findOrCreateDirectChat(callerId, parseInt(calleeId));
       }
 
-      const wsService = require('../services/webSocketService');
-      const isOnline = wsService.isUserOnline(parseInt(calleeId));
+      // Use safe wrapper — avoids isUserOnline not a function error
+      const isOnline = wsIsUserOnline(parseInt(calleeId));
       
       if (!isOnline) {
         // Still create the call record as 'missed' for history
@@ -131,7 +154,7 @@ class CallController {
       );
       
       // Notify callee via WebSocket
-      wsService.notifyCallInitiated(parseInt(calleeId), {
+      wsNotifyCallInitiated(parseInt(calleeId), {
         callId: call.id,
         callerId: callerId,
         callerName: call.callInitiatorUser?.username || req.user.username,
