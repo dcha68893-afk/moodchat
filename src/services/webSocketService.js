@@ -8,6 +8,7 @@ class WebSocketService {
   constructor() {
     this.io = null;
     this.userSockets = new Map();
+    this.wsClients = new Map();
   }
 
   setIO(io) {
@@ -29,6 +30,16 @@ class WebSocketService {
     return true;
   }
 
+  registerWebSocketClient(userId, ws) {
+    const normalizedUserId = parseInt(userId, 10);
+    if (!normalizedUserId || !ws) return false;
+
+    const existing = this.wsClients.get(normalizedUserId) || new Set();
+    existing.add(ws);
+    this.wsClients.set(normalizedUserId, existing);
+    return true;
+  }
+
   unregisterUserSocket(userId, socketId) {
     const normalizedUserId = parseInt(userId, 10);
     if (!normalizedUserId || !socketId) return false;
@@ -39,6 +50,20 @@ class WebSocketService {
     existing.delete(socketId);
     if (existing.size === 0) {
       this.userSockets.delete(normalizedUserId);
+    }
+    return true;
+  }
+
+  unregisterWebSocketClient(userId, ws) {
+    const normalizedUserId = parseInt(userId, 10);
+    if (!normalizedUserId || !ws) return false;
+
+    const existing = this.wsClients.get(normalizedUserId);
+    if (!existing) return false;
+
+    existing.delete(ws);
+    if (existing.size === 0) {
+      this.wsClients.delete(normalizedUserId);
     }
     return true;
   }
@@ -66,6 +91,10 @@ class WebSocketService {
   }
 
   async isUserOnline(userId) {
+    const normalizedUserId = parseInt(userId, 10);
+    const wsClients = this.wsClients.get(normalizedUserId);
+    if (wsClients && wsClients.size > 0) return true;
+
     const socketIds = await this.getSocketIdsForUser(userId);
     if (socketIds.length > 0) return true;
 
@@ -79,7 +108,7 @@ class WebSocketService {
   async sendToUser(userId, event, data = {}) {
     const io = this.getIO();
     const normalizedUserId = parseInt(userId, 10);
-    if (!io || !normalizedUserId || !event) return false;
+    if (!normalizedUserId || !event) return false;
 
     const payload = {
       ...data,
@@ -87,6 +116,28 @@ class WebSocketService {
     };
 
     let delivered = false;
+
+    const wsClients = this.wsClients.get(normalizedUserId);
+    if (wsClients && wsClients.size > 0) {
+      const rawPayload = JSON.stringify({
+        type: event,
+        payload,
+        timestamp: payload.timestamp
+      });
+
+      wsClients.forEach((client) => {
+        try {
+          if (client && client.readyState === 1) {
+            client.send(rawPayload);
+            delivered = true;
+          }
+        } catch (_) {}
+      });
+    }
+
+    if (!io) {
+      return delivered;
+    }
 
     const rooms = [`user:${normalizedUserId}`, `user_${normalizedUserId}`];
     rooms.forEach((room) => {

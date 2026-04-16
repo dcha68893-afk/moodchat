@@ -8,7 +8,6 @@ const JWT_SECRET = process.env.JWT_SECRET || process.env.JWT_ACCESS_SECRET;
 // Public paths that don't require authentication
 // IMPORTANT: Do NOT include '/' here unless you want ALL routes public!
 const PUBLIC_PATHS = [
-  '/api/status',
   '/api/health',
   '/api/info',
   '/api/cors-info',
@@ -23,7 +22,7 @@ const PUBLIC_PATHS = [
 
 const isPublicPath = (req) => {
   // Get the full path (including mount prefix)
-  const fullPath = req.originalUrl || req.url;
+  const fullPath = (req.originalUrl || req.url || '').split('?')[0];
   
   console.log('[Auth] Checking if public:', fullPath);
   
@@ -44,9 +43,24 @@ const isPublicPath = (req) => {
     }
   }
   
-  // Specifically allow health and status endpoints
+  // Specifically allow health and the public status landing endpoints only
   if (fullPath === '/health' || fullPath === '/api/health' || 
       fullPath === '/status' || fullPath === '/api/status') {
+    return true;
+  }
+
+  if (
+    fullPath === '/api/status/health' ||
+    fullPath === '/api/status/public' ||
+    fullPath === '/api/status/trending' ||
+    fullPath === '/api/status/search' ||
+    /^\/api\/status\/mood\/[^/]+$/.test(fullPath) ||
+    /^\/api\/status\/(?!my$|friends$|stats$|user(?:\/|$)|health$|public$|trending$|search$|mood(?:\/|$)|view$)[^/]+$/.test(fullPath) ||
+    /^\/api\/status\/(?!my$|friends$|stats$|user(?:\/|$)|health$|public$|trending$|search$|mood(?:\/|$)|view$)[^/]+\/comments$/.test(fullPath) ||
+    /^\/api\/status\/(?!my$|friends$|stats$|user(?:\/|$)|health$|public$|trending$|search$|mood(?:\/|$)|view$)[^/]+\/likes$/.test(fullPath) ||
+    fullPath === '/api/status/view' ||
+    /^\/api\/status\/(?!my$|friends$|stats$|user(?:\/|$)|health$|public$|trending$|search$|mood(?:\/|$)|view$)[^/]+\/view$/.test(fullPath)
+  ) {
     return true;
   }
   

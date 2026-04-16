@@ -2071,6 +2071,7 @@ console.log('process.env.JWT_SECRET:', process.env.JWT_SECRET ? process.env.JWT_
 console.log('process.env.JWT_ACCESS_SECRET:', process.env.JWT_ACCESS_SECRET ? process.env.JWT_ACCESS_SECRET.substring(0, 10) + '...' : 'MISSING');
 
 const tokenService = require('./services/tokenService');
+const websocketDeliveryService = require('./services/webSocketService');
 console.log('tokenService.accessSecret:', tokenService.accessSecret ? tokenService.accessSecret.substring(0, 10) + '...' : 'MISSING');
 console.log('================================\n');
 
@@ -3902,6 +3903,7 @@ class WebSocketService {
         this.transport = 'NONE';
         this.reason = '';
         this.clients = new Set();
+        this.clientUsers = new Map();
         
         systemState.registerConnection('websocket', this);
     }
@@ -3971,9 +3973,27 @@ class WebSocketService {
     
     setupEventHandlers() {
         this.wss.on('connection', (ws, req) => {
+            const authContext = this.authenticateConnection(req);
+            if (!authContext.valid) {
+                try {
+                    ws.send(JSON.stringify({
+                        type: 'error',
+                        code: 'AUTH_FAILED',
+                        message: authContext.error || 'Authentication required',
+                        timestamp: new Date().toISOString()
+                    }));
+                } catch (_) {}
+                ws.close(4001, 'Authentication required');
+                return;
+            }
+
             ws.isAlive = true;
             ws.id = Math.random().toString(36).substr(2, 9);
+            ws.userId = authContext.userId;
+            ws.user = authContext.user;
             this.clients.add(ws);
+            this.clientUsers.set(ws, authContext.userId);
+            websocketDeliveryService.registerWebSocketClient(authContext.userId, ws);
             
             // Update client count
             systemState.updateConnectionState('websocket', {
@@ -3990,6 +4010,12 @@ class WebSocketService {
             
             ws.on('close', () => {
                 this.clients.delete(ws);
+                websocketDeliveryService.unregisterWebSocketClient(authContext.userId, ws);
+                this.clientUsers.delete(ws);
+                websocketDeliveryService.sendToUser(authContext.userId, 'presence:update', {
+                    userId: authContext.userId,
+                    online: false
+                }).catch(() => {});
                 systemState.updateConnectionState('websocket', {
                     details: { clients: this.clients.size }
                 });
@@ -4001,10 +4027,19 @@ class WebSocketService {
             
             // Send welcome message
             ws.send(JSON.stringify({
-                type: 'welcome',
+                type: 'authenticated',
                 message: 'Connected to WebSocket server',
+                payload: {
+                    userId: authContext.userId,
+                    authenticated: true
+                },
                 timestamp: new Date().toISOString()
             }));
+
+            websocketDeliveryService.sendToUser(authContext.userId, 'presence:update', {
+                userId: authContext.userId,
+                online: true
+            }).catch(() => {});
         });
         
         // Heartbeat
@@ -4040,6 +4075,28 @@ class WebSocketService {
                         type: 'pong',
                         timestamp: new Date().toISOString()
                     }));
+                    break;
+
+                case 'AUTHENTICATE':
+                    ws.send(JSON.stringify({
+                        type: 'authenticated',
+                        payload: {
+                            userId: ws.userId,
+                            authenticated: true
+                        },
+                        timestamp: new Date().toISOString()
+                    }));
+                    break;
+
+                case 'call_offer':
+                case 'call_answer':
+                case 'ice_candidate':
+                case 'call:offer':
+                case 'call:answer':
+                case 'call:ice_candidate':
+                case 'sendMessage':
+                case 'sendCallSignal':
+                    this.routeTargetedMessage(ws, data);
                     break;
                     
                 case 'echo':
@@ -4078,6 +4135,77 @@ class WebSocketService {
                 client.send(messageStr);
             }
         });
+    }
+
+    authenticateConnection(req) {
+        try {
+            const requestUrl = new URL(req.url, 'http://localhost');
+            const tokenFromQuery = requestUrl.searchParams.get('token');
+            const headerToken = tokenService.extractTokenFromRequest({ headers: req.headers || {} });
+            const token = tokenFromQuery || headerToken;
+
+            if (!token) {
+                return { valid: false, error: 'Missing token' };
+            }
+
+            const verification = tokenService.verifyAccessToken(token);
+            if (!verification.valid) {
+                return { valid: false, error: verification.error || 'Invalid token' };
+            }
+
+            const decoded = verification.decoded || {};
+            const userId = decoded.userId || decoded.id;
+            if (!userId) {
+                return { valid: false, error: 'Missing userId in token' };
+            }
+
+            return {
+                valid: true,
+                userId: parseInt(userId, 10),
+                user: {
+                    id: parseInt(userId, 10),
+                    userId: parseInt(userId, 10),
+                    email: decoded.email || null,
+                    username: decoded.username || null,
+                    role: decoded.role || 'user'
+                }
+            };
+        } catch (error) {
+            return { valid: false, error: error.message };
+        }
+    }
+
+    routeTargetedMessage(ws, data) {
+        const payload = data.payload || {};
+        const targetUserId = payload.targetUserId || payload.receiverId || payload.calleeId || data.targetUserId || data.toUserId;
+
+        if (!targetUserId) {
+            ws.send(JSON.stringify({
+                type: 'error',
+                message: 'Missing target user',
+                timestamp: new Date().toISOString()
+            }));
+            return;
+        }
+
+        const outboundPayload = {
+            ...payload,
+            fromUserId: ws.userId,
+            senderId: payload.senderId || ws.userId
+        };
+
+        websocketDeliveryService.sendToUser(targetUserId, data.type, outboundPayload).catch(() => {});
+
+        if (data.messageId) {
+            ws.send(JSON.stringify({
+                type: 'ACK',
+                messageId: data.messageId,
+                payload: {
+                    success: true
+                },
+                timestamp: new Date().toISOString()
+            }));
+        }
     }
     
     handleWebSocketError(error) {

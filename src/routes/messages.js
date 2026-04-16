@@ -227,6 +227,31 @@ router.post('/mark-read/batch', apiRateLimiter, asyncHandler(async (req, res) =>
       { type: sequelize.QueryTypes.INSERT }
     );
 
+    try {
+      const wsService = require('../services/webSocketService');
+      const senders = await sequelize.query(
+        `SELECT DISTINCT "senderId" FROM "Messages"
+         WHERE id IN (:messageIds)
+           AND "chatId" = :chatId
+           AND "senderId" != :userId`,
+        {
+          replacements: { messageIds: safeIds, chatId: safeChatId, userId },
+          type: sequelize.QueryTypes.SELECT
+        }
+      );
+
+      await Promise.allSettled(
+        (senders || []).map((row) => wsService.sendToUser(row.senderId, 'message:read', {
+          chatId: safeChatId,
+          messageIds: safeIds,
+          readBy: userId,
+          readAt: new Date().toISOString()
+        }))
+      );
+    } catch (notifyError) {
+      console.warn('Failed to emit message:read websocket event:', notifyError.message);
+    }
+
     res.status(200).json({
       status: 'success',
       message: `${safeIds.length} message(s) marked as read`,
@@ -462,6 +487,43 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
       updatedAt: new Date().toISOString(),
       sender: senderRows[0] || null,
     };
+
+    try {
+      const wsService = require('../services/webSocketService');
+      const participants = await sequelize.query(
+        `SELECT DISTINCT "userId" FROM chat_participants
+         WHERE "chatId" = :chatId
+           AND "userId" != :senderId`,
+        {
+          replacements: { chatId, senderId },
+          type: sequelize.QueryTypes.SELECT
+        }
+      );
+
+      const recipientIds = (participants || []).map((row) => parseInt(row.userId, 10)).filter(Boolean);
+      const deliveryResults = await Promise.allSettled(
+        recipientIds.map(async (recipientId) => {
+          const online = await wsService.isUserOnline(recipientId);
+          await wsService.sendToUser(recipientId, 'message:new', populatedMessage);
+          return online ? recipientId : null;
+        })
+      );
+
+      const deliveredTo = deliveryResults
+        .filter((result) => result.status === 'fulfilled' && result.value)
+        .map((result) => result.value);
+
+      if (deliveredTo.length > 0) {
+        await wsService.sendToUser(senderId, 'message:delivered', {
+          messageId,
+          chatId,
+          deliveredTo,
+          deliveredAt: new Date().toISOString()
+        });
+      }
+    } catch (notifyError) {
+      console.warn('Failed to emit message:new websocket event:', notifyError.message);
+    }
 
     res.status(201).json({
       success: true,
@@ -880,3 +942,5 @@ const getMessageTypeFromMime = (mimeType) => {
 };
 
 module.exports = router;
+
+
