@@ -14,16 +14,16 @@ function getWsService() {
     return _wsService;
 }
 // Safe wrappers so we never throw if wsService isn't ready
-function wsIsUserOnline(userId) {
+async function wsIsUserOnline(userId) {
     const ws = getWsService();
-    if (ws && typeof ws.isUserOnline === 'function') return ws.isUserOnline(parseInt(userId));
+    if (ws && typeof ws.isUserOnline === 'function') return !!(await ws.isUserOnline(parseInt(userId)));
     if (ws && ws.userSockets) return ws.userSockets.has(parseInt(userId));
     return true; // Assume online if ws not available — let the call proceed
 }
-function wsNotifyCallInitiated(userId, data) {
+async function wsNotifyCallInitiated(userId, data) {
     const ws = getWsService();
-    if (ws && typeof ws.notifyCallInitiated === 'function') ws.notifyCallInitiated(parseInt(userId), data);
-    else if (ws && typeof ws.sendToUser === 'function') ws.sendToUser(parseInt(userId), 'call:incoming', data);
+    if (ws && typeof ws.notifyCallInitiated === 'function') await ws.notifyCallInitiated(parseInt(userId), data);
+    else if (ws && typeof ws.sendToUser === 'function') await ws.sendToUser(parseInt(userId), 'call:incoming', data);
     else logger.warn('[callController] wsService.notifyCallInitiated not available');
 }
 
@@ -90,8 +90,8 @@ class CallController {
         );
         
         // Notify all participants
-        calleeIds.forEach(id => {
-          wsNotifyCallInitiated(parseInt(id), {
+        for (const id of calleeIds) {
+          await wsNotifyCallInitiated(parseInt(id), {
             callId: call.id,
             callerId: callerId,
             callerName: req.user.username || 'Unknown',
@@ -101,7 +101,7 @@ class CallController {
             chatId: chatId ? parseInt(chatId) : null,
             timestamp: Date.now()
           });
-        });
+        }
         
         return res.status(201).json({
           success: true,
@@ -122,7 +122,7 @@ class CallController {
       }
 
       // Use safe wrapper — avoids isUserOnline not a function error
-      const isOnline = wsIsUserOnline(parseInt(calleeId));
+      const isOnline = await wsIsUserOnline(parseInt(calleeId));
       
       if (!isOnline) {
         // Still create the call record as 'missed' for history
@@ -154,7 +154,7 @@ class CallController {
       );
       
       // Notify callee via WebSocket
-      wsNotifyCallInitiated(parseInt(calleeId), {
+      await wsNotifyCallInitiated(parseInt(calleeId), {
         callId: call.id,
         callerId: callerId,
         callerName: call.callInitiatorUser?.username || req.user.username,

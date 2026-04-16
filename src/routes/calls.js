@@ -236,8 +236,8 @@ router.post(
           null
         );
 
-        participantIds.forEach(id => {
-          wsService.notifyCallInitiated(parseInt(id), {
+        for (const id of participantIds) {
+          await wsService.notifyCallInitiated(parseInt(id), {
             callId:       call.id,
             callerId:     userId,
             callerName:   req.user.username || 'Unknown',
@@ -246,7 +246,7 @@ router.post(
             callType,
             timestamp:    Date.now()
           });
-        });
+        }
 
         return res.status(201).json({
           success: true,
@@ -257,7 +257,7 @@ router.post(
 
       // ── 1-to-1 call path ────────────────────────────────────────────────
       const targetId = parseInt(calleeId);
-      const isOnline = wsService.isUserOnline(targetId);
+      const isOnline = await wsService.isUserOnline(targetId);
 
       const call = await callService.initiateCall(userId, targetId, callType, null);
 
@@ -274,7 +274,7 @@ router.post(
         });
       }
 
-      wsService.notifyCallInitiated(targetId, {
+      await wsService.notifyCallInitiated(targetId, {
         callId:       call.id,
         callerId:     userId,
         callerName:   call.callInitiatorUser?.username || req.user.username || 'Unknown',
