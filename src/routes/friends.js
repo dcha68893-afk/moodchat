@@ -34,11 +34,8 @@ try {
     console.log('[Friends Route] Auth middleware loaded');
 } catch (error) {
     console.error('[Friends Route] Failed to load auth middleware:', error.message);
-    // Fallback mock middleware for development
-    authenticateToken = (req, res, next) => {
-        console.warn('[Friends Route] Using fallback auth - no real authentication');
-        next();
-    };
+    // Fail closed: never run this router without real auth middleware.
+    throw new Error('[Friends Route] Critical security dependency missing: auth middleware');
 }
 
 console.log('✅ Friends routes initialized');

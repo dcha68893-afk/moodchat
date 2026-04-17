@@ -83,11 +83,8 @@ class AuthService {
           // Generate tokens
           const tokens = this.generateTokens(user.id);
 
-          // Store refresh token
-          AuthService.tokenStore.set(tokens.refreshToken, {
-            userId: user.id,
-            expires: Date.now() + 7 * 24 * 60 * 60 * 1000
-          });
+          // Store refresh token in central token service
+          await require('../services/tokenService').storeRefreshToken(tokens.refreshToken, user.id);
 
           const userWithoutPassword = user.toJSON();
           delete userWithoutPassword.password;
@@ -167,11 +164,8 @@ class AuthService {
       // Generate tokens
       const tokens = this.generateTokens(user.id);
 
-      // Store refresh token
-      AuthService.tokenStore.set(tokens.refreshToken, {
-        userId: user.id,
-        expires: Date.now() + 7 * 24 * 60 * 60 * 1000
-      });
+      // Store refresh token in central token service
+      await require('../services/tokenService').storeRefreshToken(tokens.refreshToken, user.id);
 
       // Prepare response
       const userWithoutPassword = user.toJSON();
@@ -212,22 +206,16 @@ class AuthService {
         expiresAt:  new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
       };
     } catch(e) {
-      // Fallback using direct jwt.sign if tokenService unavailable
-      const JWT_SECRET = process.env.JWT_SECRET || process.env.JWT_ACCESS_SECRET || '3e78ab2d6cb698f95b3b8d510614058c';
-      const accessToken  = jwt.sign({ userId, id: userId, email: userData.email, username: userData.username, role: userData.role || 'user' }, JWT_SECRET, { expiresIn: '24h' });
-      const refreshToken = jwt.sign({ userId, id: userId, type: 'refresh' }, JWT_SECRET, { expiresIn: '7d' });
-      return {
-        accessToken, refreshToken,
-        tokenType: 'Bearer',
-        expiresIn:  24 * 60 * 60,
-        expiresAt:  new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
-      };
+      throw new Error('Token service unavailable');
     }
   }
 
 async verifyToken(token) {
   try {
-    const secret = this.JWT_SECRET || process.env.JWT_SECRET || process.env.JWT_ACCESS_SECRET || '3e78ab2d6cb698f95b3b8d510614058c';
+    const secret = this.JWT_SECRET || process.env.JWT_SECRET || process.env.JWT_ACCESS_SECRET;
+    if (!secret) {
+      throw new Error('JWT secret not configured');
+    }
     const decoded = jwt.verify(token, secret);
     return { success: true, data: decoded };
   } catch (error) {
@@ -238,25 +226,26 @@ async verifyToken(token) {
 
 async refreshToken(refreshToken) {
   try {
-    const tokenData = AuthService.tokenStore.get(refreshToken);
-    if (!tokenData || tokenData.expires < Date.now()) {
+    const tokenService = require('../services/tokenService');
+    const tokenData = await tokenService.validateStoredRefreshToken(refreshToken);
+    if (!tokenData || !tokenData.valid) {
       throw new Error('Invalid or expired refresh token');
     }
 
-    const secret = this.JWT_SECRET || process.env.JWT_SECRET || process.env.JWT_ACCESS_SECRET || '3e78ab2d6cb698f95b3b8d510614058c';
+    const secret = this.JWT_SECRET || process.env.JWT_SECRET || process.env.JWT_ACCESS_SECRET;
+    if (!secret) {
+      throw new Error('JWT secret not configured');
+    }
     const decoded = jwt.verify(refreshToken, secret);
     
     // Generate new tokens
     const tokens = this.generateTokens(decoded.userId);
 
     // Delete old refresh token
-    AuthService.tokenStore.delete(refreshToken);
+    await tokenService.invalidateRefreshToken(refreshToken);
 
     // Store new refresh token
-    AuthService.tokenStore.set(tokens.refreshToken, {
-      userId: decoded.userId,
-      expires: Date.now() + 7 * 24 * 60 * 60 * 1000
-    });
+    await tokenService.storeRefreshToken(tokens.refreshToken, decoded.userId);
 
     return {
       success: true,
@@ -325,7 +314,7 @@ async refreshToken(refreshToken) {
         resetTokenExpiry: resetTokenExpiry
       });
 
-      console.log(`📧 Password reset token for ${email}: ${resetToken}`);
+      console.log(`📧 Password reset token issued for ${email}`);
 
       return { 
         success: true, 
@@ -372,8 +361,8 @@ async refreshToken(refreshToken) {
 validateJWTConfig() {
     const secret = process.env.JWT_SECRET || process.env.JWT_ACCESS_SECRET;
     // Check if secret is properly configured (not using default fallback)
-    if (!secret || secret === '3e78ab2d6cb698f95b3b8d510614058c') {
-        console.warn('⚠️ JWT_SECRET not properly configured - using default/fallback secret');
+    if (!secret) {
+        console.warn('JWT_SECRET not properly configured');
         return false;
     }
     console.log('✅ JWT_SECRET properly configured');

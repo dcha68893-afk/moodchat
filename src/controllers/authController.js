@@ -203,7 +203,10 @@ class AuthController {
       const refreshToken = tokenService.generateRefreshToken(user);
       
       // Store refresh token
-      tokenService.storeRefreshToken(refreshToken, user.id);
+      await tokenService.storeRefreshToken(refreshToken, user.id, 7 * 24 * 60 * 60 * 1000, {
+        userAgent: req.headers['user-agent'] || null,
+        ipAddress: req.ip || null
+      });
 
       // Save token to database if available
       if (req.app.locals.models && req.app.locals.models.Token) {
@@ -367,7 +370,10 @@ class AuthController {
       const refreshToken = tokenService.generateRefreshToken(user);
       
       // Store refresh token
-      tokenService.storeRefreshToken(refreshToken, user.id);
+      await tokenService.storeRefreshToken(refreshToken, user.id, 7 * 24 * 60 * 60 * 1000, {
+        userAgent: req.headers['user-agent'] || null,
+        ipAddress: req.ip || null
+      });
 
       // Save token to database if available
       if (req.app.locals.models && req.app.locals.models.Token) {
@@ -458,7 +464,7 @@ class AuthController {
       }
       
       // Verify stored refresh token
-      const storedCheck = tokenService.validateStoredRefreshToken(refreshToken);
+      const storedCheck = await tokenService.validateStoredRefreshToken(refreshToken);
       if (!storedCheck.valid) {
         return res.status(401).json({
           success: false,
@@ -493,8 +499,11 @@ class AuthController {
       const newRefreshToken = tokenService.generateRefreshToken(user);
       
       // Invalidate old refresh token and store new one
-      tokenService.invalidateRefreshToken(refreshToken);
-      tokenService.storeRefreshToken(newRefreshToken, user.id);
+      await tokenService.invalidateRefreshToken(refreshToken);
+      await tokenService.storeRefreshToken(newRefreshToken, user.id, 7 * 24 * 60 * 60 * 1000, {
+        userAgent: req.headers['user-agent'] || null,
+        ipAddress: req.ip || null
+      });
       
       console.log("✅ [AuthController] Refresh token successful for user:", userId);
       
@@ -640,7 +649,7 @@ class AuthController {
       // Get refresh token and invalidate it
       const refreshToken = tokenService.extractRefreshTokenFromRequest(req);
       if (refreshToken) {
-        tokenService.invalidateRefreshToken(refreshToken);
+        await tokenService.invalidateRefreshToken(refreshToken);
       }
       
       // Update user status if user exists

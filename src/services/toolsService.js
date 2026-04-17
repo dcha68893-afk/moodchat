@@ -929,12 +929,17 @@ class ToolsService {
   // Currency converter (simplified - would use real API in production)
   async convertCurrency(amount, fromCurrency, toCurrency) {
     try {
-      // Mock exchange rates
-      const exchangeRates = {
-        USD: { EUR: 0.85, GBP: 0.73, JPY: 110.5, CAD: 1.25, AUD: 1.35 },
-        EUR: { USD: 1.18, GBP: 0.86, JPY: 130.0, CAD: 1.47, AUD: 1.59 },
-        GBP: { USD: 1.37, EUR: 1.16, JPY: 151.0, CAD: 1.71, AUD: 1.85 },
-      };
+      const configuredRatesRaw = process.env.CURRENCY_RATES_JSON;
+      if (!configuredRatesRaw) {
+        throw new ServerError('Currency conversion is not configured');
+      }
+
+      let exchangeRates = null;
+      try {
+        exchangeRates = JSON.parse(configuredRatesRaw);
+      } catch (_error) {
+        throw new ServerError('Currency conversion configuration is invalid');
+      }
       
       let result = amount;
       
@@ -945,8 +950,7 @@ class ToolsService {
       } else if (exchangeRates[toCurrency] && exchangeRates[toCurrency][fromCurrency]) {
         result = amount / exchangeRates[toCurrency][fromCurrency];
       } else {
-        // Fallback to a simple conversion
-        result = amount * 0.85; // Default USD to EUR rate
+        throw new ServerError(`Unsupported currency pair: ${fromCurrency}->${toCurrency}`);
       }
       
       return {

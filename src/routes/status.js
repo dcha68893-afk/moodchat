@@ -393,18 +393,11 @@ router.post(
         }
 
         if (!Status) {
-            const fake = {
-                id: Date.now(),
-                userId,
-                content: finalContent,
-                type: type || 'text',
-                isPublic,
-                isActive: true,
-                createdAt: new Date().toISOString(),
-                updatedAt: new Date().toISOString(),
-                user: { id: userId },
-            };
-            return res.status(201).json({ success: true, data: { status: formatStatus(fake) }, message: 'Status created' });
+            return res.status(503).json({
+                success: false,
+                message: 'Status service unavailable',
+                code: 'STATUS_MODEL_UNAVAILABLE'
+            });
         }
 
         const statusData = {
@@ -648,23 +641,11 @@ router.post('/scheduled', authenticateToken, apiRateLimiter, asyncHandler(async 
     }
     
     if (!Status) {
-        const fake = {
-            id: Date.now(),
-            userId,
-            content: content || '',
-            type: type || 'text',
-            isPublic,
-            isActive: false,
-            moodType: moodType || null,
-            mediaUrl: mediaUrl || null,
-            location: location || null,
-            latitude: latitude || null,
-            longitude: longitude || null,
-            metadata: { scheduled: true, scheduledFor: scheduledFor },
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
-        };
-        return res.status(201).json({ success: true, data: { status: formatStatus(fake) }, message: 'Status scheduled' });
+        return res.status(503).json({
+            success: false,
+            message: 'Status service unavailable',
+            code: 'STATUS_MODEL_UNAVAILABLE'
+        });
     }
     
     const statusData = {

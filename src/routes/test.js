@@ -2,8 +2,19 @@ const express = require('express');
 const router = express.Router();
 const asyncHandler = require('express-async-handler');
 const { User, sequelize } = require('../models');
+const { authenticateToken } = require('../middleware/auth');
 
-console.log('✅ Test routes initialized');
+console.log('[Test Route] initialized');
+
+// Harden test endpoints: disable in production and require auth elsewhere.
+router.use((req, res, next) => {
+  if (process.env.NODE_ENV === 'production') {
+    return res.status(404).json({ success: false, message: 'Not found' });
+  }
+  return next();
+});
+
+router.use(authenticateToken);
 
 // Simple test DB endpoint
 router.get('/db', asyncHandler(async (req, res) => {
@@ -24,14 +35,14 @@ router.get('/db', asyncHandler(async (req, res) => {
   }
 }));
 
-// Test user creation
+// Test user listing
 router.get('/users', asyncHandler(async (req, res) => {
   try {
     const users = await User.findAll({
       limit: 10,
       attributes: ['id', 'username', 'email', 'createdAt']
     });
-    
+
     res.json({
       success: true,
       data: {

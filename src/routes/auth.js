@@ -89,7 +89,10 @@ router.post('/register', asyncHandler(async (req, res) => {
         const token = tokenService.generateAccessToken(newUser);
         const refreshToken = tokenService.generateRefreshToken(newUser);
 
-        tokenService.storeRefreshToken(refreshToken, newUser.id);
+        await tokenService.storeRefreshToken(refreshToken, newUser.id, 7 * 24 * 60 * 60 * 1000, {
+            userAgent: req.headers['user-agent'] || null,
+            ipAddress: req.ip || null
+        });
 
         console.log('✅ User registered:', newUser.id, newUser.username);
 
@@ -152,7 +155,10 @@ router.post('/login', asyncHandler(async (req, res) => {
         const token = tokenService.generateAccessToken(user);
         const refreshToken = tokenService.generateRefreshToken(user);
         
-        tokenService.storeRefreshToken(refreshToken, user.id);
+        await tokenService.storeRefreshToken(refreshToken, user.id, 7 * 24 * 60 * 60 * 1000, {
+            userAgent: req.headers['user-agent'] || null,
+            ipAddress: req.ip || null
+        });
         
         res.json({
             success:      true,
@@ -298,7 +304,7 @@ router.post('/refresh', asyncHandler(async (req, res) => {
         });
     }
     
-    const stored = tokenService.validateStoredRefreshToken(refreshToken);
+    const stored = await tokenService.validateStoredRefreshToken(refreshToken);
     if (!stored.valid) {
         return res.status(401).json({
             success: false,
@@ -318,8 +324,11 @@ router.post('/refresh', asyncHandler(async (req, res) => {
     const newToken = tokenService.generateAccessToken(user);
     const newRefreshToken = tokenService.generateRefreshToken(user);
     
-    tokenService.invalidateRefreshToken(refreshToken);
-    tokenService.storeRefreshToken(newRefreshToken, user.id);
+    await tokenService.invalidateRefreshToken(refreshToken);
+    await tokenService.storeRefreshToken(newRefreshToken, user.id, 7 * 24 * 60 * 60 * 1000, {
+        userAgent: req.headers['user-agent'] || null,
+        ipAddress: req.ip || null
+    });
     
     res.json({
         success: true,
@@ -338,7 +347,7 @@ router.post('/refresh', asyncHandler(async (req, res) => {
 router.post('/logout', authenticateToken, asyncHandler(async (req, res) => {
     const refreshToken = req.body.refreshToken;
     if (refreshToken) {
-        tokenService.invalidateRefreshToken(refreshToken);
+        await tokenService.invalidateRefreshToken(refreshToken);
     }
     
     res.json({
@@ -354,9 +363,10 @@ router.get('/sessions', authenticateToken, asyncHandler(async (req, res) => {
         
         console.log('[AUTH] /sessions called for user:', userId);
         
+        const sessions = await tokenService.listUserRefreshSessions(userId);
         res.status(200).json({
             success: true,
-            data: []
+            data: sessions
         });
         
     } catch (error) {

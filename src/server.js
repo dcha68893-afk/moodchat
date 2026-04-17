@@ -4148,6 +4148,10 @@ class WebSocketService {
                 return { valid: false, error: 'Missing token' };
             }
 
+            if (typeof token !== 'string' || token.length > 4096) {
+                return { valid: false, error: 'Malformed token' };
+            }
+
             const verification = tokenService.verifyAccessToken(token);
             if (!verification.valid) {
                 return { valid: false, error: verification.error || 'Invalid token' };
@@ -4159,12 +4163,17 @@ class WebSocketService {
                 return { valid: false, error: 'Missing userId in token' };
             }
 
+            const numericUserId = Number.parseInt(userId, 10);
+            if (!Number.isFinite(numericUserId) || numericUserId <= 0) {
+                return { valid: false, error: 'Invalid userId in token' };
+            }
+
             return {
                 valid: true,
-                userId: parseInt(userId, 10),
+                userId: numericUserId,
                 user: {
-                    id: parseInt(userId, 10),
-                    userId: parseInt(userId, 10),
+                    id: numericUserId,
+                    userId: numericUserId,
                     email: decoded.email || null,
                     username: decoded.username || null,
                     role: decoded.role || 'user'
@@ -4188,13 +4197,35 @@ class WebSocketService {
             return;
         }
 
+        const numericTargetUserId = Number.parseInt(targetUserId, 10);
+        if (!Number.isFinite(numericTargetUserId) || numericTargetUserId <= 0) {
+            ws.send(JSON.stringify({
+                type: 'error',
+                message: 'Invalid target user',
+                timestamp: new Date().toISOString()
+            }));
+            return;
+        }
+
         const outboundPayload = {
             ...payload,
             fromUserId: ws.userId,
             senderId: payload.senderId || ws.userId
         };
 
-        websocketDeliveryService.sendToUser(targetUserId, data.type, outboundPayload).catch(() => {});
+        try {
+            const payloadSize = Buffer.byteLength(JSON.stringify(outboundPayload), 'utf8');
+            if (payloadSize > 64 * 1024) {
+                ws.send(JSON.stringify({
+                    type: 'error',
+                    message: 'Payload too large',
+                    timestamp: new Date().toISOString()
+                }));
+                return;
+            }
+        } catch (_error) {}
+
+        websocketDeliveryService.sendToUser(numericTargetUserId, data.type, outboundPayload).catch(() => {});
 
         if (data.messageId) {
             ws.send(JSON.stringify({

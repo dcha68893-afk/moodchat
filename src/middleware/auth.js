@@ -117,8 +117,7 @@ const authenticateToken = (req, res, next) => {
       });
     }
     
-    console.log('[Auth] Token found, length:', token.length);
-    console.log('[Auth] Token prefix:', token.substring(0, 30) + '...');
+    console.log('[Auth] Token found');
     
     // CRITICAL FIX: Use tokenService for verification (same as token generation)
     const verification = tokenService.verifyAccessToken(token);
@@ -136,14 +135,6 @@ const authenticateToken = (req, res, next) => {
     const decoded = verification.decoded;
     
     console.log('[Auth] âœ… Token verification successful');
-    console.log('[Auth] Decoded payload:', {
-      userId: decoded.userId,
-      id: decoded.id,
-      email: decoded.email,
-      username: decoded.username,
-      type: decoded.type,
-      exp: decoded.exp ? new Date(decoded.exp * 1000).toISOString() : null
-    });
     
     // CRITICAL FIX: Ensure userId is properly set
     const userId = decoded.userId || decoded.id;
@@ -168,12 +159,7 @@ const authenticateToken = (req, res, next) => {
       tokenType: decoded.type
     };
     
-    console.log('[Auth] âœ… User authenticated:', {
-      userId: req.user.userId,
-      email: req.user.email,
-      username: req.user.username,
-      role: req.user.role
-    });
+    console.log('[Auth] âœ… User authenticated:', { userId: req.user.userId, role: req.user.role });
     console.log('[Auth] =========================================');
     next();
     
