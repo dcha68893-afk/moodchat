@@ -215,7 +215,7 @@ class StatusController {
   async getUserStatuses(req, res, next) {
     try {
       const { userId } = req.params;
-      const currentUserId = req.user.id;
+      const currentUserId = req.user?.userId || req.user?.id;
       const { 
         page = 1, 
         limit = 20,

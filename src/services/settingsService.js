@@ -57,13 +57,16 @@ class SettingsService {
         // Create settings if they don't exist
         settings = await this.createSettings(userId, settingsData);
       } else {
+        // Normalise AppSettings-shaped payload → flat DB schema
+        const flatData = this._normaliseSectionedPayload(settingsData);
+
         // Validate updates before applying
-        this._validateSettingsUpdate(settingsData);
+        this._validateSettingsUpdate(flatData);
         
         // Update settings
         settings = await Settings.findOneAndUpdate(
           { userId },
-          { $set: settingsData },
+          { $set: flatData },
           { new: true, runValidators: true }
         ).lean();
       }
@@ -105,10 +108,14 @@ class SettingsService {
 
       // Get default settings and merge with custom data
       const defaultSettings = Settings.getDefaultSettings();
+      // Normalise any AppSettings-shaped keys before merging with defaults
+      const flatCustom = Object.keys(settingsData).length > 0
+        ? this._normaliseSectionedPayload(settingsData)
+        : settingsData;
       const mergedSettings = {
         userId,
         ...defaultSettings,
-        ...settingsData
+        ...flatCustom
       };
 
       // Validate the merged settings
@@ -225,38 +232,133 @@ class SettingsService {
 
   /**
    * Validate settings update
+   * Accepts both flat fields (legacy) and section-keyed objects (AppSettings shape).
    * @private
    * @param {Object} settingsData - Settings data to validate
    */
   _validateSettingsUpdate(settingsData) {
-    const validFields = [
+    // ── Flat top-level fields (legacy schema, kept for backwards compat) ──────
+    const validFlatFields = [
       'theme', 'accentColor', 'notificationsEnabled', 'language',
       'fontSize', 'timezone', 'emailNotifications', 'pushNotifications',
       'soundEnabled', 'vibrationEnabled', 'dataSaver', 'autoDownload',
-      'privacy', 'chatPreferences'
+      'privacy', 'chatPreferences',
+      // userId is set server-side; updatedAt is managed here
+      'updatedAt', 'syncEnabled', 'section'
     ];
 
-    // Check for invalid fields
+    // ── Section-keyed fields (AppSettings / MoodChat schema) ─────────────────
+    const validSectionFields = [
+      'appearance', 'notifications', 'calls', 'groups',
+      'friends', 'status', 'account', 'chat', 'advanced'
+    ];
+
+    const allValidFields = [...validFlatFields, ...validSectionFields];
+
     const invalidFields = Object.keys(settingsData).filter(
-      field => !validFields.includes(field)
+      field => !allValidFields.includes(field)
     );
 
     if (invalidFields.length > 0) {
       throw new ValidationError(`Invalid fields: ${invalidFields.join(', ')}`);
     }
 
-    // Validate specific fields if present
-    if (settingsData.theme && !['light', 'dark', 'system'].includes(settingsData.theme)) {
+    // ── Field-level validation ────────────────────────────────────────────────
+    const theme = settingsData.theme || settingsData.appearance?.theme;
+    if (theme && !['light', 'dark', 'system', 'auto'].includes(theme)) {
       throw new ValidationError('Invalid theme value');
     }
 
-    if (settingsData.accentColor && !/^#([A-Fa-f0-9]{6}|[A-Fa-f0-9]{3})$/.test(settingsData.accentColor)) {
+    const accentColor = settingsData.accentColor || settingsData.appearance?.accentColor;
+    if (accentColor && !/^#([A-Fa-f0-9]{6}|[A-Fa-f0-9]{3})$/.test(accentColor)) {
       throw new ValidationError('Invalid accent color format');
     }
 
-    if (settingsData.language && !['en', 'es', 'fr', 'de', 'zh', 'ja', 'ko', 'ru', 'ar'].includes(settingsData.language)) {
+    const language = settingsData.language || settingsData.appearance?.language;
+    const validLanguages = ['en', 'es', 'fr', 'de', 'zh', 'ja', 'ko', 'ru', 'ar',
+                            'pt', 'it', 'nl', 'pl', 'sv', 'tr'];
+    if (language && !validLanguages.includes(language)) {
       throw new ValidationError('Invalid language');
     }
+
+    // Validate boolean fields
+    const boolFields = ['notificationsEnabled', 'emailNotifications', 'pushNotifications',
+                        'soundEnabled', 'vibrationEnabled', 'dataSaver', 'autoDownload', 'syncEnabled'];
+    boolFields.forEach(field => {
+      if (field in settingsData && typeof settingsData[field] !== 'boolean') {
+        throw new ValidationError(`Field "${field}" must be a boolean`);
+      }
+    });
+
+    // privacy must be an object if present
+    if (settingsData.privacy !== undefined &&
+        (typeof settingsData.privacy !== 'object' || Array.isArray(settingsData.privacy))) {
+      throw new ValidationError('Field "privacy" must be an object');
+    }
+
+    // chatPreferences must be an object if present
+    if (settingsData.chatPreferences !== undefined &&
+        (typeof settingsData.chatPreferences !== 'object' || Array.isArray(settingsData.chatPreferences))) {
+      throw new ValidationError('Field "chatPreferences" must be an object');
+    }
+  }
+
+  /**
+   * Normalise an AppSettings-shaped payload to the flat DB schema.
+   * Called by updateSettings before writing to the DB so the richer
+   * frontend shape maps cleanly to the existing Sequelize model columns.
+   * @private
+   * @param {Object} settingsData
+   * @returns {Object} flat settings object safe to pass to $set / findOneAndUpdate
+   */
+  _normaliseSectionedPayload(settingsData) {
+    const out = Object.assign({}, settingsData);
+
+    // Flatten appearance → top-level columns
+    if (settingsData.appearance && typeof settingsData.appearance === 'object') {
+      const a = settingsData.appearance;
+      if (a.theme        !== undefined) out.theme        = a.theme;
+      if (a.accentColor  !== undefined) out.accentColor  = a.accentColor;
+      if (a.fontSize     !== undefined) out.fontSize      = String(a.fontSize);
+      if (a.language     !== undefined) out.language      = a.language;
+      if (a.timezone     !== undefined) out.timezone      = a.timezone;
+      delete out.appearance;
+    }
+
+    // Flatten notifications booleans
+    if (settingsData.notifications && typeof settingsData.notifications === 'object') {
+      const n = settingsData.notifications;
+      if (n.messageNotifications   !== undefined) out.notificationsEnabled = n.messageNotifications;
+      if (n.notificationSound      !== undefined) out.soundEnabled         = n.notificationSound;
+      if (n.notificationVibration  !== undefined) out.vibrationEnabled     = n.notificationVibration;
+      if (n.emailNotifications     !== undefined) out.emailNotifications   = n.emailNotifications;
+      if (n.pushNotifications      !== undefined) out.pushNotifications    = n.pushNotifications;
+      delete out.notifications;
+    }
+
+    // Flatten chat
+    if (settingsData.chat && typeof settingsData.chat === 'object') {
+      const c = settingsData.chat;
+      out.chatPreferences = Object.assign(out.chatPreferences || {}, {
+        enterToSend:  c.enterKeySends      !== undefined ? c.enterKeySends      : undefined,
+        mediaQuality: c.videoQuality        !== undefined ? c.videoQuality       : undefined,
+        saveToGallery:c.saveMedia           !== undefined ? c.saveMedia          : undefined,
+      });
+      if (c.autoDownloadMedia !== undefined) out.autoDownload = c.autoDownloadMedia;
+      delete out.chat;
+    }
+
+    // Flatten advanced
+    if (settingsData.advanced && typeof settingsData.advanced === 'object') {
+      if (settingsData.advanced.dataSaver   !== undefined) out.dataSaver   = settingsData.advanced.dataSaver;
+      if (settingsData.advanced.syncEnabled !== undefined) out.syncEnabled = settingsData.advanced.syncEnabled;
+      delete out.advanced;
+    }
+
+    // Remove section keys that don't map to DB columns (friends, groups, status, account, calls)
+    ['friends', 'groups', 'status', 'account', 'calls'].forEach(k => delete out[k]);
+
+    return out;
   }
 
   /**

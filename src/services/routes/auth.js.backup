@@ -1,0 +1,259 @@
+﻿// src/routes/auth.js - CORRECTED VERSION
+require('dotenv').config();
+const express = require('express');
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
+const asyncHandler = require('express-async-handler');
+
+const router = express.Router();
+const db = require('../models');
+const Users = db.User || db.Users;
+
+// IMPORT tokenService (this is an instance, not a function)
+const tokenService = require('../services/tokenService');
+
+// IMPORT authenticateToken middleware
+const { authenticateToken } = require('../middleware/auth');
+
+const JWT_SECRET = process.env.JWT_SECRET || process.env.JWT_ACCESS_SECRET;
+
+console.log('✅ AUTH ROUTER LOADED - FIXED VERSION');
+
+// LOGIN ENDPOINT - Using tokenService methods correctly
+router.post('/login', asyncHandler(async (req, res) => {
+    console.log('🔐 LOGIN called');
+    const { identifier, password } = req.body;
+    
+    if (!identifier || !password) {
+        return res.status(400).json({ 
+            success: false, 
+            message: 'Email/username and password are required' 
+        });
+    }
+    
+    try {
+        const user = await Users.findOne({
+            where: {
+                [require('sequelize').Op.or]: [
+                    { email: identifier },
+                    { username: identifier }
+                ]
+            }
+        });
+        
+        if (!user) {
+            return res.status(401).json({ success: false, message: 'Invalid credentials' });
+        }
+        
+        const valid = await bcrypt.compare(password, user.password);
+        if (!valid) {
+            return res.status(401).json({ success: false, message: 'Invalid credentials' });
+        }
+        
+        // Generate tokens using tokenService methods
+        const token = tokenService.generateAccessToken(user);
+        const refreshToken = tokenService.generateRefreshToken(user);
+        
+        // Store refresh token (optional)
+        tokenService.storeRefreshToken(refreshToken, user.id);
+        
+        res.json({
+            success: true,
+            token: token,
+            refreshToken: refreshToken,
+            user: { 
+                id: user.id, 
+                username: user.username, 
+                email: user.email,
+                avatar: user.avatar,
+                role: user.role
+            }
+        });
+    } catch (error) {
+        console.error('Login error:', error);
+        res.status(500).json({ 
+            success: false, 
+            message: 'Login failed: ' + error.message 
+        });
+    }
+}));
+
+// In auth.js, replace the entire /me endpoint with this:
+router.get('/me', authenticateToken, asyncHandler(async (req, res) => {
+    try {
+        const userId = req.user.userId || req.user.id;
+        
+        // Log for debugging
+        console.log('[AUTH] /me called for user:', userId);
+        
+        // Query user with only fields that exist
+        const user = await Users.findByPk(userId, {
+            attributes: ['id', 'username', 'email', 'avatar', 'firstName', 'lastName', 'bio', 'role', 'status', 'lastSeen']
+        });
+        
+        if (!user) {
+            return res.status(404).json({
+                success: false,
+                message: 'User not found'
+            });
+        }
+        
+        // Compute displayName from firstName/lastName
+        const displayName = [user.firstName, user.lastName].filter(Boolean).join(' ').trim() || user.username;
+        
+        res.json({
+            success: true,
+            data: {
+                user: {
+                    id: user.id,
+                    username: user.username,
+                    email: user.email,
+                    avatar: user.avatar,
+                    displayName: displayName,
+                    firstName: user.firstName,
+                    lastName: user.lastName,
+                    bio: user.bio,
+                    role: user.role || 'user',
+                    status: user.status || 'offline',
+                    lastActive: user.lastSeen
+                }
+            }
+        });
+    } catch (error) {
+        console.error('[AUTH] Error in /me endpoint:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Server error: ' + error.message
+        });
+    }
+}));
+
+// VALIDATE TOKEN ENDPOINT
+router.post('/validate-token', async (req, res) => {
+    console.log('🔍 VALIDATE TOKEN CALLED');
+    
+    let token = req.headers.authorization?.split(' ')[1] || req.body.token;
+    
+    if (!token) {
+        return res.status(400).json({ 
+            success: false, 
+            valid: false, 
+            message: 'Token required' 
+        });
+    }
+    
+    try {
+        const result = tokenService.verifyAccessToken(token);
+        
+        if (result.valid) {
+            console.log('✅ Token valid for user:', result.decoded.userId);
+            
+            res.json({
+                success: true,
+                valid: true,
+                authValidated: true,
+                user: {
+                    id: result.decoded.userId,
+                    userId: result.decoded.userId,
+                    email: result.decoded.email,
+                    username: result.decoded.username,
+                    role: result.decoded.role || 'user'
+                },
+                userId: result.decoded.userId
+            });
+        } else {
+            res.status(401).json({ 
+                success: false, 
+                valid: false, 
+                message: result.message || 'Invalid token',
+                code: result.error
+            });
+        }
+    } catch (error) {
+        console.error('❌ Token validation error:', error.message);
+        res.status(401).json({ 
+            success: false, 
+            valid: false, 
+            message: error.message 
+        });
+    }
+});
+
+// REFRESH TOKEN ENDPOINT
+router.post('/refresh', asyncHandler(async (req, res) => {
+    console.log('🔄 Refresh token called');
+    
+    const refreshToken = req.body.refreshToken || req.headers['x-refresh-token'];
+    
+    if (!refreshToken) {
+        return res.status(400).json({
+            success: false,
+            message: 'Refresh token required'
+        });
+    }
+    
+    // Verify refresh token
+    const result = tokenService.verifyRefreshToken(refreshToken);
+    
+    if (!result.valid) {
+        return res.status(401).json({
+            success: false,
+            message: 'Invalid or expired refresh token'
+        });
+    }
+    
+    // Check stored refresh token
+    const stored = tokenService.validateStoredRefreshToken(refreshToken);
+    if (!stored.valid) {
+        return res.status(401).json({
+            success: false,
+            message: 'Refresh token not found or expired'
+        });
+    }
+    
+    // Get user and generate new tokens
+    const user = await Users.findByPk(stored.userId);
+    
+    if (!user) {
+        return res.status(404).json({
+            success: false,
+            message: 'User not found'
+        });
+    }
+    
+    // Generate new tokens
+    const newToken = tokenService.generateAccessToken(user);
+    const newRefreshToken = tokenService.generateRefreshToken(user);
+    
+    // Invalidate old refresh token and store new one
+    tokenService.invalidateRefreshToken(refreshToken);
+    tokenService.storeRefreshToken(newRefreshToken, user.id);
+    
+    res.json({
+        success: true,
+        token: newToken,
+        refreshToken: newRefreshToken,
+        user: {
+            id: user.id,
+            username: user.username,
+            email: user.email,
+            role: user.role
+        }
+    });
+}));
+
+// LOGOUT ENDPOINT
+router.post('/logout', authenticateToken, asyncHandler(async (req, res) => {
+    // Invalidate refresh token if provided
+    const refreshToken = req.body.refreshToken;
+    if (refreshToken) {
+        tokenService.invalidateRefreshToken(refreshToken);
+    }
+    
+    res.json({
+        success: true,
+        message: 'Logged out successfully'
+    });
+}));
+
+module.exports = router;

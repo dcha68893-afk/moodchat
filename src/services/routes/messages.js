@@ -525,13 +525,10 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
       console.warn('Failed to emit message:new websocket event:', notifyError.message);
     }
 
-    // FIX: Wrap in data.message so messageQueue._sendToServer() and
-    // messageSync.engine._fetchServerMessages() can both extract correctly:
-    // data?.data?.message || data?.message || data?.data
     res.status(201).json({
       success: true,
       message: 'Message sent successfully',
-      data: { message: populatedMessage },
+      data: populatedMessage,
     });
   } catch (error) {
     console.error('Error sending message:', error);
@@ -774,20 +771,6 @@ router.patch('/:messageId', apiRateLimiter, asyncHandler(async (req, res) => {
       { replacements: { content: content.trim(), messageId } }
     );
 
-    // Broadcast edit to all chat participants
-    try {
-      const wsService = require('../services/webSocketService');
-      wsService.broadcastToChat(msgRows[0].chatId, 'message:edited', {
-        messageId,
-        chatId: msgRows[0].chatId,
-        content: content.trim(),
-        editedAt: new Date().toISOString(),
-        editedBy: req.user.id
-      });
-    } catch (notifyError) {
-      console.warn('Failed to emit message:edited websocket event:', notifyError.message);
-    }
-
     res.status(200).json({
       status: 'success',
       message: 'Message updated successfully',
@@ -842,20 +825,6 @@ router.delete('/:messageId', apiRateLimiter, asyncHandler(async (req, res) => {
        WHERE id = :messageId`,
       { replacements: { userId: req.user.id, messageId } }
     );
-
-    // Broadcast deletion to all chat participants
-    try {
-      const wsService = require('../services/webSocketService');
-      wsService.broadcastToChat(msg.chatId, 'message:deleted', {
-        messageId,
-        chatId: msg.chatId,
-        deletedBy: req.user.id,
-        deleteForEveryone: deleteForEveryone === 'true',
-        timestamp: new Date().toISOString()
-      });
-    } catch (notifyError) {
-      console.warn('Failed to emit message:deleted websocket event:', notifyError.message);
-    }
 
     res.status(200).json({ status: 'success', message: 'Message deleted successfully' });
   } catch (error) {
@@ -920,22 +889,6 @@ router.post('/:messageId/react', apiRateLimiter, asyncHandler(async (req, res) =
       { replacements: { reactions: JSON.stringify(reactions), messageId } }
     );
 
-    // Broadcast reaction update to all chat participants
-    try {
-      const wsService = require('../services/webSocketService');
-      wsService.broadcastToChat(msg.chatId, 'message:reaction', {
-        messageId,
-        chatId: msg.chatId,
-        reactions,
-        action,
-        emoji: emojiKey,
-        userId: req.user.id,
-        timestamp: new Date().toISOString()
-      });
-    } catch (notifyError) {
-      console.warn('Failed to emit message:reaction websocket event:', notifyError.message);
-    }
-
     res.status(200).json({
       status: 'success',
       message: action === 'removed' ? 'Reaction removed' : 'Reaction added',
@@ -988,86 +941,6 @@ const getMessageTypeFromMime = (mimeType) => {
   return 'file';
 };
 
-// ============================================================================
-// POST /api/messages/:messageId/forward - Forward a message to other chats
-// ADDED: Was missing from original routes
-// ============================================================================
-router.post('/:messageId/forward', apiRateLimiter, asyncHandler(async (req, res) => {
-  try {
-    const messageId = safeInt(req.params.messageId);
-    if (!messageId) return res.status(400).json({ success: false, message: 'Invalid messageId' });
-
-    const { targetChatIds } = req.body;
-    if (!Array.isArray(targetChatIds) || targetChatIds.length === 0) {
-      return res.status(400).json({ success: false, message: 'targetChatIds array is required' });
-    }
-
-    const sequelize = req.app.locals.db;
-    const senderId = req.user.id;
-
-    // Fetch original message
-    const msgRows = await sequelize.query(
-      `SELECT id, "chatId", "senderId", content, type FROM "Messages"
-       WHERE id = :messageId AND "isDeleted" = false LIMIT 1`,
-      { replacements: { messageId }, type: sequelize.QueryTypes.SELECT }
-    );
-    if (!msgRows || msgRows.length === 0) {
-      return res.status(404).json({ success: false, message: 'Message not found' });
-    }
-    const original = msgRows[0];
-
-    const safeTargetIds = targetChatIds.map(safeInt).filter(Boolean);
-    const forwarded = [];
-
-    for (const targetChatId of safeTargetIds) {
-      // Verify sender is participant in target chat
-      const isParticipant = await sequelize.query(
-        `SELECT 1 FROM chat_participants WHERE "chatId" = :chatId AND "userId" = :senderId LIMIT 1`,
-        { replacements: { chatId: targetChatId, senderId }, type: sequelize.QueryTypes.SELECT }
-      );
-      if (!isParticipant || isParticipant.length === 0) continue;
-
-      const result = await sequelize.query(
-        `INSERT INTO "Messages" ("chatId","senderId",content,type,reactions,"sentAt","deliveredAt","createdAt","updatedAt")
-         VALUES (:chatId,:senderId,:content,:type,'{}',NOW(),NOW(),NOW(),NOW())
-         RETURNING id,"chatId","senderId",content,type,"createdAt"`,
-        {
-          replacements: { chatId: targetChatId, senderId, content: original.content, type: original.type },
-          type: sequelize.QueryTypes.INSERT
-        }
-      );
-      const newMsg = result[0][0];
-      await sequelize.query(
-        `UPDATE chats SET "updatedAt" = NOW(), "lastMessageId" = :messageId WHERE id = :chatId`,
-        { replacements: { messageId: newMsg.id, chatId: targetChatId } }
-      );
-
-      forwarded.push(newMsg);
-
-      // Notify recipients via WebSocket
-      try {
-        const wsService = require('../services/webSocketService');
-        const participants = await sequelize.query(
-          `SELECT DISTINCT "userId" FROM chat_participants WHERE "chatId" = :chatId AND "userId" != :senderId`,
-          { replacements: { chatId: targetChatId, senderId }, type: sequelize.QueryTypes.SELECT }
-        );
-        await Promise.allSettled(
-          (participants || []).map(row => wsService.sendToUser(row.userId, 'message:new', { ...newMsg, forwarded: true }))
-        );
-      } catch (notifyError) {
-        console.warn('Failed to emit forwarded message event:', notifyError.message);
-      }
-    }
-
-    res.status(201).json({
-      status: 'success',
-      message: `Message forwarded to ${forwarded.length} chat(s)`,
-      data: { forwarded, count: forwarded.length }
-    });
-  } catch (error) {
-    console.error('Error forwarding message:', error);
-    res.status(500).json({ status: 'error', message: 'Failed to forward message' });
-  }
-}));
-
 module.exports = router;
+
+

@@ -610,49 +610,6 @@ router.post('/:callId/accept', apiRateLimiter, asyncHandler(async (req, res) => 
   }
 }));
 
-// POST /:callId/answer — alias for /accept (chat.html calls this endpoint)
-// Gap 1 fix: chat.html (lines 1675, 3075) calls POST /calls/:id/answer but only /accept existed.
-router.post('/:callId/answer', apiRateLimiter, asyncHandler(async (req, res) => {
-  try {
-    const auth = checkAuth(req, res); if (!auth) return;
-    const { userId } = auth;
-    if (!checkModels(res)) return;
-
-    const { callId } = req.params;
-    const { sdpAnswer } = req.body;
-
-    const call = await Call.findOne({
-      where: { id: callId, participants: { [Op.contains]: [userId] }, status: { [Op.in]: ['ringing', 'initiated'] } },
-    });
-    if (!call) return res.status(404).json({ status: 'error', message: 'Call not found or already answered' });
-
-    await updateArrayField(call, 'answeredBy', userId, 'add');
-    if (call.status !== 'in-progress') {
-      call.status    = 'in-progress';
-      call.startedAt = new Date();
-      if (sdpAnswer) call.sdpAnswer = sdpAnswer;
-      await call.save();
-    }
-
-    const user = await User.findByPk(userId, { attributes: ['id', 'username', 'avatar'] });
-
-    for (const pid of (call.participants || [])) {
-      await notifyUser(req.io, pid, 'call_accepted', {
-        callId:     call.id,
-        answeredBy: user ? { id: user.id, username: user.username, avatar: user.avatar } : { id: userId },
-        status:     call.status,
-        startedAt:  call.startedAt,
-        timestamp:  new Date(),
-      });
-    }
-
-    res.json({ status: 'success', message: 'Call answered', data: { call: { id: call.id, status: call.status, callId: call.id } } });
-  } catch (err) {
-    console.error('[POST /:callId/answer]', err.message);
-    res.status(500).json({ status: 'error', message: 'Failed to answer call' });
-  }
-}));
-
 // POST /:callId/reject
 router.post('/:callId/reject', apiRateLimiter, asyncHandler(async (req, res) => {
   try {
