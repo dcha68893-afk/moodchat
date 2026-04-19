@@ -150,26 +150,11 @@ class CallController {
 
       if (!chatId) chatId = await findOrCreateDirectChat(callerId, parseInt(calleeId, 10));
 
+      // NOTE: isOnline is a hint only — we ALWAYS proceed with the call.
+      // The online check is unreliable across server restarts / race conditions.
+      // The 30s ring timeout or receiver rejection will handle genuine no-answer.
       const isOnline = await wsIsUserOnline(parseInt(calleeId, 10));
-
-      if (!isOnline) {
-        // Still create the call record so it appears in history, then immediately mark missed
-        const call = await callService.initiateCall(callerId, parseInt(calleeId, 10), type, chatId ? parseInt(chatId, 10) : null);
-        try { await callService.cancelCall(call.id, callerId); } catch (_) {
-          // If cancel fails (e.g. race), just mark missed directly
-          try {
-            const Call = db.Calls || db.Call;
-            await Call.update({ status: 'missed', endedAt: new Date() }, { where: { id: call.id } });
-          } catch (_2) {}
-        }
-
-        return res.status(200).json({
-          success:  false,
-          offline:  true,
-          message:  'User is currently offline.',
-          data:     { call, receiverOnline: false },
-        });
-      }
+      console.log(`[callController] wsIsUserOnline(${calleeId}) = ${isOnline} (hint only — call proceeds regardless)`);
 
       const call = await callService.initiateCall(callerId, parseInt(calleeId, 10), type, chatId ? parseInt(chatId, 10) : null);
 
@@ -186,7 +171,7 @@ class CallController {
       return res.status(201).json({
         success:  true,
         message:  'Call initiated successfully',
-        data:     { call, receiverOnline: true },
+        data:     { call, receiverOnline: isOnline },
       });
 
     } catch (error) {

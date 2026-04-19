@@ -163,16 +163,39 @@ router.get('/chats', apiRateLimiter, asyncHandler(async (req, res) => {
       { replacements: { userId }, type: sequelize.QueryTypes.SELECT }
     );
 
-    const formatted = conversations.map(conv => ({
-      id: conv.chatId,
-      name: conv.chatName || (conv.participants && conv.participants[0]?.username) || 'Chat',
-      type: conv.chatType || 'direct',
-      participants: conv.participants || [],
-      lastMessage: conv.lastMessage,
-      unreadCount: parseInt(conv.unreadCount || 0),
-      updatedAt: conv.updatedAt,
-      createdAt: conv.createdAt,
-    }));
+    const formatted = conversations.map(conv => {
+      // participants subquery already excludes current user (WHERE cp."userId" != :userId)
+      const otherP = (conv.participants && conv.participants[0]) || null;
+      const resolvedName = conv.chatName
+        || otherP?.displayName
+        || otherP?.username
+        || 'Chat';
+      return {
+        id: conv.chatId,
+        chatId: conv.chatId,
+        name: resolvedName,
+        chatName: resolvedName,
+        type: conv.chatType || 'direct',
+        chatType: conv.chatType || 'direct',
+        participants: conv.participants || [],
+        lastMessage: conv.lastMessage,
+        lastMessageContent: conv.lastMessage?.content || null,
+        unreadCount: parseInt(conv.unreadCount || 0, 10),
+        updatedAt: conv.updatedAt,
+        createdAt: conv.createdAt,
+        // FIX: Top-level friendId/friendName/friendAvatar so messages-core
+        // can find existing conversations without scanning participants array
+        friendId:     otherP?.id     || null,
+        friendName:   resolvedName,
+        friendAvatar: otherP?.avatar || null,
+        otherParticipant: otherP ? {
+          id:          otherP.id,
+          username:    otherP.username,
+          avatar:      otherP.avatar,
+          displayName: otherP.displayName || otherP.username,
+        } : null,
+      };
+    });
 
     res.status(200).json({ success: true, data: formatted });
   } catch (error) {
@@ -333,9 +356,14 @@ router.get('/', apiRateLimiter, asyncHandler(async (req, res) => {
     const total = parseInt(countResult[0]?.total || 0);
 
     res.status(200).json({
-      status: 'success',
+      success: true,
       data: {
-        messages: messages.reverse(),
+        messages: messages.reverse().map(m => ({
+          ...m,
+          // FIX: expose both "type" and "messageType" so any client field lookup works
+          type: m.messageType || m.type || 'text',
+          messageType: m.messageType || m.type || 'text',
+        })),
         pagination: { total, page, limit, pages: Math.ceil(total / limit) },
       },
     });
@@ -528,10 +556,12 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
     // FIX: Wrap in data.message so messageQueue._sendToServer() and
     // messageSync.engine._fetchServerMessages() can both extract correctly:
     // data?.data?.message || data?.message || data?.data
+    // Also expose chatId at top level for pending conversation replacement
     res.status(201).json({
       success: true,
       message: 'Message sent successfully',
-      data: { message: populatedMessage },
+      chatId,                          // top-level for createConversation pending replacement
+      data: { message: populatedMessage, chatId },
     });
   } catch (error) {
     console.error('Error sending message:', error);

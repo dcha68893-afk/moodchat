@@ -65,7 +65,11 @@ class WebSocketService {
       try {
         socketOrSocketId.join(`user:${uid}`);
         socketOrSocketId.join(`user_${uid}`);
-      } catch (_) {}
+        console.log(`[WSService] Socket ${socketId} joined rooms user:${uid} and user_${uid}`);
+      } catch (err) {
+        // Log but do NOT suppress — room join failure means call notifications won't reach user
+        console.error(`[WSService] ⚠️ Failed to join rooms for uid=${uid} socket=${socketId}:`, err.message);
+      }
     }
 
     console.log(`[WSService] registerUser uid=${uid} socketId=${socketId} (total=${this.onlineUsers.get(uid).size})`);
@@ -114,18 +118,38 @@ class WebSocketService {
     // 2. Check raw WebSocket clients
     const wsClients = this.wsClients.get(uid);
     if (wsClients && wsClients.size > 0) {
-      // Prune dead clients
       for (const ws of wsClients) {
         if (ws.readyState === 1 /* OPEN */) return true;
       }
     }
 
-    // 3. Check Socket.IO adapter rooms
+    // 3. Check Socket.IO adapter rooms (primary fix — most reliable signal)
     const io = this.getIO();
-    if (io && io.sockets && io.sockets.adapter && io.sockets.adapter.rooms) {
-      const rooms = [`user:${uid}`, `user_${uid}`];
-      for (const room of rooms) {
-        if (io.sockets.adapter.rooms.has(room)) return true;
+    if (io) {
+      // Modern Socket.IO v4: sockets.adapter.rooms is a Map
+      const adapter = io.sockets && io.sockets.adapter;
+      if (adapter && adapter.rooms) {
+        for (const room of [`user:${uid}`, `user_${uid}`]) {
+          const roomSet = adapter.rooms.get(room);
+          if (roomSet && roomSet.size > 0) {
+            // Double-check at least one socket in the room is still connected
+            for (const [sid] of io.sockets.sockets || new Map()) {
+              if (roomSet.has(sid)) return true;
+            }
+            // If we can't iterate sockets, trust the room membership
+            return true;
+          }
+        }
+      }
+
+      // Fallback: check fetchSockets() if available (Socket.IO v4+)
+      if (typeof io.in === 'function') {
+        try {
+          for (const room of [`user:${uid}`, `user_${uid}`]) {
+            const connectedSockets = await io.in(room).fetchSockets().catch(() => []);
+            if (connectedSockets && connectedSockets.length > 0) return true;
+          }
+        } catch (_) {}
       }
     }
 

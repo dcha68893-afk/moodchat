@@ -214,20 +214,17 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
 
     // ── 1-to-1 call ──────────────────────────────────────────────────────────
     const targetId = parseInt(calleeId, 10);
+
+    // NOTE: safeIsUserOnline is used ONLY as a hint for the response payload.
+    // We ALWAYS create the call record and fire the socket notification regardless,
+    // because the online check is unreliable (race conditions, delayed socket registration,
+    // cross-server deployments). The 30-second ring timeout handles genuine no-answer cases.
     const isOnline = await safeIsUserOnline(targetId);
+    console.log(`[POST /calls] safeIsUserOnline(${targetId}) = ${isOnline} (hint only — call proceeds regardless)`);
 
     const call = await callService.initiateCall(userId, targetId, callType, null);
 
-    if (!isOnline) {
-      try { await callService.endCall(call.id, userId); } catch (_) {}
-      return res.status(200).json({
-        success: false,
-        offline: true,
-        message: 'User is currently offline.',
-        data:    { call, receiverOnline: false },
-      });
-    }
-
+    // Always notify — if they are online, they'll get it; if not, it'll be a missed call
     await notifyUser(req.io, targetId, 'call_incoming', {
       callId:       call.id,
       callerId:     userId,
@@ -237,7 +234,7 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
       timestamp:    Date.now(),
     });
 
-    return res.status(201).json({ success: true, message: 'Call initiated', data: { call, receiverOnline: true } });
+    return res.status(201).json({ success: true, message: 'Call initiated', data: { call, receiverOnline: isOnline } });
 
   } catch (err) {
     console.error('[POST /calls]', err.message);
@@ -502,20 +499,18 @@ router.post('/start', apiRateLimiter, asyncHandler(async (req, res) => {
     const caller = await User.findByPk(userId, { attributes: ['id', 'username', 'avatar'] });
 
     for (const pid of participants) {
-      // Check online before notifying (non-fatal)
-      const online = await safeIsUserOnline(pid);
-      if (online) {
-        await notifyUser(req.io, pid, 'call_incoming', {
-          callId:       call.id,
-          callerId:     userId,
-          callerName:   caller && caller.username || 'Unknown',
-          callerAvatar: caller && caller.avatar   || null,
-          callType,
-          isGroupCall,
-          chatId:       chatId || null,
-          timestamp:    new Date(),
-        });
-      }
+      // Always notify — let the socket deliver if online, no-op if not.
+      // safeIsUserOnline is unreliable; skipping notification causes "missed call" false positives.
+      await notifyUser(req.io, pid, 'call_incoming', {
+        callId:       call.id,
+        callerId:     userId,
+        callerName:   caller && caller.username || 'Unknown',
+        callerAvatar: caller && caller.avatar   || null,
+        callType,
+        isGroupCall,
+        chatId:       chatId || null,
+        timestamp:    new Date(),
+      });
     }
 
     res.status(201).json({

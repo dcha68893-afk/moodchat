@@ -280,13 +280,17 @@ class GroupMembersService {
     }
 
     // ── INVITATIONS: SEND / INVITE ────────────────────────────────────────────
-    // Smart: if group requires no approval, add member directly; otherwise send invite.
+    // Smart routing:
+    //   1. Group requireAdminApproval=true   → always invite (create invite record)
+    //   2. Invitee privacy whoCanAddMe=nobody → always invite (respect user restriction)
+    //   3. Invitee privacy whoCanAddMe=contacts and inviter not a contact → invite
+    //   4. Otherwise → add directly as member
     async inviteToGroup(groupId, inviterId, inviteeId, role = 'member', message = '') {
         try {
             const group = await resolveGroup(groupId);
             await requireMembership(groupId, inviterId, 'admin');
 
-            // Check if invitee is banned
+            // ── Check if invitee is banned ─────────────────────────────────────
             const inviteeMember = await GroupMembers?.findOne({ where: { groupId, userId: inviteeId } });
             if (inviteeMember?.customSettings?.bannedAt && !inviteeMember.leftAt) {
                 throw new Error('This user is banned from the group');
@@ -295,14 +299,64 @@ class GroupMembersService {
                 return { action: 'already_member', member: formatMember(inviteeMember) };
             }
 
-            // If group settings allow direct add (no approval required), add directly
+            // ── Resolve invitee privacy settings ──────────────────────────────
+            // whoCanAddMe values: 'everyone' | 'contacts' | 'nobody'
+            // Stored in Users.privacySettings.whoCanAddMe  OR  Users.settings.whoCanAddMe
+            let inviteePrivacy = 'everyone'; // safe default — direct add allowed
+            if (Users) {
+                try {
+                    const inviteeUser = await Users.findByPk(inviteeId, {
+                        attributes: ['id', 'privacySettings', 'settings'],
+                    });
+                    if (inviteeUser) {
+                        const ps = inviteeUser.privacySettings || inviteeUser.settings?.privacy || {};
+                        inviteePrivacy = ps.whoCanAddMe || ps.groupAddPolicy || ps.allowGroupAdds || 'everyone';
+                        // Normalize boolean legacy field: allowGroupAdds=false → 'nobody'
+                        if (inviteePrivacy === false) inviteePrivacy = 'nobody';
+                        if (inviteePrivacy === true)  inviteePrivacy = 'everyone';
+                    }
+                } catch (privacyErr) {
+                    // Privacy lookup failed — default to safe (allow direct add)
+                    console.warn('[GroupMembersService] Privacy lookup failed, defaulting to everyone:', privacyErr.message);
+                }
+            }
+
+            // ── Determine add vs invite ────────────────────────────────────────
             const requiresApproval = group.settings?.requireAdminApproval ?? false;
-            if (!requiresApproval) {
+
+            // 'nobody' — invitee has blocked all direct adds; must use invite
+            const userBlocksDirectAdd = inviteePrivacy === 'nobody' || inviteePrivacy === 'invite_required';
+
+            // 'contacts' — only direct-add if inviter is a contact of invitee
+            let inviterIsContact = true; // optimistic default
+            if (inviteePrivacy === 'contacts' && Users) {
+                try {
+                    // Check Contacts/Friends table if it exists
+                    const ContactModel = db?.models?.Contacts || db?.models?.Friends || db?.Contacts || db?.Friends;
+                    if (ContactModel) {
+                        const contact = await ContactModel.findOne({
+                            where: {
+                                userId: inviteeId,
+                                contactId: inviterId,
+                                status: 'accepted',
+                            }
+                        });
+                        inviterIsContact = !!contact;
+                    }
+                } catch (_) {
+                    // Contacts table may not exist — keep optimistic true
+                }
+            }
+
+            const mustSendInvite = requiresApproval || userBlocksDirectAdd || (inviteePrivacy === 'contacts' && !inviterIsContact);
+
+            if (!mustSendInvite) {
+                // ── DIRECT ADD ──────────────────────────────────────────────
                 const member = await this.addMemberToGroup(groupId, inviterId, inviteeId, role, true);
                 return { action: 'member_added', member };
             }
 
-            // Otherwise create invitation record
+            // ── SEND INVITATION RECORD ────────────────────────────────────────
             if (!Invites) throw new Error('Invite service unavailable');
             const existingInvite = await Invites.findOne({ where: { groupId, targetUserId: inviteeId, status: 'pending' } });
             if (existingInvite) throw new Error('User is already invited to this group');
@@ -315,8 +369,10 @@ class GroupMembersService {
                 status: 'pending',
                 expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
             });
-            console.log(`[GroupMembersService] ✅ Invitation sent: user ${inviteeId} → group ${groupId}`);
-            return { action: 'invite_sent', invitation };
+
+            const reason = userBlocksDirectAdd ? 'user_privacy' : requiresApproval ? 'group_approval' : 'not_contact';
+            console.log(`[GroupMembersService] ✅ Invitation sent (reason=${reason}): user ${inviteeId} → group ${groupId}`);
+            return { action: 'invite_sent', invitation, reason };
         } catch (e) {
             if (['not found','banned','already','permission'].some(s => e.message.includes(s))) throw e;
             console.error('[GroupMembersService] inviteToGroup error:', e.message);

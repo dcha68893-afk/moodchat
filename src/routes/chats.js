@@ -178,6 +178,11 @@ router.get(
                         };
                         chatObj.chatName = displayName;
                         chatObj.avatar = otherParticipant.avatar;
+                        // FIX: Add friendId/friendName/friendAvatar so messages-core can match
+                        // existing conversations without scanning participants array
+                        chatObj.friendId     = otherParticipant.id;
+                        chatObj.friendName   = displayName;
+                        chatObj.friendAvatar = otherParticipant.avatar || null;
                     }
                 } else if (chatObj.type === 'group') {
                     chatObj.chatName = chatObj.name;
@@ -310,8 +315,12 @@ router.get(
                         lastSeen: otherParticipant.lastSeen,
                         email: otherParticipant.email
                     };
-                    chatObj.chatName = displayName;
-                    chatObj.avatar = otherParticipant.avatar;
+                    chatObj.chatName    = displayName;
+                    chatObj.avatar      = otherParticipant.avatar;
+                    // FIX: expose top-level friendId/friendName/friendAvatar
+                    chatObj.friendId     = otherParticipant.id;
+                    chatObj.friendName   = displayName;
+                    chatObj.friendAvatar = otherParticipant.avatar || null;
                 }
             } else if (chatObj.type === 'group') {
                 chatObj.chatName = chatObj.name;
@@ -406,10 +415,12 @@ router.post(
                         
                         return res.status(200).json({
                             status: 'success',
+                            success: true,
                             message: 'Existing direct chat found',
                             data: {
                                 chat: {
                                     id: chat.id,
+                                    chatId: chat.id,
                                     type: 'direct',
                                     otherParticipant: {
                                         id: otherUser.id,
@@ -419,10 +430,14 @@ router.post(
                                         status: otherUser.status || 'offline',
                                         lastSeen: otherUser.lastSeen
                                     },
-                                    chatName: displayName,
-                                    avatar: otherUser.avatar,
-                                    createdAt: chat.createdAt,
-                                    updatedAt: chat.updatedAt,
+                                    chatName:    displayName,
+                                    // FIX: top-level fields for messages-core conversation matching
+                                    friendId:     otherUser.id,
+                                    friendName:   displayName,
+                                    friendAvatar: otherUser.avatar || null,
+                                    avatar:       otherUser.avatar,
+                                    createdAt:    chat.createdAt,
+                                    updatedAt:    chat.updatedAt,
                                     unreadCount: 0
                                 }
                             }
@@ -504,10 +519,12 @@ router.post(
             
             res.status(201).json({
                 status: 'success',
+                success: true,
                 message: 'Direct chat created successfully',
                 data: {
                     chat: {
                         id: newChat.id,
+                        chatId: newChat.id,
                         type: 'direct',
                         otherParticipant: {
                             id: otherUser.id,
@@ -517,8 +534,12 @@ router.post(
                             status: otherUser.status || 'offline',
                             lastSeen: otherUser.lastSeen
                         },
-                        chatName: displayName,
-                        avatar: otherUser.avatar,
+                        chatName:    displayName,
+                        // FIX: top-level fields for messages-core conversation matching
+                        friendId:     otherUser.id,
+                        friendName:   displayName,
+                        friendAvatar: otherUser.avatar || null,
+                        avatar:       otherUser.avatar,
                         createdAt: newChat.createdAt,
                         updatedAt: newChat.updatedAt,
                         unreadCount: 0
