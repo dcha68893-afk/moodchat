@@ -75,22 +75,38 @@ class CallService {
     if (!caller) throw new Error('Caller not found');
     if (!callee) throw new Error('Callee not found');
 
-    // Auto-cleanup stale calls for both parties first
+    // Auto-cleanup stale calls for both parties first — runs before busy-check
     await this._forceCleanupStaleCallsForUsers([parseInt(callerId), parseInt(calleeId)]);
 
-    // Check callee not already in a genuine active call
+    // Check callee not already in a GENUINE in-progress call
+    // We only block if the call is actively in-progress AND recent (< CALL_TIMEOUT_SECONDS)
     const activeCall = await Call.findOne({
       where: {
         participants: { [Op.contains]: [parseInt(calleeId)] },
         status:       { [Op.in]: ['ringing', 'initiated', 'in-progress'] },
       },
+      order: [['createdAt', 'DESC']],  // most recent first
     });
     if (activeCall) {
       const callAge = (Date.now() - new Date(activeCall.createdAt).getTime()) / 1000;
-      if (callAge > CALL_TIMEOUT_SECONDS + 10) {
-        await activeCall.update({ status: 'missed', endedAt: new Date() });
+      // Force-clean any call older than CALL_TIMEOUT_SECONDS regardless of status
+      if (callAge >= CALL_TIMEOUT_SECONDS) {
+        const wasAnswered = activeCall.answeredBy && activeCall.answeredBy.length > 0;
+        await activeCall.update({ status: wasAnswered ? 'completed' : 'missed', endedAt: new Date() });
+        emitToAll(activeCall.participants || [], 'call_force_ended', {
+          callId: activeCall.id, reason: 'timeout_on_new_call', timestamp: new Date()
+        });
+        console.log(`[CallService] Auto-cleaned stale blocking call ${activeCall.id} (age=${Math.round(callAge)}s)`);
+      } else if (activeCall.status === 'in-progress') {
+        // Only block if callee is genuinely IN a live call (not just ringing)
+        throw new Error('Callee is already in an active call');
       } else {
-        throw new Error('Callee is already in a call');
+        // status is 'ringing' or 'initiated' and < timeout — cancel the old one to allow new call
+        await activeCall.update({ status: 'cancelled', endedAt: new Date() });
+        emitToAll(activeCall.participants || [], 'call_force_ended', {
+          callId: activeCall.id, reason: 'replaced_by_new_call', timestamp: new Date()
+        });
+        console.log(`[CallService] Cancelled old ringing call ${activeCall.id} to allow new call`);
       }
     }
 
@@ -107,7 +123,7 @@ class CallService {
       answeredBy:   [],
       declinedBy:   [],
       readBy:       [],
-      startedAt:    null,   // set when answered, not when ringing starts
+      startedAt:    null,
       metadata:     { ringStartedAt: new Date().toISOString() },
     });
 
@@ -527,13 +543,12 @@ class CallService {
         where: {
           [Op.or]: userIds.map(id => ({ participants: { [Op.contains]: [id] } })),
           status:    { [Op.in]: ['ringing', 'initiated', 'in-progress'] },
-          createdAt: { [Op.lt]: new Date(Date.now() - (CALL_TIMEOUT_SECONDS + 30) * 1000) },
+          createdAt: { [Op.lt]: new Date(Date.now() - CALL_TIMEOUT_SECONDS * 1000) },
         },
       });
       for (const call of stale) {
         const wasAnswered = call.answeredBy && call.answeredBy.length > 0;
         await call.update({ status: wasAnswered ? 'completed' : 'missed', endedAt: new Date() });
-        console.log(`[CallService] Force-cleaned stale call ${call.id} → ${wasAnswered ? 'completed' : 'missed'}`);
         emitToAll(call.participants, 'call_force_ended', {
           callId:    call.id,
           reason:    'stale_cleanup',
