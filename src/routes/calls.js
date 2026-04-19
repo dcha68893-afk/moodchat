@@ -33,6 +33,13 @@ const MAX_CALL_DURATION           = parseInt(process.env.MAX_CALL_DURATION)     
 
 console.log('✅ Calls routes initialized');
 
+// ── CRITICAL FIX: inject req.io on every request so notifyUser always has Socket.IO ──
+// server.js sets global.__socketIO when it initializes Socket.IO.
+router.use((req, _res, next) => {
+  if (!req.io) req.io = global.__socketIO || null;
+  next();
+});
+
 // ── Lazy wsService (avoids circular-dep at startup) ──────────────────────────
 let _wsService = null;
 function getWsService() {
@@ -77,13 +84,17 @@ const checkModels = (res) => {
 // Tries wsService first (reaches raw WS + Socket.IO rooms),
 // then falls back to io.to(room).emit.
 // Emits BOTH colon-style and underscore-style event names.
+// FIXED: if io param is null/undefined (req.io not set), pull from global.__socketIO
 const notifyUser = async (io, userId, event, data) => {
   const uid        = parseInt(userId, 10);
   const colon      = event.replace(/_/g, ':');
   const underscore = event.replace(/:/g, '_');
   const events     = [...new Set([event, colon, underscore])];
 
-  // Try wsService path
+  // Resolve io: req.io → global.__socketIO → wsService internal
+  const resolvedIo = io || global.__socketIO || (getWsService() && getWsService().getIO && getWsService().getIO()) || null;
+
+  // Try wsService path (reaches all rooms + raw WS clients)
   const svc = getWsService();
   if (svc && typeof svc.sendToUser === 'function') {
     for (const ev of events) {
@@ -93,14 +104,15 @@ const notifyUser = async (io, userId, event, data) => {
   }
 
   // Fallback: Socket.IO room emit
-  if (io) {
+  if (resolvedIo) {
     for (const ev of events) {
-      try { io.to(`user:${uid}`).emit(ev, data); } catch (_) {}
-      try { io.to(`user_${uid}`).emit(ev, data); } catch (_) {}
+      try { resolvedIo.to(`user:${uid}`).emit(ev, data); } catch (_) {}
+      try { resolvedIo.to(`user_${uid}`).emit(ev, data); } catch (_) {}
     }
     return true;
   }
 
+  console.warn(`[calls.js] notifyUser: no delivery channel for uid=${uid} event=${event}`);
   return false;
 };
 

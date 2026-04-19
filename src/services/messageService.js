@@ -1,9 +1,7 @@
 // =============================================================================
-// messageService.js  — v2.0 (Sequelize / PostgreSQL)
-// FIXED: Replaced Mongoose (MongoDB) implementation with Sequelize queries to
-// match the PostgreSQL database used by every other part of the application.
-// The original file used mongoose.Types.ObjectId, .findById(), $addToSet, etc.
-// — none of which exist in Sequelize — so the entire service was dead code.
+// messageService.js  — v2.1 (Real-time WebSocket delivery added)
+// FIXED: After createMessage(), emit 'message:new' via webSocketService
+// so the receiver's screen updates instantly without polling.
 // =============================================================================
 
 const { ValidationError, NotFoundError, ServerError } = require('../utils/errors');
@@ -13,13 +11,19 @@ function getDB() {
     catch (e) { throw new ServerError('Database not available'); }
 }
 
+// Safe reference to webSocketService — won't crash if not available
+function getWS() {
+    try { return require('./webSocketService'); }
+    catch (e) { return null; }
+}
+
 const MESSAGE_LIMIT = parseInt(process.env.MESSAGE_LIMIT_PER_PAGE, 10) || 50;
 
 class MessageService {
 
     async createMessage(messageData) {
         const sequelize = getDB();
-        const { chatId, senderId, content, type = 'text' } = messageData;
+        const { chatId, senderId, content, type = 'text', replyToId } = messageData;
 
         if (!chatId || !senderId || (!content && type === 'text'))
             throw new ValidationError('chatId, senderId, and content are required');
@@ -28,12 +32,14 @@ class MessageService {
         if (!validTypes.includes(type)) throw new ValidationError(`Invalid message type: ${type}`);
         if (type === 'text' && content.length > 5000) throw new ValidationError('Message too long (max 5000 chars)');
 
+        // Verify sender is a participant
         const [participant] = await sequelize.query(
             `SELECT 1 FROM chat_participants WHERE "chatId"=:chatId AND "userId"=:senderId LIMIT 1`,
             { replacements: { chatId, senderId }, type: sequelize.QueryTypes.SELECT }
         );
         if (!participant) throw new ValidationError('Sender is not a participant in this chat');
 
+        // Insert the message
         const [rows] = await sequelize.query(
             `INSERT INTO "Messages"
                ("chatId","senderId",content,type,reactions,"isEdited","isDeleted","sentAt","deliveredAt","createdAt","updatedAt")
@@ -44,17 +50,77 @@ class MessageService {
         );
         const message = rows[0];
 
+        // Update chat's lastMessageId and lastMessageAt
         await sequelize.query(
-            `UPDATE chats SET "updatedAt"=NOW(),"lastMessageId"=:mid WHERE id=:chatId`,
+            `UPDATE chats SET "updatedAt"=NOW(),"lastMessageId"=:mid,"lastMessageAt"=NOW() WHERE id=:chatId`,
             { replacements: { mid: message.id, chatId } }
         );
 
+        // Attach sender info
         const [sender] = await sequelize.query(
             `SELECT id,username,avatar,"firstName","lastName" FROM "Users" WHERE id=:senderId`,
             { replacements: { senderId }, type: sequelize.QueryTypes.SELECT }
         );
         message.sender = sender || null;
+
+        // ── REAL-TIME DELIVERY ──────────────────────────────────────────────
+        // Emit to all participants in this chat so their screens update instantly
+        await this._emitMessageToParticipants(chatId, senderId, message, sequelize);
+
         return message;
+    }
+
+    /**
+     * After a message is saved, push it to every other participant via WebSocket.
+     * This is what makes the receiver's screen update without a page reload.
+     */
+    async _emitMessageToParticipants(chatId, senderId, message, sequelize) {
+        const ws = getWS();
+        if (!ws) {
+            console.warn('[MessageService] webSocketService not available — no real-time delivery');
+            return;
+        }
+
+        try {
+            // Get all participant userIds for this chat
+            const participants = await sequelize.query(
+                `SELECT "userId" FROM chat_participants WHERE "chatId"=:chatId`,
+                { replacements: { chatId }, type: sequelize.QueryTypes.SELECT }
+            );
+
+            const payload = {
+                id:           message.id,
+                chatId:       message.chatId,
+                conversationId: message.chatId,
+                senderId:     message.senderId,
+                content:      message.content,
+                type:         message.type,
+                sender:       message.sender,
+                createdAt:    message.createdAt,
+                sentAt:       message.sentAt,
+                deliveredAt:  message.deliveredAt,
+                reactions:    message.reactions || {},
+                isEdited:     message.isEdited || false,
+                status:       'delivered',
+            };
+
+            for (const { userId } of participants) {
+                // Send to everyone (sender gets confirmation, receiver gets the message)
+                await ws.sendToUser(userId, 'message:new', payload);
+                // Also emit the legacy event name for older clients
+                await ws.sendToUser(userId, 'new_message', payload);
+            }
+
+            // Also broadcast to the chat room (for clients joined via room)
+            if (typeof ws.broadcastToChat === 'function') {
+                ws.broadcastToChat(chatId, 'message:new', payload);
+            }
+
+            console.log(`[MessageService] ✅ Real-time delivery: chatId=${chatId}, recipients=${participants.length}`);
+        } catch (err) {
+            // Real-time failure is non-fatal — message is already saved
+            console.error('[MessageService] Real-time delivery error:', err.message);
+        }
     }
 
     async getConversationMessages(chatId, userId, page = 1, limit = MESSAGE_LIMIT) {
@@ -159,6 +225,13 @@ class MessageService {
              WHERE id=:messageId`,
             { replacements:{userId,messageId} }
         );
+
+        // Notify chat participants of deletion
+        const ws = getWS();
+        if (ws && typeof ws.broadcastToChat === 'function') {
+            ws.broadcastToChat(message.chatId, 'message:deleted', { messageId, chatId: message.chatId, deletedBy: userId });
+        }
+
         return { success:true, message:'Message deleted successfully' };
     }
 
@@ -213,7 +286,7 @@ class MessageService {
         if (!newContent?.trim()) throw new ValidationError('Content cannot be empty');
 
         const [message] = await sequelize.query(
-            `SELECT id,"senderId","createdAt" FROM "Messages"
+            `SELECT id,"senderId","createdAt","chatId" FROM "Messages"
              WHERE id=:messageId AND "isDeleted"=false LIMIT 1`,
             { replacements:{messageId}, type: sequelize.QueryTypes.SELECT }
         );
@@ -228,6 +301,15 @@ class MessageService {
              WHERE id=:messageId`,
             { replacements:{content:newContent.trim(),messageId} }
         );
+
+        // Broadcast edit
+        const ws = getWS();
+        if (ws && typeof ws.broadcastToChat === 'function') {
+            ws.broadcastToChat(message.chatId, 'message:edited', {
+                messageId, chatId: message.chatId, content: newContent.trim(), editedAt: new Date().toISOString()
+            });
+        }
+
         return { success:true, messageId, content:newContent.trim(), editedAt:new Date().toISOString() };
     }
 
@@ -268,6 +350,13 @@ class MessageService {
             `UPDATE "Messages" SET reactions=:reactions::jsonb,"updatedAt"=NOW() WHERE id=:messageId`,
             { replacements:{reactions:JSON.stringify(reactions),messageId} }
         );
+
+        // Broadcast reaction
+        const ws = getWS();
+        if (ws && typeof ws.broadcastToChat === 'function') {
+            ws.broadcastToChat(message.chatId, 'message:reaction', { messageId, chatId: message.chatId, reactions });
+        }
+
         return { success:true, messageId, reactions };
     }
 }
