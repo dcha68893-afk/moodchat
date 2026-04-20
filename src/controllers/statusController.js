@@ -1,4 +1,5 @@
 const statusService = require('../services/statusService');
+const webSocketService = require('../services/webSocketService');
 const { AppError } = require('../middleware/errorHandler');
 const logger = require('../utils/logger');
 
@@ -36,13 +37,10 @@ class StatusController {
       const status = await statusService.createStatus(statusData);
 
       // Emit WebSocket event for real-time updates
-      if (req.io) {
-        req.io.emit('status:created', {
-          statusId: status.id,
-          userId,
-          content: status.content,
-          timestamp: new Date()
-        });
+      try {
+        await webSocketService.notifyStatusCreated(status, userId);
+      } catch (wsError) {
+        logger.warn('WebSocket notification failed:', wsError.message);
       }
 
       res.status(201).json({

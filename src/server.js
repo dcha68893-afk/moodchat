@@ -4381,11 +4381,8 @@ class Application {
             this.app.use('/', mainRouter);
             console.log('✅ Mounted main API router');
 
-            // CRITICAL FIX: DIRECTLY MOUNT AUTH ROUTES
-            console.log('🔧 DIRECTLY MOUNTING AUTH ROUTES');
-            const authRouter = require('./routes/auth');
-            this.app.use('/api/auth', authRouter);
-            console.log('✅ Auth routes mounted directly at /api/auth');
+            // Routes are automatically mounted by the main router from routes/index.js
+            console.log('?? Routes will be mounted by main router from routes/index.js');
 
             // Debug: Verify auth routes are registered
             console.log('🔍 Verifying auth routes registration...');

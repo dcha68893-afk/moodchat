@@ -9,6 +9,7 @@
  *  5. POST /        route: same fix
  *  6. Adds /socket-register endpoint for frontend to register socket manually
  *  7. Accept / reject / end route: emits via both wsService AND io
+ *  8. ADDED: /initiate endpoint alias for frontend compatibility
  */
 
 'use strict';
@@ -197,8 +198,8 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
     const rawType        = req.body.callType || req.body.type || 'audio';
     const callType       = rawType === 'voice' ? 'audio' : rawType;
     const isGroupCall    = req.body.isGroupCall || false;
-    const participantIds = req.body.participantIds;
-    const calleeId       = req.body.calleeId ||
+    const participantIds = req.body.participantIds || req.body.participants;
+    const calleeId       = req.body.calleeId || req.body.userId ||
       (Array.isArray(participantIds) && participantIds.length === 1 ? participantIds[0] : null);
 
     if (!calleeId && !isGroupCall) {
@@ -250,6 +251,69 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
 
   } catch (err) {
     console.error('[POST /calls]', err.message);
+    return res.status(500).json({ success: false, message: err.message || 'Failed to initiate call' });
+  }
+}));
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /initiate — ALIAS for / endpoint (frontend compatibility)
+// ─────────────────────────────────────────────────────────────────────────────
+router.post('/initiate', apiRateLimiter, asyncHandler(async (req, res) => {
+  try {
+    const auth = checkAuth(req, res); if (!auth) return;
+    const { userId } = auth;
+    if (!checkModels(res)) return;
+
+    const rawType        = req.body.callType || req.body.type || 'audio';
+    const callType       = rawType === 'voice' ? 'audio' : rawType;
+    const isGroupCall    = req.body.isGroupCall || false;
+    const participantIds = req.body.participantIds || req.body.participants;
+    const calleeId       = req.body.calleeId || req.body.userId ||
+      (Array.isArray(participantIds) && participantIds.length === 1 ? participantIds[0] : null);
+
+    if (!calleeId && !isGroupCall) {
+      return res.status(400).json({ success: false, message: 'calleeId or participantIds is required' });
+    }
+
+    const callService = require('../services/callService');
+
+    // ── Group call ────────────────────────────────────────────────────────────
+    if (isGroupCall && Array.isArray(participantIds) && participantIds.length > 1) {
+      const call = await callService.initiateGroupCall(userId, participantIds.map(Number), callType, null);
+      for (const id of participantIds) {
+        await notifyUser(req.io, id, 'call_incoming', {
+          callId:       call.id,
+          callerId:     userId,
+          callerName:   req.user.username || 'Unknown',
+          callerAvatar: req.user.avatar   || null,
+          isGroupCall:  true,
+          callType,
+          timestamp:    Date.now(),
+        });
+      }
+      return res.status(201).json({ success: true, message: 'Group call initiated', data: { call } });
+    }
+
+    // ── 1-to-1 call ──────────────────────────────────────────────────────────
+    const targetId = parseInt(calleeId, 10);
+    const isOnline = await safeIsUserOnline(targetId);
+    console.log(`[POST /calls/initiate] safeIsUserOnline(${targetId}) = ${isOnline}`);
+
+    const call = await callService.initiateCall(userId, targetId, callType, null);
+
+    await notifyUser(req.io, targetId, 'call_incoming', {
+      callId:       call.id,
+      callerId:     userId,
+      callerName:   (call.callerInfo && call.callerInfo.username) || req.user.username || 'Unknown',
+      callerAvatar: (call.callerInfo && call.callerInfo.avatar)   || req.user.avatar   || null,
+      callType,
+      timestamp:    Date.now(),
+    });
+
+    return res.status(201).json({ success: true, message: 'Call initiated', data: { call, receiverOnline: isOnline } });
+
+  } catch (err) {
+    console.error('[POST /calls/initiate]', err.message);
     return res.status(500).json({ success: false, message: err.message || 'Failed to initiate call' });
   }
 }));
@@ -618,7 +682,6 @@ router.post('/:callId/accept', apiRateLimiter, asyncHandler(async (req, res) => 
 }));
 
 // POST /:callId/answer — alias for /accept (chat.html calls this endpoint)
-// Gap 1 fix: chat.html (lines 1675, 3075) calls POST /calls/:id/answer but only /accept existed.
 router.post('/:callId/answer', apiRateLimiter, asyncHandler(async (req, res) => {
   try {
     const auth = checkAuth(req, res); if (!auth) return;

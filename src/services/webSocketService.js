@@ -341,6 +341,77 @@ class WebSocketService {
         return this.sendToUser(userId, 'mood:friend', payload);
     }
 
+    // --- STATUS EVENTS ---
+    async notifyStatusCreated(status, excludeUserId = null) {
+        const payload = {
+            statusId: status.id,
+            userId: status.userId,
+            type: status.type,
+            content: status.content,
+            mediaUrl: status.mediaUrl,
+            createdAt: status.createdAt,
+            expiresAt: status.expiresAt,
+            timestamp: new Date().toISOString()
+        };
+        
+        // Broadcast to all users except creator
+        return this.broadcast('status:created', payload);
+    }
+
+    async notifyStatusViewed(statusId, viewerId, ownerId) {
+        const payload = {
+            statusId,
+            viewerId,
+            ownerId,
+            timestamp: new Date().toISOString()
+        };
+        
+        // Send to status owner
+        await this.sendToUser(ownerId, 'status:viewed', payload);
+        
+        // Update viewer count in real-time
+        return this.broadcast('status:viewer_update', {
+            statusId,
+            viewerCount: 1, // Will be incremented by listeners
+            timestamp: payload.timestamp
+        });
+    }
+
+    async notifyStatusExpired(statusId, userId) {
+        const payload = {
+            statusId,
+            userId,
+            timestamp: new Date().toISOString()
+        };
+        
+        return this.broadcast('status:expired', payload);
+    }
+
+    async notifyStatusUpdated(status) {
+        const payload = {
+            statusId: status.id,
+            userId: status.userId,
+            updates: {
+                content: status.content,
+                isPublic: status.isPublic,
+                updatedAt: status.updatedAt
+            },
+            timestamp: new Date().toISOString()
+        };
+        
+        return this.broadcast('status:updated', payload);
+    }
+
+    async notifyStatusDeleted(statusId, userId) {
+        const payload = {
+            statusId,
+            userId,
+            timestamp: new Date().toISOString()
+        };
+        
+        return this.broadcast('status:deleted', payload);
+    }
+
     // ── RAW WS CLIENT REGISTRATION ────────────────────────────────────────────
 
     registerWebSocketClient(userId, ws) {
@@ -381,6 +452,83 @@ class WebSocketService {
             });
             return true;
         } catch (_) { return false; }
+    }
+
+    /** Broadcast to all group members - CRITICAL for group chat */
+    broadcastToGroup(groupId, event, payload = {}, excludeSenderId = null) {
+        const io = this.getIO();
+        if (!io || !groupId || !event) return false;
+        
+        try {
+            // Send to group room
+            const groupPayload = {
+                ...payload,
+                groupId,
+                timestamp: payload.timestamp || new Date().toISOString()
+            };
+            
+            io.to(`group:${groupId}`).emit(event, groupPayload);
+            
+            // If excludeSenderId, don't send to that user's personal room
+            if (excludeSenderId) {
+                io.to(`user:${excludeSenderId}`).emit(event, groupPayload);
+            }
+            
+            return true;
+        } catch (error) {
+            console.error('[WSService] Group broadcast failed:', error);
+            return false;
+        }
+    }
+
+    /** Send group message to all members except sender */
+    async sendGroupMessage(groupId, message, senderId) {
+        const payload = {
+            type: 'group_message',
+            groupId,
+            message: {
+                id: message.id,
+                content: message.content,
+                senderId: message.senderId,
+                senderName: message.senderName,
+                timestamp: message.timestamp || new Date().toISOString(),
+                messageType: message.messageType || 'text'
+            }
+        };
+        
+        // Broadcast to group room (includes all members)
+        const success = this.broadcastToGroup(groupId, 'group:message', payload, senderId);
+        
+        if (success) {
+            console.log(`[WSService] Group message sent to group ${groupId} from user ${senderId}`);
+        }
+        
+        return success;
+    }
+
+    /** Notify group members of membership changes */
+    async notifyGroupMembershipChange(groupId, action, memberData, changedByUserId) {
+        const payload = {
+            groupId,
+            action, // 'member_joined', 'member_left', 'member_role_changed'
+            member: memberData,
+            changedBy: changedByUserId,
+            timestamp: new Date().toISOString()
+        };
+        
+        return this.broadcastToGroup(groupId, 'group:membership_change', payload);
+    }
+
+    /** Notify group members of group updates */
+    async notifyGroupUpdated(groupId, groupData, updatedByUserId) {
+        const payload = {
+            groupId,
+            group: groupData,
+            updatedBy: updatedByUserId,
+            timestamp: new Date().toISOString()
+        };
+        
+        return this.broadcastToGroup(groupId, 'group:updated', payload);
     }
 
     // ── RECONNECT HOOK ────────────────────────────────────────────────────────
