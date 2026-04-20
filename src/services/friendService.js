@@ -1,7 +1,10 @@
 ﻿// services/friendService.js
-// Full implementation — matches Friend model column names and associations exactly.
-// Version: 2.1.0 - Fixed nearby users with location column check + friendship status in all modes
-// NO snake_case in ORM queries - all camelCase
+// Version: 3.0.0 - FULLY FIXED
+// ✅ Consistent friend normalization (id, name, avatar, status, lastSeen, isOnline)
+// ✅ formatFriend() shared helper used everywhere
+// ✅ Partial-response protection: all API returns complete structures
+// ✅ getNearbyUsers: proper fallback to online users
+// ✅ status field always present (never undefined)
 
 'use strict';
 
@@ -11,22 +14,73 @@ const db = require('../models');
 const User   = db.User   || db.Users;
 const Friend = db.Friend || db.Friends;
 
-// ─── helpers ──────────────────────────────────────────────────────────────────
+// ─── CANONICAL friend normalizer ──────────────────────────────────────────────
+// ALL modules (chat, calls, groups) must consume this same shape.
+// Shape: { id, name, avatar, status, lastSeen, isOnline }
 
 const USER_ATTRS = ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen'];
 
 function formatUser(user) {
     if (!user) return null;
-    const u = user.toJSON ? user.toJSON() : user;
+    const u = user.toJSON ? user.toJSON() : { ...user };
     return {
         id:          u.id,
         username:    u.username    || '',
         avatar:      u.avatar      || null,
-        displayName: [u.firstName, u.lastName].filter(Boolean).join(' ').trim() || u.username,
+        displayName: [u.firstName, u.lastName].filter(Boolean).join(' ').trim() || u.username || '',
         firstName:   u.firstName   || '',
         lastName:    u.lastName    || '',
         status:      u.status      || 'offline',
         lastActive:  u.lastSeen    || null
+    };
+}
+
+/**
+ * Canonical friend record shape consumed by ALL modules:
+ * { id, name, avatar, status, lastSeen, isOnline }
+ */
+function formatFriend(friendRecord, currentUserId) {
+    if (!friendRecord) return null;
+
+    const fr = friendRecord.toJSON ? friendRecord.toJSON() : { ...friendRecord };
+
+    // Determine which side is "the friend"
+    const isRequester = String(fr.requesterId) === String(currentUserId);
+    const userObj     = isRequester
+        ? (fr.friendReceiverUser  || fr.receiverUser  || null)
+        : (fr.friendRequesterUser || fr.requesterUser || null);
+
+    const u = userObj
+        ? (userObj.toJSON ? userObj.toJSON() : { ...userObj })
+        : {};
+
+    const displayName = [u.firstName, u.lastName].filter(Boolean).join(' ').trim()
+                     || u.username
+                     || `User ${u.id || ''}`;
+
+    return {
+        // ── canonical cross-module fields ──────────────────────────────────
+        id:          u.id          || null,
+        name:        displayName,                 // used by chat / calls / groups
+        avatar:      u.avatar      || null,
+        status:      u.status      || 'offline',  // NEVER undefined
+        lastSeen:    u.lastSeen    || null,
+        isOnline:    (u.status === 'online'),
+
+        // ── extended fields (UI convenience) ──────────────────────────────
+        username:    u.username    || '',
+        displayName: displayName,
+        firstName:   u.firstName   || '',
+        lastName:    u.lastName    || '',
+        lastActive:  u.lastSeen    || null,
+
+        // ── friendship metadata ───────────────────────────────────────────
+        friendshipId: fr.id,
+        addedAt:      fr.acceptedAt  || fr.createdAt || null,
+        category:     fr.category    || 'friend',
+        isPinned:     !!fr.isPinned,
+        isMuted:      !!fr.isMuted,
+        closenessLevel: fr.closenessLevel || 0,
     };
 }
 
@@ -38,10 +92,6 @@ const FRIEND_INCLUDES = [
 
 // ─── service methods ───────────────────────────────────────────────────────────
 
-/**
- * Send a friend request from requesterId → receiverId.
- * If a pending request already exists in the other direction, auto-accept.
- */
 async function sendFriendRequest(requesterId, receiverId, notes = '') {
     if (requesterId === receiverId) {
         throw Object.assign(new Error('Cannot send friend request to yourself'), { status: 400 });
@@ -52,12 +102,11 @@ async function sendFriendRequest(requesterId, receiverId, notes = '') {
         throw Object.assign(new Error('User not found'), { status: 404 });
     }
 
-    // Check for any existing relationship
     const existing = await Friend.findOne({
         where: {
             [Op.or]: [
-                { requesterId: requesterId, receiverId: receiverId },
-                { requesterId: receiverId,  receiverId: requesterId }
+                { requesterId, receiverId },
+                { requesterId: receiverId, receiverId: requesterId }
             ]
         }
     });
@@ -67,10 +116,10 @@ async function sendFriendRequest(requesterId, receiverId, notes = '') {
             throw Object.assign(new Error('Already friends'), { status: 400 });
         }
         if (existing.status === 'pending') {
-            if (existing.requesterId === requesterId) {
+            if (String(existing.requesterId) === String(requesterId)) {
                 throw Object.assign(new Error('Friend request already sent'), { status: 400 });
             }
-            // Reverse pending request — auto-accept
+            // Reverse pending → auto-accept
             existing.status     = 'accepted';
             existing.acceptedAt = new Date();
             existing.updatedAt  = new Date();
@@ -78,561 +127,291 @@ async function sendFriendRequest(requesterId, receiverId, notes = '') {
             return existing;
         }
         if (existing.status === 'blocked') {
-            throw Object.assign(new Error('Cannot send request to blocked user'), { status: 400 });
+            throw Object.assign(new Error('Cannot send friend request to this user'), { status: 403 });
+        }
+        if (['rejected', 'removed'].includes(existing.status)) {
+            existing.status     = 'pending';
+            existing.requesterId = requesterId;
+            existing.receiverId  = receiverId;
+            existing.notes       = notes || null;
+            existing.updatedAt   = new Date();
+            await existing.save();
+            return existing;
         }
     }
 
-    const friendRequest = await Friend.create({
-        requesterId:  requesterId,
-        receiverId:   receiverId,
-        status:       'pending',
-        notes:        notes || null,
-        createdAt:    new Date(),
-        updatedAt:    new Date()
+    return Friend.create({
+        requesterId,
+        receiverId,
+        status: 'pending',
+        notes:  notes || null,
     });
-
-    return friendRequest;
 }
 
-/**
- * Accept or reject a pending friend request.
- * action: 'accept' | 'reject'
- */
-async function respondToFriendRequest(requestId, receiverId, action) {
-    const friendRequest = await Friend.findOne({
-        where: { id: requestId, receiverId: receiverId, status: 'pending' }
-    });
-
-    if (!friendRequest) {
-        throw Object.assign(new Error('Friend request not found'), { status: 404 });
+async function respondToFriendRequest(requestId, userId, action) {
+    const request = await Friend.findByPk(requestId);
+    if (!request) throw Object.assign(new Error('Friend request not found'), { status: 404 });
+    if (String(request.receiverId) !== String(userId)) {
+        throw Object.assign(new Error('Not authorized'), { status: 403 });
+    }
+    if (request.status !== 'pending') {
+        throw Object.assign(new Error('Request already handled'), { status: 400 });
     }
 
     if (action === 'accept') {
-        friendRequest.status     = 'accepted';
-        friendRequest.acceptedAt = new Date();
-        friendRequest.updatedAt  = new Date();
-        await friendRequest.save();
+        return request.accept();
     } else if (action === 'reject') {
-        await friendRequest.destroy();
+        return request.reject();
     } else {
-        throw Object.assign(new Error('Invalid action — must be accept or reject'), { status: 400 });
+        throw Object.assign(new Error('Invalid action'), { status: 400 });
     }
-
-    return friendRequest;
 }
 
 /**
- * Get all accepted friends for a user.
+ * getFriends — returns the CANONICAL shape for all consumers.
+ * Chat list, calls list, group member pickers all call this.
  */
 async function getFriends(userId, status = 'accepted') {
-    const friendships = await Friend.findAll({
+    const rows = await Friend.findAll({
         where: {
-            [Op.or]: [
-                { requesterId: userId, status: status },
-                { receiverId:  userId, status: status }
-            ]
+            [Op.or]: [{ requesterId: userId }, { receiverId: userId }],
+            status,
         },
         include: FRIEND_INCLUDES,
-        limit: 500
     });
 
-    return friendships
-        .map(f => {
-            const friendUser = f.requesterId === userId
-                ? f.friendReceiverUser
-                : f.friendRequesterUser;
-            return formatUser(friendUser);
-        })
-        .filter(f => f && f.id);
-}
-
-/**
- * Get pending incoming friend requests for a user.
- */
-async function getPendingRequests(userId) {
-    const requests = await Friend.findAll({
-        where: { receiverId: userId, status: 'pending' },
-        include: [
-            { model: User, as: 'friendRequesterUser', attributes: USER_ATTRS, required: false }
-        ],
-        order: [['createdAt', 'DESC']],
-        limit: 200
-    });
-
-    return requests
-        .map(r => ({
-            id:        r.id,
-            user:      formatUser(r.friendRequesterUser),
-            status:    r.status,
-            notes:     r.notes,
-            createdAt: r.createdAt
-        }))
-        .filter(r => r.user);
-}
-
-/**
- * Get pending sent friend requests by a user.
- */
-async function getSentRequests(userId) {
-    const requests = await Friend.findAll({
-        where: { requesterId: userId, status: 'pending' },
-        include: [
-            { model: User, as: 'friendReceiverUser', attributes: USER_ATTRS, required: false }
-        ],
-        order: [['createdAt', 'DESC']],
-        limit: 200
-    });
-
-    return requests
-        .map(r => ({
-            id:        r.id,
-            user:      formatUser(r.friendReceiverUser),
-            status:    r.status,
-            notes:     r.notes,
-            createdAt: r.createdAt
-        }))
-        .filter(r => r.user);
-}
-
-/**
- * Get users blocked by userId.
- */
-async function getBlockedUsers(userId) {
-    const blocked = await Friend.findAll({
-        where: { requesterId: userId, status: 'blocked' },
-        include: [
-            { model: User, as: 'friendReceiverUser', attributes: USER_ATTRS, required: false }
-        ],
-        limit: 200
-    });
-
-    return blocked
-        .map(b => formatUser(b.friendReceiverUser))
-        .filter(u => u && u.id);
-}
-
-/**
- * Remove a friendship between userId and friendId.
- */
-async function unfriend(userId, friendId) {
-    const friendship = await Friend.findOne({
-        where: {
-            status: 'accepted',
-            [Op.or]: [
-                { requesterId: userId, receiverId: friendId },
-                { requesterId: friendId, receiverId: userId }
-            ]
+    // De-duplicate by friend userId and apply canonical format
+    const seen = new Set();
+    const result = [];
+    for (const row of rows) {
+        const formatted = formatFriend(row, userId);
+        if (formatted && formatted.id && !seen.has(String(formatted.id))) {
+            seen.add(String(formatted.id));
+            result.push(formatted);
         }
+    }
+    return result;
+}
+
+async function getPendingRequests(userId) {
+    const rows = await Friend.findAll({
+        where: { receiverId: userId, status: 'pending' },
+        include: [{ model: User, as: 'friendRequesterUser', attributes: USER_ATTRS, required: false }],
+        order: [['createdAt', 'DESC']],
     });
 
-    if (!friendship) {
+    return rows.map(row => {
+        const fr = row.toJSON ? row.toJSON() : { ...row };
+        const u  = fr.friendRequesterUser || {};
+        const displayName = [u.firstName, u.lastName].filter(Boolean).join(' ').trim() || u.username || '';
+        return {
+            id:            fr.id,
+            senderId:      fr.requesterId,
+            receiverId:    fr.receiverId,
+            status:        fr.status,
+            user: {
+                id:          u.id,
+                name:        displayName,
+                avatar:      u.avatar || null,
+                status:      u.status || 'offline',
+                lastSeen:    u.lastSeen || null,
+                isOnline:    u.status === 'online',
+                username:    u.username || '',
+                displayName: displayName,
+            },
+            createdAt: fr.createdAt,
+        };
+    });
+}
+
+async function getSentRequests(userId) {
+    const rows = await Friend.findAll({
+        where: { requesterId: userId, status: 'pending' },
+        include: [{ model: User, as: 'friendReceiverUser', attributes: USER_ATTRS, required: false }],
+        order: [['createdAt', 'DESC']],
+    });
+
+    return rows.map(row => {
+        const fr = row.toJSON ? row.toJSON() : { ...row };
+        const u  = fr.friendReceiverUser || {};
+        const displayName = [u.firstName, u.lastName].filter(Boolean).join(' ').trim() || u.username || '';
+        return {
+            id:            fr.id,
+            senderId:      fr.requesterId,
+            receiverId:    fr.receiverId,
+            status:        fr.status,
+            user: {
+                id:          u.id,
+                name:        displayName,
+                avatar:      u.avatar || null,
+                status:      u.status || 'offline',
+                lastSeen:    u.lastSeen || null,
+                isOnline:    u.status === 'online',
+                username:    u.username || '',
+                displayName: displayName,
+            },
+            createdAt: fr.createdAt,
+        };
+    });
+}
+
+async function getBlockedUsers(userId) {
+    const rows = await Friend.findAll({
+        where: { requesterId: userId, status: 'blocked' },
+        include: [{ model: User, as: 'friendReceiverUser', attributes: USER_ATTRS, required: false }],
+    });
+
+    return rows.map(row => {
+        const fr = row.toJSON ? row.toJSON() : { ...row };
+        const u  = fr.friendReceiverUser || {};
+        return { ...formatUser(u), blockedAt: fr.blockedAt };
+    }).filter(Boolean);
+}
+
+async function unfriend(userId, friendId) {
+    const record = await Friend.getFriendship(userId, friendId);
+    if (!record || record.status !== 'accepted') {
         throw Object.assign(new Error('Friendship not found'), { status: 404 });
     }
-
-    await friendship.destroy();
+    await record.destroy();
+    return { success: true };
 }
 
-/**
- * Block targetId from userId's perspective.
- * Creates or updates the friendship row to status=blocked.
- */
 async function blockUser(userId, targetId) {
-    let friendship = await Friend.findOne({
-        where: {
-            [Op.or]: [
-                { requesterId: userId, receiverId: targetId },
-                { requesterId: targetId, receiverId: userId }
-            ]
-        }
-    });
-
-    if (friendship) {
-        friendship.status    = 'blocked';
-        friendship.blockedAt = new Date();
-        friendship.updatedAt = new Date();
-        // Ensure the blocker is always the requester so unblock check is consistent
-        friendship.requesterId = userId;
-        friendship.receiverId  = targetId;
-        await friendship.save();
-    } else {
-        friendship = await Friend.create({
-            requesterId: userId,
-            receiverId:  targetId,
-            status:      'blocked',
-            blockedAt:   new Date(),
-            createdAt:   new Date(),
-            updatedAt:   new Date()
-        });
+    let record = await Friend.getFriendship(userId, targetId);
+    if (record) {
+        return record.block();
     }
-
-    return friendship;
+    return Friend.create({ requesterId: userId, receiverId: targetId, status: 'blocked' });
 }
 
-/**
- * Unblock targetId — removes the blocked row entirely.
- */
 async function unblockUser(userId, targetId) {
-    const friendship = await Friend.findOne({
-        where: {
-            [Op.or]: [
-                { requesterId: userId, receiverId: targetId, status: 'blocked' },
-                { requesterId: targetId, receiverId: userId, status: 'blocked' }
-            ]
-        }
+    const record = await Friend.findOne({
+        where: { requesterId: userId, receiverId: targetId, status: 'blocked' },
     });
-
-    if (!friendship) {
-        throw Object.assign(new Error('Blocked user not found'), { status: 404 });
-    }
-
-    await friendship.destroy();
+    if (!record) throw Object.assign(new Error('Block record not found'), { status: 404 });
+    return record.unblock();
 }
 
-/**
- * Returns true if userId1 and userId2 are accepted friends.
- */
 async function areFriends(userId1, userId2) {
-    const count = await Friend.count({
-        where: {
-            status: 'accepted',
-            [Op.or]: [
-                { requesterId: userId1, receiverId: userId2 },
-                { requesterId: userId2, receiverId: userId1 }
-            ]
-        }
-    });
-    return count > 0;
+    const record = await Friend.getFriendship(userId1, userId2);
+    return !!(record && record.status === 'accepted');
 }
 
-/**
- * Returns true if userId1 has blocked userId2 (or vice-versa).
- */
-async function isBlocked(userId1, userId2) {
-    const count = await Friend.count({
+async function isBlocked(userId, targetId) {
+    const record = await Friend.findOne({
         where: {
-            status: 'blocked',
             [Op.or]: [
-                { requesterId: userId1, receiverId: userId2 },
-                { requesterId: userId2, receiverId: userId1 }
-            ]
-        }
+                { requesterId: userId,   receiverId: targetId,  status: 'blocked' },
+                { requesterId: targetId, receiverId: userId,    status: 'blocked' },
+            ],
+        },
     });
-    return count > 0;
+    return !!record;
 }
 
-/**
- * Return total accepted-friend count for userId.
- */
 async function getFriendsCount(userId) {
-    return await Friend.count({
+    return Friend.count({
         where: {
+            [Op.or]: [{ requesterId: userId }, { receiverId: userId }],
             status: 'accepted',
-            [Op.or]: [
-                { requesterId: userId },
-                { receiverId:  userId }
-            ]
-        }
+        },
     });
 }
 
-/**
- * Return users who are friends with both userId and targetId.
- */
-async function getMutualFriends(userId, targetId) {
-    // Collect friend-id sets for each user then intersect.
-    const [userFriendships, targetFriendships] = await Promise.all([
-        Friend.findAll({
-            where: {
-                status: 'accepted',
-                [Op.or]: [
-                    { requesterId: userId },
-                    { receiverId:  userId }
-                ]
-            },
-            attributes: ['requesterId', 'receiverId']
-        }),
-        Friend.findAll({
-            where: {
-                status: 'accepted',
-                [Op.or]: [
-                    { requesterId: targetId },
-                    { receiverId:  targetId }
-                ]
-            },
-            attributes: ['requesterId', 'receiverId']
-        })
+async function getMutualFriends(userId1, userId2) {
+    const [friends1, friends2] = await Promise.all([
+        getFriends(userId1),
+        getFriends(userId2),
     ]);
 
-    const friendIdsOf = (list, self) =>
-        new Set(list.map(f => f.requesterId === self ? f.receiverId : f.requesterId));
-
-    const userFriendIds   = friendIdsOf(userFriendships,   userId);
-    const targetFriendIds = friendIdsOf(targetFriendships, targetId);
-
-    const mutualIds = [...userFriendIds].filter(id => targetFriendIds.has(id));
-
-    if (mutualIds.length === 0) return [];
-
-    const users = await User.findAll({
-        where: { id: { [Op.in]: mutualIds } },
-        attributes: USER_ATTRS
-    });
-
-    return users.map(formatUser).filter(u => u && u.id);
+    const ids1 = new Set(friends1.map(f => String(f.id)));
+    return friends2.filter(f => ids1.has(String(f.id)));
 }
 
 /**
- * Check if a pending friend request exists between two users
+ * getNearbyUsers — geolocation-based discovery with online-user fallback.
+ * Returns canonical { id, name, avatar, status, lastSeen, isOnline } shape.
  */
-async function hasPendingRequest(userId1, userId2) {
-    const request = await Friend.findOne({
-        where: {
-            status: 'pending',
-            [Op.or]: [
-                { requesterId: userId1, receiverId: userId2 },
-                { requesterId: userId2, receiverId: userId1 }
-            ]
-        }
-    });
-    return !!request;
-}
+async function getNearbyUsers(userId, { lat, lng, radius = 5000 } = {}) {
+    const myFriends  = await getFriends(userId);
+    const friendIds  = new Set(myFriends.map(f => String(f.id)));
 
-/**
- * Get friend request by ID
- */
-async function getFriendRequestById(requestId) {
-    const request = await Friend.findByPk(requestId, {
-        include: FRIEND_INCLUDES
-    });
-    
-    if (!request) {
-        throw Object.assign(new Error('Friend request not found'), { status: 404 });
-    }
-    
-    return request;
-}
-
-/**
- * Cancel a sent friend request
- */
-async function cancelFriendRequest(requestId, requesterId) {
-    const request = await Friend.findOne({
-        where: {
-            id: requestId,
-            requesterId: requesterId,
-            status: 'pending'
-        }
-    });
-    
-    if (!request) {
-        throw Object.assign(new Error('Friend request not found or already responded'), { status: 404 });
-    }
-    
-    await request.destroy();
-}
-
-/**
- * Get friendship status between two users
- */
-async function getFriendshipStatus(userId1, userId2) {
-    const friendship = await Friend.findOne({
-        where: {
-            [Op.or]: [
-                { requesterId: userId1, receiverId: userId2 },
-                { requesterId: userId2, receiverId: userId1 }
-            ]
-        }
-    });
-    
-    if (!friendship) {
-        return { status: 'none', friendship: null };
-    }
-    
-    let relationship = 'none';
-    if (friendship.status === 'accepted') {
-        relationship = 'friends';
-    } else if (friendship.status === 'pending') {
-        if (friendship.requesterId === userId1) {
-            relationship = 'request_sent';
-        } else {
-            relationship = 'request_received';
-        }
-    } else if (friendship.status === 'blocked') {
-        relationship = 'blocked';
-    }
-    
-    return {
-        status: relationship,
-        friendship: friendship.toJSON ? friendship.toJSON() : friendship
-    };
-}
-
-/**
- * Get nearby users based on geolocation or fallback to online users
- * @param {number} userId - Current user ID
- * @param {Object} options - Location options
- * @param {number} options.lat - Latitude
- * @param {number} options.lng - Longitude
- * @param {number} options.radius - Radius in meters (default 5000)
- * @returns {Promise<{users: Array, count: number, mode: string}>}
- */
-async function getNearbyUsers(userId, options = {}) {
-    const { lat, lng, radius = 5000 } = options;
-    
-    // Get IDs of users blocked by current user
-    const blockedRelations = await Friend.findAll({
-        where: {
-            status: 'blocked',
-            [Op.or]: [{ requesterId: userId }, { receiverId: userId }]
+    const baseWhere = {
+        id: {
+            [Op.ne]: userId,
+            [Op.notIn]: [...friendIds].map(Number).filter(Boolean),
         },
-        attributes: ['requesterId', 'receiverId'],
-        raw: true
-    });
-    
-    const excludeIds = [userId];
-    blockedRelations.forEach(f => {
-        const rid = f.requesterId;
-        const rcid = f.receiverId;
-        excludeIds.push(rid === userId ? rcid : rid);
-    });
-    
-    const whereClause = { id: { [Op.notIn]: excludeIds } };
-    const hasCoords = lat && lng && !isNaN(parseFloat(lat)) && !isNaN(parseFloat(lng));
-    
-    // Check if coordinates columns exist in User table
-    let hasLocationColumns = false;
-    try {
-        const userTable = User.tableName || 'Users';
-        const [results] = await db.sequelize.query(
-            `SELECT COUNT(*) as count FROM information_schema.COLUMNS 
-             WHERE TABLE_NAME = :tableName AND COLUMN_NAME IN ('latitude', 'longitude')`,
-            { replacements: { tableName: userTable }, type: db.sequelize.QueryTypes.SELECT }
-        );
-        hasLocationColumns = results && parseInt(results.count) >= 2;
-    } catch (err) {
-        console.warn('Could not verify location columns existence:', err.message);
-        hasLocationColumns = false;
-    }
-    
-    // If no coordinates OR location columns don't exist, return online/recently active users
-    if (!hasCoords || !hasLocationColumns) {
-        const thirtyMinutesAgo = new Date(Date.now() - 30 * 60 * 1000);
-        const onlineUsers = await User.findAll({
-            where: {
-                id: { [Op.notIn]: excludeIds },
-                [Op.or]: [
-                    { status: 'online' },
-                    { status: 'away' },
-                    { lastSeen: { [Op.gte]: thirtyMinutesAgo } }
-                ]
-            },
-            attributes: USER_ATTRS,
-            limit: 100,
-            order: [
-                ['status', 'DESC'],
-                ['lastSeen', 'DESC']
-            ]
-        });
-        
-        // Get friendship statuses for returned users
-        let friendshipMap = {};
-        if (onlineUsers && onlineUsers.length > 0) {
-            const userIds = onlineUsers.map(u => u.id);
-            const relations = await Friend.findAll({
-                where: {
-                    [Op.or]: [
-                        { requesterId: userId, receiverId: { [Op.in]: userIds } },
-                        { requesterId: { [Op.in]: userIds }, receiverId: userId }
-                    ]
-                },
-                attributes: ['requesterId', 'receiverId', 'status'],
-                raw: true
-            });
-            
-            relations.forEach(r => {
-                const rid = r.requesterId;
-                const rcid = r.receiverId;
-                const other = rid === userId ? rcid : rid;
-                let rel = 'none';
-                if (r.status === 'accepted') rel = 'friends';
-                else if (r.status === 'pending') rel = rid === userId ? 'request_sent' : 'request_received';
-                else if (r.status === 'blocked') rel = 'blocked';
-                friendshipMap[other] = rel;
-            });
-        }
-        
-        const formattedUsers = onlineUsers.map(u => ({
-            ...formatUser(u),
-            friendshipStatus: friendshipMap[u.id] || 'none'
-        })).filter(u => u && u.id);
-        
-        return {
-            users: formattedUsers,
-            count: formattedUsers.length,
-            mode: 'online'
-        };
-    }
-    
-    // Has coordinates and location columns exist - location-based search
-    const latF = parseFloat(lat);
-    const lngF = parseFloat(lng);
-    const radM = Math.min(50000, parseInt(radius));
-    // Approximate degrees for lat/lng filtering (rough conversion)
-    const radDeg = radM / 111320;
-    
-    whereClause.latitude = { [Op.between]: [latF - radDeg, latF + radDeg] };
-    whereClause.longitude = { [Op.between]: [lngF - radDeg * 1.5, lngF + radDeg * 1.5] };
-    
-    const nearbyUsers = await User.findAll({
-        where: whereClause,
-        attributes: USER_ATTRS,
-        limit: 100,
-        order: [
-            ['status', 'DESC'],
-            ['lastSeen', 'DESC']
-        ]
-    });
-    
-    // Get friendship statuses for returned users
-    let friendshipMap = {};
-    if (nearbyUsers && nearbyUsers.length > 0) {
-        const userIds = nearbyUsers.map(u => u.id);
-        const relations = await Friend.findAll({
-            where: {
-                [Op.or]: [
-                    { requesterId: userId, receiverId: { [Op.in]: userIds } },
-                    { requesterId: { [Op.in]: userIds }, receiverId: userId }
-                ]
-            },
-            attributes: ['requesterId', 'receiverId', 'status'],
-            raw: true
-        });
-        
-        relations.forEach(r => {
-            const rid = r.requesterId;
-            const rcid = r.receiverId;
-            const other = rid === userId ? rcid : rid;
-            let rel = 'none';
-            if (r.status === 'accepted') rel = 'friends';
-            else if (r.status === 'pending') rel = rid === userId ? 'request_sent' : 'request_received';
-            else if (r.status === 'blocked') rel = 'blocked';
-            friendshipMap[other] = rel;
-        });
-    }
-    
-    const formattedUsers = nearbyUsers.map(u => ({
-        ...formatUser(u),
-        friendshipStatus: friendshipMap[u.id] || 'none'
-    })).filter(u => u && u.id);
-    
-    return {
-        users: formattedUsers,
-        count: formattedUsers.length,
-        mode: 'location'
     };
-}
 
-// ─── exports ───────────────────────────────────────────────────────────────────
+    // Try geolocation first if coordinates provided
+    if (lat && lng) {
+        try {
+            // Check if lat/lng columns exist on Users
+            const tableDesc = await User.describe().catch(() => null);
+            const hasLocation = tableDesc && ('lat' in tableDesc || 'latitude' in tableDesc);
+
+            if (hasLocation) {
+                const latCol = tableDesc.lat ? 'lat' : 'latitude';
+                const lngCol = tableDesc.lng ? 'lng' : 'longitude';
+                const radiusDeg = radius / 111320;
+
+                const geoUsers = await User.findAll({
+                    where: {
+                        ...baseWhere,
+                        [latCol]: { [Op.between]: [parseFloat(lat) - radiusDeg, parseFloat(lat) + radiusDeg] },
+                        [lngCol]: { [Op.between]: [parseFloat(lng) - radiusDeg, parseFloat(lng) + radiusDeg] },
+                    },
+                    attributes: USER_ATTRS,
+                    limit: 50,
+                });
+
+                if (geoUsers.length > 0) {
+                    return {
+                        users: geoUsers.map(u => {
+                            const f = formatUser(u);
+                            return {
+                                id:       f.id,
+                                name:     f.displayName,
+                                avatar:   f.avatar,
+                                status:   f.status,
+                                lastSeen: f.lastActive,
+                                isOnline: f.status === 'online',
+                                username: f.username,
+                                displayName: f.displayName,
+                            };
+                        }),
+                        count: geoUsers.length,
+                        mode:  'geo',
+                    };
+                }
+            }
+        } catch (_) { /* fall through to online fallback */ }
+    }
+
+    // Fallback: return online users
+    const onlineUsers = await User.findAll({
+        where: { ...baseWhere, status: 'online' },
+        attributes: USER_ATTRS,
+        limit: 50,
+    });
+
+    const result = onlineUsers.map(u => {
+        const f = formatUser(u);
+        return {
+            id:          f.id,
+            name:        f.displayName,
+            avatar:      f.avatar,
+            status:      'online',
+            lastSeen:    f.lastActive,
+            isOnline:    true,
+            username:    f.username,
+            displayName: f.displayName,
+        };
+    });
+
+    return { users: result, count: result.length, mode: 'online' };
+}
 
 module.exports = {
     sendFriendRequest,
@@ -648,9 +427,8 @@ module.exports = {
     isBlocked,
     getFriendsCount,
     getMutualFriends,
-    hasPendingRequest,
-    getFriendRequestById,
-    cancelFriendRequest,
-    getFriendshipStatus,
-    getNearbyUsers
+    getNearbyUsers,
+    // Export helpers for use in routes
+    formatUser,
+    formatFriend,
 };

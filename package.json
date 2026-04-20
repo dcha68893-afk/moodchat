@@ -113,7 +113,7 @@
     "passport": "^0.7.0",
     "passport-jwt": "^4.0.1",
     "passport-local": "^1.0.0",
-    "pg": "^8.17.1",
+    "pg": "^8.20.0",
     "pg-hstore": "^2.3.4",
     "pm2": "^6.0.14",
     "rate-limit-redis": "^4.3.1",

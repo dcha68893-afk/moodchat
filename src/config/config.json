@@ -1,11 +1,6 @@
 {
   "development": {
-    "username": "denismoo_user",
-    "password": "a8UIFwP8552hGbYI9x7O3Dp7gs3vb6TV",
-    "database": "denismoo",
-    "host":
-     "dpg-d5obj2fgi27c73ejf2vg-a.virginia-postgres.render.com",
-    "port": 5432,
+    "use_env_variable": "SUPABASE_DB_URL",
     "dialect": "postgres",
     "logging": true,
     "pool": {
@@ -15,15 +10,14 @@
       "idle": 10000
     },
     "dialectOptions": {
-      "ssl": false
+      "ssl": {
+        "require": true,
+        "rejectUnauthorized": false
+      }
     }
   },
   "test": {
-    "username": "denismoo_user",
-    "password": "a8UIFwP8552hGbYI9x7O3Dp7gs3vb6TV",
-    "database": "denismoo_test",
-    "host": "dpg-d5obj2fgi27c73ejf2vg-a.virginia-postgres.render.com",
-    "port": 5432,
+    "use_env_variable": "SUPABASE_DB_URL",
     "dialect": "postgres",
     "logging": false,
     "pool": {
@@ -33,11 +27,14 @@
       "idle": 10000
     },
     "dialectOptions": {
-      "ssl": false
+      "ssl": {
+        "require": true,
+        "rejectUnauthorized": false
+      }
     }
   },
   "production": {
-    "use_env_variable": "DATABASE_URL",
+    "use_env_variable": "SUPABASE_DB_URL",
     "dialect": "postgres",
     "logging": false,
     "pool": {
