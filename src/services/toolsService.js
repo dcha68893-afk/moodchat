@@ -82,17 +82,30 @@ const TOOL_MANIFEST = [
     // ── Marketplace ────────────────────────────────────────────────────────
     { id: 'marketplace-create',name:'Create Listing',  description: 'Create a marketplace listing',            icon: '🛒',  category: 'marketplace',isEnabled: true, config: {} },
     { id: 'marketplace-browse',name:'Browse Listings', description: 'Browse the marketplace',                  icon: '🏪',  category: 'marketplace',isEnabled: true, config: {} },
-].map(t => ({
-    ...t,
-    version     : '1.0.0',
-    signature   : `sig_${crypto.createHash('sha256').update(t.id + '_knecta').digest('hex').slice(0,16)}`,
-    isLocalOnly : false,
-    isInstalled : true,
-    isActive    : t.isEnabled,
-    entryPoint  : `tool_${t.id.replace(/-/g,'_')}`,
-    permissions : ['storage'],
-    metadata    : { ...(t.config || {}) },
-}));
+].map(t => {
+    // CRITICAL: Generate proper cryptographic signatures
+    const signatureData = `${t.id}:${t.version}:${t.entryPoint || 'tool_' + t.id.replace(/-/g,'_')}:knecta_secure_${Date.now()}`;
+    const properSignature = crypto.createHash('sha256').update(signatureData).digest('hex');
+    
+    return {
+        ...t,
+        version     : '1.0.0',
+        signature   : properSignature, // CRITICAL: Use full 64-char signature
+        isLocalOnly : false,
+        isInstalled : true,
+        isActive    : t.isEnabled,
+        entryPoint  : `tool_${t.id.replace(/-/g,'_')}`,
+        permissions : ['storage'], // CRITICAL: Minimal permissions by default
+        metadata    : { 
+            ...(t.config || {}),
+            // CRITICAL: Add security metadata
+            requiresNetwork: ['url-shorten', 'ip-info', 'currency-convert'].includes(t.id),
+            maxExecutionTime: 30000, // 30 seconds max
+            maxMemoryUsage: 50 * 1024 * 1024, // 50MB max
+            allowedDomains: t.id === 'currency-convert' ? ['api.exchangerate-api.com'] : [],
+        },
+    };
+});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // In-memory usage log (per process; replace with DB in production)
