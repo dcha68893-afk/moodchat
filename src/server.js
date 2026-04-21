@@ -4322,8 +4322,8 @@ class Application {
             // Import the main router from index.js
             const mainRouter = require('./routes/index');
 
-            // Status endpoint (public) - Ensure it's explicitly public
-            this.app.get('/api/status', (req, res) => {
+            // Server health endpoint (public) - moved to avoid conflict with user status routes
+            this.app.get('/api/health', (req, res) => {
                 logger.logPublicRouteAccess(req.path, req.method);
                 systemState.incrementMetric('publicRouteAccess');
                 const isReady = systemState.isServerReady();
