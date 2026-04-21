@@ -78,8 +78,82 @@ class WebSocketService {
         return this.setIO(io);
     }
 
+    /**
+     * ✅ FIX: Call this from server.js AFTER setIO/init so every connecting socket
+     * is authenticated and joined to its user room automatically.
+     *
+     * Usage in server.js:
+     *   wsService.init(io);
+     *   wsService.setupConnectionHandler();
+     *
+     * The handler:
+     *  1. Reads the token from handshake.auth.token or handshake.query.token
+     *  2. Verifies it (rejects + disconnects invalid tokens)
+     *  3. Calls registerUser() so sendToUser() can find this socket
+     *  4. Joins user rooms: user:<id>  and  user_<id>
+     *  5. Emits 'authenticated' back so the client knows auth succeeded
+     *  6. Cleans up on disconnect
+     */
+    setupConnectionHandler() {
+        const io = this.getIO();
+        if (!io) {
+            console.error('[WSService] setupConnectionHandler: io not set — call init(io) first');
+            return this;
+        }
+
+        io.on('connection', (socket) => {
+            const token = (socket.handshake.auth && socket.handshake.auth.token)
+                || socket.handshake.query.token
+                || null;
+
+            // ── Auth ─────────────────────────────────────────────────────────
+            const { valid, userId, reason } = this.verifyToken(token, socket);
+            if (!valid) {
+                // verifyToken already disconnected the socket
+                return;
+            }
+
+            // ── Register + join rooms ─────────────────────────────────────────
+            this.registerUser(userId, socket);
+            // registerUser joins user:<id> and user_<id> — log confirmation
+            console.log(`[WSService] ✅ socket connected uid=${userId} sid=${socket.id}`);
+
+            // ── Tell client auth succeeded ────────────────────────────────────
+            socket.emit('authenticated', { userId, timestamp: Date.now() });
+
+            // ── Allow client to explicitly join chat/group rooms ──────────────
+            socket.on('join', ({ room } = {}) => {
+                if (room && typeof room === 'string') {
+                    socket.join(room);
+                    console.log(`[WSService] uid=${userId} joined room: ${room}`);
+                }
+            });
+            socket.on('join_user_room', ({ userId: uid } = {}) => {
+                const rid = parseInt(uid, 10);
+                if (rid) {
+                    socket.join(`user:${rid}`);
+                    socket.join(`user_${rid}`);
+                }
+            });
+
+            // ── Clean up on disconnect ────────────────────────────────────────
+            socket.on('disconnect', (reason) => {
+                this.removeUser(userId, socket);
+                console.log(`[WSService] socket disconnected uid=${userId} sid=${socket.id} reason=${reason}`);
+            });
+        });
+
+        console.log('[WSService] Connection handler registered ✅');
+        return this;
+    }
+
     getIO() {
-        return this.io || global.__socketIO || null;
+        // ✅ FIX: Check all common global names server frameworks use to expose the io instance
+        return this.io
+            || global.__socketIO
+            || global.__io
+            || global.io
+            || null;
     }
 
     // ── TOKEN VERIFICATION ────────────────────────────────────────────────────
@@ -279,6 +353,9 @@ class WebSocketService {
     async sendToUser(userId, event, data = {}) {
         const uid = parseInt(userId, 10);
         if (!uid || !event) return false;
+
+        // ✅ FIX: Required emit verification log per spec
+        console.log(`[WSService] EMITTING MESSAGE TO: uid=${uid} event=${event}`);
 
         const payload = { ...data, timestamp: data.timestamp || new Date().toISOString() };
         let delivered = false;

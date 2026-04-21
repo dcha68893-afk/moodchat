@@ -127,7 +127,36 @@ class CallService {
       metadata:     { ringStartedAt: new Date().toISOString() },
     });
 
-    return this._format(call, caller, callee);
+    // ✅ FIX: Emit call:incoming to callee NOW — this was completely missing and is why
+    // receivers never saw incoming calls.  Also emit to caller as confirmation.
+    const formatted = this._format(call, caller, callee);
+    const callPayload = {
+      callId:     call.id,
+      callerId:   parseInt(callerId),
+      receiverId: parseInt(calleeId),
+      type:       callType,
+      status:     'ringing',
+      caller:     { id: caller.id, username: caller.username, avatar: caller.avatar },
+      callee:     { id: callee.id, username: callee.username, avatar: callee.avatar },
+      chatId:     call.chatId,
+      timestamp:  Date.now(),
+    };
+
+    const svc = ws();
+    if (svc) {
+      // Primary: call:incoming + incoming_call to callee
+      console.log(`[CallService] EMITTING call:incoming to receiverId=${calleeId}`);
+      await svc.sendToUser(parseInt(calleeId), 'call:incoming',  callPayload);
+      await svc.sendToUser(parseInt(calleeId), 'incoming_call',  callPayload);
+      await svc.sendToUser(parseInt(calleeId), 'call_incoming',  callPayload);
+      // Confirmation to caller
+      await svc.sendToUser(parseInt(callerId), 'call:initiated', callPayload);
+      await svc.sendToUser(parseInt(callerId), 'call_initiated', callPayload);
+    } else {
+      console.warn('[CallService] ⚠️  webSocketService not available — call:incoming NOT emitted');
+    }
+
+    return formatted;
   }
 
   // ── answerCall ──────────────────────────────────────────────────────────────
