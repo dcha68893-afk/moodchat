@@ -1,9 +1,9 @@
 {
   "development": {
-    "username": "postgres",
-    "password": "a8UIFwP8552hGbYI9x7O3Dp7gs3vb6TV",
-    "database": "denismoo_db",
-    "host": "127.0.0.1",
+    "username": "moodchat_user",
+    "password": "5CzyEV3lQZNgKruwJHOzA7bw8q6T72xD",
+    "database": "moodchat",
+    "host": "dpg-d7k8hrl7vvec73969alg-a.virginia-postgres.render.com",
     "dialect": "postgres",
     "port": 5432,
     "logging": true,
@@ -15,19 +15,19 @@
     }
   },
   "test": {
-    "username": "postgres",
-    "password": "a8UIFwP8552hGbYI9x7O3Dp7gs3vb6TV",
-    "database": "denismoo_test",
-    "host": "127.0.0.1",
+    "username": "moodchat_user",
+    "password": "5CzyEV3lQZNgKruwJHOzA7bw8q6T72xD",
+    "database": "moodchat",
+    "host": "dpg-d7k8hrl7vvec73969alg-a.virginia-postgres.render.com",
     "dialect": "postgres",
     "port": 5432,
     "logging": false
   },
   "production": {
-    "username": "postgres",
-    "password": "a8UIFwP8552hGbYI9x7O3Dp7gs3vb6TV",
-    "database": "denismoo_db",
-    "host": "127.0.0.1",
+    "username": "moodchat_user",
+    "password": "5CzyEV3lQZNgKruwJHOzA7bw8q6T72xD",
+    "database": "moodchat",
+    "host": "dpg-d7k8hrl7vvec73969alg-a.virginia-postgres.render.com",
     "dialect": "postgres",
     "port": 5432,
     "logging": false,

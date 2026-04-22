@@ -29,6 +29,7 @@ const bcrypt = require('bcrypt');
 const WebSocket = require('ws');
 const compression = require('compression');
 const authService = require('./services/authService');
+const WebSocketService = require('./services/webSocketService');
 const { authenticateToken } = require('./middleware/auth');
 
 // Environment detection with proper precedence
@@ -3895,409 +3896,6 @@ async mountRoutersSelective(loadedRouters) {
 
 }
 
-// ========== WEBSOCKET SERVICE ==========
-class WebSocketService {
-    constructor() {
-        this.wss = null;
-        this.state = 'DISABLED';
-        this.transport = 'NONE';
-        this.reason = '';
-        this.clients = new Set();
-        this.clientUsers = new Map();
-        
-        systemState.registerConnection('websocket', this);
-    }
-    
-    async initialize(server) {
-        if (!config.get('FEATURE_WEBSOCKETS')) {
-            systemState.updateConnectionState('websocket', {
-                status: 'DISABLED',
-                connected: false,
-                degraded: false,
-                details: { reason: 'Feature disabled' }
-            });
-            logger.info('WebSocket feature disabled', 'WEBSOCKET');
-            return null;
-        }
-        
-        systemState.recordStartupStep('websocket_init_start');
-        
-        try {
-            // CORRECT: Use WebSocket.Server constructor
-            this.wss = new WebSocket.Server({
-                server,
-                path: '/ws',
-                clientTracking: true,
-                perMessageDeflate: {
-                    zlibDeflateOptions: {
-                        chunkSize: 1024,
-                        memLevel: 7,
-                        level: 3
-                    },
-                    zlibInflateOptions: {
-                        chunkSize: 10 * 1024
-                    },
-                    clientNoContextTakeover: true,
-                    serverNoContextTakeover: true,
-                    serverMaxWindowBits: 10,
-                    concurrencyLimit: 10,
-                    threshold: 1024
-                }
-            });
-            
-            this.setupEventHandlers();
-            this.transport = 'WS';
-            this.state = 'LISTENING';
-            
-            systemState.updateConnectionState('websocket', {
-                status: 'LISTENING',
-                connected: true,
-                degraded: false,
-                details: { 
-                    transport: 'WS',
-                    path: '/ws',
-                    clients: 0
-                }
-            });
-            
-            logger.success('WebSocket server initialized', 'WEBSOCKET');
-            systemState.recordStartupStep('websocket_init_complete');
-            
-            return this.wss;
-            
-        } catch (error) {
-            this.handleWebSocketError(error);
-            return null;
-        }
-    }
-    
-    setupEventHandlers() {
-        this.wss.on('connection', (ws, req) => {
-            const authContext = this.authenticateConnection(req);
-            if (!authContext.valid) {
-                try {
-                    ws.send(JSON.stringify({
-                        type: 'error',
-                        code: 'AUTH_FAILED',
-                        message: authContext.error || 'Authentication required',
-                        timestamp: new Date().toISOString()
-                    }));
-                } catch (_) {}
-                ws.close(4001, 'Authentication required');
-                return;
-            }
-
-            ws.isAlive = true;
-            ws.id = Math.random().toString(36).substr(2, 9);
-            ws.userId = authContext.userId;
-            ws.user = authContext.user;
-            this.clients.add(ws);
-            this.clientUsers.set(ws, authContext.userId);
-            websocketDeliveryService.registerWebSocketClient(authContext.userId, ws);
-            
-            // Update client count
-            systemState.updateConnectionState('websocket', {
-                details: { clients: this.clients.size }
-            });
-            
-            ws.on('pong', () => {
-                ws.isAlive = true;
-            });
-            
-            ws.on('message', (message) => {
-                this.handleMessage(ws, message);
-            });
-            
-            ws.on('close', () => {
-                this.clients.delete(ws);
-                websocketDeliveryService.unregisterWebSocketClient(authContext.userId, ws);
-                this.clientUsers.delete(ws);
-                websocketDeliveryService.sendToUser(authContext.userId, 'presence:update', {
-                    userId: authContext.userId,
-                    online: false
-                }).catch(() => {});
-                systemState.updateConnectionState('websocket', {
-                    details: { clients: this.clients.size }
-                });
-            });
-            
-            ws.on('error', (error) => {
-                logger.debug(`WebSocket error: ${error.message}`, 'WEBSOCKET');
-            });
-            
-            // Send welcome message
-            ws.send(JSON.stringify({
-                type: 'authenticated',
-                message: 'Connected to WebSocket server',
-                payload: {
-                    userId: authContext.userId,
-                    authenticated: true
-                },
-                timestamp: new Date().toISOString()
-            }));
-
-            websocketDeliveryService.sendToUser(authContext.userId, 'presence:update', {
-                userId: authContext.userId,
-                online: true
-            }).catch(() => {});
-        });
-        
-        // Heartbeat
-        const interval = setInterval(() => {
-            if (!this.wss) {
-                clearInterval(interval);
-                return;
-            }
-            
-            this.wss.clients.forEach((ws) => {
-                if (ws.isAlive === false) {
-                    ws.terminate();
-                    this.clients.delete(ws);
-                }
-                ws.isAlive = false;
-                ws.ping();
-            });
-            
-            // Update client count
-            systemState.updateConnectionState('websocket', {
-                details: { clients: this.clients.size }
-            });
-        }, 30000);
-    }
-    
-    handleMessage(ws, message) {
-        try {
-            const data = JSON.parse(message.toString());
-            
-            switch (data.type) {
-                case 'ping':
-                    ws.send(JSON.stringify({
-                        type: 'pong',
-                        timestamp: new Date().toISOString()
-                    }));
-                    break;
-
-                case 'AUTHENTICATE':
-                    ws.send(JSON.stringify({
-                        type: 'authenticated',
-                        payload: {
-                            userId: ws.userId,
-                            authenticated: true
-                        },
-                        timestamp: new Date().toISOString()
-                    }));
-                    break;
-
-                // ✅ FIX: Handle join_user_room and join events emitted by the
-                // frontend after authentication. These allow the client to
-                // (re-)register with the delivery service in case it reconnected
-                // or the mapping was lost. Since this is raw WS (not Socket.IO),
-                // there are no rooms — but we re-register the raw WS client so
-                // websocketDeliveryService.sendToUser() can find this socket.
-                case 'join_user_room': {
-                    const joinUid = parseInt(data.userId || (data.payload && data.payload.userId), 10);
-                    if (joinUid && joinUid === ws.userId) {
-                        websocketDeliveryService.registerWebSocketClient(joinUid, ws);
-                        ws.send(JSON.stringify({
-                            type: 'room_joined',
-                            room: 'user:' + joinUid,
-                            userId: joinUid,
-                            timestamp: new Date().toISOString()
-                        }));
-                        console.log('[WS] join_user_room confirmed for uid=' + joinUid);
-                    }
-                    break;
-                }
-                case 'join': {
-                    // Re-register on explicit join (reconnect safety net)
-                    if (ws.userId) {
-                        websocketDeliveryService.registerWebSocketClient(ws.userId, ws);
-                    }
-                    ws.send(JSON.stringify({
-                        type: 'room_joined',
-                        room: data.room || ('user:' + ws.userId),
-                        timestamp: new Date().toISOString()
-                    }));
-                    break;
-                }
-
-                case 'call_offer':
-                case 'call_answer':
-                case 'ice_candidate':
-                case 'call:offer':
-                case 'call:answer':
-                case 'call:ice_candidate':
-                case 'sendMessage':
-                case 'sendCallSignal':
-                    this.routeTargetedMessage(ws, data);
-                    break;
-                    
-                case 'echo':
-                    ws.send(JSON.stringify({
-                        type: 'echo',
-                        message: data.message,
-                        timestamp: new Date().toISOString()
-                    }));
-                    break;
-                    
-                default:
-                    // Broadcast to all clients
-                    this.broadcast({
-                        type: 'message',
-                        from: ws.id,
-                        message: data,
-                        timestamp: new Date().toISOString()
-                    });
-            }
-        } catch (error) {
-            logger.debug(`WebSocket message error: ${error.message}`, 'WEBSOCKET');
-            ws.send(JSON.stringify({
-                type: 'error',
-                message: 'Invalid message format',
-                timestamp: new Date().toISOString()
-            }));
-        }
-    }
-    
-    broadcast(message) {
-        if (!this.wss) return;
-        
-        const messageStr = JSON.stringify(message);
-        this.wss.clients.forEach((client) => {
-            if (client.readyState === 1) {
-                client.send(messageStr);
-            }
-        });
-    }
-
-    authenticateConnection(req) {
-        try {
-            const requestUrl = new URL(req.url, 'http://localhost');
-            const tokenFromQuery = requestUrl.searchParams.get('token');
-            const headerToken = tokenService.extractTokenFromRequest({ headers: req.headers || {} });
-            const token = tokenFromQuery || headerToken;
-
-            if (!token) {
-                return { valid: false, error: 'Missing token' };
-            }
-
-            if (typeof token !== 'string' || token.length > 4096) {
-                return { valid: false, error: 'Malformed token' };
-            }
-
-            const verification = tokenService.verifyAccessToken(token);
-            if (!verification.valid) {
-                return { valid: false, error: verification.error || 'Invalid token' };
-            }
-
-            const decoded = verification.decoded || {};
-            const userId = decoded.userId || decoded.id;
-            if (!userId) {
-                return { valid: false, error: 'Missing userId in token' };
-            }
-
-            const numericUserId = Number.parseInt(userId, 10);
-            if (!Number.isFinite(numericUserId) || numericUserId <= 0) {
-                return { valid: false, error: 'Invalid userId in token' };
-            }
-
-            return {
-                valid: true,
-                userId: numericUserId,
-                user: {
-                    id: numericUserId,
-                    userId: numericUserId,
-                    email: decoded.email || null,
-                    username: decoded.username || null,
-                    role: decoded.role || 'user'
-                }
-            };
-        } catch (error) {
-            return { valid: false, error: error.message };
-        }
-    }
-
-    routeTargetedMessage(ws, data) {
-        const payload = data.payload || {};
-        const targetUserId = payload.targetUserId || payload.receiverId || payload.calleeId || data.targetUserId || data.toUserId;
-
-        if (!targetUserId) {
-            ws.send(JSON.stringify({
-                type: 'error',
-                message: 'Missing target user',
-                timestamp: new Date().toISOString()
-            }));
-            return;
-        }
-
-        const numericTargetUserId = Number.parseInt(targetUserId, 10);
-        if (!Number.isFinite(numericTargetUserId) || numericTargetUserId <= 0) {
-            ws.send(JSON.stringify({
-                type: 'error',
-                message: 'Invalid target user',
-                timestamp: new Date().toISOString()
-            }));
-            return;
-        }
-
-        const outboundPayload = {
-            ...payload,
-            fromUserId: ws.userId,
-            senderId: payload.senderId || ws.userId
-        };
-
-        try {
-            const payloadSize = Buffer.byteLength(JSON.stringify(outboundPayload), 'utf8');
-            if (payloadSize > 64 * 1024) {
-                ws.send(JSON.stringify({
-                    type: 'error',
-                    message: 'Payload too large',
-                    timestamp: new Date().toISOString()
-                }));
-                return;
-            }
-        } catch (_error) {}
-
-        websocketDeliveryService.sendToUser(numericTargetUserId, data.type, outboundPayload).catch(() => {});
-
-        if (data.messageId) {
-            ws.send(JSON.stringify({
-                type: 'ACK',
-                messageId: data.messageId,
-                payload: {
-                    success: true
-                },
-                timestamp: new Date().toISOString()
-            }));
-        }
-    }
-    
-    handleWebSocketError(error) {
-        this.state = 'DEGRADED';
-        this.reason = error.message;
-        
-        systemState.updateConnectionState('websocket', {
-            status: 'DEGRADED',
-            connected: false,
-            degraded: true,
-            details: { 
-                reason: error.message,
-                transport: 'NONE'
-            }
-        });
-        
-        logger.warn(`WebSocket initialization failed (fallback mode): ${error.message}`, 'WEBSOCKET');
-    }
-    
-    getInfo() {
-        return {
-            state: this.state,
-            transport: this.transport,
-            reason: this.reason,
-            clients: this.clients.size
-        };
-    }
-}
 
 // ========== MAIN APPLICATION WITH PROTECTED ROUTES ONLY AUTH ==========
 const express = require('express');
@@ -5184,14 +4782,28 @@ class Application {
                 
                 logger.success(`HTTP server listening on ${host}:${port}`, 'APPLICATION');
                 
-                // Initialize WebSocket AFTER server is listening
+                // Initialize Socket.IO for real-time messaging
                 if (config.get('FEATURE_WEBSOCKETS')) {
-                    this.websocket = new WebSocketService();
-                    this.websocket.initialize(this.server).then(() => {
-                        logger.success('WebSocket initialized successfully', 'WEBSOCKET');
-                    }).catch(error => {
-                        logger.debug(`WebSocket init completed with fallback: ${error.message}`, 'WEBSOCKET');
+                    const { Server } = require('socket.io');
+                    this.io = new Server(this.server, {
+                        cors: {
+                            origin: process.env.FRONTEND_URL || "https://moodfronted.onrender.com",
+                            methods: ["GET", "POST"],
+                            credentials: true
+                        },
+                        transports: ['websocket', 'polling']
                     });
+                    
+                    // Initialize WebSocket service with Socket.IO
+                    // webSocketService exports a singleton instance, not a class
+                    this.websocket = WebSocketService;
+                    this.websocket.init(this.io);
+                    this.websocket.setupConnectionHandler();
+                    
+                    logger.success('Socket.IO initialized successfully', 'WEBSOCKET');
+                    
+                    // Use same singleton as fallback reference
+                    this.rawWebSocket = WebSocketService;
                 }
                 
                 // Setup graceful shutdown
@@ -5446,7 +5058,6 @@ module.exports = {
     DatabaseService,
     RedisService,
     RouterManager,
-    WebSocketService,
     DynamicCorsManager,
     AuthMiddlewareManager,
     LoginResponseCache,

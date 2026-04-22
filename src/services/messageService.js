@@ -104,19 +104,28 @@ class MessageService {
                 status:       'delivered',
             };
 
-            for (const { userId } of participants) {
-                // Send to everyone (sender gets confirmation, receiver gets the message)
-                await ws.sendToUser(userId, 'message:new', payload);
-                // Also emit the legacy event name for older clients
-                await ws.sendToUser(userId, 'new_message', payload);
+            // Get Socket.IO instance directly for reliable delivery
+            const io = ws.getIO();
+            if (io) {
+                // Use Socket.IO for real-time delivery to all participants
+                for (const { userId } of participants) {
+                    // Send to user's Socket.IO room
+                    io.to(`user:${userId}`).emit('message:new', payload);
+                    io.to(`user_${userId}`).emit('new_message', payload);
+                    console.log(`[MessageService] 🚀 Socket.IO sent to user:${userId} for chatId=${chatId}`);
+                }
+                
+                // Also broadcast to chat room
+                io.to(`chat:${chatId}`).emit('message:new', payload);
+                console.log(`[MessageService] ✅ Socket.IO real-time delivery: chatId=${chatId}, recipients=${participants.length}`);
+            } else {
+                // Fallback to raw WebSocket service
+                for (const { userId } of participants) {
+                    await ws.sendToUser(userId, 'message:new', payload);
+                    await ws.sendToUser(userId, 'new_message', payload);
+                }
+                console.log(`[MessageService] ⚠️ Fallback WebSocket delivery: chatId=${chatId}, recipients=${participants.length}`);
             }
-
-            // Also broadcast to the chat room (for clients joined via room)
-            if (typeof ws.broadcastToChat === 'function') {
-                ws.broadcastToChat(chatId, 'message:new', payload);
-            }
-
-            console.log(`[MessageService] ✅ Real-time delivery: chatId=${chatId}, recipients=${participants.length}`);
         } catch (err) {
             // Real-time failure is non-fatal — message is already saved
             console.error('[MessageService] Real-time delivery error:', err.message);

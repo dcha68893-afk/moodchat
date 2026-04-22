@@ -70,6 +70,13 @@ class WebSocketService {
 
     setIO(io) {
         this.io = io || null;
+        // Expose Socket.IO globally for other services
+        if (io) {
+            global.__socketIO = io;
+            global.__io = io;
+            global.io = io;
+            console.log('[WSService] Socket.IO instance exposed globally');
+        }
         return this;
     }
 

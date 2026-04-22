@@ -109,7 +109,7 @@ const formatInvite = (invite) => {
 };
 
 // Helper function with timeout
-const withTimeout = (promise, timeoutMs = 5000) => {
+const withTimeout = (promise, timeoutMs = 15000) => {
     let timeoutId;
     const timeoutPromise = new Promise((_, reject) => {
         timeoutId = setTimeout(() => {

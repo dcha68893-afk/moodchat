@@ -38,11 +38,39 @@ function emitToAll(participants, event, data) {
   const colon      = event.replace(/_/g, ':');   // call_ended  → call:ended
   const underscore = event.replace(/:/g, '_');   // call:ended  → call_ended
   const events     = [...new Set([event, colon, underscore])];
-  for (const uid of (participants || [])) {
-    for (const ev of events) {
-      try { svc.sendToUser(uid, ev, data); } catch (_) {}
+
+  // Resolve io: req.io → global.__socketIO → wsService internal
+  const resolvedIo = io || global.__socketIO || (getWsService() && getWsService().getIO && getWsService().getIO()) || null;
+
+  // Try Socket.IO first for reliable real-time delivery
+  if (resolvedIo) {
+    for (const participant of participants) {
+      const uid = typeof participant === 'object' ? participant.id || participant.userId : participant;
+      for (const ev of events) {
+        try { 
+          resolvedIo.to(`user:${uid}`).emit(ev, data); 
+          resolvedIo.to(`user_${uid}`).emit(ev, data); 
+          console.log(`[CallService] 🚀 Socket.IO sent ${ev} to user:${uid}`);
+        } catch (_) {}
+      }
     }
+    return true;
   }
+
+  // Fallback: wsService path (reaches all rooms + raw WS clients)
+  const svc = getWsService();
+  if (svc && typeof svc.sendToUser === 'function' && !resolvedIo) {
+    for (const participant of participants) {
+      const uid = typeof participant === 'object' ? participant.id || participant.userId : participant;
+      for (const ev of events) {
+        try { await svc.sendToUser(uid, ev, data); } catch (_) {}
+      }
+    }
+    return true;
+  }
+
+  console.warn(`[calls.js] notifyUser: no delivery channel for event=${event}`);
+  return false;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

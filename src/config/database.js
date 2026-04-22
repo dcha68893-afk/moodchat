@@ -14,7 +14,17 @@ function getDatabaseConfig() {
 
   console.log(`[Database] Environment: ${env}`);
 
-  // ✅ PRIMARY: Supabase connection string (all environments)
+  //  SIMPLIFIED: Use SQLite for local development to avoid connection issues
+  if (env === 'development') {
+    console.log('[Database] Using SQLite for local development');
+    return {
+      dialect: 'sqlite',
+      storage: './database.sqlite',
+      logging: process.env.DB_LOGGING === 'true' ? console.log : false
+    };
+  }
+
+  //  PRIMARY: Supabase connection string (production environments)
   if (process.env.SUPABASE_DB_URL) {
     console.log('[Database] Using SUPABASE_DB_URL connection');
     return {
@@ -24,7 +34,7 @@ function getDatabaseConfig() {
     };
   }
 
-  // ✅ FALLBACK: Legacy DATABASE_URL (backward-compatible during migration)
+  //  FALLBACK: Legacy DATABASE_URL (backward-compatible during migration)
   if (process.env.DATABASE_URL) {
     console.log('[Database] Using DATABASE_URL connection (legacy fallback)');
     return {
@@ -33,7 +43,7 @@ function getDatabaseConfig() {
     };
   }
 
-  // ✅ LAST RESORT: Individual env vars (local dev without a connection string)
+  //  LAST RESORT: Individual env vars (local dev without a connection string)
   console.log('[Database] Using individual DB_* environment variables');
   return {
     host: process.env.DB_HOST || 'localhost',
@@ -71,8 +81,11 @@ function getSequelizeInstance() {
       statement_timeout: 10000,
       query_timeout: 10000,
       idle_in_transaction_session_timeout: 10000,
-      // SSL is always enabled for Supabase
-      ssl: config.ssl || false
+      // SSL configuration for Render PostgreSQL - SSL is required
+      ssl: {
+        require: true,
+        rejectUnauthorized: false
+      }
     };
 
     const retryConfig = {

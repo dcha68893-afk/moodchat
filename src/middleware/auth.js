@@ -45,7 +45,7 @@ const isPublicPath = (req) => {
   
   // Specifically allow health and the public status landing endpoints only
   if (fullPath === '/health' || fullPath === '/api/health' || 
-      fullPath === '/status' || fullPath === '/api/status') {
+      fullPath === '/status') {
     return true;
   }
 

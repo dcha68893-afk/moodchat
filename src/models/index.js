@@ -859,10 +859,18 @@ db.createTablesIfNeeded = async function() {
     }
 };
 
-if (process.env.CREATE_TABLES === 'true' || process.env.DB_SYNC_FORCE === 'true') {
-    console.log('[Database] 🔧 CREATE_TABLES mode enabled');
-    db.createTablesIfNeeded().catch(console.error);
-}
+// ===== AUTO SYNC ON EVERY STARTUP =====
+// Always create tables and add missing columns on startup (safe: alter:true never drops columns)
+(async function autoSync() {
+  try {
+    await sequelize.authenticate();
+    console.log('[Database] 🔧 Running sequelize.sync({ alter: true }) to ensure all tables and columns exist...');
+    await sequelize.sync({ force: false, alter: true });
+    console.log('[Database] ✅ sequelize.sync complete — all tables and columns are up to date');
+  } catch (err) {
+    console.error('[Database] ❌ Auto-sync failed (non-fatal):', err.message);
+  }
+})();
 
 // ===== EXPORT with all getters =====
 module.exports = {

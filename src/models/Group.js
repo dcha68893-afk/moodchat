@@ -13,7 +13,7 @@ module.exports = (sequelize, DataTypes) => {
       },
       chatId: {
         type: DataTypes.INTEGER,
-        allowNull: false,
+        allowNull: true,
         unique: true,
       },
       name: {
