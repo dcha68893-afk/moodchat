@@ -62,18 +62,47 @@ class GroupController {
     async createGroup(req, res, next) {
         try {
             const userId = req.user.id;
-            const { name, description, avatar, members, privacy, settings } = req.body;
+            const { name, description, avatar, members, memberIds, privacy, settings } = req.body;
             if (!name) throw new AppError('Group name is required', 400);
+
+            // Merge members + memberIds, always include creator
+            const allMemberIds = [...new Set([
+                String(userId),
+                ...(members   || []).map(String),
+                ...(memberIds || []).map(String)
+            ])].filter(Boolean);
 
             const group = await groupService.createGroup({
                 name, description, avatar, creatorId: userId,
-                members: members || [], privacy: privacy || 'public', settings: settings || {},
+                members: allMemberIds, privacy: privacy || 'public', settings: settings || {},
             });
 
+            const io = global.__socketIO;
+            if (io && group?.id) {
+                const payload = { group, createdBy: userId, timestamp: new Date() };
+
+                // Notify every member via their personal room so they see
+                // the new group appear in real-time without a page reload.
+                allMemberIds.forEach(uid => {
+                    io.to(`user:${uid}`).emit('group:created', payload);
+                    io.to(`user:${uid}`).emit('group:localSync', { action: 'create', group, groupId: group.id });
+                });
+
+                // Also emit to the group room for any already-subscribed sockets
+                io.to(`group:${group.id}`).emit('group:created', payload);
+                io.to(`group:${group.id}`).emit('group:localSync', { action: 'create', group, groupId: group.id });
+
+                logger.info(`[GROUP FLOW] WebSocket emitted group:created for group ${group.id} to ${allMemberIds.length} member(s)`);
+            }
+
+            // Return flat shape: data.group (not data.group.group)
             res.status(201).json({
                 success: true,
                 message: 'Group created successfully',
-                data: withLocalSyncMeta({ group }, 'create'),
+                data: {
+                    group,
+                    _localSync: { action: 'create', timestamp: Date.now() }
+                },
             });
         } catch (error) { handleError(error, next, 'createGroup'); }
     }
@@ -100,13 +129,24 @@ class GroupController {
             };
 
             const result = await groupService.getUserGroups(userId, options);
-
-            // FIX: Partition into typed arrays so group-core.js and GroupSyncEngine
-            // can directly assign myGroups / joinedGroups / adminGroups without extra work.
             const groups = result.groups || [];
+
             const myGroups     = groups.filter(g => String(g.createdBy) === String(userId) || g.isCreator);
             const adminGroups  = groups.filter(g => g.isAdmin || g.isCreator);
             const joinedGroups = groups.filter(g => !g.isCreator && !g.isAdmin);
+
+            // Ensure the user's socket is in every group room so they receive
+            // group:message events in real-time without a separate join step.
+            const io = global.__socketIO;
+            if (io && groups.length) {
+                const userRoom = io.sockets.adapter.rooms?.get(`user:${userId}`);
+                if (userRoom) {
+                    userRoom.forEach(socketId => {
+                        const socket = io.sockets.sockets?.get(socketId);
+                        if (socket) groups.forEach(g => g.id && socket.join(`group:${g.id}`));
+                    });
+                }
+            }
 
             res.status(200).json({
                 success: true,
@@ -117,7 +157,6 @@ class GroupController {
                     adminGroups,
                     joinedGroups,
                     pagination: result.pagination,
-                    // Include _localSync so GroupSyncEngine can persist immediately
                     _localSync: { action: 'sync', timestamp: Date.now() },
                 },
             });

@@ -119,7 +119,13 @@ class WebSocketService {
             console.log(`[WSService] ✅ socket connected uid=${userId} sid=${socket.id}`);
 
             // ── Tell client auth succeeded ────────────────────────────────────
-            socket.emit('authenticated', { userId, timestamp: Date.now() });
+            // Include userId in payload so client can call _joinUserRoom(payload) reliably
+            socket.emit('authenticated', { userId, authenticated: true, timestamp: Date.now() });
+
+            // ── FIX: Proactively join all chat rooms this user belongs to ─────
+            // This makes broadcastToChat(chatId, ...) deliver to the receiver even
+            // if the client never emits an explicit 'join' for each chat room.
+            this._joinUserChatRooms(userId, socket).catch(() => {});
 
             // ── Allow client to explicitly join chat/group rooms ──────────────
             socket.on('join', ({ room } = {}) => {
@@ -128,11 +134,14 @@ class WebSocketService {
                     console.log(`[WSService] uid=${userId} joined room: ${room}`);
                 }
             });
+            // ✅ FIX: Validate that join_user_room userId matches the authenticated userId
+            // to prevent any socket from joining another user's room.
             socket.on('join_user_room', ({ userId: uid } = {}) => {
                 const rid = parseInt(uid, 10);
-                if (rid) {
+                if (rid && rid === userId) {
                     socket.join(`user:${rid}`);
                     socket.join(`user_${rid}`);
+                    console.log(`[WSService] uid=${userId} confirmed join user rooms`);
                 }
             });
 
@@ -666,6 +675,40 @@ class WebSocketService {
 
         if (pruned > 0) {
             console.log(`[WSService] Stale socket reaper removed ${pruned} dead socket(s).`);
+        }
+    }
+
+    /**
+     * ✅ FIX: After a user connects, proactively join all Socket.IO rooms for every
+     * chat they are a participant in. This means broadcastToChat(chatId, 'message:new', ...)
+     * will reach the receiver's socket even if the client never emitted an explicit join.
+     *
+     * Falls back silently if DB is unavailable (e.g. during test runs).
+     */
+    async _joinUserChatRooms(userId, socket) {
+        if (!userId || !socket || typeof socket.join !== 'function') return;
+        try {
+            const db = require('../models');
+            const sequelize = db.sequelize || db;
+            if (!sequelize || typeof sequelize.query !== 'function') return;
+
+            const rows = await sequelize.query(
+                'SELECT "chatId" FROM chat_participants WHERE "userId" = :userId',
+                { replacements: { userId }, type: sequelize.QueryTypes.SELECT }
+            );
+
+            for (const { chatId } of (rows || [])) {
+                if (chatId) {
+                    socket.join(`chat:${chatId}`);
+                }
+            }
+
+            if (rows && rows.length > 0) {
+                console.log(`[WSService] uid=${userId} auto-joined ${rows.length} chat room(s)`);
+            }
+        } catch (err) {
+            // Non-fatal — user:X room delivery still works via sendToUser()
+            console.warn(`[WSService] _joinUserChatRooms failed for uid=${userId}:`, err.message);
         }
     }
 }

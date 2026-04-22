@@ -1927,6 +1927,208 @@ router.post('/:groupId/join', groupController.joinGroup.bind(groupController));
 router.post('/:groupId/leave', groupController.leaveGroup.bind(groupController));
 router.put('/:groupId/settings', groupController.updateGroupSettings.bind(groupController));
 
+// ============================================================
+// GROUP MESSAGES — GET + POST /api/groups/:groupId/messages
+// These routes were missing entirely, causing every message
+// send and history load to silently fail (404 from parent
+// pipeline was swallowed as a generic "API request failed").
+// ============================================================
+
+// ── Helper: normalise a GroupMessage record for the client ──────────────────
+function _fmtMessage(msg, currentUserId) {
+  const d = msg.toJSON ? msg.toJSON() : msg;
+  return {
+    id:           d.id,
+    groupId:      d.groupId,
+    senderId:     d.senderId || d.userId,
+    senderName:   d.sender
+      ? ([d.sender.firstName, d.sender.lastName].filter(Boolean).join(' ') || d.sender.username || 'User')
+      : (d.senderName || 'User'),
+    senderAvatar: d.sender?.avatar || d.senderAvatar || null,
+    content:      d.content || d.text || '',
+    type:         d.type    || 'text',
+    topic:        d.topic   || null,
+    anonymous:    d.anonymous || false,
+    readBy:       d.readBy  || [],
+    createdAt:    d.createdAt,
+    timestamp:    d.createdAt || d.timestamp,
+  };
+}
+
+// GET /api/groups/:groupId/messages?limit=50&before=<id>
+// Load group message history (newest 50 by default)
+router.get('/:groupId/messages', async (req, res) => {
+  try {
+    const userId  = getUserId(req);
+    const groupId = parseInt(req.params.groupId);
+    const limit   = Math.min(parseInt(req.query.limit || 50), 200);
+    const before  = req.query.before || null;
+
+    if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
+    if (isNaN(groupId)) return res.status(400).json({ success: false, message: 'Invalid group ID' });
+
+    // Verify membership
+    if (GroupMember) {
+      const membership = await GroupMember.findOne({ where: { groupId, userId } });
+      if (!membership) {
+        return res.status(403).json({ success: false, message: 'You are not a member of this group' });
+      }
+    }
+
+    // GroupMessage model may not exist yet — return empty gracefully
+    const GroupMessage = db?.models?.GroupMessages || db?.models?.GroupMessage
+                      || db?.GroupMessages || db?.GroupMessage || null;
+
+    if (!GroupMessage) {
+      console.warn('[Groups] GroupMessage model not available, returning []');
+      return res.json({ success: true, data: [], pagination: { limit, hasMore: false } });
+    }
+
+    const { Op } = require('sequelize');
+    const where = { groupId };
+    if (before) where.id = { [Op.lt]: parseInt(before) };
+
+    const messages = await withTimeout(GroupMessage.findAll({
+      where,
+      order: [['createdAt', 'DESC']],
+      limit,
+      include: [{
+        model:      User,
+        as:         'sender',
+        attributes: ['id', 'username', 'firstName', 'lastName', 'avatar'],
+        required:   false
+      }]
+    }));
+
+    const formatted = messages.reverse().map(m => _fmtMessage(m, userId));
+    console.log(`[GROUP FLOW] Loaded ${formatted.length} messages for group ${groupId}`);
+
+    return res.json({
+      success:    true,
+      data:       formatted,
+      pagination: { limit, hasMore: messages.length === limit }
+    });
+
+  } catch (error) {
+    console.error('[Groups] GET messages error:', error.message);
+    return res.json({ success: true, data: [], pagination: { limit: 50, hasMore: false } });
+  }
+});
+
+// POST /api/groups/:groupId/messages
+// Send a message — persists to DB and emits real-time socket events
+router.post('/:groupId/messages', async (req, res) => {
+  try {
+    const userId  = getUserId(req);
+    const groupId = parseInt(req.params.groupId);
+    const { content, type = 'text', topic = null, anonymous = false } = req.body;
+
+    if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
+    if (isNaN(groupId)) return res.status(400).json({ success: false, message: 'Invalid group ID' });
+    if (!content || !String(content).trim()) {
+      return res.status(400).json({ success: false, message: 'Message content is required' });
+    }
+
+    console.log(`[GROUP FLOW] Saving message for group ${groupId} from user ${userId}`);
+
+    // Verify membership
+    if (GroupMember) {
+      const membership = await GroupMember.findOne({ where: { groupId, userId } });
+      if (!membership) {
+        return res.status(403).json({ success: false, message: 'You are not a member of this group' });
+      }
+    }
+
+    // Fetch sender display info
+    let senderName = 'User';
+    let senderAvatar = null;
+    if (User) {
+      try {
+        const user = await User.findByPk(userId, { attributes: ['id', 'username', 'firstName', 'lastName', 'avatar'] });
+        if (user) {
+          const u = user.toJSON ? user.toJSON() : user;
+          senderName   = [u.firstName, u.lastName].filter(Boolean).join(' ') || u.username || 'User';
+          senderAvatar = u.avatar || null;
+        }
+      } catch (_) {}
+    }
+
+    const GroupMessage = db?.models?.GroupMessages || db?.models?.GroupMessage
+                      || db?.GroupMessages || db?.GroupMessage || null;
+
+    let savedMessage;
+
+    if (GroupMessage) {
+      const record = await GroupMessage.create({
+        groupId,
+        senderId:     userId,
+        senderName:   anonymous ? 'Anonymous' : senderName,
+        content:      String(content).trim(),
+        type,
+        topic:        topic || null,
+        anonymous:    !!anonymous,
+        readBy:       [userId],
+        createdAt:    new Date()
+      });
+      savedMessage = _fmtMessage(record, userId);
+      savedMessage.senderAvatar = senderAvatar;
+    } else {
+      // No model yet — return a stub so the client gets a valid response
+      console.warn('[Groups] GroupMessage model not available — message not persisted to DB');
+      savedMessage = {
+        id:           `msg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        groupId,
+        senderId:     userId,
+        senderName:   anonymous ? 'Anonymous' : senderName,
+        senderAvatar,
+        content:      String(content).trim(),
+        type,
+        topic:        topic || null,
+        anonymous:    !!anonymous,
+        readBy:       [userId],
+        createdAt:    new Date().toISOString(),
+        timestamp:    new Date().toISOString()
+      };
+    }
+
+    console.log(`[GROUP FLOW] Message saved: ${savedMessage.id}`);
+
+    // ── Emit real-time events to all group members ──────────────────────
+    const io = global.__socketIO;
+    if (io) {
+      const socketPayload = {
+        groupId,
+        message:    savedMessage,
+        senderId:   userId,
+        senderName: anonymous ? 'Anonymous' : senderName,
+        timestamp:  new Date()
+      };
+      // Primary event name + common aliases
+      io.to(`group:${groupId}`).emit('group:message',  socketPayload);
+      io.to(`group:${groupId}`).emit('group_message',  socketPayload);
+      // localSync for the WS bridge in group-core-patch.js
+      io.to(`group:${groupId}`).emit('group:localSync', {
+        action:  'message',
+        groupId,
+        message: savedMessage
+      });
+      console.log(`[GROUP FLOW] WebSocket emitted group:message to room group:${groupId}`);
+    } else {
+      console.warn('[GROUP FLOW] global.__socketIO not set — real-time not emitted');
+    }
+
+    return res.status(201).json({
+      success: true,
+      message: 'Message sent successfully',
+      data:    { message: savedMessage }
+    });
+
+  } catch (error) {
+    console.error('[Groups] POST message error:', error.message);
+    return res.status(500).json({ success: false, message: 'Failed to send message', error: error.message });
+  }
+});
+
 // Error handling middleware for validation errors
 router.use((err, req, res, next) => {
   if (err.type === 'validation') {

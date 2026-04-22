@@ -2,6 +2,13 @@ const friendService = require('../services/friendService');
 const { AppError } = require('../middleware/errorHandler');
 const logger = require('../utils/logger');
 
+// Resolve Socket.IO without hard-coupling to server.js.
+// Works when the app sets `global.io = io` in server.js.
+function getIO() {
+    if (global.io) return global.io;
+    try { return require('../socket').io || require('../realtime').io || null; } catch (_) { return null; }
+}
+
 class FriendController {
   async sendFriendRequest(req, res, next) {
     try {
@@ -21,6 +28,31 @@ class FriendController {
           friendRequest: friendRequest
         }
       });
+
+      // Emit real-time notification to the receiver AFTER responding (non-blocking)
+      try {
+        const io = getIO();
+        if (io) {
+          io.to(`user:${receiverId}`).emit('friend:request', {
+            id:             friendRequest.id,
+            requesterId:    userId,
+            receiverId:     receiverId,
+            status:         'pending',
+            createdAt:      friendRequest.createdAt,
+            senderName:     req.user.displayName || req.user.username || '',
+            senderUsername: req.user.username    || '',
+            senderAvatar:   req.user.avatar      || null,
+            user: {
+              id:          req.user.id,
+              username:    req.user.username    || '',
+              displayName: req.user.displayName || req.user.username || '',
+              avatar:      req.user.avatar      || null,
+            },
+          });
+        }
+      } catch (emitErr) {
+        logger.warn('sendFriendRequest: realtime emit failed (non-fatal):', emitErr.message);
+      }
     } catch (error) {
       logger.error('Send friend request controller error:', error);
       next(error);
@@ -41,6 +73,42 @@ class FriendController {
           friendRequest: friendRequest
         }
       });
+
+      // Emit real-time notification AFTER responding (non-blocking)
+      try {
+        const io = getIO();
+        if (io) {
+          const originalRequesterId = friendRequest.requesterId;
+          if (action === 'accept') {
+            const accepterInfo = {
+              id:          req.user.id,
+              username:    req.user.username    || '',
+              displayName: req.user.displayName || req.user.username || '',
+              avatar:      req.user.avatar      || null,
+            };
+            // Notify the original sender — their request was accepted
+            io.to(`user:${originalRequesterId}`).emit('friend:accepted', {
+              requestId:  requestId,
+              friendId:   userId,
+              user:       accepterInfo,
+              acceptedAt: new Date().toISOString(),
+            });
+            // Notify the accepter too (multi-tab sync)
+            io.to(`user:${userId}`).emit('friend:accepted', {
+              requestId:  requestId,
+              friendId:   originalRequesterId,
+              acceptedAt: new Date().toISOString(),
+            });
+          } else if (action === 'reject') {
+            io.to(`user:${originalRequesterId}`).emit('friend:rejected', {
+              requestId: requestId,
+              friendId:  userId,
+            });
+          }
+        }
+      } catch (emitErr) {
+        logger.warn('respondToFriendRequest: realtime emit failed (non-fatal):', emitErr.message);
+      }
     } catch (error) {
       logger.error('Respond to friend request controller error:', error);
       next(error);

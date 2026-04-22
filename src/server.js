@@ -4088,6 +4088,39 @@ class WebSocketService {
                     }));
                     break;
 
+                // ✅ FIX: Handle join_user_room and join events emitted by the
+                // frontend after authentication. These allow the client to
+                // (re-)register with the delivery service in case it reconnected
+                // or the mapping was lost. Since this is raw WS (not Socket.IO),
+                // there are no rooms — but we re-register the raw WS client so
+                // websocketDeliveryService.sendToUser() can find this socket.
+                case 'join_user_room': {
+                    const joinUid = parseInt(data.userId || (data.payload && data.payload.userId), 10);
+                    if (joinUid && joinUid === ws.userId) {
+                        websocketDeliveryService.registerWebSocketClient(joinUid, ws);
+                        ws.send(JSON.stringify({
+                            type: 'room_joined',
+                            room: 'user:' + joinUid,
+                            userId: joinUid,
+                            timestamp: new Date().toISOString()
+                        }));
+                        console.log('[WS] join_user_room confirmed for uid=' + joinUid);
+                    }
+                    break;
+                }
+                case 'join': {
+                    // Re-register on explicit join (reconnect safety net)
+                    if (ws.userId) {
+                        websocketDeliveryService.registerWebSocketClient(ws.userId, ws);
+                    }
+                    ws.send(JSON.stringify({
+                        type: 'room_joined',
+                        room: data.room || ('user:' + ws.userId),
+                        timestamp: new Date().toISOString()
+                    }));
+                    break;
+                }
+
                 case 'call_offer':
                 case 'call_answer':
                 case 'ice_candidate':

@@ -520,26 +520,41 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
       const wsService = require('../services/webSocketService');
       const participants = await sequelize.query(
         `SELECT DISTINCT "userId" FROM chat_participants
-         WHERE "chatId" = :chatId
-           AND "userId" != :senderId`,
+         WHERE "chatId" = :chatId`,
         {
-          replacements: { chatId, senderId },
+          replacements: { chatId },
           type: sequelize.QueryTypes.SELECT
         }
       );
 
-      const recipientIds = (participants || []).map((row) => parseInt(row.userId, 10)).filter(Boolean);
+      const allParticipantIds = (participants || []).map((row) => parseInt(row.userId, 10)).filter(Boolean);
+      const recipientIds = allParticipantIds.filter(id => id !== senderId);
+
+      // ✅ FIX 6a: Emit message:new to every participant's user room (including sender
+      // so their other devices/tabs receive the confirmation).
+      // sendToUser() targets user:<id> room + individual socket IDs — both paths.
       const deliveryResults = await Promise.allSettled(
-        recipientIds.map(async (recipientId) => {
-          const online = await wsService.isUserOnline(recipientId);
-          await wsService.sendToUser(recipientId, 'message:new', populatedMessage);
-          return online ? recipientId : null;
-        })
+        allParticipantIds.map(uid => wsService.sendToUser(uid, 'message:new', populatedMessage))
       );
 
-      const deliveredTo = deliveryResults
-        .filter((result) => result.status === 'fulfilled' && result.value)
-        .map((result) => result.value);
+      // ✅ FIX 6b: Also broadcast to the chat room (chat:<id>) so any socket that
+      // joined via _joinUserChatRooms receives the message as a secondary delivery path.
+      if (typeof wsService.broadcastToChat === 'function') {
+        wsService.broadcastToChat(chatId, 'message:new', populatedMessage);
+      }
+
+      const deliveredTo = recipientIds; // optimistic — all participants targeted
+
+      // ✅ FIX 6c: Send message:sent confirmation to sender with serverId so the
+      // frontend can replace the optimistic message correctly.
+      await wsService.sendToUser(senderId, 'message:sent', {
+        localId:     populatedMessage.localId || null,
+        messageId,
+        serverId:    messageId,
+        chatId,
+        status:      'sent',
+        createdAt:   populatedMessage.createdAt
+      });
 
       if (deliveredTo.length > 0) {
         await wsService.sendToUser(senderId, 'message:delivered', {
@@ -549,6 +564,8 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
           deliveredAt: new Date().toISOString()
         });
       }
+
+      console.log(`[messages.js] ✅ Emitted message:new to ${allParticipantIds.length} participant(s) + chat:${chatId} room`);
     } catch (notifyError) {
       console.warn('Failed to emit message:new websocket event:', notifyError.message);
     }

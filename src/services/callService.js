@@ -392,8 +392,28 @@ class CallService {
     });
     if (!call) throw new Error('Call not found or user not a participant');
 
+    // Persist the candidate
     call.iceCandidates = [...(call.iceCandidates || []), { userId: parseInt(userId), candidate, timestamp: new Date() }];
     await call.save();
+
+    // ── CRITICAL FIX: Relay ICE candidate to the OTHER participants via WS ──
+    // Without this relay the ICE negotiation never completes → no audio.
+    const svc = ws();
+    if (svc && typeof svc.sendToUser === 'function') {
+      const otherParticipants = (call.participants || []).filter(pid => pid !== parseInt(userId));
+      const icePayload = {
+        callId:    callId,
+        candidate: candidate,
+        from:      parseInt(userId),
+        timestamp: Date.now(),
+      };
+      for (const pid of otherParticipants) {
+        try { svc.sendToUser(pid, 'ice_candidate',      icePayload); } catch (_) {}
+        try { svc.sendToUser(pid, 'call:ice_candidate', icePayload); } catch (_) {}
+        try { svc.sendToUser(pid, 'call_ice_candidate', icePayload); } catch (_) {}
+      }
+    }
+
     return { success: true };
   }
 

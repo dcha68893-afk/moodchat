@@ -647,8 +647,13 @@ class ToolsController {
 
     async createListing(req, res, next) {
         try {
+            console.log('[TOOLS FLOW] Step 1: Backend createListing triggered', { userId: req.user?.id });
+
             const { title, description, price, category, type, images, tags, stock, currency, metadata, condition } = req.body;
             if (!title) throw new AppError('title is required', 400);
+
+            console.log('[TOOLS FLOW] Step 2: Payload validated', { title, type, category, price, userId: req.user.id });
+
             const db = require('../models');
 
             const typeMap          = { services: 'service', digital: 'digital', premium: 'premium', physical: 'physical' };
@@ -658,7 +663,7 @@ class ToolsController {
             const validConditions  = ['new','used','refurbished'];
             const normalizedCond   = validConditions.includes(condition) ? condition : 'new';
 
-            const listing    = await db.Tool.create({
+            const listing = await db.Tool.create({
                 sellerId: req.user.id, title, description,
                 price: price !== undefined ? parseFloat(price) : 0,
                 category: normalizedCat, type: normalizedType,
@@ -669,10 +674,27 @@ class ToolsController {
                 status: 'active', available: true,
             });
 
+            console.log('[TOOLS FLOW] Step 3: Listing saved to DB', { id: listing.id });
+
+            // Guard — if DB somehow did not return an id, fail loudly rather than send undefined
+            if (!listing || !listing.id) {
+                logger.error('[TOOLS FLOW] DB returned listing without id');
+                return res.status(500).json({ success: false, message: 'Database error: listing ID missing after save' });
+            }
+
             const data = listing.toJSON ? listing.toJSON() : { ...listing };
             data.userId    = data.sellerId;
             data.condition = (data.metadata || {}).condition || normalizedCond;
             data.user      = { id: data.sellerId, displayName: req.user.displayName || req.user.username || 'User', photoURL: req.user.avatar || '' };
+
+            // FIX: Broadcast LISTING_CREATED over WebSocket so all connected sessions update instantly
+            const io = req.app.get('io') || global.__IO__;
+            if (io) {
+                io.emit('LISTING_CREATED', { type: 'LISTING_CREATED', listing: data, userId: req.user.id });
+                console.log('[TOOLS FLOW] Step 4: WS broadcast sent — LISTING_CREATED', { id: data.id });
+            } else {
+                logger.warn('[TOOLS FLOW] io not available — WebSocket broadcast skipped (set app.set("io", io) in server.js)');
+            }
 
             return ok(res, { listing: data }, 'Listing created', 201);
         } catch (e) { _next(next, e, 'createListing'); }
