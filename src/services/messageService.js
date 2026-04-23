@@ -25,29 +25,49 @@ class MessageService {
         const sequelize = getDB();
         const { chatId, senderId, content, type = 'text', replyToId } = messageData;
 
-        if (!chatId || !senderId || (!content && type === 'text'))
+        // CRITICAL SECURITY: Validate all required fields
+        if (!chatId || !senderId || (!content && type === 'text')) {
             throw new ValidationError('chatId, senderId, and content are required');
+        }
+        
+        // CRITICAL SECURITY: Prevent undefined/null values
+        if (chatId === undefined || chatId === null || 
+            senderId === undefined || senderId === null) {
+            throw new ValidationError('Invalid chatId or senderId - undefined/null not allowed');
+        }
+        
+        // CRITICAL SECURITY: Sanitize content
+        const sanitizedContent = content ? content.toString().trim().substring(0, 5000) : '';
+        if (type === 'text' && !sanitizedContent) {
+            throw new ValidationError('Content cannot be empty for text messages');
+        }
 
         const validTypes = ['text','image','video','audio','file','document','system'];
         if (!validTypes.includes(type)) throw new ValidationError(`Invalid message type: ${type}`);
-        if (type === 'text' && content.length > 5000) throw new ValidationError('Message too long (max 5000 chars)');
+        if (type === 'text' && sanitizedContent.length > 5000) throw new ValidationError('Message too long (max 5000 chars)');
 
-        // Verify sender is a participant
+        // CRITICAL SECURITY: Verify sender is a participant with proper authorization
         const [participant] = await sequelize.query(
             `SELECT 1 FROM chat_participants WHERE "chatId"=:chatId AND "userId"=:senderId LIMIT 1`,
             { replacements: { chatId, senderId }, type: sequelize.QueryTypes.SELECT }
         );
         if (!participant) throw new ValidationError('Sender is not a participant in this chat');
 
-        // Insert the message
+        // CRITICAL SECURITY: Use parameterized query to prevent SQL injection
         const [rows] = await sequelize.query(
             `INSERT INTO "Messages"
                ("chatId","senderId",content,type,reactions,"isEdited","isDeleted","sentAt","deliveredAt","createdAt","updatedAt")
              VALUES (:chatId,:senderId,:content,:type,'{}',false,false,NOW(),NOW(),NOW(),NOW())
              RETURNING *`,
-            { replacements: { chatId, senderId, content: (content||'').trim(), type },
+            { replacements: { chatId, senderId, content: sanitizedContent, type },
               type: sequelize.QueryTypes.INSERT }
         );
+        
+        // CRITICAL SECURITY: Ensure message was actually created
+        if (!rows || !rows[0] || !rows[0].id) {
+            throw new ServerError('Failed to create message - database returned invalid data');
+        }
+        
         const message = rows[0];
 
         // Update chat's lastMessageId and lastMessageAt
@@ -63,10 +83,10 @@ class MessageService {
         );
         message.sender = sender || null;
 
-        // ── REAL-TIME DELIVERY ──────────────────────────────────────────────
-        // Emit to all participants in this chat so their screens update instantly
+        // CRITICAL SECURITY: Real-time delivery with error handling
         await this._emitMessageToParticipants(chatId, senderId, message, sequelize);
 
+        console.log(`[MessageService] ✅ Message created successfully: ${message.id} for chat ${chatId}`);
         return message;
     }
 
@@ -77,17 +97,23 @@ class MessageService {
     async _emitMessageToParticipants(chatId, senderId, message, sequelize) {
         const ws = getWS();
         if (!ws) {
-            console.warn('[MessageService] webSocketService not available — no real-time delivery');
+            console.warn('[MessageService] ⚠️ webSocketService not available — no real-time delivery');
             return;
         }
 
         try {
-            // Get all participant userIds for this chat
+            // CRITICAL SECURITY: Get all participant userIds for this chat
             const participants = await sequelize.query(
-                `SELECT "userId" FROM chat_participants WHERE "chatId"=:chatId`,
-                { replacements: { chatId }, type: sequelize.QueryTypes.SELECT }
+                `SELECT DISTINCT "userId" FROM chat_participants WHERE "chatId"=:chatId AND "userId" != :senderId`,
+                { replacements: { chatId, senderId }, type: sequelize.QueryTypes.SELECT }
             );
+            
+            if (!participants || participants.length === 0) {
+                console.warn(`[MessageService] ⚠️ No other participants found for chat ${chatId}`);
+                return;
+            }
 
+            // CRITICAL SECURITY: Validate message data before broadcasting
             const payload = {
                 id:           message.id,
                 chatId:       message.chatId,
@@ -98,11 +124,14 @@ class MessageService {
                 sender:       message.sender,
                 createdAt:    message.createdAt,
                 sentAt:       message.sentAt,
-                deliveredAt:  message.deliveredAt,
-                reactions:    message.reactions || {},
-                isEdited:     message.isEdited || false,
-                status:       'delivered',
+                deliveredAt:  new Date().toISOString()
             };
+            
+            // CRITICAL SECURITY: Validate payload integrity
+            if (!payload.id || !payload.chatId || !payload.senderId) {
+                console.error('[MessageService] ❌ Invalid message payload - missing required fields');
+                return;
+            }
 
             // Get Socket.IO instance directly for reliable delivery
             const io = ws.getIO();

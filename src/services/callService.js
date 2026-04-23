@@ -32,15 +32,15 @@ function ws() {
 
 // Emit an event to ALL participants using both naming conventions
 // so every frontend listener (colon OR underscore) is triggered.
-function emitToAll(participants, event, data) {
-  const svc = ws();
-  if (!svc) return;
+async function emitToAll(participants, event, data) {
+  const wsService = ws();
+  if (!wsService) return;
   const colon      = event.replace(/_/g, ':');   // call_ended  → call:ended
   const underscore = event.replace(/:/g, '_');   // call:ended  → call_ended
   const events     = [...new Set([event, colon, underscore])];
 
   // Resolve io: req.io → global.__socketIO → wsService internal
-  const resolvedIo = io || global.__socketIO || (getWsService() && getWsService().getIO && getWsService().getIO()) || null;
+  const resolvedIo = io || global.__socketIO || (wsService && wsService.getIO && wsService.getIO()) || null;
 
   // Try Socket.IO first for reliable real-time delivery
   if (resolvedIo) {
@@ -58,12 +58,11 @@ function emitToAll(participants, event, data) {
   }
 
   // Fallback: wsService path (reaches all rooms + raw WS clients)
-  const svc = getWsService();
-  if (svc && typeof svc.sendToUser === 'function' && !resolvedIo) {
+  if (wsService && typeof wsService.sendToUser === 'function' && !resolvedIo) {
     for (const participant of participants) {
       const uid = typeof participant === 'object' ? participant.id || participant.userId : participant;
       for (const ev of events) {
-        try { await svc.sendToUser(uid, ev, data); } catch (_) {}
+        try { await wsService.sendToUser(uid, ev, data); } catch (_) {}
       }
     }
     return true;
@@ -93,8 +92,17 @@ class CallService {
 
   // ── initiateCall ────────────────────────────────────────────────────────────
   async initiateCall(callerId, calleeId, callType = 'audio', chatId = null) {
+    // CRITICAL SECURITY: Validate all required fields
     if (!callerId || !calleeId) throw new Error('callerId and calleeId are required');
+    if (callerId === undefined || callerId === null || calleeId === undefined || calleeId === null) {
+      throw new Error('Invalid callerId or calleeId - undefined/null not allowed');
+    }
     if (!['audio', 'video'].includes(callType)) throw new Error('Invalid call type');
+    
+    // CRITICAL SECURITY: Prevent self-calls
+    if (callerId === calleeId) {
+      throw new Error('Cannot call yourself');
+    }
 
     const [caller, callee] = await Promise.all([
       User.findByPk(parseInt(callerId), { attributes: ['id', 'username', 'avatar', 'email'] }),
@@ -121,7 +129,7 @@ class CallService {
       if (callAge >= CALL_TIMEOUT_SECONDS) {
         const wasAnswered = activeCall.answeredBy && activeCall.answeredBy.length > 0;
         await activeCall.update({ status: wasAnswered ? 'completed' : 'missed', endedAt: new Date() });
-        emitToAll(activeCall.participants || [], 'call_force_ended', {
+        await emitToAll(activeCall.participants || [], 'call_force_ended', {
           callId: activeCall.id, reason: 'timeout_on_new_call', timestamp: new Date()
         });
         console.log(`[CallService] Auto-cleaned stale blocking call ${activeCall.id} (age=${Math.round(callAge)}s)`);
@@ -131,7 +139,7 @@ class CallService {
       } else {
         // status is 'ringing' or 'initiated' and < timeout — cancel the old one to allow new call
         await activeCall.update({ status: 'cancelled', endedAt: new Date() });
-        emitToAll(activeCall.participants || [], 'call_force_ended', {
+        await emitToAll(activeCall.participants || [], 'call_force_ended', {
           callId: activeCall.id, reason: 'replaced_by_new_call', timestamp: new Date()
         });
         console.log(`[CallService] Cancelled old ringing call ${activeCall.id} to allow new call`);
@@ -230,8 +238,8 @@ class CallService {
       startedAt:  call.startedAt,
       timestamp:  Date.now(),
     };
-    emitToAll(call.participants, 'call_accepted', eventData);   // matches calls-core.js CALL_ACCEPTED
-    emitToAll(call.participants, 'call_answered', eventData);
+    await emitToAll(call.participants, 'call_accepted', eventData);   // matches calls-core.js CALL_ACCEPTED
+    await emitToAll(call.participants, 'call_answered', eventData);
 
     return this._format(call);
   }
@@ -270,7 +278,7 @@ class CallService {
       reason:     'declined',
       timestamp:  Date.now(),
     };
-    emitToAll(call.participants, 'call_rejected', eventData);
+    await emitToAll(call.participants, 'call_rejected', eventData);
 
     return this._format(call);
   }
@@ -300,7 +308,7 @@ class CallService {
       timestamp: Date.now(),
     };
     // CALL_CANCELLED is what calls-ui.js watches for to dismiss the incoming modal
-    emitToAll(call.participants, 'call_cancelled', eventData);
+    await emitToAll(call.participants, 'call_cancelled', eventData);
 
     return this._format(call);
   }
@@ -347,8 +355,8 @@ class CallService {
       timestamp:  Date.now(),
     };
     // Emit both call_ended and call_force_ended so every listener in calls-core / calls-ui is hit
-    emitToAll(call.participants, 'call_ended',        eventData);
-    emitToAll(call.participants, 'call_force_ended',  { ...eventData, forceEnd: true });
+    await emitToAll(call.participants, 'call_ended',        eventData);
+    await emitToAll(call.participants, 'call_force_ended',  { ...eventData, forceEnd: true });
 
     return this._format(call);
   }
@@ -398,7 +406,7 @@ class CallService {
       if (call.startedAt) {
         call.duration = Math.floor((new Date() - new Date(call.startedAt)) / 1000);
       }
-      emitToAll(call.participants, 'call_ended', {
+      await emitToAll(call.participants, 'call_ended', {
         callId:    call.id,
         status:    'completed',
         duration:  call.duration,

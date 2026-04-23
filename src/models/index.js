@@ -116,13 +116,12 @@ const db = {
   wss: null
 };
 
-// CRITICAL: Whitelist of all expected model files
+// CRITICAL: Whitelist of all expected model files - ORDERED BY DEPENDENCIES
 const MODEL_WHITELIST = [
-  'Users', 'Token', 'Profile', 'Settings', 'Features',
-  'Chats', 'Messages', 'ChatParticipant', 'GroupMembers',
-  'TypingIndicator', 'UserStatus', 'ReadReceipt', 'SharedMood',
-  'Notification', 'Friend', 'Calls', 'Groups', 'Media', 'Mood', 'Status',
-  'Category', 'Template', 'Notes', 'File'
+  'Users', 'Token', 'Profile', 'Settings', 'Chats', 'ChatParticipant',
+  'Messages', 'GroupMembers', 'TypingIndicator', 'UserStatus', 'ReadReceipt',
+  'SharedMood', 'Notification', 'Friend', 'Calls', 'Groups', 'Media', 'Mood',
+  'Status', 'Category', 'Template', 'Notes', 'File', 'Features'
 ];
 
 // CRITICAL: Patterns that indicate NON-MODEL files
@@ -864,11 +863,25 @@ db.createTablesIfNeeded = async function() {
 (async function autoSync() {
   try {
     await sequelize.authenticate();
-    console.log('[Database] 🔧 Running sequelize.sync({ alter: true }) to ensure all tables and columns exist...');
+    console.log('[Database] 🔧 Running sequelize.sync({ alter: false }) to ensure all tables exist...');
+    
+    // First sync without alter to create tables
+    await sequelize.sync({ force: false, alter: false });
+    console.log('[Database] ✅ Initial sync complete — all tables exist');
+    
+    // Then sync with alter to add missing columns (handles foreign keys better)
     await sequelize.sync({ force: false, alter: true });
-    console.log('[Database] ✅ sequelize.sync complete — all tables and columns are up to date');
+    console.log('[Database] ✅ Alter sync complete — all tables and columns are up to date');
   } catch (err) {
     console.error('[Database] ❌ Auto-sync failed (non-fatal):', err.message);
+    // Try fallback sync without alter
+    try {
+      console.log('[Database] 🔧 Trying fallback sync without alter...');
+      await sequelize.sync({ force: false, alter: false });
+      console.log('[Database] ✅ Fallback sync complete');
+    } catch (fallbackErr) {
+      console.error('[Database] ❌ Fallback sync also failed:', fallbackErr.message);
+    }
   }
 })();
 

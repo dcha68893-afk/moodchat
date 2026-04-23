@@ -14,17 +14,7 @@ function getDatabaseConfig() {
 
   console.log(`[Database] Environment: ${env}`);
 
-  //  SIMPLIFIED: Use SQLite for local development to avoid connection issues
-  if (env === 'development') {
-    console.log('[Database] Using SQLite for local development');
-    return {
-      dialect: 'sqlite',
-      storage: './database.sqlite',
-      logging: process.env.DB_LOGGING === 'true' ? console.log : false
-    };
-  }
-
-  //  PRIMARY: Supabase connection string (production environments)
+  //  PRIMARY: Supabase connection string (all environments)
   if (process.env.SUPABASE_DB_URL) {
     console.log('[Database] Using SUPABASE_DB_URL connection');
     return {
