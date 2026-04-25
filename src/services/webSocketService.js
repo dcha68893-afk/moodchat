@@ -707,11 +707,13 @@ class WebSocketService {
             for (const { chatId } of (rows || [])) {
                 if (chatId) {
                     socket.join(`chat:${chatId}`);
+                    // ✅ FIX 13: Also join group room so broadcastToGroup() reaches this socket
+                    socket.join(`group:${chatId}`);
                 }
             }
 
             if (rows && rows.length > 0) {
-                console.log(`[WSService] uid=${userId} auto-joined ${rows.length} chat room(s)`);
+                console.log(`[WSService] ✅ FIX13 uid=${userId} auto-joined ${rows.length} chat+group room(s)`);
             }
         } catch (err) {
             // Non-fatal — user:X room delivery still works via sendToUser()

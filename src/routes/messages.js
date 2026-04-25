@@ -379,7 +379,7 @@ router.get('/', apiRateLimiter, asyncHandler(async (req, res) => {
 // ============================================================================
 router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
   try {
-    const { receiverId, content, type = 'text', chatId: existingChatId, replyToId } = req.body;
+    const { receiverId, content, type = 'text', chatId: existingChatId, replyToId, localId: clientLocalId } = req.body;
     const senderId = req.user.id;
 
     // Validate content
@@ -503,6 +503,7 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
 
     const populatedMessage = {
       id: messageId,
+      localId: clientLocalId || null,          // ✅ FIX 1: echo client's localId so sender can replace optimistic bubble
       chatId,
       senderId,
       content: content.trim(),

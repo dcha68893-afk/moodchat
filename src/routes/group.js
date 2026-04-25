@@ -395,10 +395,54 @@ class GroupController {
           joinedAt: new Date()
         });
       }
+
+      // ── Add initial members from request (members / memberIds arrays) ────
+      const { members: reqMembers, memberIds: reqMemberIds } = req.body;
+      const extraMemberIds = [...new Set([
+        ...(reqMembers   || []).map(String),
+        ...(reqMemberIds || []).map(String)
+      ])].filter(mid => mid && String(mid) !== String(userId));
+
+      if (GroupMember && extraMemberIds.length > 0) {
+        for (const mid of extraMemberIds) {
+          try {
+            await GroupMember.create({ groupId: newGroup.id, userId: parseInt(mid), role: 'member', joinedAt: new Date() });
+          } catch (_) { /* skip duplicates */ }
+        }
+      }
+
+      // ── Emit real-time group:created to ALL members ─────────────────────
+      const io = global.__socketIO;
+      const formattedGroup = formatGroup(newGroup);
+      if (io && newGroup.id) {
+        const allMemberIds = [String(userId), ...extraMemberIds];
+        const createdPayload    = { group: formattedGroup, createdBy: userId, timestamp: new Date() };
+        const localSyncPayload  = { action: 'create', group: formattedGroup, groupId: newGroup.id };
+
+        allMemberIds.forEach(mid => {
+          // Auto-join their socket to the group room
+          const userRoom = io.sockets.adapter.rooms?.get(`user:${mid}`);
+          if (userRoom) {
+            userRoom.forEach(socketId => {
+              const sock = io.sockets.sockets?.get(socketId);
+              if (sock) sock.join(`group:${newGroup.id}`);
+            });
+          }
+          // Deliver via personal user room (reliable path)
+          io.to(`user:${mid}`).emit('group:created',   createdPayload);
+          io.to(`user:${mid}`).emit('group_created',   createdPayload);
+          io.to(`user:${mid}`).emit('group:localSync', localSyncPayload);
+        });
+        // Also broadcast to the group room itself
+        io.to(`group:${newGroup.id}`).emit('group:created',   createdPayload);
+        io.to(`group:${newGroup.id}`).emit('group:localSync', localSyncPayload);
+
+        console.log(`[GROUP FLOW] group:created emitted to ${allMemberIds.length} member(s) for group ${newGroup.id}`);
+      }
       
       res.status(201).json({
         success: true,
-        data: { group: formatGroup(newGroup) },
+        data: { group: formattedGroup },
         message: 'Group created successfully'
       });
     } catch (error) {
@@ -446,6 +490,23 @@ class GroupController {
       }));
       
       const groups = memberships.map(m => formatGroup(m.group)).filter(g => g);  // FIXED: Changed from m.userGroup to m.group
+
+      // ── Auto-join the user's socket to all their group rooms ─────────────
+      // This ensures they receive group:message events without needing
+      // an explicit join step after initial load.
+      try {
+        const io = global.__socketIO;
+        if (io && groups.length) {
+          const userRoom = io.sockets.adapter.rooms?.get(`user:${userId}`);
+          if (userRoom) {
+            userRoom.forEach(socketId => {
+              const sock = io.sockets.sockets?.get(socketId);
+              if (sock) groups.forEach(g => g.id && sock.join(`group:${g.id}`));
+            });
+            console.log(`[GROUP FLOW] Auto-joined user ${userId} to ${groups.length} group socket room(s)`);
+          }
+        }
+      } catch (_) {}
       
       res.json({
         success: true,
@@ -833,6 +894,38 @@ class GroupController {
         role: role,
         joinedAt: new Date()
       });
+
+      // ── Emit real-time events so added member instantly sees the group ───
+      try {
+        const io = global.__socketIO;
+        if (io) {
+          // Fetch group details for the payload
+          const groupData = Group ? await Group.findByPk(groupIdNum) : null;
+          const groupFormatted = groupData ? formatGroup(groupData) : { id: groupIdNum };
+
+          const memberAddedPayload = { groupId: groupIdNum, userId: targetIdNum, role, timestamp: new Date() };
+          const groupCreatedPayload = { group: groupFormatted, addedBy: currentUserId, timestamp: new Date() };
+          const localSyncPayload = { action: 'member_add', groupId: groupIdNum, group: groupFormatted, userId: targetIdNum, role };
+
+          // Auto-join new member's socket to the group room
+          const userRoom = io.sockets.adapter.rooms?.get(`user:${targetIdNum}`);
+          if (userRoom) {
+            userRoom.forEach(socketId => {
+              const sock = io.sockets.sockets?.get(socketId);
+              if (sock) sock.join(`group:${groupIdNum}`);
+            });
+          }
+          // Notify the new member they were added
+          io.to(`user:${targetIdNum}`).emit('group:created',      groupCreatedPayload);
+          io.to(`user:${targetIdNum}`).emit('group_created',      groupCreatedPayload);
+          io.to(`user:${targetIdNum}`).emit('group:localSync',    localSyncPayload);
+          io.to(`user:${targetIdNum}`).emit('GROUP_MEMBER_ADDED', memberAddedPayload);
+          // Notify existing group members
+          io.to(`group:${groupIdNum}`).emit('group:member:added', memberAddedPayload);
+          io.to(`group:${groupIdNum}`).emit('group:localSync',    localSyncPayload);
+          console.log(`[GROUP FLOW] group:member:added emitted for user ${targetIdNum} in group ${groupIdNum}`);
+        }
+      } catch (_) {}
       
       res.status(201).json({
         success: true,
@@ -2103,15 +2196,48 @@ router.post('/:groupId/messages', async (req, res) => {
         senderName: anonymous ? 'Anonymous' : senderName,
         timestamp:  new Date()
       };
-      // Primary event name + common aliases
-      io.to(`group:${groupId}`).emit('group:message',  socketPayload);
-      io.to(`group:${groupId}`).emit('group_message',  socketPayload);
-      // localSync for the WS bridge in group-core-patch.js
-      io.to(`group:${groupId}`).emit('group:localSync', {
-        action:  'message',
-        groupId,
-        message: savedMessage
-      });
+      const localSyncPayload = { action: 'message', groupId, message: savedMessage };
+
+      // ── Strategy 1: Emit to the group room (members who joined it) ──────
+      io.to(`group:${groupId}`).emit('group:message',   socketPayload);
+      io.to(`group:${groupId}`).emit('group_message',   socketPayload);
+      io.to(`group:${groupId}`).emit('group:localSync', localSyncPayload);
+
+      // ── Strategy 2: ALSO emit to every member's personal user room ──────
+      //    This is the CRITICAL fallback. If a member has not yet called
+      //    GET /api/groups/user (which joins the group socket room), they
+      //    still have a user:${uid} room that is joined on connection.
+      //    Without this, new-group members NEVER receive messages.
+      try {
+        const GroupMemberModel = db?.models?.GroupMembers || db?.models?.GroupMember
+                               || db?.GroupMembers || db?.GroupMember || null;
+        if (GroupMemberModel) {
+          const members = await GroupMemberModel.findAll({
+            where: { groupId },
+            attributes: ['userId']
+          });
+          members.forEach(m => {
+            const mid = m.userId || m.dataValues?.userId;
+            if (!mid) return;
+            // Join their socket to the group room automatically
+            const userRoom = io.sockets.adapter.rooms?.get(`user:${mid}`);
+            if (userRoom) {
+              userRoom.forEach(socketId => {
+                const sock = io.sockets.sockets?.get(socketId);
+                if (sock) sock.join(`group:${groupId}`);
+              });
+            }
+            // Deliver via user room (guaranteed delivery path)
+            io.to(`user:${mid}`).emit('group:message',   socketPayload);
+            io.to(`user:${mid}`).emit('group_message',   socketPayload);
+            io.to(`user:${mid}`).emit('group:localSync', localSyncPayload);
+          });
+          console.log(`[GROUP FLOW] WebSocket emitted group:message to ${members.length} member user rooms`);
+        }
+      } catch (emitErr) {
+        console.warn('[GROUP FLOW] Per-member emit failed (non-fatal):', emitErr.message);
+      }
+
       console.log(`[GROUP FLOW] WebSocket emitted group:message to room group:${groupId}`);
     } else {
       console.warn('[GROUP FLOW] global.__socketIO not set — real-time not emitted');
@@ -2144,4 +2270,61 @@ router.use((err, req, res, next) => {
 
 // REMOVED: All console.log route listings to clean up startup output
 
+// ─────────────────────────────────────────────────────────────────────────────
+// SOCKET SETUP — call this from your main server.js/app.js once io is ready:
+//   const groupRoutes = require('./routes/group');
+//   groupRoutes.setupGroupSocket(io);
+//
+// This handles 'join_group_rooms' messages so clients receive group:message
+// events without needing to call GET /api/groups/user first.
+// ─────────────────────────────────────────────────────────────────────────────
+function setupGroupSocket(io) {
+    if (!io) return;
+    io.on('connection', (socket) => {
+        // Client sends: { type: 'join_group_rooms', groupIds: [1,2,3] }
+        socket.on('join_group_rooms', async ({ groupIds } = {}) => {
+            if (!Array.isArray(groupIds)) return;
+            groupIds.forEach(gid => {
+                if (gid) socket.join(`group:${gid}`);
+            });
+            console.log(`[GROUP FLOW] Socket ${socket.id} joined ${groupIds.length} group room(s)`);
+        });
+
+        // Client sends: { type: 'join', room: 'group:5' }
+        socket.on('join', ({ room } = {}) => {
+            if (room && typeof room === 'string' && room.startsWith('group:')) {
+                socket.join(room);
+                console.log(`[GROUP FLOW] Socket ${socket.id} joined room: ${room}`);
+            }
+        });
+
+        // On (re)auth: auto-join all group rooms for this user
+        socket.on('join_user_room', async ({ userId } = {}) => {
+            if (!userId) return;
+            socket.join(`user:${userId}`);
+            console.log(`[GROUP FLOW] Socket ${socket.id} joined user room: user:${userId}`);
+
+            // Auto-join all group rooms for this user
+            try {
+                const db = require('../models');
+                const GroupMemberModel = db?.models?.GroupMembers || db?.models?.GroupMember
+                                      || db?.GroupMembers || db?.GroupMember || null;
+                if (GroupMemberModel) {
+                    const memberships = await GroupMemberModel.findAll({
+                        where: { userId, leftAt: null },
+                        attributes: ['groupId']
+                    });
+                    memberships.forEach(m => {
+                        const gid = m.groupId || m.dataValues?.groupId;
+                        if (gid) socket.join(`group:${gid}`);
+                    });
+                    console.log(`[GROUP FLOW] Auto-joined user ${userId} to ${memberships.length} group socket room(s)`);
+                }
+            } catch (_) {}
+        });
+    });
+    console.log('[GROUP SOCKET] setupGroupSocket ✅ — join_group_rooms handler installed');
+}
+
+router.setupGroupSocket = setupGroupSocket;
 module.exports = router;

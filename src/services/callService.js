@@ -166,28 +166,40 @@ class CallService {
     // ✅ FIX: Emit call:incoming to callee NOW — this was completely missing and is why
     // receivers never saw incoming calls.  Also emit to caller as confirmation.
     const formatted = this._format(call, caller, callee);
+    // ── FIX: callerName / callerAvatar MUST be top-level for calls-ui.js
+    //    AND callType alias added (frontend checks callType not type)
+    const callerDisplayName = (caller.firstName
+      ? `${caller.firstName}${caller.lastName ? ' ' + caller.lastName : ''}`.trim()
+      : null) || caller.username || 'Unknown';
     const callPayload = {
-      callId:     call.id,
-      callerId:   parseInt(callerId),
-      receiverId: parseInt(calleeId),
-      type:       callType,
-      status:     'ringing',
-      caller:     { id: caller.id, username: caller.username, avatar: caller.avatar },
-      callee:     { id: callee.id, username: callee.username, avatar: callee.avatar },
-      chatId:     call.chatId,
-      timestamp:  Date.now(),
+      callId:       call.id,
+      callerId:     parseInt(callerId),
+      receiverId:   parseInt(calleeId),
+      callType:     callType,   // ← alias: UI checks callType
+      type:         callType,
+      status:       'ringing',
+      callerName:   callerDisplayName,     // ← top-level critical for UI
+      callerAvatar: caller.avatar || null, // ← top-level critical for UI
+      caller:       { id: caller.id, username: caller.username, avatar: caller.avatar, displayName: callerDisplayName },
+      callee:       { id: callee.id, username: callee.username, avatar: callee.avatar },
+      chatId:       call.chatId,
+      isGroupCall:  false,
+      timestamp:    Date.now(),
     };
 
     const svc = ws();
     if (svc) {
-      // Primary: call:incoming + incoming_call to callee
-      console.log(`[CallService] EMITTING call:incoming to receiverId=${calleeId}`);
+      // ── PROOF LOG: EMITTING ──────────────────────────────────────────────
+      console.log(`[CallService] 📞 EMITTING call:incoming to receiverId=${calleeId} callerName="${callerDisplayName}"`);
+      // Primary: all naming variants to callee
       await svc.sendToUser(parseInt(calleeId), 'call:incoming',  callPayload);
       await svc.sendToUser(parseInt(calleeId), 'incoming_call',  callPayload);
       await svc.sendToUser(parseInt(calleeId), 'call_incoming',  callPayload);
+      console.log(`[CallService] ✅ EMITTED to callee ${calleeId}`);
       // Confirmation to caller
       await svc.sendToUser(parseInt(callerId), 'call:initiated', callPayload);
       await svc.sendToUser(parseInt(callerId), 'call_initiated', callPayload);
+      console.log(`[CallService] ✅ EMITTED call:initiated to caller ${callerId}`);
     } else {
       console.warn('[CallService] ⚠️  webSocketService not available — call:incoming NOT emitted');
     }

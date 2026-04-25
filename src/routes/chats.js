@@ -22,6 +22,29 @@ if (!Chat || !User || !Message || !ChatParticipant) {
 }
 // Import middleware
 const { apiRateLimiter } = require('../middleware/rateLimiter');
+// ✅ FIX 12: Use webSocketService for live socket delivery (it maintains the in-memory onlineUsers map).
+// chats.js previously relied on User.socketIds from DB which is never updated by webSocketService.
+let _wsService = null;
+function getWsService() {
+    if (!_wsService) {
+        try { _wsService = require('../services/webSocketService'); } catch (_) {}
+    }
+    return _wsService;
+}
+
+// ✅ FIX 12: Universal emit helper — tries wsService rooms first, then socketId loop fallback.
+async function emitToUser(io, userId, event, payload) {
+    const ws = getWsService();
+    if (ws && typeof ws.sendToUser === 'function') {
+        const delivered = await ws.sendToUser(userId, event, payload);
+        if (delivered) return;
+    }
+    // Fallback: io rooms (works if socket joined user room via webSocketService.registerUser)
+    if (io) {
+        io.to(`user:${userId}`).emit(event, payload);
+        io.to(`user_${userId}`).emit(event, payload);
+    }
+}
 
 console.log('✅ Chats routes initialized (v2.0.0 - Complete CRUD)');
 
@@ -62,18 +85,10 @@ const broadcastToChat = async (req, chatId, event, data) => {
     
     try {
         const participantIds = await getChatParticipantIds(chatId);
-        const users = await User.findAll({
-            where: { id: participantIds },
-            attributes: ['id', 'socketIds']
-        });
-        
-        users.forEach(user => {
-            if (user.socketIds && Array.isArray(user.socketIds) && user.socketIds.length > 0) {
-                user.socketIds.forEach(socketId => {
-                    req.io.to(socketId).emit(event, data);
-                });
-            }
-        });
+        // ✅ FIX 12d: Use for...of (not forEach) so await works correctly
+        await Promise.allSettled(
+            participantIds.map(uid => emitToUser(req.io, uid, event, data))
+        );
     } catch (error) {
         console.error(`[Chats] Error broadcasting ${event}:`, error.message);
     }
@@ -492,29 +507,21 @@ router.post(
                     updatedAt: newChat.updatedAt
                 };
                 
-                // Notify current user
-                const currentUserSockets = await User.findByPk(userId, { attributes: ['socketIds'] });
-                if (currentUserSockets && currentUserSockets.socketIds) {
-                    currentUserSockets.socketIds.forEach(socketId => {
-                        req.io.to(socketId).emit('chat:created', chatData);
-                    });
-                }
-                
-                // Notify other user
-                if (otherUser.socketIds && Array.isArray(otherUser.socketIds)) {
-                    otherUser.socketIds.forEach(socketId => {
-                        const otherUserChatData = {
-                            ...chatData,
-                            otherParticipant: {
-                                id: userId,
-                                username: req.user?.username || 'User',
-                                avatar: req.user?.avatar || null,
-                                displayName: req.user?.username || 'User'
-                            }
-                        };
-                        req.io.to(socketId).emit('chat:created', otherUserChatData);
-                    });
-                }
+                // ✅ FIX 12b: Use emitToUser (wsService rooms) instead of stale DB socketIds
+                await emitToUser(req.io, userId, 'chat:created', chatData);
+                console.log(`[Chats] 📡 FIX12 chat:created emitted to creator uid=${userId}`);
+
+                const otherUserChatData = {
+                    ...chatData,
+                    otherParticipant: {
+                        id: userId,
+                        username: req.user?.username || 'User',
+                        avatar: req.user?.avatar || null,
+                        displayName: req.user?.username || 'User'
+                    }
+                };
+                await emitToUser(req.io, otherUserId, 'chat:created', otherUserChatData);
+                console.log(`[Chats] 📡 FIX12 chat:created emitted to receiver uid=${otherUserId}`);
             }
             
             res.status(201).json({
@@ -685,13 +692,13 @@ router.post(
                     }
                 };
                 
-                participants.forEach(participant => {
-                    if (participant.socketIds && Array.isArray(participant.socketIds) && participant.socketIds.length > 0) {
-                        participant.socketIds.forEach(socketId => {
-                            req.io.to(socketId).emit('group:created', notificationData);
-                        });
-                    }
-                });
+                // ✅ FIX 12c: emit group:created to all participants via live wsService rooms
+                await Promise.allSettled(
+                    participants.map(participant =>
+                        emitToUser(req.io, participant.id, 'group:created', notificationData)
+                            .then(() => console.log(`[Chats] 📡 FIX12 group:created → uid=${participant.id}`))
+                    )
+                );
             }
             
             res.status(201).json({
@@ -921,26 +928,17 @@ router.post(
             
             // Broadcast to all participants
             if (req.io) {
-                // Notify new participants
-                newParticipants.forEach(participant => {
-                    if (participant.socketIds && Array.isArray(participant.socketIds) && participant.socketIds.length > 0) {
-                        participant.socketIds.forEach(socketId => {
-                            req.io.to(socketId).emit('group:joined', {
-                                chat: {
-                                    id: chat.id,
-                                    name: chat.name,
-                                    type: chat.type,
-                                    avatar: chat.avatar
-                                },
-                                addedBy: {
-                                    id: userId,
-                                    username: currentUser?.username || req.user?.username,
-                                    avatar: currentUser?.avatar || req.user?.avatar
-                                }
-                            });
-                        });
-                    }
-                });
+                // ✅ FIX: Notify new participants (Promise.allSettled is await-safe)
+                await Promise.allSettled(
+                    newParticipants.map(p => emitToUser(req.io, p.id, 'group:joined', {
+                        chat: { id: chat.id, name: chat.name, type: chat.type, avatar: chat.avatar },
+                        addedBy: {
+                            id: userId,
+                            username: currentUser?.username || req.user?.username,
+                            avatar: currentUser?.avatar || req.user?.avatar
+                        }
+                    }))
+                );
                 
                 // Notify existing participants
                 const existingUserIds = Array.from(existingParticipantIds);
@@ -949,27 +947,18 @@ router.post(
                     attributes: ['id', 'socketIds']
                 });
                 
-                existingUsers.forEach(user => {
-                    if (user.socketIds && Array.isArray(user.socketIds) && user.socketIds.length > 0) {
-                        user.socketIds.forEach(socketId => {
-                            req.io.to(socketId).emit('group:participants-added', {
-                                chatId: chat.id,
-                                addedParticipants: newParticipants.map(p => ({
-                                    id: p.id,
-                                    username: p.username,
-                                    avatar: p.avatar,
-                                    firstName: p.firstName,
-                                    lastName: p.lastName
-                                })),
-                                addedBy: {
-                                    id: userId,
-                                    username: currentUser?.username || req.user?.username
-                                },
-                                timestamp: new Date().toISOString()
-                            });
-                        });
-                    }
-                });
+                // ✅ FIX: emit group:participants-added to existing members
+                await Promise.allSettled(
+                    existingUserIds.map(uid => emitToUser(req.io, uid, 'group:participants-added', {
+                        chatId: chat.id,
+                        addedParticipants: newParticipants.map(p => ({
+                            id: p.id, username: p.username, avatar: p.avatar,
+                            firstName: p.firstName, lastName: p.lastName
+                        })),
+                        addedBy: { id: userId, username: currentUser?.username || req.user?.username },
+                        timestamp: new Date().toISOString()
+                    }))
+                );
             }
             
             res.status(200).json({
@@ -1087,8 +1076,8 @@ router.delete(
             if (req.io && removedUser && currentUser) {
                 // Notify removed user
                 if (removedUser.socketIds && Array.isArray(removedUser.socketIds) && removedUser.socketIds.length > 0) {
-                    removedUser.socketIds.forEach(socketId => {
-                        req.io.to(socketId).emit('group:removed', {
+                // ✅ FIX 12e: emitToUser replaces stale socketIds loop
+                await emitToUser(req.io, removedUser.id || removedUser.userId, 'group:removed', {
                             chatId: chat.id,
                             chatName: chat.name,
                             removedBy: isSelfRemoval ? 'self' : {
@@ -1097,7 +1086,6 @@ router.delete(
                             },
                             timestamp: new Date().toISOString()
                         });
-                    });
                 }
                 
                 // Notify remaining participants
@@ -1112,22 +1100,16 @@ router.delete(
                     attributes: ['id', 'socketIds']
                 });
                 
-                remainingUsers.forEach(user => {
-                    if (user.socketIds && Array.isArray(user.socketIds) && user.socketIds.length > 0) {
-                        user.socketIds.forEach(socketId => {
-                            req.io.to(socketId).emit('group:participant-removed', {
-                                chatId: chat.id,
-                                removedUserId: parseInt(targetUserId),
-                                removedUsername: removedUser.username,
-                                removedBy: {
-                                    id: currentUserId,
-                                    username: currentUser.username
-                                },
-                                timestamp: new Date().toISOString()
-                            });
-                        });
-                    }
-                });
+                // ✅ FIX: emit group:participant-removed via Promise.allSettled
+                await Promise.allSettled(
+                    remainingUsers.map(u => emitToUser(req.io, u.id || u.userId, 'group:participant-removed', {
+                        chatId: chat.id,
+                        removedUserId: parseInt(targetUserId),
+                        removedUsername: removedUser.username,
+                        removedBy: { id: currentUserId, username: currentUser.username },
+                        timestamp: new Date().toISOString()
+                    }))
+                );
             }
             
             res.status(200).json({
@@ -1231,18 +1213,15 @@ router.post(
                     attributes: ['id', 'socketIds']
                 });
                 
-                remainingUsers.forEach(user => {
-                    if (user.socketIds && Array.isArray(user.socketIds) && user.socketIds.length > 0) {
-                        user.socketIds.forEach(socketId => {
-                            req.io.to(socketId).emit('group:left', {
-                                chatId: chat.id,
-                                userId: userId,
-                                username: currentUser.username,
-                                timestamp: new Date().toISOString()
-                            });
-                        });
-                    }
-                });
+                // ✅ FIX: emit group:left via Promise.allSettled
+                await Promise.allSettled(
+                    remainingUsers.map(u => emitToUser(req.io, u.id || u.userId, 'group:left', {
+                        chatId: chat.id,
+                        userId: userId,
+                        username: currentUser.username,
+                        timestamp: new Date().toISOString()
+                    }))
+                );
             }
             
             res.status(200).json({

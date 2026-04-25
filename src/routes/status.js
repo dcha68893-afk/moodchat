@@ -489,17 +489,12 @@ router.get('/friends', authenticateToken, apiRateLimiter, asyncHandler(async (re
         friendIds = friendships.map(f => f.requesterId === userId ? f.receiverId : f.requesterId);
     }
 
-    if (friendIds.length === 0) {
-        return res.json({
-            success: true,
-            data: {
-                statuses: [],
-                pagination: { limit: +limit, offset: +offset, total: 0, hasMore: false },
-            }
-        });
-    }
+    // FIX: Always include the viewer's own statuses in the feed so:
+    //   1. User A can see their own posted status immediately after posting
+    //   2. The list is never completely empty for a user with no friends yet
+    const visibleUserIds = [...new Set([userId, ...friendIds])];
 
-    const where = { userId: { [Op.in]: friendIds }, ...activeWhere() };
+    const where = { userId: { [Op.in]: visibleUserIds }, ...activeWhere() };
     let rows = [], total = 0;
     if (Status) {
         const r = await Status.findAndCountAll({

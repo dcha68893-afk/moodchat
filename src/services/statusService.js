@@ -46,6 +46,31 @@ function rethrow(error, fallbackMsg) {
     throw serverErr(fallbackMsg);
 }
 
+// ---------------------------------------------------------------------------
+// Exported helper: getAcceptedFriendIds
+// Returns the list of userIds who are accepted friends of `userId`.
+// Used by statusController to emit socket events to friend rooms only.
+// ---------------------------------------------------------------------------
+async function getAcceptedFriendIds(userId) {
+    try {
+        const { Friend } = getModels();
+        if (!Friend) return [];
+        const friendships = await Friend.findAll({
+            where: {
+                status: 'accepted',
+                [Op.or]: [{ requesterId: userId }, { receiverId: userId }]
+            },
+            attributes: ['requesterId', 'receiverId']
+        });
+        return friendships.map(f =>
+            String(f.requesterId) === String(userId) ? f.receiverId : f.requesterId
+        );
+    } catch (err) {
+        console.warn(`[StatusService] getAcceptedFriendIds uid=${userId}: ${err.message}`);
+        return [];
+    }
+}
+
 /** Standard include for User on a Status query */
 function userInclude(Users) {
     return {
@@ -724,6 +749,7 @@ module.exports = {
     getUserStatuses,
     getTimeline,
     getFriendsStatuses,
+    getAcceptedFriendIds,   // used by statusController for friend-targeted socket emit
     likeStatus,
     unlikeStatus,
     commentOnStatus,

@@ -3,6 +3,9 @@ const webSocketService = require('../services/webSocketService');
 const { AppError } = require('../middleware/errorHandler');
 const logger = require('../utils/logger');
 
+// getAcceptedFriendIds is now exported from statusService — no need to duplicate the DB query here.
+const { getAcceptedFriendIds } = statusService;
+
 // ─── Helper: get io instance from req OR global fallback ─────────────────────
 // FIX: statusController was using webSocketService.notifyStatusCreated() for
 // createStatus but req.io.emit() everywhere else, and req.io was sometimes
@@ -15,6 +18,7 @@ function getIO(req) {
 }
 
 // ─── Helper: safe broadcast that never throws ────────────────────────────────
+// Kept for non-status events (update/delete/like) where global emit is fine.
 function safeEmit(io, event, payload) {
   if (!io) {
     logger.warn(`[StatusController] safeEmit: no io for event "${event}" — skipped`);
@@ -26,6 +30,49 @@ function safeEmit(io, event, payload) {
   } catch (err) {
     logger.warn(`[StatusController] safeEmit error for "${event}":`, err.message);
     return false;
+  }
+}
+
+// ─── Helper: emit ONLY to the creator's friends ──────────────────────────────
+// Each online user is automatically joined to their personal room "user:<id>"
+// by webSocketService on connection. We emit to every friend's room so only
+// friends receive the event — never all connected sockets.
+//
+// Falls back to safeEmit (global broadcast) when io is missing or no friends
+// are found, so status delivery is never silently dropped.
+async function safeEmitToFriends(io, event, payload, creatorId) {
+  if (!io) {
+    logger.warn(`[StatusController] safeEmitToFriends: no io for event "${event}" — skipped`);
+    return false;
+  }
+  try {
+    const enrichedPayload = { ...payload, timestamp: payload.timestamp || new Date().toISOString() };
+
+    const friendIds = await getAcceptedFriendIds(creatorId);
+
+    if (friendIds.length === 0) {
+      // No friends — nothing to broadcast. Creator still sees their own status
+      // via the HTTP 201 response, so this is not an error.
+      logger.info(`[StatusController] safeEmitToFriends: userId=${creatorId} has no friends yet — no broadcast needed`);
+      return true;
+    }
+
+    let delivered = 0;
+    for (const fid of friendIds) {
+      const room = `user:${fid}`;
+      try {
+        io.to(room).emit(event, enrichedPayload);
+        delivered++;
+      } catch (err) {
+        logger.warn(`[StatusController] safeEmitToFriends: failed room=${room}: ${err.message}`);
+      }
+    }
+
+    logger.info(`[StatusController] 📡 "${event}" delivered to ${delivered}/${friendIds.length} friend rooms for userId=${creatorId}`);
+    return delivered > 0;
+  } catch (err) {
+    logger.warn(`[StatusController] safeEmitToFriends error for "${event}": ${err.message} — falling back to global emit`);
+    return safeEmit(io, event, payload);
   }
 }
 
@@ -93,10 +140,15 @@ class StatusController {
         timestamp: new Date().toISOString()
       };
 
-      // Emit all three names so legacy and new listeners all fire
-      safeEmit(io, 'status:created',  wsPayload);  // status-websocket.js
-      safeEmit(io, 'new_status',      wsPayload);  // status-core.js handleRealtimeStatusEvent
-      safeEmit(io, 'status_created',  wsPayload);  // any other alias
+      // ── TARGETED FRIEND BROADCAST ────────────────────────────────────────────
+      // BUG WAS HERE: safeEmit used io.emit() = all sockets globally.
+      // FIX: emit only into "user:<friendId>" rooms so only accepted friends
+      //      receive the event. All three alias names sent so every listener fires.
+      console.log(`[StatusController] 📤 STATUS CREATED id=${status.id} — broadcasting to friends`);
+      await safeEmitToFriends(io, 'status:created', wsPayload, userId);
+      await safeEmitToFriends(io, 'new_status',     wsPayload, userId);
+      await safeEmitToFriends(io, 'status_created', wsPayload, userId);
+      console.log(`[StatusController] 📡 STATUS EMITTED to friend rooms`);
 
       // ── RESPONSE ─────────────────────────────────────────────────────────────
       return res.status(201).json({

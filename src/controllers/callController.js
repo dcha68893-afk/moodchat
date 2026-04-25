@@ -158,15 +158,24 @@ class CallController {
 
       const call = await callService.initiateCall(callerId, parseInt(calleeId, 10), type, chatId ? parseInt(chatId, 10) : null);
 
+      // ── FIX: Build callerDisplayName from firstName/lastName if available ──
+      const callerDisplayName = (req.user.firstName
+        ? `${req.user.firstName}${req.user.lastName ? ' ' + req.user.lastName : ''}`.trim()
+        : null) || (call.callerInfo && call.callerInfo.username) || req.user.username || 'Unknown';
+
+      console.log(`[callController] 📞 CALLING wsNotifyCallInitiated → receiverId=${calleeId} callerName="${callerDisplayName}"`);
       await wsNotifyCallInitiated(parseInt(calleeId, 10), {
         callId:       call.id,
         callerId,
-        callerName:   (call.callerInfo && call.callerInfo.username) || req.user.username || 'Unknown',
-        callerAvatar: (call.callerInfo && call.callerInfo.avatar)   || req.user.avatar   || null,
-        callType:     type,
+        callerName:   callerDisplayName,
+        callerAvatar: (call.callerInfo && call.callerInfo.avatar) || req.user.avatar || null,
+        callType:     type,   // top-level alias expected by calls-ui
+        type:         type,
+        isGroupCall:  false,
         chatId:       chatId ? parseInt(chatId, 10) : null,
         timestamp:    Date.now(),
       });
+      console.log(`[callController] ✅ wsNotifyCallInitiated sent for call=${call.id}`);
 
       return res.status(201).json({
         success:  true,
