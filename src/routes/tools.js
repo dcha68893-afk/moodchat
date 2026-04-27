@@ -23,7 +23,7 @@ try {
     apiRateLimiter = (_req, _res, next) => next();
 }
 
-console.log('✅ Tools routes initialized');
+
 
 // ═════════════════════════════════════════════════════════════════════════════
 // [FIX 1] TOOL MANIFEST — returns ALL tools the frontend should know about.
