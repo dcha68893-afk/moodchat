@@ -160,8 +160,15 @@ class TokenService {
     }
 
     if (process.env.NODE_ENV === 'production') {
-      console.warn('[TokenService] In-memory refresh token store active in production');
-    }
+        // SECURITY FIX #9: Hard-fail in production rather than silently falling back to memory.
+        // In-memory tokens are lost on every deploy/restart, forcing all users to re-login.
+        // If we reach here, the DB Token model is unavailable — that is a fatal configuration error.
+        throw new Error('[TokenService] Token model unavailable in production — cannot store refresh token. Check DB connection.');
+      }
+      // Development-only in-memory fallback below
+      if (process.env.NODE_ENV !== 'production') {
+        console.warn('[TokenService] In-memory refresh token store active (dev only)');
+      }
 
     TokenService.refreshTokenStore.set(token, {
       userId,

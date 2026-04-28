@@ -5,41 +5,23 @@ const validator = require('validator');
 const { Op } = require('sequelize');
 const tokenService = require('../services/tokenService');
 
-// CRITICAL FIX: Use consistent JWT secret - load from env with proper fallback
-const JWT_SECRET = process.env.JWT_SECRET || process.env.JWT_ACCESS_SECRET || '3e78ab2d6cb698f95b3b8d510614058c';
+// SECURITY FIX #1: Crash fast if secret is absent — never fall through to a hardcoded literal.
+const JWT_SECRET = process.env.JWT_SECRET || process.env.JWT_ACCESS_SECRET;
+if (!JWT_SECRET) {
+  throw new Error('FATAL: JWT_SECRET env variable is not set. Server will not start.');
+}
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '24h';
 
 const loginAttemptsStore = new Map();
 
 class AuthController {
-  // Helper method to generate JWT token (consistent format)
-  generateToken(user) {
-    return jwt.sign(
-      { 
-        userId: user.id, 
-        id: user.id,
-        email: user.email, 
-        username: user.username,
-        role: user.role || 'user'
-      },
-      JWT_SECRET,
-      { expiresIn: JWT_EXPIRES_IN }
-    );
-  }
+  // SECURITY FIX #2: Removed generateToken() — it signed with raw JWT_SECRET which differs
+  // from tokenService's JWT_ACCESS_SECRET, causing verification failures in auth middleware.
+  // All token generation now delegates exclusively to tokenService (single source of truth).
 
-  // Generates a long-lived refresh token (7 days)
+  // Generates a long-lived refresh token via tokenService (7 days)
   generateRefreshToken(user) {
-    try {
-      const tokenService = require('../services/tokenService');
-      return tokenService.generateRefreshToken(user);
-    } catch(e) {
-      // Fallback: sign with extended expiry
-      return jwt.sign(
-        { userId: user.id, id: user.id, type: 'refresh' },
-        JWT_SECRET,
-        { expiresIn: '7d' }
-      );
-    }
+    return tokenService.generateRefreshToken(user);
   }
 
   // Builds the standard auth response object (ensures token + refreshToken + user always present)

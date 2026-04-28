@@ -210,19 +210,21 @@ class AuthService {
     }
   }
 
-async verifyToken(token) {
-  try {
-    const secret = this.JWT_SECRET || process.env.JWT_SECRET || process.env.JWT_ACCESS_SECRET;
-    if (!secret) {
-      throw new Error('JWT secret not configured');
+// SECURITY FIX #8: Removed this.JWT_SECRET (never set on instance) and replaced with
+  // tokenService.verifyAccessToken() — single source of truth for verification.
+  async verifyToken(token) {
+    try {
+      const tokenService = require('../services/tokenService');
+      const result = tokenService.verifyAccessToken(token);
+      if (result.valid) {
+        return { success: true, data: result.decoded };
+      }
+      return { success: false, message: result.message || result.error };
+    } catch (error) {
+      console.error('Token verification error:', error.message);
+      return { success: false, message: error.message };
     }
-    const decoded = jwt.verify(token, secret);
-    return { success: true, data: decoded };
-  } catch (error) {
-    console.error('Token verification error:', error.message);
-    return { success: false, message: error.message };
   }
-}
 
 async refreshToken(refreshToken) {
   try {
@@ -232,11 +234,12 @@ async refreshToken(refreshToken) {
       throw new Error('Invalid or expired refresh token');
     }
 
-    const secret = this.JWT_SECRET || process.env.JWT_SECRET || process.env.JWT_ACCESS_SECRET;
-    if (!secret) {
-      throw new Error('JWT secret not configured');
+    // SECURITY FIX: Use tokenService.verifyRefreshToken instead of raw jwt.verify with this.JWT_SECRET
+    const verifyResult = tokenService.verifyRefreshToken(refreshToken);
+    if (!verifyResult.valid) {
+      throw new Error('Invalid or expired refresh token');
     }
-    const decoded = jwt.verify(refreshToken, secret);
+    const decoded = verifyResult.decoded;
     
     // Generate new tokens
     const tokens = this.generateTokens(decoded.userId);
