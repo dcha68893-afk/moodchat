@@ -4,6 +4,7 @@
 // FIXED: Proper model exports for all models
 // FIXED: Added missing columns for chats table (isArchived, archivedBy, archivedAt, deletedAt, deletedBy)
 // FIXED: Added purpose column for Groups table
+// FIXED: Added Token model getter
 const { Sequelize, Op } = require('sequelize');
 const fs = require('fs');
 const path = require('path');
@@ -366,26 +367,35 @@ async function addMissingColumns() {
       { name: 'notificationsMuted', type: Sequelize.BOOLEAN, defaultValue: false, allowNull: false },
       { name: 'customSettings', type: Sequelize.JSONB, defaultValue: {}, allowNull: false }
     ],
-  
+    'Tokens': [
+      { name: 'user_id', type: Sequelize.INTEGER, allowNull: false },
+      { name: 'token', type: Sequelize.TEXT, allowNull: false },
+      { name: 'token_type', type: Sequelize.STRING, defaultValue: 'refresh', allowNull: false },
+      { name: 'expires_at', type: Sequelize.DATE, allowNull: false },
+      { name: 'is_revoked', type: Sequelize.BOOLEAN, defaultValue: false, allowNull: false },
+      { name: 'user_agent', type: Sequelize.STRING, allowNull: true },
+      { name: 'ip_address', type: Sequelize.STRING(45), allowNull: true },
+      { name: 'device_info', type: Sequelize.STRING, allowNull: true }
+    ],
     'Messages': [
-  { name: 'chatId', type: Sequelize.INTEGER, allowNull: true },
-  { name: 'senderId', type: Sequelize.INTEGER, allowNull: true },
-  { name: 'content', type: Sequelize.TEXT, allowNull: true },
-  { name: 'type', type: Sequelize.STRING(20), defaultValue: 'text', allowNull: false },
-  { name: 'replyToId', type: Sequelize.INTEGER, allowNull: true },
-  { name: 'isEdited', type: Sequelize.BOOLEAN, defaultValue: false, allowNull: false },
-  { name: 'editedAt', type: Sequelize.DATE, allowNull: true },
-  { name: 'isDeleted', type: Sequelize.BOOLEAN, defaultValue: false, allowNull: false },
-  { name: 'deletedAt', type: Sequelize.DATE, allowNull: true },
-  { name: 'deletedBy', type: Sequelize.INTEGER, allowNull: true },
-  { name: 'isRead', type: Sequelize.BOOLEAN, defaultValue: false, allowNull: false },  // ADD THIS
-  { name: 'readAt', type: Sequelize.DATE, allowNull: true },  // ADD THIS
-  { name: 'reactions', type: Sequelize.JSONB, defaultValue: {}, allowNull: false },
-  { name: 'metadata', type: Sequelize.JSONB, defaultValue: {}, allowNull: false },
-  { name: 'encryptionKey', type: Sequelize.STRING(100), allowNull: true },
-  { name: 'sentAt', type: Sequelize.DATE, defaultValue: Sequelize.NOW, allowNull: false },
-  { name: 'deliveredAt', type: Sequelize.DATE, allowNull: true }
-],
+      { name: 'chatId', type: Sequelize.INTEGER, allowNull: true },
+      { name: 'senderId', type: Sequelize.INTEGER, allowNull: true },
+      { name: 'content', type: Sequelize.TEXT, allowNull: true },
+      { name: 'type', type: Sequelize.STRING(20), defaultValue: 'text', allowNull: false },
+      { name: 'replyToId', type: Sequelize.INTEGER, allowNull: true },
+      { name: 'isEdited', type: Sequelize.BOOLEAN, defaultValue: false, allowNull: false },
+      { name: 'editedAt', type: Sequelize.DATE, allowNull: true },
+      { name: 'isDeleted', type: Sequelize.BOOLEAN, defaultValue: false, allowNull: false },
+      { name: 'deletedAt', type: Sequelize.DATE, allowNull: true },
+      { name: 'deletedBy', type: Sequelize.INTEGER, allowNull: true },
+      { name: 'isRead', type: Sequelize.BOOLEAN, defaultValue: false, allowNull: false },
+      { name: 'readAt', type: Sequelize.DATE, allowNull: true },
+      { name: 'reactions', type: Sequelize.JSONB, defaultValue: {}, allowNull: false },
+      { name: 'metadata', type: Sequelize.JSONB, defaultValue: {}, allowNull: false },
+      { name: 'encryptionKey', type: Sequelize.STRING(100), allowNull: true },
+      { name: 'sentAt', type: Sequelize.DATE, defaultValue: Sequelize.NOW, allowNull: false },
+      { name: 'deliveredAt', type: Sequelize.DATE, allowNull: true }
+    ],
     'settings': [
       { name: 'user_id', type: Sequelize.INTEGER, allowNull: false },
       { name: 'theme', type: Sequelize.STRING, defaultValue: 'light', allowNull: false },
@@ -460,6 +470,18 @@ async function addMissingColumns() {
         console.log(`[Migration] ✅ Added indexes to friends table`);
       } catch (indexError) {
         console.log(`[Migration] ⚠️ Could not add indexes: ${indexError.message}`);
+      }
+    }
+    
+    if (tables.includes('Tokens')) {
+      try {
+        await sequelize.query(`CREATE INDEX IF NOT EXISTS tokens_user_id_idx ON "Tokens" ("user_id");`);
+        await sequelize.query(`CREATE INDEX IF NOT EXISTS tokens_token_idx ON "Tokens" ("token");`);
+        await sequelize.query(`CREATE INDEX IF NOT EXISTS tokens_expires_at_idx ON "Tokens" ("expires_at");`);
+        await sequelize.query(`CREATE INDEX IF NOT EXISTS tokens_user_revoked_idx ON "Tokens" ("user_id", "is_revoked");`);
+        console.log(`[Migration] ✅ Added indexes to Tokens table`);
+      } catch (indexError) {
+        console.log(`[Migration] ⚠️ Could not add token indexes: ${indexError.message}`);
       }
     }
     
@@ -570,6 +592,7 @@ const hasFriendModel = !!(db.models.Friend);
 const hasChatModel = !!(db.models.Chats);
 const hasMessageModel = !!(db.models.Messages);
 const hasChatParticipantModel = !!(db.models.ChatParticipant);
+const hasTokenModel = !!(db.models.Token);
 
 if (!hasUserModel) {
   console.error('[Database] ❌ CRITICAL: User model not found!');
@@ -610,6 +633,16 @@ if (!hasChatParticipantModel) {
   console.warn('[Database] ⚠️ ChatParticipant model not found - chat participant features may be limited');
 } else {
   console.log('[Database] ✅ ChatParticipant model loaded successfully');
+}
+
+if (!hasTokenModel) {
+  console.warn('[Database] ⚠️ Token model not found - authentication features may be limited');
+} else {
+  console.log('[Database] ✅ Token model loaded successfully');
+  
+  if (db.models.Token.associations) {
+    console.log('[Database] Token model associations:', Object.keys(db.models.Token.associations));
+  }
 }
 
 console.log(`[Database] Total models loaded: ${Object.keys(db.models).length}`);
@@ -694,6 +727,7 @@ db.getOperationalStatus = function() {
     hasChatModel: hasChatModel,
     hasMessageModel: hasMessageModel,
     hasChatParticipantModel: hasChatParticipantModel,
+    hasTokenModel: hasTokenModel,
     timestamp: new Date().toISOString()
   };
 };
@@ -884,7 +918,6 @@ db.createTablesIfNeeded = async function() {
     }
   }
 })();
-
 // ===== EXPORT with all getters =====
 module.exports = {
   ...db,
@@ -900,10 +933,9 @@ module.exports = {
   get Chat() { return db.models.Chat || db.models.Chats || null; },
   get Message() { return db.models.Message || db.models.Messages || null; },
   get ChatParticipant() { return db.models.ChatParticipant || null; },
-  
+  get Token() { return db.models.Token || null; },
   get Group() { return db.models.Group || db.models.Groups || null; },
   get GroupMember() { return db.models.GroupMember || db.models.GroupMembers || null; },
-  get Token() { return db.models.Token || null; },
   get Profile() { return db.models.Profile || null; },
   get Settings() { return db.models.Settings || null; },
   get Features() { return db.models.Features || null; },

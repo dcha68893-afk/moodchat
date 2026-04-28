@@ -18,7 +18,20 @@ class TokenService {
   }
 
   getTokenModel() {
-    return db?.Token || db?.models?.Token || null;
+    // Always re-require db to get the post-sync, fully hydrated module.
+    // Using a cached top-level `db` reference can miss the Token model when
+    // tokenService is first loaded before sequelize.sync() completes.
+    try {
+      const freshDb = require('../models');
+      return (
+        freshDb.Token ||
+        freshDb.models?.Token ||
+        freshDb.getModel?.('Token') ||
+        null
+      );
+    } catch (_) {
+      return db?.Token || db?.models?.Token || null;
+    }
   }
 
   generateAccessToken(user) {
@@ -269,5 +282,7 @@ class TokenService {
     }
   }
 }
+console.log("🔍 DB keys:", Object.keys(db));
+console.log("🔍 Sequelize models:", db?.sequelize?.models);
 
 module.exports = new TokenService();
