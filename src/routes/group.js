@@ -481,7 +481,7 @@ class GroupController {
         where: { userId: userId, leftAt: null },
         include: [{
           model: Group,
-          as: 'group',  // FIXED: Changed from 'userGroup' to match typical association alias
+          as: 'userGroup',  // FIXED: Changed back to 'userGroup' (actual association alias)
           required: true,
           attributes: ['id', 'name', 'description', 'avatar', 'purpose', 'isPublic', 'maxMembers', 'createdBy', 'createdAt', 'updatedAt']
         }],
@@ -1108,7 +1108,7 @@ class GroupController {
           },
           {
             model: Group,
-            as: 'group',  // FIXED: Changed from 'userGroup' to match typical alias
+            as: 'userGroup',  // FIXED: Changed back to 'userGroup' (actual association alias)
             attributes: ['id', 'name', 'avatar', 'description', 'purpose']
           }
         ],
@@ -1271,7 +1271,7 @@ class GroupController {
           },
           {
             model: Group,
-            as: 'group',  // FIXED: Changed from 'userGroup' to match typical alias
+            as: 'userGroup',  // FIXED: Changed back to 'userGroup' (actual association alias)
             attributes: ['id', 'name', 'avatar', 'description', 'purpose']
           }
         ],

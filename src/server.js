@@ -4785,24 +4785,104 @@ class Application {
                 // Initialize Socket.IO for real-time messaging
                 if (config.get('FEATURE_WEBSOCKETS')) {
                     const { Server } = require('socket.io');
+
+                    /**
+                     * socketAuthenticate — io.use() middleware.
+                     * Runs BEFORE 'connection' fires, so auth failures surface as
+                     * 'connect_error' on the client instead of "io server disconnect".
+                     * On success, attaches userId to socket.data and socket.handshake.auth
+                     * so setupConnectionHandler() can read it without re-verifying.
+                     */
+                    // FIX #1: Use tokenService for verification — single source of truth.
+                    // The old code called jwt.verify(token, JWT_SECRET) directly, but
+                    // tokenService signs with JWT_ACCESS_SECRET (falling back to JWT_SECRET).
+                    // When these two env vars differ (common on Render/Railway/Heroku), every
+                    // socket connection failed with "invalid signature".
+                    const tokenService = require('./services/tokenService');
+
+                    const socketAuthenticate = (socket, next) => {
+                        try {
+                            const token = (socket.handshake.auth && socket.handshake.auth.token)
+                                || socket.handshake.query.token
+                                || null;
+
+                            // Debug log — remove after confirming fix
+                            console.log('[Socket.IO] Auth attempt, token present:', !!token,
+                                token ? ('length=' + token.length) : '');
+
+                            if (!token || token.length < 10) {
+                                console.warn('[Socket.IO] Auth rejected: token missing or too short');
+                                return next(new Error('auth/token-missing'));
+                            }
+
+                            // FIX: Delegate to tokenService — uses JWT_ACCESS_SECRET (the correct secret).
+                            const verification = tokenService.verifyAccessToken(token);
+
+                            if (!verification.valid) {
+                                const reason = verification.error || 'INVALID_TOKEN';
+                                console.warn(`[Socket.IO] Auth rejected: ${reason} — ${verification.message}`);
+                                return next(new Error(`auth/invalid-token: ${verification.message || reason}`));
+                            }
+
+                            const decoded = verification.decoded;
+                            const userId  = parseInt(decoded.userId || decoded.id || decoded.sub, 10);
+
+                            if (!userId) {
+                                console.warn('[Socket.IO] Auth rejected: no userId in token payload');
+                                return next(new Error('auth/no-userId-in-token'));
+                            }
+
+                            console.log(`[Socket.IO] ✅ Auth accepted for userId=${userId}`);
+
+                            // Attach for downstream handlers
+                            socket.data.userId            = userId;
+                            socket.handshake.auth.userId  = userId;
+                            next();
+                        } catch (err) {
+                            console.error('[Socket.IO] socketAuthenticate unexpected error:', err.message);
+                            next(new Error('auth/invalid-token: ' + err.message));
+                        }
+                    };
+
                     this.io = new Server(this.server, {
                         cors: {
-                            origin: process.env.FRONTEND_URL || "https://moodfronted.onrender.com",
-                            methods: ["GET", "POST"],
+                            // FIX: use shared corsManager — same allowlist as Express.
+                            // A hardcoded single origin is the ROOT CAUSE of "io server disconnect":
+                            // when the client origin (e.g. http://127.0.0.1:5501 in dev) doesn't
+                            // match, Socket.IO rejects immediately with that exact error string.
+                            origin: (origin, callback) => {
+                                if (!origin) return callback(null, true); // mobile / curl / Postman
+                                if (corsManager.isOriginAllowed(origin)) return callback(null, true);
+                                console.warn(`[Socket.IO] CORS blocked: ${origin}`);
+                                return callback(new Error('Not allowed by CORS'));
+                            },
+                            methods: ['GET', 'POST'],
                             credentials: true
                         },
+                        // FIX: generous timeouts — survive Render cold-starts & slow networks
+                        pingTimeout:    60000,   // 60s before server declares dead
+                        pingInterval:   25000,   // keep-alive ping every 25s
+                        upgradeTimeout: 30000,   // 30s for WS upgrade
+                        connectTimeout: 45000,   // 45s for initial handshake
+                        allowEIO3:      true,    // backward compat with older clients
                         transports: ['websocket', 'polling']
                     });
-                    
-                    // Initialize WebSocket service with Socket.IO
-                    // webSocketService exports a singleton instance, not a class
+
+                    // FIX: Auth runs in middleware (before 'connection').
+                    // Failed auth → client gets 'connect_error', NOT "io server disconnect".
+                    this.io.use(socketAuthenticate);
+
+                    // Init WebSocket service AFTER attaching auth middleware
                     this.websocket = WebSocketService;
                     this.websocket.init(this.io);
+
+                    // setupConnectionHandler handles room-join & presence only.
+                    // verifyToken inside it is now a harmless secondary check —
+                    // it will always succeed because the middleware already validated.
                     this.websocket.setupConnectionHandler();
-                    
-                    logger.success('Socket.IO initialized successfully', 'WEBSOCKET');
-                    
-                    // Use same singleton as fallback reference
+
+                    logger.success('Socket.IO initialized with middleware auth ✅', 'WEBSOCKET');
+
                     this.rawWebSocket = WebSocketService;
                 }
                 
