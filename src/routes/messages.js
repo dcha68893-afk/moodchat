@@ -517,58 +517,81 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
       sender: senderRows[0] || null,
     };
 
+    // ── REALTIME DELIVERY ─────────────────────────────────────────────────────
+    // FIX: Replaced silent catch with loud error logging so delivery failures
+    // are visible in server logs. Also added explicit io-null guard with warning
+    // so engineers can diagnose "wsService.setIO() not called before first request".
     try {
       const wsService = require('../services/webSocketService');
-      const participants = await sequelize.query(
-        `SELECT DISTINCT "userId" FROM chat_participants
-         WHERE "chatId" = :chatId`,
-        {
-          replacements: { chatId },
-          type: sequelize.QueryTypes.SELECT
+
+      // Verify io is actually available before attempting delivery
+      const io = wsService.getIO ? wsService.getIO() : null;
+      if (!io) {
+        console.error(
+          '[messages.js] ❌ WebSocket io is NULL — message saved but NOT delivered in real-time.' +
+          ' Ensure wsService.setIO(io) is called at server startup BEFORE accepting requests.' +
+          ` chatId=${chatId} messageId=${messageId}`
+        );
+        // Do NOT return — still send HTTP 201; the message is in the DB.
+        // Fall through so the response is sent below.
+      } else {
+        const participants = await sequelize.query(
+          `SELECT DISTINCT "userId" FROM chat_participants WHERE "chatId" = :chatId`,
+          { replacements: { chatId }, type: sequelize.QueryTypes.SELECT }
+        );
+
+        const allParticipantIds = (participants || [])
+          .map((row) => parseInt(row.userId, 10))
+          .filter(Boolean);
+        const recipientIds = allParticipantIds.filter(id => id !== senderId);
+
+        // Emit message:new to every participant's personal user room (both naming conventions)
+        // sendToUser() handles user:<id> room + user_<id> room + individual socket IDs
+        const deliveryResults = await Promise.allSettled(
+          allParticipantIds.map(uid => wsService.sendToUser(uid, 'message:new', populatedMessage))
+        );
+
+        // Count successes for diagnostics
+        const delivered = deliveryResults.filter(r => r.status === 'fulfilled' && r.value === true).length;
+        const failed    = deliveryResults.length - delivered;
+        if (failed > 0) {
+          console.warn(`[messages.js] ⚠️ sendToUser: ${delivered}/${deliveryResults.length} delivered, ${failed} failed for chatId=${chatId}`);
         }
-      );
 
-      const allParticipantIds = (participants || []).map((row) => parseInt(row.userId, 10)).filter(Boolean);
-      const recipientIds = allParticipantIds.filter(id => id !== senderId);
+        // Also broadcast to the chat:<id> room — catches any socket that joined
+        // via _joinUserChatRooms but isn't tracked in onlineUsers yet
+        if (typeof wsService.broadcastToChat === 'function') {
+          wsService.broadcastToChat(chatId, 'message:new', populatedMessage);
+        }
 
-      // ✅ FIX 6a: Emit message:new to every participant's user room (including sender
-      // so their other devices/tabs receive the confirmation).
-      // sendToUser() targets user:<id> room + individual socket IDs — both paths.
-      const deliveryResults = await Promise.allSettled(
-        allParticipantIds.map(uid => wsService.sendToUser(uid, 'message:new', populatedMessage))
-      );
-
-      // ✅ FIX 6b: Also broadcast to the chat room (chat:<id>) so any socket that
-      // joined via _joinUserChatRooms receives the message as a secondary delivery path.
-      if (typeof wsService.broadcastToChat === 'function') {
-        wsService.broadcastToChat(chatId, 'message:new', populatedMessage);
-      }
-
-      const deliveredTo = recipientIds; // optimistic — all participants targeted
-
-      // ✅ FIX 6c: Send message:sent confirmation to sender with serverId so the
-      // frontend can replace the optimistic message correctly.
-      await wsService.sendToUser(senderId, 'message:sent', {
-        localId:     populatedMessage.localId || null,
-        messageId,
-        serverId:    messageId,
-        chatId,
-        status:      'sent',
-        createdAt:   populatedMessage.createdAt
-      });
-
-      if (deliveredTo.length > 0) {
-        await wsService.sendToUser(senderId, 'message:delivered', {
+        // Confirm to sender: their optimistic bubble can now show ✓ sent tick
+        await wsService.sendToUser(senderId, 'message:sent', {
+          localId:   populatedMessage.localId || null,
           messageId,
+          serverId:  messageId,
           chatId,
-          deliveredTo,
-          deliveredAt: new Date().toISOString()
+          status:    'sent',
+          createdAt: populatedMessage.createdAt
         });
-      }
 
-      console.log(`[messages.js] ✅ Emitted message:new to ${allParticipantIds.length} participant(s) + chat:${chatId} room`);
+        // Tell sender when at least one recipient was targeted
+        if (recipientIds.length > 0) {
+          await wsService.sendToUser(senderId, 'message:delivered', {
+            messageId,
+            chatId,
+            deliveredTo: recipientIds,
+            deliveredAt: new Date().toISOString()
+          });
+        }
+
+        console.log(
+          `[messages.js] ✅ Realtime delivery: chatId=${chatId} messageId=${messageId}` +
+          ` participants=${allParticipantIds.length} recipients=${recipientIds.length}`
+        );
+      }
     } catch (notifyError) {
-      console.warn('Failed to emit message:new websocket event:', notifyError.message);
+      // Non-fatal: message is already in the DB. Log clearly so it's never silently lost.
+      console.error('[messages.js] ❌ Realtime delivery threw an error (message is saved):', notifyError.message, notifyError.stack);
     }
 
     // FIX: Wrap in data.message so messageQueue._sendToServer() and

@@ -396,7 +396,15 @@ class WebSocketService {
             }
         }
 
-        if (!io) return delivered;
+        if (!io) {
+            // FIX: Warn loudly instead of silently returning false.
+            // If this appears in logs, wsService.setIO(io) was never called at startup.
+            console.warn(
+                `[WSService] ⚠️ sendToUser: io is NULL — cannot deliver event="${event}" to uid=${uid}.` +
+                ' Call wsService.setIO(io) at server startup before accepting requests.'
+            );
+            return delivered;
+        }
 
         for (const room of [`user:${uid}`, `user_${uid}`]) {
             try { io.to(room).emit(event, payload); delivered = true; } catch (_) {}
