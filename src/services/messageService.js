@@ -141,19 +141,18 @@ class MessageService {
                     // Send to user's Socket.IO room
                     io.to(`user:${userId}`).emit('message:new', payload);
                     io.to(`user_${userId}`).emit('new_message', payload);
-                    console.log(`[MessageService] 🚀 Socket.IO sent to user:${userId} for chatId=${chatId}`);
                 }
-                
                 // Also broadcast to chat room
                 io.to(`chat:${chatId}`).emit('message:new', payload);
-                console.log(`[MessageService] ✅ Socket.IO real-time delivery: chatId=${chatId}, recipients=${participants.length}`);
+                // FIX Bug7: one summary log instead of per-recipient spam
+                console.log(`[MessageService] ✅ Real-time delivery: chatId=${chatId}, recipients=${participants.length}`);
             } else {
                 // Fallback to raw WebSocket service
                 for (const { userId } of participants) {
                     await ws.sendToUser(userId, 'message:new', payload);
                     await ws.sendToUser(userId, 'new_message', payload);
                 }
-                console.log(`[MessageService] ⚠️ Fallback WebSocket delivery: chatId=${chatId}, recipients=${participants.length}`);
+                console.log(`[MessageService] ⚠️ Fallback WS delivery: chatId=${chatId}, recipients=${participants.length}`);
             }
         } catch (err) {
             // Real-time failure is non-fatal — message is already saved

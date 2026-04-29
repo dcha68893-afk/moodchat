@@ -234,7 +234,11 @@ class WebSocketService {
             };
             try {
                 joinRooms();
-                console.log(`[WSService] registerUser uid=${uid} socket=${socketId} rooms joined ✅`);
+                if (!this._roomJoinLogged) { this._roomJoinLogged = new Set(); }
+                if (!this._roomJoinLogged.has(uid)) {
+                    this._roomJoinLogged.add(uid);
+                    console.log(`[WSService] registerUser uid=${uid} socket=${socketId} rooms joined ✅`);
+                }
             } catch (err) {
                 console.warn(`[WSService] Room join failed (retry): ${err.message}`);
                 setTimeout(() => {
@@ -370,8 +374,14 @@ class WebSocketService {
         const uid = parseInt(userId, 10);
         if (!uid || !event) return false;
 
-        // ✅ FIX: Required emit verification log per spec
-        console.log(`[WSService] EMITTING MESSAGE TO: uid=${uid} event=${event}`);
+        // Log once per uid+event combination within 5 seconds to avoid console flood
+        const _emitLogKey = `${uid}:${event}`;
+        const _now = Date.now();
+        if (!this._emitLogCache) this._emitLogCache = new Map();
+        if (!this._emitLogCache.has(_emitLogKey) || _now - this._emitLogCache.get(_emitLogKey) > 5000) {
+            this._emitLogCache.set(_emitLogKey, _now);
+            console.log(`[WSService] EMITTING MESSAGE TO: uid=${uid} event=${event}`);
+        }
 
         const payload = { ...data, timestamp: data.timestamp || new Date().toISOString() };
         let delivered = false;

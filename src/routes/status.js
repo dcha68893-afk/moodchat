@@ -16,6 +16,9 @@ const asyncHandler = require('express-async-handler');
 const { apiRateLimiter } = require('../middleware/rateLimiter');
 const { authenticateToken } = require('../middleware/auth');
 const { body, validationResult } = require('express-validator');
+// FIX: logger needed for friend-targeted socket emit logging
+let logger;
+try { logger = require('../utils/logger'); } catch(_) { logger = console; }
 
 // ---------------------------------------------------------------------------
 // Model imports
@@ -423,11 +426,41 @@ router.post(
         if (user) created.dataValues.statusUser = user;
 
         if (req.io) {
-            req.io.emit('status:created', {
-                statusId: created.id,
+            // FIX Bug C: was req.io.emit() = global broadcast to ALL sockets.
+            // FIX Bug D: payload was missing the full `status` object so receivers
+            //            couldn't render the card without a second fetch.
+            // Now: emit only to accepted friends' user rooms, with full status object.
+            const io = req.io || (req.app && req.app.get && req.app.get('io'));
+            const wsPayload = {
+                statusId:  created.id,
                 userId,
-                content: created.content,
-                timestamp: new Date(),
+                type:      created.type,
+                content:   created.content,
+                mediaUrl:  created.mediaUrl  || null,
+                createdAt: created.createdAt,
+                expiresAt: created.expiresAt || null,
+                status:    formatStatus(created), // FIX Bug D: include full object
+                timestamp: new Date().toISOString()
+            };
+
+            // Emit to creator's own room so their other tabs/devices update
+            io.to(`user:${userId}`).emit('status:created', wsPayload);
+            io.to(`user:${userId}`).emit('new_status',     wsPayload);
+
+            // Emit to each accepted friend's room asynchronously (non-blocking)
+            const { getAcceptedFriendIds } = require('../services/statusService');
+            getAcceptedFriendIds(userId).then(friendIds => {
+                friendIds.forEach(fid => {
+                    try {
+                        io.to(`user:${fid}`).emit('status:created', wsPayload);
+                        io.to(`user:${fid}`).emit('new_status',     wsPayload);
+                        io.to(`user:${fid}`).emit('status_created', wsPayload);
+                    } catch (_) {}
+                });
+                logger.info(`[status.js] 📡 status:created emitted to ${friendIds.length} friend rooms for userId=${userId}`);
+            }).catch(err => {
+                logger.warn(`[status.js] getAcceptedFriendIds failed, falling back to scoped emit: ${err.message}`);
+                // Fallback: still emit to own room at minimum
             });
         }
 
