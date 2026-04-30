@@ -61,15 +61,31 @@ const formatUser = (user) => {
     };
 };
 
-// 🔴 BUG 3 FIX: getUserId now always returns integer for consistent DB comparison
+// FIX: getUserId supports BOTH integer and UUID/string IDs.
+// parseInt() was breaking UUID-based user systems — if the ID is purely numeric
+// we still return it as an integer for DB compatibility, otherwise return as-is.
 const getUserId = (req) => {
     if (!req.user) { 
         console.error('[Friends] req.user is undefined! Auth middleware may not be working');
         return null; 
     }
     const id = req.user.userId || req.user.id;
-    // Return as integer for consistent DB comparison
-    return id ? parseInt(id, 10) : null;
+    if (!id) return null;
+    // Only coerce to integer if the id looks purely numeric
+    const parsed = parseInt(id, 10);
+    return !isNaN(parsed) && String(parsed) === String(id) ? parsed : String(id);
+};
+
+// FIX: Safe ID parser — handles both integer PKs and UUID string PKs.
+// parseInt() silently returns NaN for UUIDs, causing all param-based routes to
+// return 400 "Invalid ID" for UUID-based users. Use this everywhere instead.
+const parseId = (raw) => {
+    if (!raw) return null;
+    const s = String(raw).trim();
+    if (!s) return null;
+    const n = parseInt(s, 10);
+    // If purely numeric AND roundtrips correctly, treat as integer; otherwise UUID/string
+    return !isNaN(n) && String(n) === s ? n : s;
 };
 
 const withTimeout = (promise, timeoutMs = 8000) => {
@@ -956,8 +972,8 @@ router.get('/user/:userId', apiRateLimiter, asyncHandler(async (req, res) => {
         const requesterId = getUserId(req);
         if (!requesterId) return res.status(401).json({ success: false, message: 'Authentication required' });
 
-        const targetId = parseInt(req.params.userId);
-        if (isNaN(targetId)) return res.status(400).json({ success: false, message: 'Invalid user ID' });
+        const targetId = parseId(req.params.userId);
+        if (targetId === null) return res.status(400).json({ success: false, message: 'Invalid user ID' });
 
         const targetUser = await withTimeout(User.findByPk(targetId, { attributes: ['id','username','avatar','firstName','lastName','status','lastSeen'] }));
         if (!targetUser) return res.status(404).json({ success: false, message: 'User not found' });
@@ -1044,8 +1060,8 @@ router.post('/requests/send', apiRateLimiter, asyncHandler(async (req, res) => {
         const userId = getUserId(req);
         if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
 
-        const receiverId = parseInt(req.body.receiverId || req.body.userId || req.body.targetId);
-        if (isNaN(receiverId)) return res.status(400).json({ success: false, message: 'receiverId is required' });
+        const receiverId = parseId(req.body.receiverId || req.body.userId || req.body.targetId);
+        if (receiverId === null) return res.status(400).json({ success: false, message: 'receiverId is required' });
         if (receiverId === userId) return res.status(400).json({ success: false, message: 'Cannot send friend request to yourself', code: 'SELF_REQUEST' });
         if (!Friend) return res.status(503).json({ success: false, message: 'Friend service temporarily unavailable' });
 
@@ -1075,6 +1091,33 @@ router.post('/requests/send', apiRateLimiter, asyncHandler(async (req, res) => {
             createdAt: new Date(), updatedAt: new Date()
         });
 
+        // FIX: Emit friend:request to receiver in real-time so their inbox updates immediately.
+        // Previously this event was never emitted — the receiver only found out via polling.
+        const io = req.io || (req.app && req.app.get('io'));
+        if (io) {
+            const senderInfo = req.user ? {
+                id:          userId,
+                username:    req.user.username    || '',
+                displayName: req.user.displayName || req.user.username || '',
+                avatar:      req.user.avatar      || null,
+            } : { id: userId };
+
+            const requestPayload = {
+                id:             friendRequest.id,
+                requestId:      friendRequest.id,
+                requesterId:    userId,
+                receiverId:     receiverId,
+                status:         'pending',
+                createdAt:      friendRequest.createdAt,
+                senderName:     senderInfo.displayName,
+                senderUsername: senderInfo.username,
+                senderAvatar:   senderInfo.avatar,
+                user:           senderInfo,
+            };
+            io.to(`user:${receiverId}`).emit('friend:request', requestPayload);
+            io.to(`user_${receiverId}`).emit('friend:request', requestPayload);
+        }
+
         return res.status(201).json({
             success: true,
             data: { request: { id: friendRequest.id, requesterId: friendRequest.requesterId, receiverId: friendRequest.receiverId, status: friendRequest.status, createdAt: friendRequest.createdAt } },
@@ -1097,7 +1140,7 @@ router.post('/requests/:requestId/accept', apiRateLimiter, asyncHandler(async (r
         // 🔴 BUG 2 FIX: Use integer directly for DB comparison, not string
         const friendRequest = await withTimeout(Friend.findOne({ 
             where: { 
-                id: parseInt(req.params.requestId), 
+                id: parseId(req.params.requestId), 
                 status: 'pending',
                 receiverId: userId
             } 
@@ -1113,32 +1156,50 @@ router.post('/requests/:requestId/accept', apiRateLimiter, asyncHandler(async (r
 
         // FIX: emit friend:accepted to BOTH room formats (user:ID and user_ID) so that
         // clients are notified regardless of which format their socket joined with.
-        // Also include requestId, friendId, and user profile fields so friend-core.js
-        // can immediately update KynectaFriendsLocalStore without an extra API call.
+        // Fetch full profiles for both users so clients can update caches without a round-trip.
         const io = req.io || (req.app && req.app.get('io'));
         if (io) {
-            // Payload for the original sender — they need to know who accepted (receiver = userId)
+            // Fetch accepter profile (current user = receiver)
+            let accepterProfile = { id: userId };
+            let senderProfile   = { id: friendRequest.requesterId };
+            try {
+                if (User) {
+                    const [accepterUser, senderUser] = await Promise.all([
+                        User.findByPk(userId,                  { attributes: ['id','username','avatar','firstName','lastName','status','lastSeen'] }),
+                        User.findByPk(friendRequest.requesterId, { attributes: ['id','username','avatar','firstName','lastName','status','lastSeen'] }),
+                    ]);
+                    if (accepterUser) {
+                        const u = accepterUser.toJSON ? accepterUser.toJSON() : accepterUser;
+                        accepterProfile = { id: u.id, username: u.username||'', displayName: ([u.firstName,u.lastName].filter(Boolean).join(' ').trim())||u.username||'', avatar: u.avatar||null, status: u.status||'offline', lastSeen: u.lastSeen||null };
+                    }
+                    if (senderUser) {
+                        const u = senderUser.toJSON ? senderUser.toJSON() : senderUser;
+                        senderProfile = { id: u.id, username: u.username||'', displayName: ([u.firstName,u.lastName].filter(Boolean).join(' ').trim())||u.username||'', avatar: u.avatar||null, status: u.status||'offline', lastSeen: u.lastSeen||null };
+                    }
+                }
+            } catch (_) { /* non-fatal, use minimal profiles */ }
+
+            // Tell the original SENDER: their request was accepted, new friend = accepter
             const senderPayload = {
                 friendshipId: friendRequest.id,
                 requestId:    friendRequest.id,
-                friendId:     userId,            // accepter's ID = new friend for the sender
+                friendId:     userId,
                 acceptedById: userId,
-                friendship: { ...friendRequest.toJSON(), status: 'accepted' },
-                // user/friend fields let the client skip a profile fetch
-                user:   { id: userId },
-                friend: { id: userId },
-                acceptedAt: new Date().toISOString(),
+                friendship:   { ...friendRequest.toJSON(), status: 'accepted' },
+                user:         accepterProfile,
+                friend:       accepterProfile,
+                acceptedAt:   new Date().toISOString(),
             };
-            // Payload for the accepter (receiver) — they need the sender's ID for multi-tab sync
+            // Tell the ACCEPTER's other tabs/devices: sync the new friendship
             const accepterPayload = {
                 friendshipId: friendRequest.id,
                 requestId:    friendRequest.id,
-                friendId:     friendRequest.requesterId,  // sender's ID = new friend for the accepter
+                friendId:     friendRequest.requesterId,
                 acceptedById: userId,
-                friendship: { ...friendRequest.toJSON(), status: 'accepted' },
-                user:   { id: friendRequest.requesterId },
-                friend: { id: friendRequest.requesterId },
-                acceptedAt: new Date().toISOString(),
+                friendship:   { ...friendRequest.toJSON(), status: 'accepted' },
+                user:         senderProfile,
+                friend:       senderProfile,
+                acceptedAt:   new Date().toISOString(),
             };
             // Emit to both room naming conventions to guarantee delivery
             io.to(`user_${friendRequest.requesterId}`).emit('friend:accepted', senderPayload);
@@ -1162,7 +1223,7 @@ router.post('/requests/:requestId/reject', apiRateLimiter, asyncHandler(async (r
         if (!Friend) return res.status(503).json({ success: false, message: 'Friend service temporarily unavailable' });
 
         // 🔴 BUG 4 FIX: Parse requestId as integer for consistent DB comparison
-        const friendRequest = await withTimeout(Friend.findOne({ where: { id: parseInt(req.params.requestId), receiverId: userId, status: 'pending' } }));
+        const friendRequest = await withTimeout(Friend.findOne({ where: { id: parseId(req.params.requestId), receiverId: userId, status: 'pending' } }));
         if (!friendRequest) return res.status(404).json({ success: false, message: 'Friend request not found' });
 
         await friendRequest.destroy();
@@ -1179,8 +1240,8 @@ router.post('/request/:userId', apiRateLimiter, asyncHandler(async (req, res) =>
         const userId = getUserId(req);
         if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
 
-        const targetId = parseInt(req.params.userId);
-        if (isNaN(targetId)) return res.status(400).json({ success: false, message: 'Invalid user ID' });
+        const targetId = parseId(req.params.userId);
+        if (targetId === null) return res.status(400).json({ success: false, message: 'Invalid user ID' });
         if (targetId === userId) return res.status(400).json({ success: false, message: 'Cannot send friend request to yourself', code: 'SELF_REQUEST' });
         if (!Friend) return res.status(503).json({ success: false, message: 'Friend service temporarily unavailable' });
 
@@ -1236,7 +1297,7 @@ router.post('/qr/connect', apiRateLimiter, asyncHandler(async (req, res) => {
             }
         }
 
-        if (isNaN(targetId)) return res.status(400).json({ success: false, message: 'Invalid target user ID' });
+        if (targetId === null) return res.status(400).json({ success: false, message: 'Invalid target user ID' });
         if (targetId === userId) return res.status(400).json({ success: false, message: 'Cannot connect to yourself' });
 
         const targetUser = await withTimeout(User.findByPk(targetId, { attributes: ['id', 'username'] }));
@@ -1275,8 +1336,8 @@ router.post('/:friendId/block', apiRateLimiter, asyncHandler(async (req, res) =>
         const userId = getUserId(req);
         if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
 
-        const targetId = parseInt(req.params.friendId);
-        if (isNaN(targetId)) return res.status(400).json({ success: false, message: 'Invalid user ID' });
+        const targetId = parseId(req.params.friendId);
+        if (targetId === null) return res.status(400).json({ success: false, message: 'Invalid user ID' });
         if (targetId === userId) return res.status(400).json({ success: false, message: 'Cannot block yourself' });
         if (!Friend) return res.status(503).json({ success: false, message: 'Friend service temporarily unavailable' });
 
@@ -1306,8 +1367,8 @@ router.post('/:friendId/unblock', apiRateLimiter, asyncHandler(async (req, res) 
         const userId = getUserId(req);
         if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
 
-        const targetId = parseInt(req.params.friendId);
-        if (isNaN(targetId)) return res.status(400).json({ success: false, message: 'Invalid user ID' });
+        const targetId = parseId(req.params.friendId);
+        if (targetId === null) return res.status(400).json({ success: false, message: 'Invalid user ID' });
         if (!Friend) return res.status(503).json({ success: false, message: 'Friend service temporarily unavailable' });
 
         const friendship = await withTimeout(Friend.findOne({
@@ -1329,8 +1390,8 @@ router.post('/:friendId/pin', apiRateLimiter, asyncHandler(async (req, res) => {
     try {
         const userId = getUserId(req);
         if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
-        const targetId = parseInt(req.params.friendId);
-        if (isNaN(targetId)) return res.status(400).json({ success: false, message: 'Invalid friend ID' });
+        const targetId = parseId(req.params.friendId);
+        if (targetId === null) return res.status(400).json({ success: false, message: 'Invalid friend ID' });
         if (!Friend) return res.status(503).json({ success: false, message: 'Friend service temporarily unavailable' });
 
         const friendship = await withTimeout(Friend.findOne({
@@ -1350,8 +1411,8 @@ router.post('/:friendId/unpin', apiRateLimiter, asyncHandler(async (req, res) =>
     try {
         const userId = getUserId(req);
         if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
-        const targetId = parseInt(req.params.friendId);
-        if (isNaN(targetId)) return res.status(400).json({ success: false, message: 'Invalid friend ID' });
+        const targetId = parseId(req.params.friendId);
+        if (targetId === null) return res.status(400).json({ success: false, message: 'Invalid friend ID' });
         if (!Friend) return res.status(503).json({ success: false, message: 'Friend service temporarily unavailable' });
 
         const friendship = await withTimeout(Friend.findOne({
@@ -1371,8 +1432,8 @@ router.post('/:friendId/mute', apiRateLimiter, asyncHandler(async (req, res) => 
     try {
         const userId = getUserId(req);
         if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
-        const targetId = parseInt(req.params.friendId);
-        if (isNaN(targetId)) return res.status(400).json({ success: false, message: 'Invalid friend ID' });
+        const targetId = parseId(req.params.friendId);
+        if (targetId === null) return res.status(400).json({ success: false, message: 'Invalid friend ID' });
         const { duration = 30 } = req.body;
         if (!Friend) return res.status(503).json({ success: false, message: 'Friend service temporarily unavailable' });
 
@@ -1394,8 +1455,8 @@ router.post('/:friendId/unmute', apiRateLimiter, asyncHandler(async (req, res) =
     try {
         const userId = getUserId(req);
         if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
-        const targetId = parseInt(req.params.friendId);
-        if (isNaN(targetId)) return res.status(400).json({ success: false, message: 'Invalid friend ID' });
+        const targetId = parseId(req.params.friendId);
+        if (targetId === null) return res.status(400).json({ success: false, message: 'Invalid friend ID' });
         if (!Friend) return res.status(503).json({ success: false, message: 'Friend service temporarily unavailable' });
 
         const friendship = await withTimeout(Friend.findOne({
@@ -1415,8 +1476,8 @@ router.delete('/:friendId', apiRateLimiter, asyncHandler(async (req, res) => {
     try {
         const userId = getUserId(req);
         if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
-        const targetId = parseInt(req.params.friendId);
-        if (isNaN(targetId)) return res.status(400).json({ success: false, message: 'Invalid friend ID' });
+        const targetId = parseId(req.params.friendId);
+        if (targetId === null) return res.status(400).json({ success: false, message: 'Invalid friend ID' });
         if (!Friend) return res.status(503).json({ success: false, message: 'Friend service temporarily unavailable' });
 
         const friendships = await withTimeout(Friend.findAll({
@@ -1426,6 +1487,23 @@ router.delete('/:friendId', apiRateLimiter, asyncHandler(async (req, res) => {
         if (!friendships.length) return res.status(404).json({ success: false, message: 'Friend not found' });
 
         await Promise.all(friendships.map(f => f.destroy()));
+
+        // FIX: Emit friend:removed to BOTH users so both clients update their lists in real-time.
+        // Previously only the initiator's optimistic update was used — the removed user's client
+        // never received a socket event and kept showing the removed person as a friend.
+        const io = req.io || (req.app && req.app.get('io'));
+        if (io) {
+            // Tell the removed friend that userId removed them
+            const removedPayload   = { friendId: userId,   removedBy: userId };
+            // Tell the initiator's other tabs/devices that targetId was removed
+            const initiatorPayload = { friendId: targetId, removedBy: userId };
+
+            io.to(`user:${targetId}`).emit('friend:removed', removedPayload);
+            io.to(`user_${targetId}`).emit('friend:removed', removedPayload);
+            io.to(`user:${userId}`).emit('friend:removed', initiatorPayload);
+            io.to(`user_${userId}`).emit('friend:removed', initiatorPayload);
+        }
+
         return res.json({ success: true, message: 'Friend removed successfully' });
     } catch (e) {
         console.error('[Friends DELETE /:friendId]', e.message);
@@ -1440,8 +1518,8 @@ router.get('/:friendId', apiRateLimiter, asyncHandler(async (req, res) => {
         if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
 
         const { friendId } = req.params;
-        const targetId = parseInt(friendId);
-        if (isNaN(targetId)) return res.status(400).json({ success: false, message: 'Invalid friend ID' });
+        const targetId = parseId(friendId);
+        if (targetId === null) return res.status(400).json({ success: false, message: 'Invalid friend ID' });
 
         const friend = await withTimeout(User.findByPk(targetId, { attributes: ['id','username','avatar','firstName','lastName','bio','status','lastSeen'] }));
         if (!friend) return res.status(404).json({ success: false, message: 'User not found' });
