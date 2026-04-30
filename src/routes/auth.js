@@ -356,6 +356,137 @@ router.post('/logout', authenticateToken, asyncHandler(async (req, res) => {
     });
 }));
 
+// POST /forgot-password
+// FIX: This route was missing — frontend calls /auth/forgot-password but it was never registered
+router.post('/forgot-password', asyncHandler(async (req, res) => {
+    console.log('📧 FORGOT PASSWORD called');
+    const { email } = req.body;
+
+    if (!email || !email.includes('@')) {
+        return res.status(400).json({
+            success: false,
+            message: 'Valid email is required'
+        });
+    }
+
+    try {
+        const user = await Users.findOne({ where: { email: email.toLowerCase().trim() } });
+
+        // Always return success to prevent email enumeration attacks
+        if (!user) {
+            return res.status(200).json({
+                success: true,
+                message: 'If an account exists with this email, a password reset link has been sent'
+            });
+        }
+
+        const crypto = require('crypto');
+        const jwt = require('jsonwebtoken');
+        const JWT_SECRET_KEY = process.env.JWT_SECRET || process.env.JWT_ACCESS_SECRET;
+
+        // Generate a signed reset token (expires in 1 hour)
+        const resetToken = jwt.sign(
+            { userId: user.id, email: user.email, type: 'reset' },
+            JWT_SECRET_KEY,
+            { expiresIn: '1h' }
+        );
+
+        const resetTokenExpiry = new Date(Date.now() + 3600000); // 1 hour
+
+        await user.update({
+            resetToken: resetToken,
+            resetTokenExpiry: resetTokenExpiry
+        });
+
+        // In production you would send an email here.
+        // For now, log it so you can test without a mail server.
+        console.log(`📧 [RESET TOKEN] For ${email}: ${resetToken}`);
+
+        // TODO: plug in your email service here, e.g.:
+        // await emailService.sendResetEmail(email, resetToken);
+
+        return res.status(200).json({
+            success: true,
+            message: 'If an account exists with this email, a password reset link has been sent',
+            // REMOVE the line below before going to production — it exposes the token
+            ...(process.env.NODE_ENV !== 'production' && { resetToken })
+        });
+    } catch (error) {
+        console.error('❌ Forgot password error:', error);
+        return res.status(500).json({
+            success: false,
+            message: 'Failed to process password reset request'
+        });
+    }
+}));
+
+// POST /reset-password
+// FIX: This route was missing — frontend calls /auth/reset-password but it was never registered
+router.post('/reset-password', asyncHandler(async (req, res) => {
+    console.log('🔑 RESET PASSWORD called');
+    const { token, newPassword, password } = req.body;
+    const resetToken = token;
+    const passwordToSet = newPassword || password;
+
+    if (!resetToken) {
+        return res.status(400).json({ success: false, message: 'Reset token is required' });
+    }
+    if (!passwordToSet || passwordToSet.length < 8) {
+        return res.status(400).json({ success: false, message: 'New password must be at least 8 characters' });
+    }
+
+    try {
+        const jwt = require('jsonwebtoken');
+        const JWT_SECRET_KEY = process.env.JWT_SECRET || process.env.JWT_ACCESS_SECRET;
+
+        // Verify the JWT reset token
+        let decoded;
+        try {
+            decoded = jwt.verify(resetToken, JWT_SECRET_KEY);
+        } catch (jwtErr) {
+            return res.status(400).json({ success: false, message: 'Invalid or expired reset token' });
+        }
+
+        if (decoded.type !== 'reset') {
+            return res.status(400).json({ success: false, message: 'Invalid reset token type' });
+        }
+
+        // Find user and confirm token still matches (not already used)
+        const { Op } = require('sequelize');
+        const user = await Users.findOne({
+            where: {
+                id: decoded.userId,
+                resetToken: resetToken,
+                resetTokenExpiry: { [Op.gt]: new Date() }
+            }
+        });
+
+        if (!user) {
+            return res.status(400).json({ success: false, message: 'Invalid or expired reset token' });
+        }
+
+        // Hash the new password
+        const hashedPassword = await bcrypt.hash(passwordToSet, 12);
+
+        // Update password and clear the reset token
+        await user.update({
+            password: hashedPassword,
+            resetToken: null,
+            resetTokenExpiry: null
+        });
+
+        console.log('✅ Password reset successful for user:', user.id);
+
+        return res.status(200).json({
+            success: true,
+            message: 'Password has been reset successfully. You can now log in with your new password.'
+        });
+    } catch (error) {
+        console.error('❌ Reset password error:', error);
+        return res.status(500).json({ success: false, message: 'Failed to reset password' });
+    }
+}));
+
 // GET /sessions
 router.get('/sessions', authenticateToken, asyncHandler(async (req, res) => {
     try {
