@@ -86,21 +86,43 @@ class FriendController {
               displayName: req.user.displayName || req.user.username || '',
               avatar:      req.user.avatar      || null,
             };
-            // Notify the original sender — their request was accepted
-            io.to(`user:${originalRequesterId}`).emit('friend:accepted', {
-              requestId:  requestId,
-              friendId:   userId,
-              user:       accepterInfo,
-              acceptedAt: new Date().toISOString(),
-            });
-            // Notify the accepter too (multi-tab sync)
-            io.to(`user:${userId}`).emit('friend:accepted', {
-              requestId:  requestId,
-              friendId:   originalRequesterId,
-              acceptedAt: new Date().toISOString(),
-            });
+
+            // FIX: notify the ORIGINAL SENDER that their request was accepted.
+            // Payload includes full accepter profile (user field) so the sender's
+            // friend-core.js FRIEND_REQUEST_ACCEPTED handler can immediately populate
+            // FriendCacheManager and KynectaFriendsLocalStore without a round-trip.
+            // Also emit to both room formats (user:ID and user_ID) to handle any
+            // inconsistency between friendController and friends.js room naming.
+            const senderPayload = {
+              requestId:    requestId,
+              friendId:     userId,           // the accepter's ID (new friend for the sender)
+              acceptedById: userId,
+              user:         accepterInfo,     // FIX: was missing in the multi-tab sync copy
+              friend:       accepterInfo,     // alias for friend-core.js compatibility
+              acceptedAt:   new Date().toISOString(),
+            };
+            io.to(`user:${originalRequesterId}`).emit('friend:accepted', senderPayload);
+            io.to(`user_${originalRequesterId}`).emit('friend:accepted', senderPayload); // room format alias
+
+            // Notify the accepter too (multi-tab / multi-device sync).
+            // Include the sender's basic info so their cache also fills immediately.
+            const accepterPayload = {
+              requestId:    requestId,
+              friendId:     originalRequesterId,  // the sender's ID (new friend for the accepter)
+              acceptedById: userId,
+              user:         { id: originalRequesterId },
+              friend:       { id: originalRequesterId },
+              acceptedAt:   new Date().toISOString(),
+            };
+            io.to(`user:${userId}`).emit('friend:accepted', accepterPayload);
+            io.to(`user_${userId}`).emit('friend:accepted', accepterPayload); // room format alias
+
           } else if (action === 'reject') {
             io.to(`user:${originalRequesterId}`).emit('friend:rejected', {
+              requestId: requestId,
+              friendId:  userId,
+            });
+            io.to(`user_${originalRequesterId}`).emit('friend:rejected', {
               requestId: requestId,
               friendId:  userId,
             });

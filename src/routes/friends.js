@@ -1111,18 +1111,40 @@ router.post('/requests/:requestId/accept', apiRateLimiter, asyncHandler(async (r
         friendRequest.acceptedAt = new Date();
         await friendRequest.save();
 
-        // 🔴 BUG 2 FIX: Add Socket.IO notifications to update both users in real-time
+        // FIX: emit friend:accepted to BOTH room formats (user:ID and user_ID) so that
+        // clients are notified regardless of which format their socket joined with.
+        // Also include requestId, friendId, and user profile fields so friend-core.js
+        // can immediately update KynectaFriendsLocalStore without an extra API call.
         const io = req.io || (req.app && req.app.get('io'));
         if (io) {
-            const payload = {
+            // Payload for the original sender — they need to know who accepted (receiver = userId)
+            const senderPayload = {
                 friendshipId: friendRequest.id,
-                friendship: {
-                    ...friendRequest.toJSON(),
-                    status: 'accepted'
-                }
+                requestId:    friendRequest.id,
+                friendId:     userId,            // accepter's ID = new friend for the sender
+                acceptedById: userId,
+                friendship: { ...friendRequest.toJSON(), status: 'accepted' },
+                // user/friend fields let the client skip a profile fetch
+                user:   { id: userId },
+                friend: { id: userId },
+                acceptedAt: new Date().toISOString(),
             };
-            io.to(`user_${friendRequest.requesterId}`).emit('friend:accepted', payload);
-            io.to(`user_${userId}`).emit('friend:accepted', payload);
+            // Payload for the accepter (receiver) — they need the sender's ID for multi-tab sync
+            const accepterPayload = {
+                friendshipId: friendRequest.id,
+                requestId:    friendRequest.id,
+                friendId:     friendRequest.requesterId,  // sender's ID = new friend for the accepter
+                acceptedById: userId,
+                friendship: { ...friendRequest.toJSON(), status: 'accepted' },
+                user:   { id: friendRequest.requesterId },
+                friend: { id: friendRequest.requesterId },
+                acceptedAt: new Date().toISOString(),
+            };
+            // Emit to both room naming conventions to guarantee delivery
+            io.to(`user_${friendRequest.requesterId}`).emit('friend:accepted', senderPayload);
+            io.to(`user:${friendRequest.requesterId}`).emit('friend:accepted', senderPayload);
+            io.to(`user_${userId}`).emit('friend:accepted', accepterPayload);
+            io.to(`user:${userId}`).emit('friend:accepted', accepterPayload);
         }
 
         return res.json({ success: true, data: { friendship: friendRequest }, message: 'Friend request accepted successfully' });
