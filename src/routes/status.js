@@ -1061,4 +1061,221 @@ router.delete('/:statusId/comment/:commentId', authenticateToken, apiRateLimiter
     res.json({ success: true, message: 'Comment deleted' });
 }));
 
+// ── Emoji Reaction (PROTECTED)  POST /:statusId/react  { emoji: "🔥" }
+router.post('/:statusId/react', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+    const userId = getUserId(req);
+    const { statusId } = req.params;
+    const { emoji } = req.body;
+
+    if (!statusId || isNaN(+statusId)) return res.status(400).json({ success: false, message: 'Invalid status ID' });
+    if (!emoji || !emoji.trim()) return res.status(400).json({ success: false, message: 'emoji is required' });
+
+    if (!Status) return res.status(503).json({ success: false, message: 'Service unavailable' });
+
+    const status = await Status.findByPk(statusId).catch(() => null);
+    if (!status) return res.status(404).json({ success: false, message: 'Status not found' });
+
+    // Check expired
+    if (status.expiresAt && new Date(status.expiresAt) < new Date()) {
+        return res.status(410).json({ success: false, message: 'Status has expired' });
+    }
+
+    const StatusReaction = db.StatusReaction || db.StatusReactions;
+    let reactionCount = 0;
+
+    if (StatusReaction) {
+        // One reaction per user per status — remove old, insert new
+        await StatusReaction.destroy({ where: { statusId: +statusId, userId } }).catch(() => {});
+        await StatusReaction.create({ statusId: +statusId, userId, emoji: emoji.trim(), createdAt: new Date() }).catch(() => {});
+        reactionCount = await StatusReaction.count({ where: { statusId: +statusId, emoji: emoji.trim() } }).catch(() => 0);
+    } else {
+        // Fallback: persist in metadata JSON
+        const meta = status.metadata || {};
+        const reactions = meta.reactions || {};
+        // Remove any previous reaction by this user across all emojis
+        for (const e of Object.keys(reactions)) {
+            reactions[e] = reactions[e].filter(id => id !== userId);
+            if (reactions[e].length === 0) delete reactions[e];
+        }
+        if (!reactions[emoji.trim()]) reactions[emoji.trim()] = [];
+        reactions[emoji.trim()].push(userId);
+        reactionCount = reactions[emoji.trim()].length;
+        await status.update({ metadata: { ...meta, reactions } }).catch(() => {});
+    }
+
+    // Real-time: notify the status owner
+    const io = req.io || (req.app && req.app.get && req.app.get('io'));
+    if (io && status.userId !== userId) {
+        io.to(`user:${status.userId}`).emit('status:reaction', {
+            statusId: +statusId,
+            reactorId: userId,
+            emoji: emoji.trim(),
+            count: reactionCount,
+        });
+    }
+
+    res.json({ success: true, data: { emoji: emoji.trim(), count: reactionCount }, message: 'Reaction added' });
+}));
+
+// ── Remove Reaction (PROTECTED)  DELETE /:statusId/react
+router.delete('/:statusId/react', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+    const userId = getUserId(req);
+    const { statusId } = req.params;
+
+    if (!statusId || isNaN(+statusId)) return res.status(400).json({ success: false, message: 'Invalid status ID' });
+
+    const StatusReaction = db.StatusReaction || db.StatusReactions;
+    if (StatusReaction) {
+        await StatusReaction.destroy({ where: { statusId: +statusId, userId } }).catch(() => {});
+    } else if (Status) {
+        const status = await Status.findByPk(statusId).catch(() => null);
+        if (status) {
+            const meta = status.metadata || {};
+            const reactions = meta.reactions || {};
+            for (const e of Object.keys(reactions)) {
+                reactions[e] = reactions[e].filter(id => id !== userId);
+                if (reactions[e].length === 0) delete reactions[e];
+            }
+            await status.update({ metadata: { ...meta, reactions } }).catch(() => {});
+        }
+    }
+
+    res.json({ success: true, message: 'Reaction removed' });
+}));
+
+// ── Get Reactions (public)  GET /:statusId/reactions
+router.get('/:statusId/reactions', apiRateLimiter, asyncHandler(async (req, res) => {
+    const { statusId } = req.params;
+    if (!statusId || isNaN(+statusId)) return res.status(400).json({ success: false, message: 'Invalid status ID' });
+
+    const StatusReaction = db.StatusReaction || db.StatusReactions;
+    let reactions = [];
+
+    if (StatusReaction) {
+        const rows = await StatusReaction.findAll({ where: { statusId: +statusId } }).catch(() => []);
+        // Group by emoji
+        const grouped = {};
+        for (const r of rows) {
+            const e = r.emoji;
+            if (!grouped[e]) grouped[e] = { emoji: e, count: 0, users: [] };
+            grouped[e].count++;
+            grouped[e].users.push(r.userId);
+        }
+        reactions = Object.values(grouped);
+    } else if (Status) {
+        const status = await Status.findByPk(statusId, { attributes: ['metadata'] }).catch(() => null);
+        const meta = status?.metadata || {};
+        const reactionMap = meta.reactions || {};
+        reactions = Object.entries(reactionMap).map(([emoji, users]) => ({ emoji, count: users.length, users }));
+    }
+
+    res.json({ success: true, data: { reactions } });
+}));
+
+// ── Reply to Status (PROTECTED)  POST /:statusId/reply  { content: "..." }
+// Replies become chat messages — NOT stored as statuses
+router.post('/:statusId/reply', authenticateToken, [
+    body('content').notEmpty().withMessage('Reply content required').isLength({ max: 1000 }),
+], apiRateLimiter, asyncHandler(async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
+
+    const senderId = getUserId(req);
+    const { statusId } = req.params;
+    const { content } = req.body;
+
+    if (!statusId || isNaN(+statusId)) return res.status(400).json({ success: false, message: 'Invalid status ID' });
+    if (!Status) return res.status(503).json({ success: false, message: 'Service unavailable' });
+
+    const status = await Status.findByPk(statusId).catch(() => null);
+    if (!status) return res.status(404).json({ success: false, message: 'Status not found' });
+
+    if (status.expiresAt && new Date(status.expiresAt) < new Date()) {
+        return res.status(410).json({ success: false, message: 'Status has expired' });
+    }
+
+    const ownerId = status.userId;
+    const statusPreview = JSON.stringify({
+        id: status.id,
+        content: (status.content || '').slice(0, 100),
+        type: status.type || 'text',
+        mediaUrl: status.mediaUrl || null,
+    });
+
+    // Find or create direct chat between sender and status owner
+    const Chat     = db.Chat     || db.Chats     || db.Conversation || db.Conversations;
+    const Message  = db.Message  || db.Messages  || db.ChatMessage  || db.ChatMessages;
+    const ChatParticipant = db.ChatParticipant || db.ChatParticipants;
+
+    if (!Message) return res.status(503).json({ success: false, message: 'Message service unavailable' });
+
+    let chatId = null;
+    if (Chat && ChatParticipant) {
+        // Find a direct chat that has BOTH users as participants
+        const { QueryTypes } = require('sequelize');
+        const rawDb = db.sequelize;
+
+        if (rawDb) {
+            const rows = await rawDb.query(
+                `SELECT c.id FROM "Chats" c
+                 JOIN "ChatParticipants" cp1 ON cp1."chatId" = c.id AND cp1."userId" = :senderId
+                 JOIN "ChatParticipants" cp2 ON cp2."chatId" = c.id AND cp2."userId" = :ownerId
+                 WHERE c.type = 'direct' LIMIT 1`,
+                { replacements: { senderId, ownerId }, type: QueryTypes.SELECT }
+            ).catch(() => []);
+            if (rows.length) chatId = rows[0].id;
+        }
+
+        if (!chatId) {
+            const newChat = await Chat.create({
+                type: 'direct', createdBy: senderId, isActive: true,
+                createdAt: new Date(), updatedAt: new Date(),
+            }).catch(() => null);
+            if (newChat) {
+                chatId = newChat.id;
+                await ChatParticipant.bulkCreate([
+                    { chatId, userId: senderId, joinedAt: new Date() },
+                    { chatId, userId: ownerId,  joinedAt: new Date() },
+                ]).catch(() => {});
+            }
+        }
+    }
+
+    const message = await Message.create({
+        chatId,
+        senderId,
+        receiverId: ownerId,
+        content: content.trim(),
+        type: 'status_reply',
+        replyToStatusId: +statusId,
+        statusPreview,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+    }).catch(e => { throw Object.assign(new Error('Failed to save reply: ' + e.message), { statusCode: 500 }); });
+
+    // Real-time: deliver to owner via socket
+    const io = req.io || (req.app && req.app.get && req.app.get('io'));
+    if (io) {
+        const payload = {
+            message: message.toJSON ? message.toJSON() : message,
+            chatId,
+            type: 'status_reply',
+            statusPreview: JSON.parse(statusPreview),
+        };
+        io.to(`user:${ownerId}`).emit('new_message',    payload);
+        io.to(`user:${ownerId}`).emit('status:reply',   payload);
+        io.to(`user:${senderId}`).emit('new_message',   payload); // sender's other tabs
+    }
+
+    res.status(201).json({
+        success: true,
+        message: 'Reply sent',
+        data: {
+            message: message.toJSON ? message.toJSON() : message,
+            chatId,
+            statusPreview: JSON.parse(statusPreview),
+        }
+    });
+}));
+
 module.exports = router;

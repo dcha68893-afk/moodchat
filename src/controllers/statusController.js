@@ -639,6 +639,107 @@ class StatusController {
       return next(new AppError('Failed to unpin status', 500));
     }
   }
+
+  /**
+   * Add emoji reaction to a status
+   * POST /api/status/:statusId/react   { emoji: "🔥" }
+   */
+  async addReaction(req, res, next) {
+    try {
+      const { statusId } = req.params;
+      const userId = req.user?.userId || req.user?.id;
+      const { emoji } = req.body;
+
+      if (!statusId) throw new AppError('Status ID is required', 400);
+      if (!emoji || typeof emoji !== 'string' || emoji.trim().length === 0) {
+        throw new AppError('emoji is required', 400);
+      }
+
+      const result = await statusService.addReaction(statusId, userId, emoji.trim());
+
+      // Notify status owner via socket
+      const io = getIO(req);
+      if (io && result.ownerId) {
+        io.to(`user:${result.ownerId}`).emit('status:reaction', {
+          statusId,
+          reactorId: userId,
+          emoji: result.emoji,
+          count: result.count,
+        });
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: 'Reaction added',
+        data: { emoji: result.emoji, count: result.count }
+      });
+    } catch (error) {
+      logger.error('[StatusController] addReaction error:', error);
+      if (error instanceof AppError) return next(error);
+      return next(new AppError('Failed to add reaction', 500));
+    }
+  }
+
+  /**
+   * Remove emoji reaction from a status
+   * DELETE /api/status/:statusId/react
+   */
+  async removeReaction(req, res, next) {
+    try {
+      const { statusId } = req.params;
+      const userId = req.user?.userId || req.user?.id;
+      if (!statusId) throw new AppError('Status ID is required', 400);
+
+      await statusService.removeReaction(statusId, userId);
+      return res.status(200).json({ success: true, message: 'Reaction removed' });
+    } catch (error) {
+      logger.error('[StatusController] removeReaction error:', error);
+      return next(new AppError('Failed to remove reaction', 500));
+    }
+  }
+
+  /**
+   * Reply to a status — creates a chat message (NOT stored as status)
+   * POST /api/status/:statusId/reply   { content: "Nice!" }
+   */
+  async replyToStatus(req, res, next) {
+    try {
+      const { statusId } = req.params;
+      const senderId = req.user?.userId || req.user?.id;
+      const { content } = req.body;
+
+      if (!statusId) throw new AppError('Status ID is required', 400);
+      if (!content || !content.trim()) throw new AppError('Reply content is required', 400);
+
+      const result = await statusService.replyToStatus(statusId, senderId, null, content.trim());
+
+      // Push message to recipient via socket
+      const io = getIO(req);
+      if (io && result.recipientId) {
+        io.to(`user:${result.recipientId}`).emit('new_message', {
+          message: result.message,
+          chatId: result.chatId,
+          type: 'status_reply',
+          statusPreview: result.statusPreview,
+        });
+      }
+
+      return res.status(201).json({
+        success: true,
+        message: 'Reply sent',
+        data: {
+          message: result.message,
+          chatId: result.chatId,
+          statusPreview: result.statusPreview,
+        }
+      });
+    } catch (error) {
+      logger.error('[StatusController] replyToStatus error:', error);
+      if (error instanceof AppError) return next(error);
+      if (error.message.includes('not found')) return next(new AppError(error.message, 404));
+      return next(new AppError('Failed to send reply', 500));
+    }
+  }
 }
 
 module.exports = new StatusController();

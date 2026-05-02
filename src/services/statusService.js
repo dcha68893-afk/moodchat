@@ -741,6 +741,175 @@ async function unpinStatus(statusId, userId) {
 }
 
 // ---------------------------------------------------------------------------
+// 19. viewStatus  — record a view, prevent duplicates, return view count + ownerId
+// ---------------------------------------------------------------------------
+async function viewStatus(statusId, viewerId) {
+    const { Status, StatusView } = getModels();
+    if (!Status) throw serverErr('Status model unavailable');
+
+    try {
+        const status = await Status.findByPk(statusId);
+        if (!status) throw notFound('Status not found');
+
+        // Owner viewing their own status — don't count but still return info
+        if (status.userId === viewerId) {
+            return { alreadyViewed: true, ownView: true, viewCount: status.viewCount || 0, ownerId: status.userId };
+        }
+
+        const expired = status.expiresAt && new Date(status.expiresAt) < new Date();
+        if (expired) throw Object.assign(new Error('Status has expired'), { statusCode: 410 });
+
+        // Check for duplicate view
+        if (StatusView) {
+            const existing = await StatusView.findOne({ where: { statusId, userId: viewerId } });
+            if (existing) {
+                return { alreadyViewed: true, viewCount: status.viewCount || 0, ownerId: status.userId };
+            }
+            await StatusView.create({ statusId, userId: viewerId, viewedAt: new Date() });
+        }
+
+        // Increment view count atomically
+        await Status.increment('viewCount', { where: { id: statusId } });
+        const updated = await Status.findByPk(statusId, { attributes: ['viewCount', 'userId'] });
+        return { alreadyViewed: false, viewCount: updated.viewCount || 0, ownerId: status.userId };
+    } catch (e) { rethrow(e, 'Failed to record view'); }
+}
+
+// ---------------------------------------------------------------------------
+// 20. addReaction  — emoji reaction, prevent duplicates, return reaction + count
+// ---------------------------------------------------------------------------
+async function addReaction(statusId, userId, emoji) {
+    const { Status } = getModels();
+    if (!Status) throw serverErr('Status model unavailable');
+
+    try {
+        const db = require('../models');
+        const StatusReaction = db.StatusReaction || db.StatusReactions;
+
+        const status = await Status.findByPk(statusId);
+        if (!status) throw notFound('Status not found');
+        if (!(await canView(status, userId))) throw forbidden('Not authorized');
+
+        if (StatusReaction) {
+            // Remove previous reaction from this user on this status (one reaction per user)
+            await StatusReaction.destroy({ where: { statusId, userId } });
+            // Insert new reaction
+            const reaction = await StatusReaction.create({ statusId, userId, emoji, createdAt: new Date() });
+            const count = await StatusReaction.count({ where: { statusId, emoji } });
+            return { success: true, reaction, emoji, count, ownerId: status.userId };
+        }
+
+        // Fallback: store in metadata if no model exists
+        const meta = status.metadata || {};
+        const reactions = meta.reactions || {};
+        if (!reactions[emoji]) reactions[emoji] = [];
+        if (!reactions[emoji].includes(userId)) reactions[emoji].push(userId);
+        await status.update({ metadata: { ...meta, reactions } });
+        return { success: true, emoji, count: reactions[emoji].length, ownerId: status.userId };
+    } catch (e) { rethrow(e, 'Failed to add reaction'); }
+}
+
+// ---------------------------------------------------------------------------
+// 21. removeReaction  — remove user's emoji reaction
+// ---------------------------------------------------------------------------
+async function removeReaction(statusId, userId) {
+    const db = require('../models');
+    const StatusReaction = db.StatusReaction || db.StatusReactions;
+    if (StatusReaction) {
+        await StatusReaction.destroy({ where: { statusId, userId } }).catch(() => {});
+    }
+    return { success: true };
+}
+
+// ---------------------------------------------------------------------------
+// 22. replyToStatus  — creates a chat message linked to the status (NOT stored as status)
+// ---------------------------------------------------------------------------
+async function replyToStatus(statusId, senderId, recipientId, replyText) {
+    const db = require('../models');
+    const { Status } = getModels();
+    const Chat = db.Chat || db.Chats || db.Conversation || db.Conversations;
+    const Message = db.Message || db.Messages || db.ChatMessage || db.ChatMessages;
+
+    if (!Status) throw serverErr('Status model unavailable');
+    if (!Message) throw serverErr('Message model unavailable');
+
+    try {
+        const status = await Status.findByPk(statusId);
+        if (!status) throw notFound('Status not found');
+
+        const ownerId = status.userId;
+
+        // Find or create a direct chat between sender and status owner
+        let chat = null;
+        if (Chat) {
+            chat = await Chat.findOne({
+                where: {
+                    type: 'direct',
+                    [Op.or]: [
+                        { createdBy: senderId },
+                        { createdBy: ownerId }
+                    ]
+                },
+                include: Chat.associations?.chatParticipants
+                    ? [{ association: Chat.associations.chatParticipants, where: { userId: [senderId, ownerId] } }]
+                    : []
+            });
+
+            if (!chat) {
+                // Simple fallback: find any chat that has both users as participants
+                const allChats = await Chat.findAll({ where: { type: 'direct' } });
+                // We'll just create a new one if none found via a simpler lookup
+                chat = await Chat.create({
+                    type: 'direct',
+                    createdBy: senderId,
+                    isActive: true,
+                    createdAt: new Date(),
+                    updatedAt: new Date(),
+                });
+                // Add participants if model exists
+                const ChatParticipant = db.ChatParticipant || db.ChatParticipants;
+                if (ChatParticipant) {
+                    await ChatParticipant.bulkCreate([
+                        { chatId: chat.id, userId: senderId, joinedAt: new Date() },
+                        { chatId: chat.id, userId: ownerId, joinedAt: new Date() },
+                    ]);
+                }
+            }
+        }
+
+        // Create the message with status reference
+        const message = await Message.create({
+            chatId: chat ? chat.id : null,
+            senderId,
+            receiverId: ownerId,
+            content: replyText,
+            type: 'status_reply',
+            replyToStatusId: statusId,
+            statusPreview: JSON.stringify({
+                id: status.id,
+                content: status.content || '',
+                type: status.type || 'text',
+                mediaUrl: status.mediaUrl || null,
+            }),
+            createdAt: new Date(),
+            updatedAt: new Date(),
+        });
+
+        return {
+            success: true,
+            message,
+            chatId: chat ? chat.id : null,
+            recipientId: ownerId,
+            statusPreview: {
+                id: status.id,
+                content: status.content || '',
+                type: status.type || 'text',
+            }
+        };
+    } catch (e) { rethrow(e, 'Failed to send status reply'); }
+}
+
+// ---------------------------------------------------------------------------
 module.exports = {
     createStatus,
     getStatusById,
@@ -749,7 +918,7 @@ module.exports = {
     getUserStatuses,
     getTimeline,
     getFriendsStatuses,
-    getAcceptedFriendIds,   // used by statusController for friend-targeted socket emit
+    getAcceptedFriendIds,
     likeStatus,
     unlikeStatus,
     commentOnStatus,
@@ -761,4 +930,8 @@ module.exports = {
     getTrendingStatuses,
     pinStatus,
     unpinStatus,
+    viewStatus,
+    addReaction,
+    removeReaction,
+    replyToStatus,
 };

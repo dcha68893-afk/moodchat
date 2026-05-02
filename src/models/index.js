@@ -117,7 +117,9 @@ const MODEL_WHITELIST = [
   'Users', 'Token', 'Profile', 'Settings', 'Chats', 'ChatParticipant',
   'Messages', 'GroupMembers', 'TypingIndicator', 'UserStatus', 'ReadReceipt',
   'SharedMood', 'Notification', 'Friend', 'Calls', 'Groups', 'Media', 'Mood',
-  'Status', 'Category', 'Template', 'Notes', 'File', 'Features'
+  'Status', 'Category', 'Template', 'Notes', 'File', 'Features',
+  // ── Marketplace models ──────────────────────────────────────────────────────
+  'Tool', 'Order', 'Review'
 ];
 
 // CRITICAL: Patterns that indicate NON-MODEL files
@@ -308,7 +310,9 @@ async function createMissingTables() {
     'Users', 'Token', 'Tokens', 'Friends', 'Friend', 'Chats', 'Chat',
     'Messages', 'Message', 'Groups', 'Group', 'GroupMembers', 'GroupMember',
     'Settings', 'Profile', 'Notifications', 'Notification', 'Media',
-    'Calls', 'Call', 'UserStatus', 'TypingIndicator', 'ReadReceipt'
+    'Calls', 'Call', 'UserStatus', 'TypingIndicator', 'ReadReceipt',
+    // ── Marketplace ───────────────────────────────────────────────────────────
+    'tools', 'marketplace_orders', 'marketplace_reviews'
   ];
   
   const missingTables = [];
@@ -501,6 +505,65 @@ async function addMissingColumns() {
       { name: 'auto_download', type: Sequelize.BOOLEAN, defaultValue: false, allowNull: false },
       { name: 'privacy', type: Sequelize.JSONB, defaultValue: {}, allowNull: false },
       { name: 'chat_preferences', type: Sequelize.JSONB, defaultValue: {}, allowNull: false }
+    ],
+    // ── Marketplace: tools (listings) ─────────────────────────────────────────
+    'tools': [
+      { name: 'seller_id', type: Sequelize.UUID, allowNull: false },
+      { name: 'title', type: Sequelize.STRING(255), allowNull: false },
+      { name: 'description', type: Sequelize.TEXT, allowNull: true },
+      { name: 'price', type: Sequelize.DECIMAL(10, 2), defaultValue: 0, allowNull: false },
+      { name: 'category', type: Sequelize.STRING(100), defaultValue: 'other', allowNull: false },
+      { name: 'type', type: Sequelize.STRING(50), defaultValue: 'physical', allowNull: false },
+      { name: 'images', type: Sequelize.ARRAY(Sequelize.TEXT), defaultValue: [], allowNull: true },
+      { name: 'tags', type: Sequelize.ARRAY(Sequelize.STRING), defaultValue: [], allowNull: true },
+      { name: 'available', type: Sequelize.BOOLEAN, defaultValue: true, allowNull: false },
+      { name: 'is_premium', type: Sequelize.BOOLEAN, defaultValue: false, allowNull: false },
+      { name: 'is_spotlight', type: Sequelize.BOOLEAN, defaultValue: false, allowNull: false },
+      { name: 'is_featured', type: Sequelize.BOOLEAN, defaultValue: false, allowNull: false },
+      { name: 'is_boosted', type: Sequelize.BOOLEAN, defaultValue: false, allowNull: false },
+      { name: 'boost_expires_at', type: Sequelize.DATE, allowNull: true },
+      { name: 'views', type: Sequelize.INTEGER, defaultValue: 0, allowNull: false },
+      { name: 'saved_by', type: Sequelize.ARRAY(Sequelize.UUID), defaultValue: [], allowNull: true },
+      { name: 'purchased_by', type: Sequelize.ARRAY(Sequelize.UUID), defaultValue: [], allowNull: true },
+      { name: 'rating', type: Sequelize.DECIMAL(3, 2), defaultValue: 0, allowNull: false },
+      { name: 'rating_count', type: Sequelize.INTEGER, defaultValue: 0, allowNull: false },
+      { name: 'status', type: Sequelize.STRING(20), defaultValue: 'active', allowNull: false },
+      { name: 'currency', type: Sequelize.STRING(10), defaultValue: 'KES', allowNull: true },
+      { name: 'stock', type: Sequelize.INTEGER, allowNull: true },
+      { name: 'metadata', type: Sequelize.JSONB, defaultValue: {}, allowNull: true }
+    ],
+    // ── Marketplace: orders ───────────────────────────────────────────────────
+    'marketplace_orders': [
+      { name: 'product_id', type: Sequelize.UUID, allowNull: false },
+      { name: 'buyer_id', type: Sequelize.UUID, allowNull: false },
+      { name: 'seller_id', type: Sequelize.UUID, allowNull: false },
+      { name: 'status', type: Sequelize.STRING(20), defaultValue: 'pending', allowNull: false },
+      { name: 'quantity', type: Sequelize.INTEGER, defaultValue: 1, allowNull: false },
+      { name: 'total_price', type: Sequelize.DECIMAL(10, 2), allowNull: false },
+      { name: 'currency', type: Sequelize.STRING(10), defaultValue: 'KES', allowNull: true },
+      { name: 'payment_method', type: Sequelize.STRING(50), allowNull: true },
+      { name: 'payment_ref', type: Sequelize.STRING(255), allowNull: true },
+      { name: 'paid_at', type: Sequelize.DATE, allowNull: true },
+      { name: 'shipped_at', type: Sequelize.DATE, allowNull: true },
+      { name: 'delivered_at', type: Sequelize.DATE, allowNull: true },
+      { name: 'delivery_address', type: Sequelize.JSONB, defaultValue: {}, allowNull: true },
+      { name: 'tracking_number', type: Sequelize.STRING(255), allowNull: true },
+      { name: 'notes', type: Sequelize.TEXT, allowNull: true },
+      { name: 'metadata', type: Sequelize.JSONB, defaultValue: {}, allowNull: true }
+    ],
+    // ── Marketplace: reviews ──────────────────────────────────────────────────
+    'marketplace_reviews': [
+      { name: 'product_id', type: Sequelize.UUID, allowNull: false },
+      { name: 'order_id', type: Sequelize.UUID, allowNull: true },
+      { name: 'user_id', type: Sequelize.UUID, allowNull: false },
+      { name: 'seller_id', type: Sequelize.UUID, allowNull: false },
+      { name: 'rating', type: Sequelize.INTEGER, allowNull: false },
+      { name: 'comment', type: Sequelize.TEXT, allowNull: true },
+      { name: 'images', type: Sequelize.ARRAY(Sequelize.TEXT), defaultValue: [], allowNull: true },
+      { name: 'is_verified_purchase', type: Sequelize.BOOLEAN, defaultValue: false, allowNull: false },
+      { name: 'helpful_count', type: Sequelize.INTEGER, defaultValue: 0, allowNull: false },
+      { name: 'seller_reply', type: Sequelize.TEXT, allowNull: true },
+      { name: 'seller_replied_at', type: Sequelize.DATE, allowNull: true }
     ]
   };
   
@@ -769,6 +832,95 @@ async function runFullMigration() {
       console.error('[Migration] ❌ Tokens table is STILL missing - CRITICAL ERROR!');
       hasErrors = true;
     }
+
+    // STEP 6: Ensure marketplace tables exist (non-destructive raw SQL)
+    console.log('[Migration] STEP 6: Ensuring marketplace tables exist...');
+    try {
+      await sequelize.query(`
+        CREATE TABLE IF NOT EXISTS "tools" (
+          "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          "seller_id" UUID NOT NULL,
+          "title" VARCHAR(255) NOT NULL,
+          "description" TEXT,
+          "price" DECIMAL(10,2) NOT NULL DEFAULT 0,
+          "category" VARCHAR(100) NOT NULL DEFAULT 'other',
+          "type" VARCHAR(50) NOT NULL DEFAULT 'physical',
+          "images" TEXT[] DEFAULT '{}',
+          "tags" VARCHAR[] DEFAULT '{}',
+          "available" BOOLEAN NOT NULL DEFAULT true,
+          "is_premium" BOOLEAN NOT NULL DEFAULT false,
+          "is_spotlight" BOOLEAN NOT NULL DEFAULT false,
+          "is_featured" BOOLEAN NOT NULL DEFAULT false,
+          "is_boosted" BOOLEAN NOT NULL DEFAULT false,
+          "boost_expires_at" TIMESTAMPTZ,
+          "views" INTEGER NOT NULL DEFAULT 0,
+          "saved_by" UUID[] DEFAULT '{}',
+          "purchased_by" UUID[] DEFAULT '{}',
+          "rating" DECIMAL(3,2) NOT NULL DEFAULT 0,
+          "rating_count" INTEGER NOT NULL DEFAULT 0,
+          "status" VARCHAR(20) NOT NULL DEFAULT 'active',
+          "currency" VARCHAR(10) DEFAULT 'KES',
+          "stock" INTEGER,
+          "metadata" JSONB DEFAULT '{}',
+          "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_tools_seller  ON "tools" ("seller_id");
+        CREATE INDEX IF NOT EXISTS idx_tools_status  ON "tools" ("status");
+        CREATE INDEX IF NOT EXISTS idx_tools_category ON "tools" ("category");
+
+        CREATE TABLE IF NOT EXISTS "marketplace_orders" (
+          "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          "product_id" UUID NOT NULL,
+          "buyer_id" UUID NOT NULL,
+          "seller_id" UUID NOT NULL,
+          "status" VARCHAR(20) NOT NULL DEFAULT 'pending'
+            CHECK ("status" IN ('pending','paid','shipped','delivered','cancelled','refunded')),
+          "quantity" INTEGER NOT NULL DEFAULT 1 CHECK ("quantity" >= 1),
+          "total_price" DECIMAL(10,2) NOT NULL CHECK ("total_price" >= 0),
+          "currency" VARCHAR(10) DEFAULT 'KES',
+          "payment_method" VARCHAR(50),
+          "payment_ref" VARCHAR(255),
+          "paid_at" TIMESTAMPTZ,
+          "shipped_at" TIMESTAMPTZ,
+          "delivered_at" TIMESTAMPTZ,
+          "delivery_address" JSONB DEFAULT '{}',
+          "tracking_number" VARCHAR(255),
+          "notes" TEXT,
+          "metadata" JSONB DEFAULT '{}',
+          "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_orders_buyer   ON "marketplace_orders" ("buyer_id");
+        CREATE INDEX IF NOT EXISTS idx_orders_seller  ON "marketplace_orders" ("seller_id");
+        CREATE INDEX IF NOT EXISTS idx_orders_product ON "marketplace_orders" ("product_id");
+        CREATE INDEX IF NOT EXISTS idx_orders_status  ON "marketplace_orders" ("status");
+
+        CREATE TABLE IF NOT EXISTS "marketplace_reviews" (
+          "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          "product_id" UUID NOT NULL,
+          "order_id" UUID,
+          "user_id" UUID NOT NULL,
+          "seller_id" UUID NOT NULL,
+          "rating" INTEGER NOT NULL CHECK ("rating" BETWEEN 1 AND 5),
+          "comment" TEXT,
+          "images" TEXT[] DEFAULT '{}',
+          "is_verified_purchase" BOOLEAN NOT NULL DEFAULT false,
+          "helpful_count" INTEGER NOT NULL DEFAULT 0,
+          "seller_reply" TEXT,
+          "seller_replied_at" TIMESTAMPTZ,
+          "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          CONSTRAINT unique_review_per_user_product UNIQUE ("product_id", "user_id")
+        );
+        CREATE INDEX IF NOT EXISTS idx_reviews_product ON "marketplace_reviews" ("product_id");
+        CREATE INDEX IF NOT EXISTS idx_reviews_user    ON "marketplace_reviews" ("user_id");
+        CREATE INDEX IF NOT EXISTS idx_reviews_seller  ON "marketplace_reviews" ("seller_id");
+      `);
+      console.log('[Migration] ✅ Marketplace tables (tools, marketplace_orders, marketplace_reviews) ensured');
+    } catch (mpErr) {
+      console.error('[Migration] ⚠️ Marketplace table creation error (non-fatal):', mpErr.message);
+    }
     
     console.log('\n[Migration] ===== MIGRATION COMPLETE =====\n');
     
@@ -820,6 +972,10 @@ const hasChatModel = !!(db.models.Chats);
 const hasMessageModel = !!(db.models.Messages);
 const hasChatParticipantModel = !!(db.models.ChatParticipant);
 const hasTokenModel = !!(db.models.Token || db.models.Tokens);
+// ── Marketplace model flags ──────────────────────────────────────────────────
+const hasToolModel    = !!(db.models.Tool);
+const hasOrderModel   = !!(db.models.Order);
+const hasReviewModel  = !!(db.models.Review);
 
 if (!hasUserModel) {
   console.error('[Database] ❌ CRITICAL: User model not found!');
@@ -850,6 +1006,25 @@ if (!hasMessageModel) {
   console.warn('[Database] ⚠️ Messages model not found - messaging features may be limited');
 } else {
   console.log('[Database] ✅ Messages model loaded successfully');
+}
+
+// ── Marketplace model validation ─────────────────────────────────────────────
+if (!hasToolModel) {
+  console.warn('[Database] ⚠️ Tool model not found - marketplace listings unavailable');
+} else {
+  console.log('[Database] ✅ Tool model loaded (marketplace listings)');
+}
+
+if (!hasOrderModel) {
+  console.warn('[Database] ⚠️ Order model not found - marketplace orders unavailable');
+} else {
+  console.log('[Database] ✅ Order model loaded (marketplace orders)');
+}
+
+if (!hasReviewModel) {
+  console.warn('[Database] ⚠️ Review model not found - marketplace reviews unavailable');
+} else {
+  console.log('[Database] ✅ Review model loaded (marketplace reviews)');
 }
 
 console.log(`[Database] Total models loaded: ${Object.keys(db.models).length}`);
@@ -1082,5 +1257,18 @@ module.exports = {
   get ReadReceipt() { return db.models.ReadReceipt || null; },
   get SharedMood() { return db.models.SharedMood || null; },
   get TypingIndicator() { return db.models.TypingIndicator || null; },
-  getUserStatus() { return db.models.UserStatus || null; }
+  getUserStatus() { return db.models.UserStatus || null; },
+  // ── Marketplace models ────────────────────────────────────────────────────
+  get Tool()   { return db.models.Tool   || null; },
+  get Order()  { return db.models.Order  || null; },
+  get Review() { return db.models.Review || null; },
+  // ── Marketplace operational status ───────────────────────────────────────
+  getMarketplaceStatus() {
+    return {
+      toolModel:   !!(db.models.Tool),
+      orderModel:  !!(db.models.Order),
+      reviewModel: !!(db.models.Review),
+      operational: !!(db.models.Tool && db.models.Order && db.models.Review),
+    };
+  }
 };

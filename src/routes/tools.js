@@ -193,6 +193,24 @@ router.get('/marketplace/leaderboard',apiRateLimiter, toolsController.getLeaderb
 router.post('/marketplace/tips',      apiRateLimiter, toolsController.sendTip.bind(toolsController));
 router.get('/marketplace/stats',      apiRateLimiter, toolsController.getMarketplaceStats.bind(toolsController));
 
+// ── Orders ────────────────────────────────────────────────────────────────────
+router.get('/marketplace/orders/mine',               apiRateLimiter, toolsController.getMyOrders.bind(toolsController));
+router.get('/marketplace/orders/selling',            apiRateLimiter, toolsController.getSellerOrders.bind(toolsController));
+router.get('/marketplace/orders/:orderId',           apiRateLimiter, toolsController.getOrder.bind(toolsController));
+router.post('/marketplace/orders',                   apiRateLimiter, toolsController.placeOrder.bind(toolsController));
+router.patch('/marketplace/orders/:orderId/status',  apiRateLimiter, toolsController.updateOrderStatus.bind(toolsController));
+router.post('/marketplace/orders/:orderId/cancel',   apiRateLimiter, toolsController.cancelOrder.bind(toolsController));
+
+// ── Reviews ───────────────────────────────────────────────────────────────────
+router.get('/marketplace/listings/:listingId/reviews',  apiRateLimiter, toolsController.getReviews.bind(toolsController));
+router.post('/marketplace/listings/:listingId/reviews', apiRateLimiter, toolsController.createReview.bind(toolsController));
+router.patch('/marketplace/reviews/:reviewId/reply',    apiRateLimiter, toolsController.replyToReview.bind(toolsController));
+router.post('/marketplace/reviews/:reviewId/helpful',   apiRateLimiter, toolsController.markReviewHelpful.bind(toolsController));
+
+// ── Seller Profile ────────────────────────────────────────────────────────────
+router.get('/marketplace/seller/:sellerId',          apiRateLimiter, toolsController.getSellerProfile.bind(toolsController));
+router.get('/marketplace/seller/:sellerId/listings', apiRateLimiter, toolsController.getSellerListings.bind(toolsController));
+
 // ═════════════════════════════════════════════════════════════════════════════
 // PREMIUM / PAYMENTS
 // ═════════════════════════════════════════════════════════════════════════════

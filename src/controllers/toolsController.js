@@ -929,6 +929,381 @@ class ToolsController {
         } catch (e) { logger.error('[M-Pesa] Callback error:', e); }
         return res.status(200).json({ ResultCode: 0, ResultDesc: 'Accepted' });
     }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // ORDERS
+    // ══════════════════════════════════════════════════════════════════════════
+
+    async placeOrder(req, res, next) {
+        try {
+            const { productId, quantity = 1, deliveryAddress = {}, notes, paymentMethod } = req.body;
+            if (!productId) return res.status(400).json({ success: false, message: 'productId is required' });
+
+            const db      = require('../models');
+            const listing = await db.Tool.findByPk(productId);
+            if (!listing || !listing.available || listing.status !== 'active') {
+                return res.status(404).json({ success: false, message: 'Product not available' });
+            }
+            if (listing.sellerId === req.user.id) {
+                return res.status(400).json({ success: false, message: 'You cannot order your own listing' });
+            }
+
+            // Prevent duplicate active orders
+            if (db.Order) {
+                const { Op } = require('sequelize');
+                const duplicate = await db.Order.findOne({
+                    where: { buyerId: req.user.id, productId, status: { [Op.in]: ['pending', 'paid', 'shipped'] } },
+                });
+                if (duplicate) {
+                    return res.status(409).json({ success: false, message: 'You already have an active order for this item' });
+                }
+            }
+
+            const totalPrice = parseFloat(listing.price) * parseInt(quantity);
+            const order = await db.Order.create({
+                productId,
+                buyerId:         req.user.id,
+                sellerId:        listing.sellerId,
+                quantity:        parseInt(quantity),
+                totalPrice,
+                currency:        listing.currency || 'KES',
+                paymentMethod:   paymentMethod || null,
+                deliveryAddress: deliveryAddress || {},
+                notes:           notes || null,
+                status:          'pending',
+            });
+
+            const orderData = order.toJSON ? order.toJSON() : { ...order };
+            orderData.product = { id: listing.id, title: listing.title, images: listing.images, price: listing.price, type: listing.type };
+
+            const io = req.app.get('io') || global.__IO__;
+            if (io) {
+                io.to(`user:${listing.sellerId}`).emit('ORDER_RECEIVED', { type: 'ORDER_RECEIVED', order: orderData });
+                io.to(`user:${req.user.id}`).emit('ORDER_PLACED', { type: 'ORDER_PLACED', order: orderData });
+            }
+
+            return ok(res, { order: orderData }, 'Order placed successfully', 201);
+        } catch (e) { _next(next, e, 'placeOrder'); }
+    }
+
+    async getMyOrders(req, res, next) {
+        try {
+            const { status } = req.query;
+            const db = require('../models');
+            const { Op } = require('sequelize');
+            const where = { buyerId: req.user.id };
+            if (status) where.status = status;
+            const orders = await db.Order.findAll({
+                where,
+                order: [['createdAt', 'DESC']],
+                include: db.Order.associations?.product
+                    ? [{ association: db.Order.associations.product, attributes: ['id', 'title', 'images', 'price', 'type', 'currency'] }]
+                    : [],
+            });
+            return ok(res, { orders, total: orders.length }, 'Orders retrieved');
+        } catch (e) { _next(next, e, 'getMyOrders'); }
+    }
+
+    async getSellerOrders(req, res, next) {
+        try {
+            const { status } = req.query;
+            const db = require('../models');
+            const where = { sellerId: req.user.id };
+            if (status) where.status = status;
+            const orders = await db.Order.findAll({
+                where,
+                order: [['createdAt', 'DESC']],
+                include: db.Order.associations?.product
+                    ? [{ association: db.Order.associations.product, attributes: ['id', 'title', 'images', 'price', 'type', 'currency'] }]
+                    : [],
+            });
+            return ok(res, { orders, total: orders.length }, 'Seller orders retrieved');
+        } catch (e) { _next(next, e, 'getSellerOrders'); }
+    }
+
+    async getOrder(req, res, next) {
+        try {
+            const { orderId } = req.params;
+            const db    = require('../models');
+            const order = await db.Order.findByPk(orderId, {
+                include: db.Order.associations?.product
+                    ? [{ association: db.Order.associations.product }]
+                    : [],
+            });
+            if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+            if (order.buyerId !== req.user.id && order.sellerId !== req.user.id) {
+                return res.status(403).json({ success: false, message: 'Access denied' });
+            }
+            return ok(res, { order }, 'Order retrieved');
+        } catch (e) { _next(next, e, 'getOrder'); }
+    }
+
+    async updateOrderStatus(req, res, next) {
+        try {
+            const { orderId } = req.params;
+            const { status, trackingNumber, notes } = req.body;
+            if (!status) return res.status(400).json({ success: false, message: 'status is required' });
+
+            const db    = require('../models');
+            const order = await db.Order.findByPk(orderId);
+            if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+            if (order.sellerId !== req.user.id && order.buyerId !== req.user.id) {
+                return res.status(403).json({ success: false, message: 'Access denied' });
+            }
+
+            const transitions = {
+                pending: ['paid', 'cancelled'],
+                paid: ['shipped', 'cancelled', 'refunded'],
+                shipped: ['delivered'],
+                delivered: ['refunded'],
+                cancelled: [],
+                refunded: [],
+            };
+            if (!(transitions[order.status] || []).includes(status)) {
+                return res.status(400).json({ success: false, message: `Cannot move order from '${order.status}' to '${status}'` });
+            }
+
+            const now = new Date();
+            order.status = status;
+            if (status === 'paid')      order.paidAt      = now;
+            if (status === 'shipped')   order.shippedAt   = now;
+            if (status === 'delivered') order.deliveredAt = now;
+            if (trackingNumber)         order.trackingNumber = trackingNumber;
+            if (notes)                  order.notes = notes;
+            await order.save();
+
+            const io = req.app.get('io') || global.__IO__;
+            if (io) {
+                const evt = { type: 'ORDER_STATUS_UPDATED', orderId: order.id, status: order.status };
+                io.to(`user:${order.buyerId}`).emit('ORDER_STATUS_UPDATED', evt);
+                io.to(`user:${order.sellerId}`).emit('ORDER_STATUS_UPDATED', evt);
+            }
+
+            return ok(res, { order }, `Order updated to ${status}`);
+        } catch (e) { _next(next, e, 'updateOrderStatus'); }
+    }
+
+    async cancelOrder(req, res, next) {
+        try {
+            const { orderId } = req.params;
+            const db    = require('../models');
+            const order = await db.Order.findByPk(orderId);
+            if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+            if (order.buyerId !== req.user.id && order.sellerId !== req.user.id) {
+                return res.status(403).json({ success: false, message: 'Access denied' });
+            }
+            if (!['pending', 'paid'].includes(order.status)) {
+                return res.status(400).json({ success: false, message: `Cannot cancel an order with status '${order.status}'` });
+            }
+            order.status = 'cancelled';
+            order.notes  = req.body.reason || 'Cancelled by user';
+            await order.save();
+
+            const io = req.app.get('io') || global.__IO__;
+            if (io) {
+                const evt = { type: 'ORDER_STATUS_UPDATED', orderId: order.id, status: 'cancelled' };
+                io.to(`user:${order.buyerId}`).emit('ORDER_STATUS_UPDATED', evt);
+                io.to(`user:${order.sellerId}`).emit('ORDER_STATUS_UPDATED', evt);
+            }
+
+            return ok(res, { order }, 'Order cancelled');
+        } catch (e) { _next(next, e, 'cancelOrder'); }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // REVIEWS
+    // ══════════════════════════════════════════════════════════════════════════
+
+    async getReviews(req, res, next) {
+        try {
+            const { listingId } = req.params;
+            const { page = 1, limit = 10 } = req.query;
+            const db     = require('../models');
+            const { Op } = require('sequelize');
+            const offset = (parseInt(page) - 1) * parseInt(limit);
+
+            const { count, rows } = await db.Review.findAndCountAll({
+                where:  { productId: listingId },
+                order:  [['createdAt', 'DESC']],
+                limit:  parseInt(limit),
+                offset,
+                include: db.Review.associations?.reviewer
+                    ? [{ association: db.Review.associations.reviewer, attributes: ['id', 'username', 'avatar', 'displayName'] }]
+                    : [],
+            });
+
+            const avgRating = rows.length
+                ? rows.reduce((s, r) => s + r.rating, 0) / rows.length
+                : 0;
+
+            return ok(res, {
+                reviews:    rows,
+                total:      count,
+                page:       parseInt(page),
+                limit:      parseInt(limit),
+                totalPages: Math.ceil(count / parseInt(limit)),
+                avgRating:  Math.round(avgRating * 10) / 10,
+            }, 'Reviews retrieved');
+        } catch (e) { _next(next, e, 'getReviews'); }
+    }
+
+    async createReview(req, res, next) {
+        try {
+            const { listingId }                      = req.params;
+            const { rating, comment, orderId, images } = req.body;
+
+            if (!rating || rating < 1 || rating > 5) {
+                return res.status(400).json({ success: false, message: 'Rating must be between 1 and 5' });
+            }
+
+            const db      = require('../models');
+            const listing = await db.Tool.findByPk(listingId);
+            if (!listing) return res.status(404).json({ success: false, message: 'Listing not found' });
+
+            // One review per user per product
+            const alreadyReviewed = await db.Review.findOne({ where: { userId: req.user.id, productId: listingId } });
+            if (alreadyReviewed) {
+                return res.status(409).json({ success: false, message: 'You have already reviewed this product' });
+            }
+
+            // Verify purchase
+            let isVerifiedPurchase = false;
+            if (orderId && db.Order) {
+                const order = await db.Order.findOne({
+                    where: { id: orderId, buyerId: req.user.id, productId: listingId, status: 'delivered' },
+                });
+                isVerifiedPurchase = !!order;
+            }
+
+            const review = await db.Review.create({
+                productId:          listingId,
+                userId:             req.user.id,
+                sellerId:           listing.sellerId,
+                orderId:            orderId || null,
+                rating:             parseInt(rating),
+                comment:            comment || null,
+                images:             images || [],
+                isVerifiedPurchase,
+            });
+
+            // Update listing aggregate rating
+            const total   = (parseFloat(listing.rating) || 0) * (listing.ratingCount || 0) + parseInt(rating);
+            listing.ratingCount = (listing.ratingCount || 0) + 1;
+            listing.rating      = total / listing.ratingCount;
+            await listing.save();
+
+            const io = req.app.get('io') || global.__IO__;
+            if (io) {
+                io.to(`user:${listing.sellerId}`).emit('NEW_REVIEW', {
+                    type: 'NEW_REVIEW',
+                    review: review.toJSON ? review.toJSON() : review,
+                    productId: listingId,
+                });
+            }
+
+            return ok(res, { review }, 'Review submitted', 201);
+        } catch (e) {
+            if (e.name === 'SequelizeUniqueConstraintError') {
+                return res.status(409).json({ success: false, message: 'You have already reviewed this product' });
+            }
+            _next(next, e, 'createReview');
+        }
+    }
+
+    async replyToReview(req, res, next) {
+        try {
+            const { reviewId } = req.params;
+            const { reply }    = req.body;
+            if (!reply) return res.status(400).json({ success: false, message: 'reply text is required' });
+
+            const db     = require('../models');
+            const review = await db.Review.findByPk(reviewId);
+            if (!review) return res.status(404).json({ success: false, message: 'Review not found' });
+            if (review.sellerId !== req.user.id) {
+                return res.status(403).json({ success: false, message: 'Only the seller can reply to this review' });
+            }
+
+            review.sellerReply     = reply;
+            review.sellerRepliedAt = new Date();
+            await review.save();
+
+            return ok(res, { review }, 'Reply added');
+        } catch (e) { _next(next, e, 'replyToReview'); }
+    }
+
+    async markReviewHelpful(req, res, next) {
+        try {
+            const { reviewId } = req.params;
+            const db     = require('../models');
+            const review = await db.Review.findByPk(reviewId);
+            if (!review) return res.status(404).json({ success: false, message: 'Review not found' });
+            review.helpfulCount = (review.helpfulCount || 0) + 1;
+            await review.save();
+            return ok(res, { helpfulCount: review.helpfulCount }, 'Marked helpful');
+        } catch (e) { _next(next, e, 'markReviewHelpful'); }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // SELLER PROFILE
+    // ══════════════════════════════════════════════════════════════════════════
+
+    async getSellerProfile(req, res, next) {
+        try {
+            const { sellerId } = req.params;
+            const db = require('../models');
+
+            const [listingsResult, reviewsResult, sellerResult] = await Promise.allSettled([
+                db.Tool.findAll({
+                    where: { sellerId, status: 'active', available: true },
+                    order: [['createdAt', 'DESC']],
+                    limit: 6,
+                }),
+                db.Review ? db.Review.findAll({ where: { sellerId }, attributes: ['rating'] }) : Promise.resolve([]),
+                db.Users  ? db.Users.findByPk(sellerId, { attributes: ['id', 'username', 'displayName', 'avatar', 'createdAt'] }) : Promise.resolve(null),
+            ]);
+
+            const listings   = listingsResult.value   || [];
+            const reviews    = reviewsResult.value    || [];
+            const sellerRow  = sellerResult.value     || null;
+
+            const avgRating = reviews.length
+                ? (reviews.reduce((s, r) => s + r.rating, 0) / reviews.length).toFixed(1)
+                : 0;
+
+            return ok(res, {
+                seller: sellerRow
+                    ? { id: sellerRow.id, name: sellerRow.displayName || sellerRow.username, avatar: sellerRow.avatar, joinedAt: sellerRow.createdAt }
+                    : { id: sellerId, name: 'Seller', avatar: null, joinedAt: null },
+                listings,
+                stats: {
+                    listingCount: listings.length,
+                    reviewCount:  reviews.length,
+                    avgRating:    parseFloat(avgRating),
+                },
+            }, 'Seller profile retrieved');
+        } catch (e) { _next(next, e, 'getSellerProfile'); }
+    }
+
+    async getSellerListings(req, res, next) {
+        try {
+            const { sellerId }        = req.params;
+            const { page = 1, limit = 20 } = req.query;
+            const db     = require('../models');
+            const offset = (parseInt(page) - 1) * parseInt(limit);
+            const { count, rows } = await db.Tool.findAndCountAll({
+                where:  { sellerId, status: 'active', available: true },
+                order:  [['createdAt', 'DESC']],
+                limit:  parseInt(limit),
+                offset,
+            });
+            return ok(res, {
+                listings:   rows,
+                total:      count,
+                page:       parseInt(page),
+                totalPages: Math.ceil(count / parseInt(limit)),
+            }, 'Seller listings retrieved');
+        } catch (e) { _next(next, e, 'getSellerListings'); }
+    }
 }
 
 module.exports = new ToolsController();

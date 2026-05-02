@@ -814,6 +814,17 @@ module.exports = (sequelize, DataTypes) => {
         onUpdate: 'CASCADE',
       });
     }
+
+    if (models.StatusReaction || models.StatusReactions) {
+      const ReactModel = models.StatusReaction || models.StatusReactions;
+      Status.hasMany(ReactModel, {
+        foreignKey: 'statusId',
+        as: 'statusReactions',
+        constraints: false,
+        onDelete: 'CASCADE',
+        onUpdate: 'CASCADE',
+      });
+    }
   };
 
   return Status;

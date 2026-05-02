@@ -1,4 +1,38 @@
 // --- MODEL: Tool.js (Marketplace Listings) ---
+// ─────────────────────────────────────────────────────────────────────────────
+// MIGRATION: Run once to create Order + Review tables
+// ─────────────────────────────────────────────────────────────────────────────
+// CREATE TABLE IF NOT EXISTS marketplace_orders (
+//   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+//   product_id UUID NOT NULL, buyer_id UUID NOT NULL, seller_id UUID NOT NULL,
+//   status VARCHAR(20) NOT NULL DEFAULT 'pending'
+//     CHECK (status IN ('pending','paid','shipped','delivered','cancelled','refunded')),
+//   quantity INTEGER NOT NULL DEFAULT 1 CHECK (quantity >= 1),
+//   total_price DECIMAL(10,2) NOT NULL CHECK (total_price >= 0),
+//   currency VARCHAR(10) DEFAULT 'KES', payment_method VARCHAR(50), payment_ref VARCHAR(255),
+//   paid_at TIMESTAMPTZ, shipped_at TIMESTAMPTZ, delivered_at TIMESTAMPTZ,
+//   delivery_address JSONB DEFAULT '{}', tracking_number VARCHAR(255),
+//   notes TEXT, metadata JSONB DEFAULT '{}',
+//   created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW()
+// );
+// CREATE INDEX IF NOT EXISTS idx_orders_buyer   ON marketplace_orders (buyer_id);
+// CREATE INDEX IF NOT EXISTS idx_orders_seller  ON marketplace_orders (seller_id);
+// CREATE INDEX IF NOT EXISTS idx_orders_product ON marketplace_orders (product_id);
+// CREATE INDEX IF NOT EXISTS idx_orders_status  ON marketplace_orders (status);
+//
+// CREATE TABLE IF NOT EXISTS marketplace_reviews (
+//   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+//   product_id UUID NOT NULL, order_id UUID, user_id UUID NOT NULL, seller_id UUID NOT NULL,
+//   rating INTEGER NOT NULL CHECK (rating BETWEEN 1 AND 5),
+//   comment TEXT, images TEXT[] DEFAULT '{}',
+//   is_verified_purchase BOOLEAN DEFAULT false, helpful_count INTEGER DEFAULT 0,
+//   seller_reply TEXT, seller_replied_at TIMESTAMPTZ,
+//   created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW(),
+//   CONSTRAINT unique_review_per_user_product UNIQUE (product_id, user_id)
+// );
+// CREATE INDEX IF NOT EXISTS idx_reviews_product ON marketplace_reviews (product_id);
+// CREATE INDEX IF NOT EXISTS idx_reviews_user    ON marketplace_reviews (user_id);
+// ─────────────────────────────────────────────────────────────────────────────
 const { Op } = require('sequelize');
 
 module.exports = (sequelize, DataTypes) => {
@@ -386,6 +420,20 @@ module.exports = (sequelize, DataTypes) => {
         constraints: false,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
+      });
+    }
+    if (models.Order) {
+      Tool.hasMany(models.Order, {
+        foreignKey: 'productId',
+        as: 'orders',
+        constraints: false,
+      });
+    }
+    if (models.Review) {
+      Tool.hasMany(models.Review, {
+        foreignKey: 'productId',
+        as: 'reviews',
+        constraints: false,
       });
     }
   };
