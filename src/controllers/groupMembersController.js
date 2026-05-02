@@ -276,11 +276,25 @@ class GroupMembersController {
             const result = await groupMembersService.acceptInvitation(invitationId, userId);
 
             if (req.io) {
+                // Notify all current group members that someone joined
                 req.io.to(`group:${result.groupId}`).emit('group:member:joined', {
                     groupId: result.groupId, memberId: userId, viaInvitation: true, timestamp: new Date(),
                 });
+                req.io.to(`group:${result.groupId}`).emit('GROUP_MEMBER_ADDED', {
+                    groupId: result.groupId, member: result.member, userId, timestamp: new Date(),
+                });
                 req.io.to(`group:${result.groupId}`).emit('group:localSync', {
                     action: 'member_add', groupId: result.groupId, member: result.member,
+                });
+                // FIX: Notify the accepted user directly so their group list refreshes
+                req.io.to(`user:${userId}`).emit('GROUP_MEMBER_ADDED', {
+                    groupId: result.groupId, member: result.member, userId, timestamp: new Date(),
+                });
+                req.io.to(`user:${userId}`).emit('group:localSync', {
+                    action: 'member_add', groupId: result.groupId, member: result.member,
+                });
+                req.io.to(`user:${userId}`).emit('group:refresh_needed', {
+                    reason: 'invitation_accepted', groupId: result.groupId,
                 });
                 if (result.invitedBy) {
                     req.io.to(`user:${result.invitedBy}`).emit('group:invitation:accepted', {
