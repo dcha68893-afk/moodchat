@@ -339,9 +339,21 @@ router.get('/', apiRateLimiter, asyncHandler(async (req, res) => {
               m.type as "messageType", m.reactions, m."isEdited",
               m."editedAt", m."isDeleted", m."createdAt", m."updatedAt",
               m."replyToId",
-              jsonb_build_object('id', u.id, 'username', u.username, 'avatar', u.avatar) as sender
+              jsonb_build_object('id', u.id, 'username', u.username, 'avatar', u.avatar) as sender,
+              CASE WHEN m."replyToId" IS NOT NULL THEN
+                jsonb_build_object(
+                  'id',         rm.id,
+                  'content',    rm.content,
+                  'type',       rm.type,
+                  'senderId',   rm."senderId",
+                  'senderName', ru.username,
+                  'messageId',  rm.id
+                )
+              ELSE NULL END as "replyTo"
        FROM "Messages" m
-       LEFT JOIN "Users" u ON u.id = m."senderId"
+       LEFT JOIN "Users" u  ON u.id  = m."senderId"
+       LEFT JOIN "Messages" rm ON rm.id = m."replyToId" AND rm."isDeleted" = false
+       LEFT JOIN "Users" ru ON ru.id = rm."senderId"
        WHERE m."chatId" = :chatId AND m."isDeleted" = false ${beforeClause} ${afterClause}
        ORDER BY m."createdAt" DESC LIMIT ${limit} OFFSET ${offset}`,
       { replacements, type: sequelize.QueryTypes.SELECT }
@@ -501,15 +513,31 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
       { replacements: { messageId, chatId } }
     );
 
+    // ✅ FIX: Fetch replyTo content so receiver gets preview immediately
+    let replyToData = null;
+    if (safeReplyToId) {
+      try {
+        const replyRows = await sequelize.query(
+          `SELECT m.id, m.content, m.type, m."senderId", u.username as "senderName"
+           FROM "Messages" m
+           LEFT JOIN "Users" u ON u.id = m."senderId"
+           WHERE m.id = :replyToId AND m."isDeleted" = false LIMIT 1`,
+          { replacements: { replyToId: safeReplyToId }, type: sequelize.QueryTypes.SELECT }
+        );
+        if (replyRows && replyRows.length > 0) replyToData = replyRows[0];
+      } catch(_) {}
+    }
+
     const populatedMessage = {
       id: messageId,
-      localId: clientLocalId || null,          // ✅ FIX 1: echo client's localId so sender can replace optimistic bubble
+      localId: clientLocalId || null,
       chatId,
       senderId,
       content: content.trim(),
       type: messageType,
       reactions: {},
       replyToId: safeReplyToId,
+      replyTo: replyToData,
       sentAt: new Date().toISOString(),
       deliveredAt: new Date().toISOString(),
       createdAt: new Date().toISOString(),
@@ -665,9 +693,21 @@ router.get('/:chatId', apiRateLimiter, asyncHandler(async (req, res) => {
               m.type as "messageType", m.reactions, m."isEdited",
               m."editedAt", m."isDeleted", m."createdAt", m."updatedAt",
               m."replyToId",
-              jsonb_build_object('id', u.id, 'username', u.username, 'avatar', u.avatar) as sender
+              jsonb_build_object('id', u.id, 'username', u.username, 'avatar', u.avatar) as sender,
+              CASE WHEN m."replyToId" IS NOT NULL THEN
+                jsonb_build_object(
+                  'id',         rm.id,
+                  'content',    rm.content,
+                  'type',       rm.type,
+                  'senderId',   rm."senderId",
+                  'senderName', ru.username,
+                  'messageId',  rm.id
+                )
+              ELSE NULL END as "replyTo"
        FROM "Messages" m
-       LEFT JOIN "Users" u ON u.id = m."senderId"
+       LEFT JOIN "Users" u  ON u.id  = m."senderId"
+       LEFT JOIN "Messages" rm ON rm.id = m."replyToId" AND rm."isDeleted" = false
+       LEFT JOIN "Users" ru ON ru.id = rm."senderId"
        WHERE m."chatId" = :chatId AND m."isDeleted" = false ${beforeClause} ${afterClause}
        ORDER BY m."createdAt" DESC LIMIT ${limit} OFFSET ${offset}`,
       { replacements, type: sequelize.QueryTypes.SELECT }
