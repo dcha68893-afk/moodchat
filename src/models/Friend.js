@@ -21,7 +21,9 @@ module.exports = (sequelize, DataTypes) => {
         field: 'receiver_id',
       },
       status: {
-        type: DataTypes.ENUM('pending', 'accepted', 'rejected', 'blocked'),
+        // FIX: Added 'removed' and 'cancelled' — codebase writes these values but they
+        // were missing from the ENUM, causing Sequelize validation errors or silent DB failures.
+        type: DataTypes.ENUM('pending', 'accepted', 'rejected', 'blocked', 'removed', 'cancelled'),
         defaultValue: 'pending',
         allowNull: false,
       },
@@ -116,9 +118,11 @@ module.exports = (sequelize, DataTypes) => {
   };
 
   Friend.prototype.unblock = async function () {
-    this.status = 'accepted';
+    // FIX: Setting status = 'accepted' was wrong when the two users were never friends —
+    // it would make them friends automatically on unblock. Destroy the record instead
+    // so they can send a fresh friend request if desired.
     this.blockedAt = null;
-    return await this.save();
+    return await this.destroy();
   };
 
   // Static methods

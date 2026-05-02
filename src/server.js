@@ -4,7 +4,7 @@
 // CRITICAL FIX: Standardized token response format, fixed public route detection
 // ENHANCED: Professional model diagnostics with column names and table details
 // OPTIMIZED: Connection pool (max:20, min:5), Login response caching (30s TTL)
-// OPTIMIZED: Response compression, Query timeout (8s), UV_THREADPOOL_SIZE=16
+// OPTIMIZED: Response compression, Query timeout (30s), UV_THREADPOOL_SIZE=16
 // =========================================================================
 // ========== ABSOLUTE FIRST LINE - LOAD ENVIRONMENT ==========
 require('dotenv').config();
@@ -628,7 +628,7 @@ class DuplicateRequestFilter {
 
 // ========== QUERY TIMEOUT MIDDLEWARE ==========
 class QueryTimeoutMiddleware {
-    constructor(timeoutMs = 8000) {
+    constructor(timeoutMs = 30000) {
         this.timeout = timeoutMs;
     }
     
@@ -693,7 +693,7 @@ class ResponseCompressionMiddleware {
 // Create instances
 const loginCache = new LoginResponseCache(30);
 const duplicateFilter = new DuplicateRequestFilter(500);
-const queryTimeout = new QueryTimeoutMiddleware(8000);
+const queryTimeout = new QueryTimeoutMiddleware(30000);
 const responseCompression = new ResponseCompressionMiddleware();
 
 // ========== SINGLE SOURCE OF TRUTH: SYSTEM STATE MANAGER ==========
@@ -1714,7 +1714,7 @@ class ProfessionalLogger {
         console.log(`${this.colors.cyan}   • UV_THREADPOOL_SIZE: ${process.env.UV_THREADPOOL_SIZE}${this.colors.reset}`);
         console.log(`${this.colors.cyan}   • Connection Pool: max=20, min=5${this.colors.reset}`);
         console.log(`${this.colors.cyan}   • Login Cache TTL: 30 seconds${this.colors.reset}`);
-        console.log(`${this.colors.cyan}   • Query Timeout: 8 seconds${this.colors.reset}`);
+        console.log(`${this.colors.cyan}   • Query Timeout: 30 seconds${this.colors.reset}`);
         console.log(`${this.colors.cyan}   • Response Compression: Enabled${this.colors.reset}`);
         console.log(`${this.colors.cyan}   • Duplicate Request Filter: 500ms${this.colors.reset}`);
         console.log(`${this.colors.green}══════════════════════════════════════════════════════════════════════════════${this.colors.reset}`);
@@ -1785,7 +1785,7 @@ class ProfessionalLogger {
     }
     
     logQueryTimeout(path, method) {
-        console.log(`${this.colors.red}⏱️ TIMEOUT [QUERY] ${method} ${path} exceeded 8s limit${this.colors.reset}`);
+        console.log(`${this.colors.red}⏱️ TIMEOUT [QUERY] ${method} ${path} exceeded 30s limit${this.colors.reset}`);
         systemState.incrementMetric('queryTimeouts');
     }
 }
@@ -1916,7 +1916,7 @@ class ConfigurationManager {
         this.set('DB_POOL_IDLE', parseInt(process.env.DB_POOL_IDLE, 10) || 10000);
         
         // Query timeout configuration
-        this.set('QUERY_TIMEOUT_MS', parseInt(process.env.QUERY_TIMEOUT_MS, 10) || 8000);
+        this.set('QUERY_TIMEOUT_MS', parseInt(process.env.QUERY_TIMEOUT_MS, 10) || 30000);
         
         // Login cache configuration
         this.set('LOGIN_CACHE_TTL', parseInt(process.env.LOGIN_CACHE_TTL, 10) || 30);
@@ -2290,7 +2290,7 @@ class DatabaseService {
         
         // Add query timeout
         this.sequelize.config.query = {
-            timeout: config.get('QUERY_TIMEOUT_MS', 8000)
+            timeout: config.get('QUERY_TIMEOUT_MS', 30000)
         };
         
         console.log('✅ [Database] Connection configured with OPTIMIZED pool settings');

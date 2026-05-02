@@ -146,6 +146,8 @@ class MessageService {
                 io.to(`chat:${chatId}`).emit('message:new', payload);
                 // FIX Bug7: one summary log instead of per-recipient spam
                 console.log(`[MessageService] ✅ Real-time delivery: chatId=${chatId}, recipients=${participants.length}`);
+                console.log(`[MessageService] 📤 Emitting to rooms:`, participants.map(p => [`user:${p.userId}`, `user_${p.userId}`]).flat());
+                console.log(`[MessageService] 📤 Message payload:`, { id: payload.id, chatId: payload.chatId, senderId: payload.senderId, content: payload.content?.substring(0, 50) });
             } else {
                 // Fallback to raw WebSocket service
                 for (const { userId } of participants) {

@@ -1471,6 +1471,48 @@ router.post('/:friendId/unmute', apiRateLimiter, asyncHandler(async (req, res) =
     }
 }));
 
+// ===== CANCEL SENT FRIEND REQUEST =====
+// FIX: This route was missing. Frontend calls DELETE /api/friends/requests/:requestId
+// but no handler existed — every cancel attempt returned 404, leaving DB records stale.
+router.delete('/requests/:requestId', apiRateLimiter, asyncHandler(async (req, res) => {
+    try {
+        const userId = getUserId(req);
+        if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
+
+        const requestId = parseId(req.params.requestId);
+        if (requestId === null) return res.status(400).json({ success: false, message: 'Invalid request ID' });
+        if (!Friend) return res.status(503).json({ success: false, message: 'Friend service temporarily unavailable' });
+
+        // Only the original sender (requesterId) may cancel their own pending request
+        const friendRequest = await withTimeout(Friend.findOne({
+            where: { id: requestId, requesterId: userId, status: 'pending' }
+        }));
+
+        if (!friendRequest) {
+            return res.status(404).json({
+                success: false,
+                message: 'Pending friend request not found or not authorized to cancel'
+            });
+        }
+
+        const receiverId = friendRequest.receiverId;
+        await friendRequest.destroy();
+
+        // Notify receiver so their "Incoming Requests" list clears immediately
+        const io = req.io || (req.app && req.app.get('io'));
+        if (io) {
+            const cancelPayload = { requestId, senderId: userId, receiverId, cancelled: true, timestamp: new Date().toISOString() };
+            io.to(`user:${receiverId}`).emit('friend:rejected', cancelPayload);
+            io.to(`user_${receiverId}`).emit('friend:rejected', cancelPayload);
+        }
+
+        return res.json({ success: true, message: 'Friend request cancelled successfully' });
+    } catch (e) {
+        console.error('[Friends DELETE /requests/:requestId]', e.message);
+        return res.status(500).json({ success: false, message: 'Failed to cancel friend request' });
+    }
+}));
+
 // ===== REMOVE FRIEND (DELETE) =====
 router.delete('/:friendId', apiRateLimiter, asyncHandler(async (req, res) => {
     try {
