@@ -4846,10 +4846,6 @@ class Application {
 
                     this.io = new Server(this.server, {
                         cors: {
-                            // FIX: use shared corsManager — same allowlist as Express.
-                            // A hardcoded single origin is the ROOT CAUSE of "io server disconnect":
-                            // when the client origin (e.g. http://127.0.0.1:5501 in dev) doesn't
-                            // match, Socket.IO rejects immediately with that exact error string.
                             origin: (origin, callback) => {
                                 if (!origin) return callback(null, true); // mobile / curl / Postman
                                 if (corsManager.isOriginAllowed(origin)) return callback(null, true);
@@ -4859,13 +4855,15 @@ class Application {
                             methods: ['GET', 'POST'],
                             credentials: true
                         },
-                        // FIX: generous timeouts — survive Render cold-starts & slow networks
-                        pingTimeout:    60000,   // 60s before server declares dead
-                        pingInterval:   25000,   // keep-alive ping every 25s
-                        upgradeTimeout: 30000,   // 30s for WS upgrade
-                        connectTimeout: 45000,   // 45s for initial handshake
-                        allowEIO3:      true,    // backward compat with older clients
-                        transports: ['websocket', 'polling']
+                        // polling FIRST — establishes session even if raw WebSocket upgrade
+                        // is blocked on Render's free tier, then auto-upgrades to WS
+                        transports: ['polling', 'websocket'],
+                        allowUpgrades: true,
+                        pingTimeout:    60000,
+                        pingInterval:   25000,
+                        upgradeTimeout: 30000,
+                        connectTimeout: 45000,
+                        allowEIO3:      true,
                     });
 
                     // FIX: Auth runs in middleware (before 'connection').
@@ -4883,7 +4881,109 @@ class Application {
 
                     logger.success('Socket.IO initialized with middleware auth ✅', 'WEBSOCKET');
 
-                    this.rawWebSocket = WebSocketService;
+                    // ── Real /ws raw-WebSocket endpoint ───────────────────────────────────
+                    // app.realtime.socket.js falls back to wss://<host>/ws?token=<jwt>
+                    // when the Socket.IO client library is unavailable.  Without this
+                    // handler the HTTP server returns a 404 / can't-upgrade, causing the
+                    // DEGRADED loop seen in the console.
+                    //
+                    // We use { noServer: true } so the ws.WebSocketServer does NOT bind its
+                    // own port — it only handles upgrades we explicitly hand off to it.
+                    // Socket.IO intercepts /socket.io upgrades before this runs, so there
+                    // is zero conflict between the two.
+                    (() => {
+                        const { WebSocketServer } = require('ws');
+                        const rawWss = new WebSocketServer({ noServer: true });
+
+                        this.server.on('upgrade', (req, socket, head) => {
+                            try {
+                                const reqUrl  = new URL(req.url, `http://${req.headers.host || 'x'}`);
+                                if (reqUrl.pathname !== '/ws') return; // Socket.IO owns /socket.io — ignore
+
+                                // CORS guard
+                                const origin = req.headers.origin || '';
+                                if (origin && !corsManager.isOriginAllowed(origin)) {
+                                    console.warn(`[RawWS] CORS blocked upgrade from: ${origin}`);
+                                    socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+                                    socket.destroy();
+                                    return;
+                                }
+
+                                // Auth: token must be in ?token= query param
+                                const token = reqUrl.searchParams.get('token') || '';
+                                if (!token || token.length < 10) {
+                                    console.warn('[RawWS] Upgrade rejected: token missing');
+                                    socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+                                    socket.destroy();
+                                    return;
+                                }
+
+                                const verification = tokenService.verifyAccessToken(token);
+                                if (!verification.valid) {
+                                    console.warn(`[RawWS] Upgrade rejected: ${verification.error}`);
+                                    socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+                                    socket.destroy();
+                                    return;
+                                }
+
+                                const decoded = verification.decoded;
+                                const userId  = parseInt(decoded.userId || decoded.id || decoded.sub, 10);
+                                if (!userId) {
+                                    socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+                                    socket.destroy();
+                                    return;
+                                }
+
+                                rawWss.handleUpgrade(req, socket, head, (ws) => {
+                                    ws._userId = userId;
+                                    rawWss.emit('connection', ws, req);
+                                });
+                            } catch (err) {
+                                console.error('[RawWS] Upgrade handler error:', err.message);
+                                try { socket.destroy(); } catch (_) {}
+                            }
+                        });
+
+                        rawWss.on('connection', (ws) => {
+                            const userId = ws._userId;
+                            console.log(`[RawWS] ✅ Client connected uid=${userId}`);
+                            WebSocketService.registerWebSocketClient(userId, ws);
+
+                            // Confirm auth to client
+                            try { ws.send(JSON.stringify({ type: 'authenticated', userId, timestamp: Date.now() })); } catch (_) {}
+
+                            // Keep-alive ping every 30s
+                            const pingInterval = setInterval(() => {
+                                if (ws.readyState === 1 /* OPEN */) {
+                                    try { ws.ping(); } catch (_) {}
+                                }
+                            }, 30000);
+
+                            ws.on('message', (data) => {
+                                try {
+                                    const msg = JSON.parse(data);
+                                    if (msg.type === 'ping') {
+                                        ws.send(JSON.stringify({ type: 'pong', timestamp: Date.now() }));
+                                    }
+                                } catch (_) {}
+                            });
+
+                            ws.on('pong', () => { /* client is alive */ });
+
+                            ws.on('close', () => {
+                                clearInterval(pingInterval);
+                                WebSocketService.unregisterWebSocketClient(userId, ws);
+                                console.log(`[RawWS] Client disconnected uid=${userId}`);
+                            });
+
+                            ws.on('error', (err) => {
+                                console.warn(`[RawWS] Client error uid=${userId}:`, err.message);
+                            });
+                        });
+
+                        this.rawWebSocket = rawWss;
+                        logger.success('Raw /ws WebSocket endpoint ready ✅', 'WEBSOCKET');
+                    })();
                 }
                 
                 // Setup graceful shutdown
@@ -4986,12 +5086,18 @@ class Application {
             }
             
             // Close WebSocket connections
-            if (this.websocket && this.websocket.wss) {
-                this.websocket.wss.clients.forEach(client => {
-                    client.close();
-                });
-                this.websocket.wss.close();
-                logger.success('WebSocket server closed', 'SHUTDOWN');
+            if (this.websocket && this.websocket.io) {
+                try {
+                    this.websocket.io.close();
+                    logger.success('Socket.IO server closed', 'SHUTDOWN');
+                } catch (_) {}
+            }
+            if (this.rawWebSocket) {
+                try {
+                    this.rawWebSocket.clients.forEach(client => { try { client.close(); } catch (_) {} });
+                    this.rawWebSocket.close();
+                    logger.success('Raw WebSocket server closed', 'SHUTDOWN');
+                } catch (_) {}
             }
             
             // Close Redis
