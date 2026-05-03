@@ -30,12 +30,40 @@ class FriendController {
             try {
                 const io = getIO();
                 if (io) {
-                    const senderInfo = {
+                    // FIX: Always include full sender profile in the socket payload so the
+                    // receiver's friend-core.js can populate the incoming-request card
+                    // immediately without a separate API lookup.
+                    let senderProfile = {
                         id:          req.user.id,
                         username:    req.user.username    || '',
                         displayName: req.user.displayName || req.user.username || '',
                         avatar:      req.user.avatar      || null,
                     };
+
+                    // Attempt to load full profile fields (firstName/lastName/status) so the
+                    // receiver's initials avatar and full display name are correct.
+                    try {
+                        const db   = require('../models');
+                        const User = db.User || db.Users;
+                        if (User) {
+                            const senderUser = await User.findByPk(req.user.id, {
+                                attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen']
+                            });
+                            if (senderUser) {
+                                const u = senderUser.toJSON ? senderUser.toJSON() : senderUser;
+                                senderProfile = {
+                                    id:          u.id,
+                                    username:    u.username   || '',
+                                    displayName: ([u.firstName, u.lastName].filter(Boolean).join(' ').trim()) || u.username || '',
+                                    firstName:   u.firstName  || '',
+                                    lastName:    u.lastName   || '',
+                                    avatar:      u.avatar     || null,
+                                    status:      u.status     || 'offline',
+                                    lastSeen:    u.lastSeen   || null,
+                                };
+                            }
+                        }
+                    } catch (_) { /* non-fatal — use what we have from req.user */ }
 
                     const payload = {
                         id:             friendRequest.id,
@@ -43,10 +71,13 @@ class FriendController {
                         receiverId:     receiverId,
                         status:         'pending',
                         createdAt:      friendRequest.createdAt,
-                        senderName:     senderInfo.displayName,
-                        senderUsername: senderInfo.username,
-                        senderAvatar:   senderInfo.avatar,
-                        user:           senderInfo,
+                        // Flat fields for backwards-compat with older friend-core versions
+                        senderName:     senderProfile.displayName,
+                        senderUsername: senderProfile.username,
+                        senderAvatar:   senderProfile.avatar,
+                        // Full nested user object so friend-core.js FRIEND_REQUEST_RECEIVED
+                        // handler can directly populate the card without a cache lookup.
+                        user:           senderProfile,
                     };
 
                     io.to(`user:${receiverId}`).emit('friend:request', payload);
