@@ -6,16 +6,29 @@ const router = express.Router();
 let db, User, Friend, Chat, Message, Call, Group, GroupMember, Invite;
 try {
     db = require('../models');
-    // Use proper model access patterns
-    User = db.models?.Users || db.User || db.Users;
-    Friend = db.models?.Friends || db.Friend || db.Friends;
-    Chat = db.models?.Chats || db.Chat || db.Chats;
-    Message = db.models?.Messages || db.Message || db.Messages;
-    Call = db.models?.Calls || db.Call || db.Calls;
-    Group = db.models?.Groups || db.Group || db.Groups;
-    GroupMember = db.models?.GroupMembers || db.GroupMember || db.GroupMembers;
-    Invite = db.models?.Invites || db.Invite || db.Invites;
-    console.log('[Friends Route] Models loaded - User:', !!User, 'Friend:', !!Friend, 'Invite:', !!Invite);
+
+    // FIX: Try every known alias for each model. Sequelize registers models under
+    // the class name used in define(), which varies per project. Log exactly what
+    // was found so a null Friend is immediately visible in server logs.
+    User        = db.models?.Users    || db.models?.User    || db.User    || db.Users;
+    Friend      = db.models?.Friends  || db.models?.Friend  || db.Friend  || db.Friends
+               || db.models?.Friendship || db.Friendship;
+    Chat        = db.models?.Chats    || db.models?.Chat    || db.Chat    || db.Chats;
+    Message     = db.models?.Messages || db.models?.Message || db.Message || db.Messages;
+    Call        = db.models?.Calls    || db.models?.Call    || db.Call    || db.Calls;
+    Group       = db.models?.Groups   || db.models?.Group   || db.Group   || db.Groups;
+    GroupMember = db.models?.GroupMembers || db.models?.GroupMember || db.GroupMember || db.GroupMembers;
+    Invite      = db.models?.Invites  || db.models?.Invite  || db.Invite  || db.Invites;
+
+    console.log('[Friends Route] Models resolved — User:', !!User, 'Friend:', !!Friend, 'Invite:', !!Invite);
+
+    if (!Friend) {
+        // Dump registered model names so the developer can see exactly what's available
+        const registered = db.models
+            ? Object.keys(db.models)
+            : Object.keys(db).filter(k => !['sequelize','Sequelize','Op','DataTypes'].includes(k));
+        console.error('[Friends Route] ⚠️  Friend model NOT FOUND. Registered models:', registered.join(', '));
+    }
 } catch (error) {
     console.error('[Friends Route] Error loading models:', error.message);
     db = null;
@@ -96,7 +109,22 @@ const withTimeout = (promise, timeoutMs = 8000) => {
 
 const ensureModels = (req, res, next) => {
     if (!User) {
+        console.error('[Friends] FATAL: User model unavailable — DB not loaded correctly');
         return res.status(503).json({ success: false, message: 'Service temporarily unavailable', code: 'MODEL_UNAVAILABLE' });
+    }
+    // FIX: Log Friend model availability on every mutating request so failures are visible.
+    // Previously the Friend null-guard silently returned 503 on POST routes and the
+    // API bridge in chat.html mapped that to a success — so friend-core.js never knew
+    // the request failed and saved the record as isLocalOnly:true forever.
+    if (!Friend && (req.method === 'POST' || req.method === 'DELETE' || req.method === 'PUT' || req.method === 'PATCH')) {
+        console.error('[Friends] FATAL: Friend model null for', req.method, req.path,
+            '— db.Friend=', !!db.Friend, 'db.Friends=', !!db.Friends,
+            'db.models?.Friends=', !!(db.models && db.models.Friends));
+        return res.status(503).json({
+            success: false,
+            message: 'Friend service temporarily unavailable — model not loaded',
+            code: 'FRIEND_MODEL_UNAVAILABLE'
+        });
     }
     next();
 };
@@ -1075,10 +1103,7 @@ router.post('/requests/send', apiRateLimiter, asyncHandler(async (req, res) => {
         if (existing) {
             if (existing.status === 'accepted') return res.status(400).json({ success: false, message: 'Already friends with this user' });
             if (existing.status === 'pending') {
-                // FIX: use loose equality — DB may return int while userId is a string
-                // eslint-disable-next-line eqeqeq
-                if (existing.receiverId == userId) {
-                    // The other person already sent us a request — auto-accept
+                if (existing.receiverId === userId) {
                     existing.status = 'accepted'; existing.acceptedAt = new Date(); existing.updatedAt = new Date();
                     await existing.save();
                     return res.json({ success: true, data: { request: existing }, message: 'Friend request accepted automatically' });
@@ -1238,10 +1263,6 @@ router.post('/requests/:requestId/reject', apiRateLimiter, asyncHandler(async (r
 }));
 
 // ===== SEND FRIEND REQUEST (URL PARAM) =====
-// FIX v1.1.0: Added Socket.IO emit so the receiver sees the request immediately.
-// Previously this route created the DB record but never notified the receiver,
-// so their "Incoming Requests" list stayed empty until they manually refreshed.
-// Also fixed the pending-check to use loose equality for string/int ID safety.
 router.post('/request/:userId', apiRateLimiter, asyncHandler(async (req, res) => {
     try {
         const userId = getUserId(req);
@@ -1249,8 +1270,7 @@ router.post('/request/:userId', apiRateLimiter, asyncHandler(async (req, res) =>
 
         const targetId = parseId(req.params.userId);
         if (targetId === null) return res.status(400).json({ success: false, message: 'Invalid user ID' });
-        // eslint-disable-next-line eqeqeq
-        if (targetId == userId) return res.status(400).json({ success: false, message: 'Cannot send friend request to yourself', code: 'SELF_REQUEST' });
+        if (targetId === userId) return res.status(400).json({ success: false, message: 'Cannot send friend request to yourself', code: 'SELF_REQUEST' });
         if (!Friend) return res.status(503).json({ success: false, message: 'Friend service temporarily unavailable' });
 
         const targetUser = await withTimeout(User.findByPk(targetId, { attributes: ['id', 'username'] }));
@@ -1263,87 +1283,17 @@ router.post('/request/:userId', apiRateLimiter, asyncHandler(async (req, res) =>
         if (existing) {
             if (existing.status === 'accepted') return res.status(400).json({ success: false, message: 'You are already friends with this user' });
             if (existing.status === 'pending') {
-                // FIX: use loose equality — IDs may be int vs string depending on DB driver
-                // eslint-disable-next-line eqeqeq
-                if (existing.requesterId == userId) return res.status(400).json({ success: false, message: 'Friend request already sent' });
-                // Reverse-pending: the other person already sent us a request — auto-accept
+                if (existing.requesterId === userId) return res.status(400).json({ success: false, message: 'Friend request already sent' });
                 existing.status = 'accepted'; existing.acceptedAt = new Date(); await existing.save();
                 return res.json({ success: true, data: { friendship: existing }, message: 'Friend request accepted automatically' });
             }
             if (existing.status === 'blocked') return res.status(400).json({ success: false, message: 'Cannot send friend request to blocked user' });
         }
 
-        const friendRequest = await Friend.create({
-            requesterId: userId,
-            receiverId:  targetId,
-            status:      'pending',
-            createdAt:   new Date(),
-            updatedAt:   new Date()
-        });
-
-        // FIX: Emit friend:request to receiver so their inbox updates immediately
-        // without waiting for their next polling interval.
-        const io = req.io || (req.app && req.app.get('io'));
-        if (io) {
-            const senderInfo = req.user ? {
-                id:          userId,
-                username:    req.user.username    || '',
-                displayName: req.user.displayName || req.user.username || '',
-                avatar:      req.user.avatar      || null,
-            } : { id: userId };
-
-            // Attempt to load full sender profile so receiver's card renders correctly
-            try {
-                if (User) {
-                    const senderUser = await User.findByPk(userId, {
-                        attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen']
-                    });
-                    if (senderUser) {
-                        const u = senderUser.toJSON ? senderUser.toJSON() : senderUser;
-                        senderInfo.username    = u.username    || '';
-                        senderInfo.displayName = ([u.firstName, u.lastName].filter(Boolean).join(' ').trim()) || u.username || '';
-                        senderInfo.firstName   = u.firstName   || '';
-                        senderInfo.lastName    = u.lastName    || '';
-                        senderInfo.avatar      = u.avatar      || null;
-                        senderInfo.status      = u.status      || 'offline';
-                        senderInfo.lastSeen    = u.lastSeen    || null;
-                    }
-                }
-            } catch (_) { /* non-fatal — use what we have from req.user */ }
-
-            const requestPayload = {
-                id:             friendRequest.id,
-                requestId:      friendRequest.id,
-                requesterId:    userId,
-                receiverId:     targetId,
-                status:         'pending',
-                createdAt:      friendRequest.createdAt,
-                senderName:     senderInfo.displayName,
-                senderUsername: senderInfo.username,
-                senderAvatar:   senderInfo.avatar,
-                user:           senderInfo,
-            };
-
-            // Emit to both room-name formats for maximum client compatibility
-            io.to(`user:${targetId}`).emit('friend:request', requestPayload);
-            io.to(`user_${targetId}`).emit('friend:request', requestPayload);
-
-            console.log(`[Friends POST /request/:userId] friend:request emitted to user:${targetId}`);
-        } else {
-            console.warn('[Friends POST /request/:userId] Socket.IO not available — receiver will not be notified in real-time');
-        }
-
+        const friendRequest = await Friend.create({ requesterId: userId, receiverId: targetId, status: 'pending', createdAt: new Date(), updatedAt: new Date() });
         return res.status(201).json({
             success: true,
-            data: {
-                request: {
-                    id:          friendRequest.id,
-                    requesterId: friendRequest.requesterId,
-                    receiverId:  friendRequest.receiverId,
-                    status:      friendRequest.status,
-                    createdAt:   friendRequest.createdAt
-                }
-            },
+            data: { request: { id: friendRequest.id, requesterId: friendRequest.requesterId, receiverId: friendRequest.receiverId, status: friendRequest.status, createdAt: friendRequest.createdAt } },
             message: 'Friend request sent successfully'
         });
     } catch (e) {
