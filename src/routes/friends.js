@@ -1236,7 +1236,44 @@ router.post('/requests/:requestId/accept', apiRateLimiter, asyncHandler(async (r
             io.to(`user:${userId}`).emit('friend:accepted', accepterPayload);
         }
 
-        return res.json({ success: true, data: { friendship: friendRequest }, message: 'Friend request accepted successfully' });
+        // Return the friendship record under BOTH field names so any client version
+        // can find the data, and include the sender's profile for immediate display.
+        // senderProfile was already fetched above in the io block (reused here).
+        const _fr = friendRequest.toJSON ? friendRequest.toJSON() : { ...friendRequest };
+
+        // senderProfile is defined in the io block above; if io was null, define it now.
+        if (typeof senderProfile === 'undefined') {
+            senderProfile = { id: _fr.requesterId };
+            try {
+                if (User) {
+                    const _su = await User.findByPk(_fr.requesterId, {
+                        attributes: ['id','username','avatar','firstName','lastName','status','lastSeen']
+                    });
+                    if (_su) {
+                        const u = _su.toJSON ? _su.toJSON() : _su;
+                        senderProfile = {
+                            id:          u.id,
+                            username:    u.username || '',
+                            displayName: ([u.firstName, u.lastName].filter(Boolean).join(' ').trim()) || u.username || '',
+                            avatar:      u.avatar   || null,
+                            status:      u.status   || 'offline',
+                            lastSeen:    u.lastSeen || null
+                        };
+                    }
+                }
+            } catch (_) {}
+        }
+
+        return res.json({
+            success: true,
+            message: 'Friend request accepted successfully',
+            data: {
+                friendRequest: _fr,        // friend-core.js checks response.data?.friendRequest
+                friendship:    _fr,        // alias for older clients
+                friend:        senderProfile,  // immediate sender profile for the accepter's UI
+                user:          senderProfile,  // alias
+            }
+        });
     } catch (e) {
         console.error('[Friends POST /requests/:id/accept]', e.message);
         return res.status(500).json({ success: false, message: 'Failed to accept friend request' });
