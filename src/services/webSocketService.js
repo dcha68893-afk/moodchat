@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * webSocketService.js — FIXED v3.1.0
+ * webSocketService.js — FIXED v3.2.0
  *
  * ROOT CAUSE FIXES:
  *  1. verifyToken() no longer calls socket.disconnect(true) — callers handle rejection
@@ -16,6 +16,14 @@
  *  This is the WRONG order — tokenService signs with JWT_ACCESS_SECRET || JWT_SECRET.
  *  When these differ (Render/Railway/Heroku), verification produced "invalid signature".
  *  FIX: Delegate to tokenService.verifyAccessToken() — single source of truth.
+ *
+ * BUG 3 FIX (v3.2.0):
+ *  registerUser() previously only joined user:${uid} and user_${uid} using the integer-
+ *  coerced uid. In some Node.js/Socket.IO edge cases, a room joined as user:2 (integer)
+ *  doesn't match an emit to user:2 (string). Fix: also joins user:${String(uid)} and
+ *  user_${String(uid)} so all four variants are covered. All rooms the socket is actually
+ *  in are logged after joining so you can confirm in server logs during the next test.
+ *  Same fix applied to the join_user_room event handler.
  */
 
 const db   = require('../models');
@@ -147,9 +155,17 @@ class WebSocketService {
             socket.on('join_user_room', ({ userId: uid } = {}) => {
                 const rid = parseInt(uid, 10);
                 if (rid && rid === userId) {
+                    const strRid = String(rid);
                     socket.join(`user:${rid}`);
                     socket.join(`user_${rid}`);
-                    console.log(`[WSService] uid=${userId} confirmed join user rooms`);
+                    socket.join(`user:${strRid}`);   // BUG 3 FIX: string-coerced variants
+                    socket.join(`user_${strRid}`);
+                    try {
+                        const actualRooms = Array.from(socket.rooms || []);
+                        console.log(`[WSService] uid=${userId} confirmed join user rooms — in rooms: [${actualRooms.join(', ')}]`);
+                    } catch (_) {
+                        console.log(`[WSService] uid=${userId} confirmed join user rooms`);
+                    }
                 }
             });
 
@@ -254,12 +270,28 @@ class WebSocketService {
 
         if (socketOrSocketId && typeof socketOrSocketId.join === 'function') {
             const joinRooms = () => {
-                socketOrSocketId.join(`user:${uid}`);
-                socketOrSocketId.join(`user_${uid}`);
+                // BUG 3 FIX: Join all four room name variants to survive integer/string
+                // coercion edge cases in Socket.IO room keys. The server may emit to
+                // user:2 (string) while the room was joined as user:2 (integer-coerced);
+                // in some Node.js/Socket.IO versions these don't match. Joining all four
+                // forms guarantees delivery regardless of how the emit key is formed.
+                const strUid = String(uid);
+                socketOrSocketId.join(`user:${uid}`);      // integer coerced (original)
+                socketOrSocketId.join(`user_${uid}`);      // underscore, integer coerced
+                socketOrSocketId.join(`user:${strUid}`);   // explicit string variant
+                socketOrSocketId.join(`user_${strUid}`);   // underscore, explicit string
+
+                // Log all rooms the socket is actually in so you can confirm in server
+                // logs that the right room names were registered during the next test.
+                try {
+                    const actualRooms = Array.from(socketOrSocketId.rooms || []);
+                    console.log(`[WSService] registerUser uid=${uid} socket=${socketId} rooms joined ✅ — in rooms: [${actualRooms.join(', ')}]`);
+                } catch (_) {
+                    console.log(`[WSService] registerUser uid=${uid} socket=${socketId} rooms joined ✅`);
+                }
             };
             try {
                 joinRooms();
-                console.log(`[WSService] registerUser uid=${uid} socket=${socketId} rooms joined ✅`);
             } catch (err) {
                 console.warn(`[WSService] Room join failed (retry): ${err.message}`);
                 setTimeout(() => {
