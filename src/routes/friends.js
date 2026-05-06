@@ -1121,35 +1121,57 @@ router.post('/requests/send', apiRateLimiter, asyncHandler(async (req, res) => {
 
         // FIX: Emit friend:request to receiver in real-time so their inbox updates immediately.
         // Previously this event was never emitted — the receiver only found out via polling.
-        const io = req.io || (req.app && req.app.get('io'));
-        if (io) {
-            const senderInfo = req.user ? {
-                id:          userId,
-                username:    req.user.username    || '',
-                displayName: req.user.displayName || req.user.username || '',
-                avatar:      req.user.avatar      || null,
-            } : { id: userId };
+        // FIX: Try req.io first, then app.get('io'), then global webSocketService
+        // If none are set, the receiver never gets real-time notification.
+        const io = req.io || (req.app && req.app.get('io'))
+            || (global._wsService && global._wsService.getIO && global._wsService.getIO())
+            || null;
 
-            const requestPayload = {
-                id:             friendRequest.id,
-                requestId:      friendRequest.id,
-                requesterId:    userId,
-                receiverId:     receiverId,
-                status:         'pending',
-                createdAt:      friendRequest.createdAt,
-                senderName:     senderInfo.displayName,
-                senderUsername: senderInfo.username,
-                senderAvatar:   senderInfo.avatar,
-                user:           senderInfo,
-            };
+        const senderInfo = req.user ? {
+            id:          userId,
+            username:    req.user.username    || '',
+            displayName: req.user.displayName || req.user.username || '',
+            avatar:      req.user.avatar      || null,
+        } : { id: userId };
+
+        const requestPayload = {
+            id:             friendRequest.id,
+            requestId:      friendRequest.id,
+            requesterId:    userId,
+            receiverId:     receiverId,
+            status:         'pending',
+            createdAt:      friendRequest.createdAt,
+            senderName:     senderInfo.displayName,
+            senderUsername: senderInfo.username,
+            senderAvatar:   senderInfo.avatar,
+            user:           senderInfo,
+        };
+
+        if (io) {
+            // Emit to all room name formats the client may have joined
             io.to(`user:${receiverId}`).emit('friend:request', requestPayload);
             io.to(`user_${receiverId}`).emit('friend:request', requestPayload);
+            io.to(`user:${receiverId}`).emit('FRIEND_REQUEST_RECEIVED', requestPayload);
+            io.to(`user_${receiverId}`).emit('FRIEND_REQUEST_RECEIVED', requestPayload);
+        } else {
+            console.warn('[Friends /requests/send] ⚠️  io not available — receiver will not get real-time notification');
         }
 
+        // FIX: Return request data under both field names friend-core.js looks for:
+        //   response.data.request  (checked first in friend-core)
+        //   response.data          (fallback)
+        const _fr = friendRequest.toJSON ? friendRequest.toJSON() : {
+            id: friendRequest.id, requesterId: friendRequest.requesterId,
+            receiverId: friendRequest.receiverId, status: friendRequest.status,
+            createdAt: friendRequest.createdAt
+        };
         return res.status(201).json({
             success: true,
-            data: { request: { id: friendRequest.id, requesterId: friendRequest.requesterId, receiverId: friendRequest.receiverId, status: friendRequest.status, createdAt: friendRequest.createdAt } },
-            message: 'Friend request sent successfully'
+            message: 'Friend request sent successfully',
+            data: {
+                request:    _fr,
+                friendRequest: _fr,
+            }
         });
     } catch (e) {
         console.error('[Friends POST /requests/send]', e.message);
@@ -1236,42 +1258,35 @@ router.post('/requests/:requestId/accept', apiRateLimiter, asyncHandler(async (r
             io.to(`user:${userId}`).emit('friend:accepted', accepterPayload);
         }
 
-        // Return the friendship record under BOTH field names so any client version
-        // can find the data, and include the sender's profile for immediate display.
-        // senderProfile was already fetched above in the io block (reused here).
-        const _fr = friendRequest.toJSON ? friendRequest.toJSON() : { ...friendRequest };
-
-        // senderProfile is defined in the io block above; if io was null, define it now.
-        if (typeof senderProfile === 'undefined') {
-            senderProfile = { id: _fr.requesterId };
-            try {
-                if (User) {
-                    const _su = await User.findByPk(_fr.requesterId, {
-                        attributes: ['id','username','avatar','firstName','lastName','status','lastSeen']
-                    });
-                    if (_su) {
-                        const u = _su.toJSON ? _su.toJSON() : _su;
-                        senderProfile = {
-                            id:          u.id,
-                            username:    u.username || '',
-                            displayName: ([u.firstName, u.lastName].filter(Boolean).join(' ').trim()) || u.username || '',
-                            avatar:      u.avatar   || null,
-                            status:      u.status   || 'offline',
-                            lastSeen:    u.lastSeen || null
-                        };
-                    }
+        // Fetch sender profile for immediate display on the accepter's side
+        const _fr2 = friendRequest.toJSON ? friendRequest.toJSON() : { ...friendRequest };
+        let senderProfile = { id: _fr2.requesterId };
+        try {
+            if (User) {
+                const _su = await User.findByPk(_fr2.requesterId, {
+                    attributes: ['id','username','avatar','firstName','lastName','status','lastSeen']
+                });
+                if (_su) {
+                    const u = _su.toJSON ? _su.toJSON() : _su;
+                    senderProfile = {
+                        id:          u.id,
+                        username:    u.username || '',
+                        displayName: ([u.firstName, u.lastName].filter(Boolean).join(' ').trim()) || u.username || '',
+                        avatar:      u.avatar   || null,
+                        status:      u.status   || 'offline',
+                        lastSeen:    u.lastSeen || null
+                    };
                 }
-            } catch (_) {}
-        }
-
+            }
+        } catch (_) {}
         return res.json({
             success: true,
             message: 'Friend request accepted successfully',
             data: {
-                friendRequest: _fr,        // friend-core.js checks response.data?.friendRequest
-                friendship:    _fr,        // alias for older clients
-                friend:        senderProfile,  // immediate sender profile for the accepter's UI
-                user:          senderProfile,  // alias
+                friendRequest: _fr2,
+                friendship:    _fr2,
+                friend:        senderProfile,
+                user:          senderProfile,
             }
         });
     } catch (e) {
