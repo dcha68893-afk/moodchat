@@ -108,11 +108,19 @@ function pagination(options = {}) {
  *   - privacy 'friends' → only if they are accepted friends
  */
 async function canView(status, viewerId) {
-    if (!viewerId) return status.isPublic;
-    if (status.userId === viewerId) return true;
-    if (status.isPublic) return true;
+    // Owner always sees their own status
+    if (viewerId && status.userId === viewerId) return true;
 
-    // friends-only: check friendship
+    const privacy = status.privacy || (status.isPublic ? 'public' : 'friends');
+
+    // Private: only owner
+    if (privacy === 'private') return false;
+
+    // Public / everyone: anyone can see
+    if (privacy === 'public' || privacy === 'everyone') return true;
+
+    // friends / close-friends: must be an accepted friend
+    if (!viewerId) return false;
     const { Friend } = getModels();
     if (!Friend) return false;
     const count = await Friend.count({
@@ -135,7 +143,7 @@ async function createStatus(statusData) {
     if (!Status) throw serverErr('Status model not available');
     
     // CRITICAL SECURITY: Validate all required fields
-    const { userId, content, type = 'text', mood, privacy = 'public', mediaUrl, expiresAt } = statusData;
+    const { userId, content, type = 'text', mood, privacy = 'friends', mediaUrl, expiresAt } = statusData;
     
     if (!userId || userId === undefined || userId === null) {
         throw badRequest('userId is required and cannot be null/undefined');
@@ -158,7 +166,7 @@ async function createStatus(statusData) {
     // CRITICAL SECURITY: Sanitize inputs
     const sanitizedContent = content.toString().trim();
     const validTypes = ['text', 'image', 'video', 'link'];
-    const validPrivacy = ['public', 'friends', 'private'];
+    const validPrivacy = ['public', 'friends', 'close-friends', 'private', 'everyone'];
     
     if (!validTypes.includes(type)) {
         throw badRequest('Invalid status type');
@@ -169,14 +177,22 @@ async function createStatus(statusData) {
     }
     
     // CRITICAL SECURITY: Create status with validated data
+    // Derive isPublic boolean from the privacy string
+    const isPublicVal = (privacy === 'public' || privacy === 'everyone');
+    // Always set a real expiresAt — default 24 h so the status auto-expires
+    const resolvedExpiresAt = expiresAt
+        ? new Date(expiresAt)
+        : new Date(Date.now() + 24 * 60 * 60 * 1000);
+
     const status = await Status.create({
         userId: parseInt(userId),
         content: sanitizedContent,
         type,
         mood: mood ? mood.toString().substring(0, 50) : null,
         privacy,
+        isPublic: isPublicVal,
         mediaUrl: mediaUrl ? mediaUrl.toString().substring(0, 500) : null,
-        expiresAt: expiresAt ? new Date(expiresAt) : null,
+        expiresAt: resolvedExpiresAt,
         isActive: true,
         likeCount: 0,
         commentCount: 0,
@@ -283,12 +299,14 @@ async function getUserStatuses(targetUserId, viewerId, options = {}) {
 
         const where = { userId: targetUserId };
 
-        // Non-owners only see active, non-expired, public (or friends) statuses
-        if (targetUserId !== viewerId) {
+        // Owner sees all their own statuses regardless of privacy.
+        // Non-owners only see active, non-expired, public statuses.
+        if (String(targetUserId) !== String(viewerId)) {
             Object.assign(where, activeFilter());
-            // Privacy: public only (friends check would require join — keep simple)
-            where.isPublic = true;
+            // Only show public/everyone to non-friends (friends use getFriendsStatuses)
+            where.privacy = { [Op.in]: ['public', 'everyone'] };
         } else if (!includeExpired) {
+            // Owner: filter expired but show all privacy levels
             Object.assign(where, activeFilter());
         }
 
@@ -335,7 +353,11 @@ async function getTimeline(userId, options = {}) {
         const where = {
             userId: { [Op.in]: visibleUserIds },
             ...activeFilter(),
-            [Op.or]: [{ isPublic: true }, { userId }], // own private statuses included
+            // Include own statuses at all privacy levels, plus friends' public/friends posts
+            [Op.or]: [
+                { userId },                                              // all own statuses
+                { privacy: { [Op.in]: ['public', 'friends', 'everyone'] } } // friends' visible posts
+            ],
         };
 
         const { count, rows } = await Status.findAndCountAll({
@@ -382,7 +404,9 @@ async function getFriendsStatuses(userId, options = {}) {
         const where = {
             userId: { [Op.in]: friendIds },
             ...activeFilter(),
-            // friends' statuses: public OR friends-only (both are visible to friends)
+            // Friends can see 'public', 'everyone', and 'friends' privacy statuses.
+            // 'close-friends' and 'private' are excluded.
+            privacy: { [Op.in]: ['public', 'friends', 'everyone'] },
         };
 
         const { count, rows } = await Status.findAndCountAll({

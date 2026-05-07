@@ -585,18 +585,32 @@ class ToolsController {
     async getListings(req, res, next) {
         try {
             const { page = 1, limit = 20, category, type, search, minPrice, maxPrice, sort = 'newest' } = req.query;
-            const db     = require('../models');
-            const result = await db.Tool.getListings({
-                page: parseInt(page), limit: parseInt(limit),
-                category, type, search,
-                minPrice: minPrice ? parseFloat(minPrice) : undefined,
-                maxPrice: maxPrice ? parseFloat(maxPrice) : undefined,
-                sort,
-            });
+            const db = require('../models');
+            
+            // Defensive check — table may not exist yet
+            if (!db.Tool || !db.Tool.getListings) {
+                return ok(res, { listings: [], total: 0, page: 1, limit: 20 }, 'Listings retrieved (no table)');
+            }
+            
+            let result;
+            try {
+                result = await db.Tool.getListings({
+                    page: parseInt(page), limit: parseInt(limit),
+                    category, type, search,
+                    minPrice: minPrice ? parseFloat(minPrice) : undefined,
+                    maxPrice: maxPrice ? parseFloat(maxPrice) : undefined,
+                    sort,
+                });
+            } catch (dbErr) {
+                console.error('[getListings] DB error:', dbErr.message);
+                // Return empty instead of 500
+                return ok(res, { listings: [], total: 0, page: parseInt(page), limit: parseInt(limit) }, 'Listings retrieved (fallback)');
+            }
+            
             if (result && Array.isArray(result.listings)) {
                 result.listings = result.listings.map(l => {
-                    const item    = l.toJSON ? l.toJSON() : { ...l };
-                    item.condition= (item.metadata || {}).condition || 'new';
+                    const item = l.toJSON ? l.toJSON() : { ...l };
+                    item.condition = (item.metadata || {}).condition || 'new';
                     return item;
                 });
             }
@@ -655,6 +669,9 @@ class ToolsController {
             console.log('[TOOLS FLOW] Step 2: Payload validated', { title, type, category, price, userId: req.user.id });
 
             const db = require('../models');
+            if (!db.Tool) {
+                return res.status(503).json({ success: false, message: 'Marketplace DB table not ready. Run migration.' });
+            }
 
             const typeMap          = { services: 'service', digital: 'digital', premium: 'premium', physical: 'physical' };
             const normalizedType   = typeMap[type] || type || 'service';
@@ -790,8 +807,17 @@ class ToolsController {
     async getSpotlightListings(req, res, next) {
         try {
             const { limit = 10 } = req.query;
-            const db             = require('../models');
-            const listings       = await db.Tool.getSpotlight(parseInt(limit));
+            const db = require('../models');
+            if (!db.Tool || !db.Tool.getSpotlight) {
+                return ok(res, { listings: [], total: 0 }, 'Spotlight listings retrieved (no table)');
+            }
+            let listings;
+            try {
+                listings = await db.Tool.getSpotlight(parseInt(limit));
+            } catch (dbErr) {
+                console.error('[getSpotlightListings] DB error:', dbErr.message);
+                return ok(res, { listings: [], total: 0 }, 'Spotlight listings retrieved (fallback)');
+            }
             return ok(res, { listings, total: listings.length }, 'Spotlight listings retrieved');
         } catch (e) { _next(next, e, 'getSpotlightListings'); }
     }

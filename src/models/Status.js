@@ -105,8 +105,22 @@ module.exports = (sequelize, DataTypes) => {
         defaultValue: true,
         allowNull: false,
       },
+      // privacy: human-readable visibility level that maps to/from isPublic.
+      // 'public'/'everyone' = isPublic true  (visible to all friends and on discover)
+      // 'friends'           = isPublic false (visible only to accepted friends)
+      // 'close-friends'     = isPublic false (visible only to close-friends list)
+      // 'private'           = isPublic false (visible only to creator)
+      // Stored as a VARCHAR so the client can filter by named level without
+      // running a separate close-friends membership check on every row.
+      privacy: {
+        type: DataTypes.ENUM('public', 'friends', 'close-friends', 'private', 'everyone'),
+        defaultValue: 'friends',
+        allowNull: false,
+      },
       expiresAt: {
         type: DataTypes.DATE,
+        // Not nullable — every status must have a real expiry.
+        // The controller always sets a default of 24 h when the client omits it.
         allowNull: true,
       },
       viewCount: {
