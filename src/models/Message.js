@@ -18,17 +18,29 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.INTEGER,
         allowNull: false,
       },
+      receiverId: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+      },
       content: {
         type: DataTypes.TEXT,
         allowNull: true,
       },
       type: {
-        type: DataTypes.ENUM('text', 'image', 'video', 'audio', 'file', 'sticker', 'location', 'contact', 'system'),
+        type: DataTypes.ENUM('text', 'image', 'video', 'audio', 'file', 'sticker', 'location', 'contact', 'system', 'status_reply'),
         defaultValue: 'text',
         allowNull: false,
       },
       replyToId: {
         type: DataTypes.INTEGER,
+        allowNull: true,
+      },
+      replyToStatusId: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+      },
+      statusPreview: {
+        type: DataTypes.TEXT,
         allowNull: true,
       },
       isEdited: {
@@ -112,7 +124,13 @@ module.exports = (sequelize, DataTypes) => {
           fields: ['senderId'],
         },
         {
+          fields: ['receiverId'],
+        },
+        {
           fields: ['replyToId'],
+        },
+        {
+          fields: ['replyToStatusId'],
         },
         {
           fields: ['createdAt'],
@@ -296,6 +314,14 @@ module.exports = (sequelize, DataTypes) => {
       Messages.belongsTo(models.Users, {
         foreignKey: 'deletedBy',
         as: 'messageDeleter',
+        constraints: false,
+        onDelete: 'SET NULL',
+        onUpdate: 'CASCADE',
+      });
+
+      Messages.belongsTo(models.Users, {
+        foreignKey: 'receiverId',
+        as: 'messageReceiver',
         constraints: false,
         onDelete: 'SET NULL',
         onUpdate: 'CASCADE',

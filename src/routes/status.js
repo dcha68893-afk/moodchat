@@ -14,8 +14,10 @@ const express = require('express');
 const router = express.Router();
 const asyncHandler = require('express-async-handler');
 const { apiRateLimiter } = require('../middleware/rateLimiter');
-const { authenticateToken } = require('../middleware/auth');
+const { authenticateToken, optionalAuthenticateToken } = require('../middleware/auth');
 const { body, validationResult } = require('express-validator');
+const WebSocketService = require('../services/webSocketService');
+const { getAcceptedFriendIds } = require('../services/statusService');
 // FIX: logger needed for friend-targeted socket emit logging
 let logger;
 try { logger = require('../utils/logger'); } catch(_) { logger = console; }
@@ -23,7 +25,7 @@ try { logger = require('../utils/logger'); } catch(_) { logger = console; }
 // ---------------------------------------------------------------------------
 // Model imports
 // ---------------------------------------------------------------------------
-let db, User, Status, StatusLike, StatusComment, StatusView, Friend;
+let db, User, Status, StatusLike, StatusComment, StatusView, StatusReaction, StatusReply, Message, Friend;
 try {
     db = require('../models');
     User = db.User || db.Users;
@@ -31,6 +33,9 @@ try {
     StatusLike = db.StatusLike || db.StatusLikes;
     StatusComment = db.StatusComment || db.StatusComments;
     StatusView = db.StatusView || db.StatusViews;
+    StatusReaction = db.StatusReaction || db.StatusReactions;
+    StatusReply = db.StatusReply || db.StatusReplies;
+    Message = db.Message || db.Messages;
     Friend = db.Friend || db.Friends;
     console.log('[Status Route] Models loaded - User:', !!User, 'Status:', !!Status, 'Friend:', !!Friend);
 } catch (e) {
@@ -75,6 +80,7 @@ const formatStatus = (s) => {
         longitude: d.longitude,
         isActive: d.isActive,
         isPublic: d.isPublic,
+        privacy: normalizePrivacy(d.privacy, d.isPublic),
         expiresAt: d.expiresAt,
         viewCount: d.viewCount || 0,
         likeCount: d.likeCount || 0,
@@ -93,6 +99,7 @@ const VALID_TYPES = ['text', 'image', 'video', 'audio', 'mood', 'location'];
 const VALID_MOODS = ['happy', 'sad', 'angry', 'excited', 'calm', 'anxious', 'tired', 'energetic',
     'focused', 'relaxed', 'nostalgic', 'romantic', 'lonely', 'confused', 'proud',
     'grateful', 'hopeful', 'bored', 'sick', 'neutral'];
+const VALID_PRIVACY = ['public', 'everyone', 'friends', 'close-friends', 'private', 'except', 'specific', 'micro-circle'];
 
 const userInclude = () => User ? [{
     model: User,
@@ -106,12 +113,276 @@ const activeWhere = () => ({
     [Op.or]: [{ expiresAt: null }, { expiresAt: { [Op.gt]: new Date() } }],
 });
 
+const getStatusMetadata = (status) => {
+    if (!status) return {};
+    const raw = status.toJSON ? status.toJSON() : status;
+    return raw.metadata && typeof raw.metadata === 'object' ? raw.metadata : {};
+};
+
+const normalizePrivacy = (privacy, isPublic = false) => {
+    const value = String(privacy || '').trim().toLowerCase();
+    if (VALID_PRIVACY.includes(value)) return value;
+    return isPublic ? 'everyone' : 'friends';
+};
+
+const normalizeUserIds = (value) => {
+    const source = Array.isArray(value) ? value : [];
+    return [...new Set(
+        source
+            .map((entry) => Number(entry))
+            .filter((entry) => Number.isInteger(entry) && entry > 0)
+    )];
+};
+
+const getAllowedUserIds = (status) => {
+    const metadata = getStatusMetadata(status);
+    return normalizeUserIds(
+        metadata.allowedUserIds ||
+        metadata.allowedUsers ||
+        metadata.selectedFriendIds ||
+        metadata.specificUserIds ||
+        []
+    );
+};
+
+const getExcludedUserIds = (status) => {
+    const metadata = getStatusMetadata(status);
+    return normalizeUserIds(metadata.excludedUserIds || metadata.excludedUsers || []);
+};
+
+const canReplyToStatus = (status) => {
+    const metadata = getStatusMetadata(status);
+    return metadata.allowReplies !== false;
+};
+
+const getIO = (req) => {
+    return req?.io || (req?.app && req.app.get && req.app.get('io')) || WebSocketService.getIO?.() || global.__socketIO || null;
+};
+
+const emitToUsers = (io, userIds, eventName, payload) => {
+    if (!io) return;
+    [...new Set((userIds || []).map((id) => Number(id)).filter(Boolean))].forEach((userId) => {
+        try {
+            io.to(`user:${userId}`).emit(eventName, payload);
+        } catch (_error) {}
+    });
+};
+
+const buildFriendContext = async (viewerId) => {
+    const context = {
+        acceptedFriendIds: new Set(),
+        blockedUserIds: new Set(),
+        closeFriendIds: new Set(),
+    };
+
+    if (!viewerId || !Friend) {
+        return context;
+    }
+
+    const relationships = await Friend.findAll({
+        where: {
+            [Op.or]: [{ requesterId: viewerId }, { receiverId: viewerId }],
+        },
+        attributes: ['requesterId', 'receiverId', 'status', 'closenessLevel', 'category'],
+    }).catch(() => []);
+
+    for (const relationship of relationships) {
+        const otherUserId = Number(relationship.requesterId) === Number(viewerId)
+            ? Number(relationship.receiverId)
+            : Number(relationship.requesterId);
+
+        if (!otherUserId) continue;
+
+        if (relationship.status === 'accepted') {
+            context.acceptedFriendIds.add(otherUserId);
+            if (Number(relationship.closenessLevel || 0) >= 7 || String(relationship.category || '').toLowerCase() === 'close-friends') {
+                context.closeFriendIds.add(otherUserId);
+            }
+        }
+
+        if (relationship.status === 'blocked') {
+            context.blockedUserIds.add(otherUserId);
+        }
+    }
+
+    return context;
+};
+
+const canUserViewStatus = async (status, viewerId, context = null) => {
+    if (!status) return false;
+
+    const ownerId = Number(status.userId);
+    const currentViewerId = viewerId ? Number(viewerId) : null;
+    if (currentViewerId && ownerId === currentViewerId) return true;
+
+    const privacy = normalizePrivacy(status.privacy, status.isPublic);
+    if (!currentViewerId) {
+        return privacy === 'public' || privacy === 'everyone' || status.isPublic === true;
+    }
+
+    const friendContext = context || await buildFriendContext(currentViewerId);
+    if (friendContext.blockedUserIds.has(ownerId)) {
+        return false;
+    }
+
+    if (privacy === 'public' || privacy === 'everyone' || status.isPublic === true) {
+        return true;
+    }
+
+    if (!friendContext.acceptedFriendIds.has(ownerId)) {
+        return false;
+    }
+
+    if (privacy === 'friends') return true;
+    if (privacy === 'close-friends') {
+        const allowedIds = getAllowedUserIds(status);
+        return friendContext.closeFriendIds.has(ownerId) || allowedIds.includes(currentViewerId);
+    }
+    if (privacy === 'except') {
+        return !getExcludedUserIds(status).includes(currentViewerId);
+    }
+    if (privacy === 'specific' || privacy === 'micro-circle') {
+        return getAllowedUserIds(status).includes(currentViewerId);
+    }
+
+    return false;
+};
+
+const filterStatusesForViewer = async (rows, viewerId, context = null) => {
+    const friendContext = context || await buildFriendContext(viewerId);
+    const result = [];
+
+    for (const row of rows || []) {
+        if (await canUserViewStatus(row, viewerId, friendContext)) {
+            result.push(row);
+        }
+    }
+
+    return result;
+};
+
+const getAudienceUserIds = async (status, ownerId = null) => {
+    const creatorId = Number(ownerId || status?.userId);
+    if (!creatorId) return [];
+
+    const privacy = normalizePrivacy(status?.privacy, status?.isPublic);
+    const acceptedFriendIds = await getAcceptedFriendIds(creatorId).catch(() => []);
+    let audience = [...acceptedFriendIds];
+
+    if (privacy === 'private') {
+        audience = [];
+    } else if (privacy === 'close-friends') {
+        const allowedIds = getAllowedUserIds(status);
+        audience = allowedIds.length > 0 ? acceptedFriendIds.filter((id) => allowedIds.includes(Number(id))) : acceptedFriendIds;
+    } else if (privacy === 'except') {
+        const excludedIds = getExcludedUserIds(status);
+        audience = acceptedFriendIds.filter((id) => !excludedIds.includes(Number(id)));
+    } else if (privacy === 'specific' || privacy === 'micro-circle') {
+        audience = getAllowedUserIds(status);
+    }
+
+    return [...new Set([creatorId, ...audience.map((id) => Number(id)).filter(Boolean)])];
+};
+
+const emitStatusEvent = async (req, eventName, status, extraPayload = {}) => {
+    const io = getIO(req);
+    if (!io || !status) return;
+
+    const audience = await getAudienceUserIds(status, status.userId);
+    const payload = {
+        statusId: Number(status.id),
+        userId: Number(status.userId),
+        status: formatStatus(status),
+        timestamp: new Date().toISOString(),
+        ...extraPayload,
+    };
+
+    emitToUsers(io, audience, eventName, payload);
+};
+
+const recordStatusView = async (req, status, viewerId) => {
+    if (!status || !viewerId || Number(status.userId) === Number(viewerId)) {
+        return { alreadyViewed: true, viewCount: status?.viewCount || 0 };
+    }
+
+    let alreadyViewed = false;
+    if (StatusView) {
+        const existing = await StatusView.findOne({
+            where: { statusId: Number(status.id), userId: Number(viewerId) }
+        }).catch(() => null);
+        alreadyViewed = !!existing;
+
+        if (!alreadyViewed) {
+            await StatusView.create({
+                statusId: Number(status.id),
+                userId: Number(viewerId),
+                viewedAt: new Date(),
+            }).catch(() => {});
+        }
+    }
+
+    if (!alreadyViewed) {
+        await Status.increment('viewCount', { where: { id: Number(status.id) } }).catch(() => {});
+        status.viewCount = Number(status.viewCount || 0) + 1;
+
+        const io = getIO(req);
+        const payload = {
+            statusId: Number(status.id),
+            userId: Number(status.userId),
+            viewerId: Number(viewerId),
+            viewerCount: Number(status.viewCount || 0),
+            viewCount: Number(status.viewCount || 0),
+            viewedAt: new Date().toISOString(),
+            timestamp: new Date().toISOString(),
+        };
+        emitToUsers(io, [status.userId], 'status:viewed', payload);
+        emitToUsers(io, [status.userId, viewerId], 'status:viewer_update', payload);
+    }
+
+    return { alreadyViewed, viewCount: Number(status.viewCount || 0) };
+};
+
 const ensureModels = (req, res, next) => {
     if (!User) return res.status(503).json({ success: false, message: 'Service temporarily unavailable' });
     next();
 };
 
 router.use(ensureModels);
+router.use((req, _res, next) => {
+    if (!req.io) {
+        req.io = getIO(req);
+    }
+    next();
+});
+
+if (!global.__statusExpiryCleanupStarted) {
+    global.__statusExpiryCleanupStarted = true;
+    setInterval(async () => {
+        try {
+            if (!Status) return;
+            const expiredStatuses = await Status.findAll({
+                where: {
+                    isActive: true,
+                    expiresAt: { [Op.lte]: new Date() },
+                },
+                limit: 100,
+            }).catch(() => []);
+
+            for (const status of expiredStatuses) {
+                await status.update({ isActive: false }).catch(() => {});
+                const io = WebSocketService.getIO?.() || global.__socketIO || null;
+                const audience = await getAudienceUserIds(status, status.userId);
+                emitToUsers(io, audience, 'status:expired', {
+                    statusId: Number(status.id),
+                    userId: Number(status.userId),
+                    timestamp: new Date().toISOString(),
+                });
+            }
+        } catch (error) {
+            logger.warn(`[status.js] expiry cleanup failed: ${error.message}`);
+        }
+    }, 60 * 1000);
+}
 
 // ============================================================================
 // PUBLIC ROUTES (no authentication required)
@@ -372,6 +643,7 @@ router.post(
         body('moodType').optional().isIn(VALID_MOODS).withMessage('Invalid mood'),
         body('mediaUrl').optional().isURL().withMessage('Invalid media URL'),
         body('isPublic').optional().isBoolean(),
+        body('privacy').optional().isString(),
     ],
     apiRateLimiter,
     asyncHandler(async (req, res) => {
@@ -386,8 +658,10 @@ router.post(
         const {
             content, type, moodType, mediaUrl,
             location, latitude, longitude,
-            isPublic = true, background, expiresAt,
-            text,
+            isPublic, background, expiresAt, privacy,
+            text, duration, allowReplies,
+            allowedUserIds, selectedFriendIds, excludedUserIds, specificUserIds,
+            caption, mediaType, fontFamily, textColor, actionButtons,
         } = req.body;
 
         const finalContent = content || text || '';
@@ -403,6 +677,15 @@ router.post(
             });
         }
 
+        const safePrivacy = normalizePrivacy(privacy, isPublic);
+        const resolvedIsPublic = safePrivacy === 'public' || safePrivacy === 'everyone'
+            ? true
+            : typeof isPublic === 'boolean'
+                ? isPublic
+                : false;
+        const durationMs = Number(duration || 86400) * 1000;
+        const allowList = normalizeUserIds(allowedUserIds || selectedFriendIds || specificUserIds);
+        const excludeList = normalizeUserIds(excludedUserIds);
         const statusData = {
             userId,
             content: finalContent,
@@ -412,10 +695,22 @@ router.post(
             location: location || null,
             latitude: latitude || null,
             longitude: longitude || null,
-            isPublic,
+            isPublic: resolvedIsPublic,
+            privacy: safePrivacy,
             isActive: true,
-            metadata: background ? { background } : {},
-            expiresAt: expiresAt ? new Date(expiresAt) : new Date(Date.now() + 24 * 3600000),
+            metadata: {
+                ...(background ? { background } : {}),
+                ...(caption ? { caption: String(caption).trim() } : {}),
+                ...(mediaType ? { mediaType: String(mediaType).trim() } : {}),
+                ...(fontFamily ? { fontFamily: String(fontFamily).trim() } : {}),
+                ...(textColor ? { textColor: String(textColor).trim() } : {}),
+                ...(Array.isArray(actionButtons) ? { actionButtons } : {}),
+                allowReplies: allowReplies !== false,
+                allowedUserIds: allowList,
+                selectedFriendIds: allowList,
+                excludedUserIds: excludeList,
+            },
+            expiresAt: expiresAt ? new Date(expiresAt) : new Date(Date.now() + (Number.isFinite(durationMs) && durationMs > 0 ? durationMs : 24 * 3600000)),
         };
 
         const created = await Status.create(statusData);
@@ -425,7 +720,7 @@ router.post(
         }).catch(() => null) : null;
         if (user) created.dataValues.statusUser = user;
 
-        if (req.io) {
+        if (false && req.io) {
             // FIX Bug C: was req.io.emit() = global broadcast to ALL sockets.
             // FIX Bug D: payload was missing the full `status` object so receivers
             //            couldn't render the card without a second fetch.
@@ -463,6 +758,16 @@ router.post(
                 // Fallback: still emit to own room at minimum
             });
         }
+
+        await emitStatusEvent(req, 'status:created', created, {
+            type: created.type,
+            content: created.content,
+            mediaUrl: created.mediaUrl || null,
+            createdAt: created.createdAt,
+            expiresAt: created.expiresAt || null,
+        });
+        await emitStatusEvent(req, 'new_status', created);
+        await emitStatusEvent(req, 'status_created', created);
 
         res.status(201).json({
             success: true,
@@ -509,18 +814,8 @@ router.get('/friends', authenticateToken, apiRateLimiter, asyncHandler(async (re
     if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
 
     const { limit = 50, offset = 0 } = req.query;
-
-    let friendIds = [];
-    if (Friend) {
-        const friendships = await Friend.findAll({
-            where: {
-                status: 'accepted',
-                [Op.or]: [{ requesterId: userId }, { receiverId: userId }],
-            },
-            attributes: ['requesterId', 'receiverId'],
-        }).catch(() => []);
-        friendIds = friendships.map(f => f.requesterId === userId ? f.receiverId : f.requesterId);
-    }
+    const friendContext = await buildFriendContext(userId);
+    const friendIds = [...friendContext.acceptedFriendIds];
 
     // FIX: Always include the viewer's own statuses in the feed so:
     //   1. User A can see their own posted status immediately after posting
@@ -540,6 +835,9 @@ router.get('/friends', authenticateToken, apiRateLimiter, asyncHandler(async (re
         rows = r.rows;
         total = r.count;
     }
+
+    rows = await filterStatusesForViewer(rows, userId, friendContext);
+    total = rows.length;
 
     res.json({
         success: true,
@@ -727,7 +1025,6 @@ router.get('/user/:userId', authenticateToken, apiRateLimiter, asyncHandler(asyn
     const where = { userId: targetId };
     if (targetId !== viewerId) {
         Object.assign(where, activeWhere());
-        where.isPublic = true;
     } else if (includeExpired !== 'true') {
         Object.assign(where, activeWhere());
     }
@@ -743,6 +1040,11 @@ router.get('/user/:userId', authenticateToken, apiRateLimiter, asyncHandler(asyn
         }).catch(() => ({ rows: [], count: 0 }));
         rows = r.rows;
         total = r.count;
+    }
+
+    if (targetId !== viewerId) {
+        rows = await filterStatusesForViewer(rows, viewerId);
+        total = rows.length;
     }
 
     res.json({
@@ -807,7 +1109,7 @@ router.get('/stats', authenticateToken, apiRateLimiter, asyncHandler(async (req,
 // ============================================================================
 
 // ── Single status (public read for active/public statuses)
-router.get('/:statusId', apiRateLimiter, asyncHandler(async (req, res) => {
+router.get('/:statusId', optionalAuthenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
     const { statusId } = req.params;
 
     // Validate statusId is a number
@@ -823,11 +1125,10 @@ router.get('/:statusId', apiRateLimiter, asyncHandler(async (req, res) => {
     }
     if (!status) return res.status(404).json({ success: false, message: 'Status not found' });
 
-    const isOwner = userId && status.userId === userId;
-    const isPublic = status.isPublic === true;
+    const isOwner = userId && Number(status.userId) === Number(userId);
     const isExpired = status.expiresAt && new Date(status.expiresAt) < new Date();
 
-    if (!isOwner && !isPublic) {
+    if (!(await canUserViewStatus(status, userId))) {
         return res.status(403).json({ success: false, message: 'Not authorized' });
     }
     if (isExpired) {
@@ -835,21 +1136,85 @@ router.get('/:statusId', apiRateLimiter, asyncHandler(async (req, res) => {
     }
 
     if (!isOwner && userId) {
-        await Status.update({ viewCount: (status.viewCount || 0) + 1 }, { where: { id: statusId } }).catch(() => { });
-        status.viewCount = (status.viewCount || 0) + 1;
-        if (StatusView) {
-            const seen = await StatusView.findOne({ where: { statusId, userId } }).catch(() => null);
-            if (!seen) StatusView.create({ statusId: +statusId, userId, viewedAt: new Date() }).catch(() => { });
-        }
+        await recordStatusView(req, status, userId);
     }
 
     res.json({ success: true, data: { status: formatStatus(status) } });
 }));
 
 // ── Update status (PROTECTED)
+router.get('/:statusId/viewers', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+    const ownerId = getUserId(req);
+    const { statusId } = req.params;
+
+    if (!statusId || isNaN(+statusId)) {
+        return res.status(400).json({ success: false, message: 'Invalid status ID' });
+    }
+
+    const status = await Status?.findByPk(statusId).catch(() => null);
+    if (!status) {
+        return res.status(404).json({ success: false, message: 'Status not found' });
+    }
+    if (Number(status.userId) !== Number(ownerId)) {
+        return res.status(403).json({ success: false, message: 'Only the creator can view viewers' });
+    }
+
+    const viewerRows = StatusView ? await StatusView.findAll({
+        where: { statusId: Number(statusId) },
+        include: User ? [{
+            model: User,
+            as: 'viewerUser',
+            required: false,
+            attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen'],
+        }] : [],
+        order: [['viewedAt', 'DESC']],
+    }).catch(() => []) : [];
+
+    const replyRows = StatusReply ? await StatusReply.findAll({
+        where: { statusId: Number(statusId) },
+        attributes: ['senderId'],
+    }).catch(() => []) : [];
+
+    const reactionRows = StatusReaction ? await StatusReaction.findAll({
+        where: { statusId: Number(statusId) },
+        attributes: ['userId', 'emoji'],
+    }).catch(() => []) : [];
+
+    const replyCounts = new Map();
+    replyRows.forEach((reply) => {
+        const key = Number(reply.senderId);
+        replyCounts.set(key, (replyCounts.get(key) || 0) + 1);
+    });
+
+    const reactionMap = new Map();
+    reactionRows.forEach((reaction) => {
+        reactionMap.set(Number(reaction.userId), reaction.emoji);
+    });
+
+    const viewers = viewerRows.map((row) => ({
+        id: row.id,
+        statusId: Number(row.statusId),
+        viewerId: Number(row.userId),
+        viewedAt: row.viewedAt,
+        reaction: reactionMap.get(Number(row.userId)) || null,
+        replyCount: replyCounts.get(Number(row.userId)) || 0,
+        viewer: formatUser(row.viewerUser),
+    }));
+
+    res.json({
+        success: true,
+        data: {
+            statusId: Number(statusId),
+            totalViews: viewers.length,
+            viewers,
+        }
+    });
+}));
+
 router.put('/:statusId', authenticateToken, [
     body('content').optional().isLength({ max: 500 }).withMessage('Content too long'),
     body('isPublic').optional().isBoolean(),
+    body('privacy').optional().isString(),
 ], apiRateLimiter, asyncHandler(async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
@@ -865,10 +1230,14 @@ router.put('/:statusId', authenticateToken, [
     }
     if (!status) return res.status(404).json({ success: false, message: 'Status not found or you do not own it' });
 
-    const { content, isPublic } = req.body;
+    const { content, isPublic, privacy, metadata } = req.body;
     const updates = {};
     if (content !== undefined) updates.content = content;
     if (isPublic !== undefined) updates.isPublic = isPublic;
+    if (privacy !== undefined) updates.privacy = normalizePrivacy(privacy, isPublic ?? status.isPublic);
+    if (metadata && typeof metadata === 'object') {
+        updates.metadata = { ...getStatusMetadata(status), ...metadata };
+    }
     updates.updatedAt = new Date();
 
     await status.update(updates).catch(() => { });
@@ -878,7 +1247,15 @@ router.put('/:statusId', authenticateToken, [
         include: userInclude(),
     }).catch(() => status) : status;
 
-    if (req.io) req.io.emit('status:updated', { statusId, userId, timestamp: new Date() });
+    await emitStatusEvent(req, 'status:updated', refreshed, {
+        updates: {
+            content: refreshed.content,
+            isPublic: refreshed.isPublic,
+            privacy: refreshed.privacy,
+            metadata: refreshed.metadata,
+            updatedAt: refreshed.updatedAt,
+        }
+    });
 
     res.json({ success: true, data: { status: formatStatus(refreshed) }, message: 'Status updated successfully' });
 }));
@@ -890,13 +1267,23 @@ router.delete('/:statusId', authenticateToken, apiRateLimiter, asyncHandler(asyn
     
     if (isNaN(+statusId)) return res.status(400).json({ success: false, message: 'Invalid status ID' });
 
+    const status = await Status?.findOne({ where: { id: statusId, userId } }).catch(() => null);
     let deleted = false;
     if (Status) {
         deleted = await Status.destroy({ where: { id: statusId, userId } }).then(n => n > 0).catch(() => false);
     }
     if (!deleted) return res.status(404).json({ success: false, message: 'Status not found or you do not own it' });
 
-    if (req.io) req.io.emit('status:deleted', { statusId, userId, timestamp: new Date() });
+    if (status) {
+        await emitStatusEvent(req, 'status:deleted', status, {
+            statusId: Number(statusId),
+            deleted: true,
+        });
+        await emitStatusEvent(req, 'status_deleted', status, {
+            statusId: Number(statusId),
+            deleted: true,
+        });
+    }
 
     res.json({ success: true, message: 'Status deleted successfully' });
 }));
@@ -977,30 +1364,27 @@ const _recordView = asyncHandler(async (req, res) => {
 
     const status = await Status.findByPk(statusId).catch(() => null);
     if (!status) return res.status(404).json({ success: false, message: 'Status not found' });
-
-    let alreadyViewed = false;
-    if (StatusView && userId) {
-        const existing = await StatusView.findOne({ where: { statusId, userId } }).catch(() => null);
-        alreadyViewed = !!existing;
-        if (!alreadyViewed) {
-            await StatusView.create({ statusId: +statusId, userId, viewedAt: new Date() }).catch(() => { });
-            await Status.update({ viewCount: (status.viewCount || 0) + 1 }, { where: { id: statusId } });
-            status.viewCount = (status.viewCount || 0) + 1;
-        }
-    } else if (userId) {
-        await Status.update({ viewCount: (status.viewCount || 0) + 1 }, { where: { id: statusId } });
-        status.viewCount = (status.viewCount || 0) + 1;
+    if (!(await canUserViewStatus(status, userId))) {
+        return res.status(403).json({ success: false, message: 'Not authorized' });
     }
+    if (status.expiresAt && new Date(status.expiresAt) < new Date()) {
+        return res.status(410).json({ success: false, message: 'Status has expired' });
+    }
+    if (!userId) {
+        return res.status(401).json({ success: false, message: 'Authentication required to record a view' });
+    }
+
+    const { alreadyViewed, viewCount } = await recordStatusView(req, status, userId);
 
     res.json({
         success: true,
-        data: { viewed: !alreadyViewed, viewCount: status.viewCount },
+        data: { viewed: !alreadyViewed, viewCount },
         message: alreadyViewed ? 'View already recorded' : 'View recorded'
     });
 });
 
-router.post('/view', apiRateLimiter, _recordView);
-router.post('/:statusId/view', apiRateLimiter, _recordView);
+router.post('/view', optionalAuthenticateToken, apiRateLimiter, _recordView);
+router.post('/:statusId/view', optionalAuthenticateToken, apiRateLimiter, _recordView);
 
 // ── Comment on a status (PROTECTED)
 router.post('/:statusId/comment', authenticateToken, [
@@ -1074,13 +1458,14 @@ router.post('/:statusId/react', authenticateToken, apiRateLimiter, asyncHandler(
 
     const status = await Status.findByPk(statusId).catch(() => null);
     if (!status) return res.status(404).json({ success: false, message: 'Status not found' });
+    if (!(await canUserViewStatus(status, userId))) {
+        return res.status(403).json({ success: false, message: 'Not authorized' });
+    }
 
     // Check expired
     if (status.expiresAt && new Date(status.expiresAt) < new Date()) {
         return res.status(410).json({ success: false, message: 'Status has expired' });
     }
-
-    const StatusReaction = db.StatusReaction || db.StatusReactions;
     let reactionCount = 0;
 
     if (StatusReaction) {
@@ -1104,15 +1489,16 @@ router.post('/:statusId/react', authenticateToken, apiRateLimiter, asyncHandler(
     }
 
     // Real-time: notify the status owner
-    const io = req.io || (req.app && req.app.get && req.app.get('io'));
-    if (io && status.userId !== userId) {
-        io.to(`user:${status.userId}`).emit('status:reaction', {
-            statusId: +statusId,
-            reactorId: userId,
-            emoji: emoji.trim(),
-            count: reactionCount,
-        });
-    }
+    const io = getIO(req);
+    const audience = await getAudienceUserIds(status, status.userId);
+    emitToUsers(io, [...audience, userId], 'status:reaction', {
+        statusId: +statusId,
+        reactorId: userId,
+        userId: Number(status.userId),
+        emoji: emoji.trim(),
+        count: reactionCount,
+        timestamp: new Date().toISOString(),
+    });
 
     res.json({ success: true, data: { emoji: emoji.trim(), count: reactionCount }, message: 'Reaction added' });
 }));
@@ -1124,7 +1510,6 @@ router.delete('/:statusId/react', authenticateToken, apiRateLimiter, asyncHandle
 
     if (!statusId || isNaN(+statusId)) return res.status(400).json({ success: false, message: 'Invalid status ID' });
 
-    const StatusReaction = db.StatusReaction || db.StatusReactions;
     if (StatusReaction) {
         await StatusReaction.destroy({ where: { statusId: +statusId, userId } }).catch(() => {});
     } else if (Status) {
@@ -1140,15 +1525,35 @@ router.delete('/:statusId/react', authenticateToken, apiRateLimiter, asyncHandle
         }
     }
 
+    const status = await Status?.findByPk(statusId).catch(() => null);
+    if (status) {
+        const io = getIO(req);
+        const audience = await getAudienceUserIds(status, status.userId);
+        emitToUsers(io, [...audience, userId], 'status:reaction', {
+            statusId: +statusId,
+            reactorId: userId,
+            userId: Number(status.userId),
+            emoji: null,
+            count: 0,
+            removed: true,
+            timestamp: new Date().toISOString(),
+        });
+    }
+
     res.json({ success: true, message: 'Reaction removed' });
 }));
 
 // ── Get Reactions (public)  GET /:statusId/reactions
-router.get('/:statusId/reactions', apiRateLimiter, asyncHandler(async (req, res) => {
+router.get('/:statusId/reactions', optionalAuthenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
     const { statusId } = req.params;
     if (!statusId || isNaN(+statusId)) return res.status(400).json({ success: false, message: 'Invalid status ID' });
 
-    const StatusReaction = db.StatusReaction || db.StatusReactions;
+    const status = await Status?.findByPk(statusId).catch(() => null);
+    if (!status) return res.status(404).json({ success: false, message: 'Status not found' });
+    if (!(await canUserViewStatus(status, getUserId(req)))) {
+        return res.status(403).json({ success: false, message: 'Not authorized' });
+    }
+
     let reactions = [];
 
     if (StatusReaction) {
@@ -1189,6 +1594,12 @@ router.post('/:statusId/reply', authenticateToken, [
 
     const status = await Status.findByPk(statusId).catch(() => null);
     if (!status) return res.status(404).json({ success: false, message: 'Status not found' });
+    if (!(await canUserViewStatus(status, senderId))) {
+        return res.status(403).json({ success: false, message: 'Not authorized' });
+    }
+    if (!canReplyToStatus(status)) {
+        return res.status(403).json({ success: false, message: 'Replies are disabled for this status' });
+    }
 
     if (status.expiresAt && new Date(status.expiresAt) < new Date()) {
         return res.status(410).json({ success: false, message: 'Status has expired' });
@@ -1253,18 +1664,35 @@ router.post('/:statusId/reply', authenticateToken, [
         updatedAt: new Date(),
     }).catch(e => { throw Object.assign(new Error('Failed to save reply: ' + e.message), { statusCode: 500 }); });
 
+    if (StatusReply) {
+        await StatusReply.create({
+            statusId: +statusId,
+            senderId,
+            receiverId: ownerId,
+            messageId: message.id || null,
+            content: content.trim(),
+            createdAt: new Date(),
+            updatedAt: new Date(),
+        }).catch(() => {});
+    }
+
     // Real-time: deliver to owner via socket
-    const io = req.io || (req.app && req.app.get && req.app.get('io'));
+    const io = getIO(req);
     if (io) {
         const payload = {
+            statusId: Number(statusId),
             message: message.toJSON ? message.toJSON() : message,
             chatId,
             type: 'status_reply',
+            senderId,
+            userId: Number(ownerId),
             statusPreview: JSON.parse(statusPreview),
+            timestamp: new Date().toISOString(),
         };
         io.to(`user:${ownerId}`).emit('new_message',    payload);
         io.to(`user:${ownerId}`).emit('status:reply',   payload);
         io.to(`user:${senderId}`).emit('new_message',   payload); // sender's other tabs
+        io.to(`user:${senderId}`).emit('status:reply',  payload);
     }
 
     res.status(201).json({

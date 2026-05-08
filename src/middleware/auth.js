@@ -121,6 +121,43 @@ const authenticateToken = (req, res, next) => {
 
 const authenticate = authenticateToken;
 
+const optionalAuthenticateToken = (req, _res, next) => {
+    try {
+        const token = tokenService.extractTokenFromRequest
+            ? tokenService.extractTokenFromRequest(req)
+            : extractToken(req);
+
+        if (!token) {
+            return next();
+        }
+
+        const verification = tokenService.verifyAccessToken(token);
+        if (!verification.valid) {
+            return next();
+        }
+
+        const decoded = verification.decoded;
+        const userId  = decoded.userId || decoded.id;
+        if (!userId) {
+            return next();
+        }
+
+        req.user = {
+            userId,
+            id: userId,
+            email: decoded.email || null,
+            username: decoded.username || null,
+            role: decoded.role || 'user',
+            _verified: true,
+            tokenType: decoded.type
+        };
+
+        next();
+    } catch (_error) {
+        next();
+    }
+};
+
 // ── Role-based authorization ──────────────────────────────────────────────────
 const authorize = (...roles) => {
     return (req, res, next) => {
@@ -243,6 +280,7 @@ const socketAuthenticate = async (socket, next) => {
 module.exports = {
     authenticateToken,
     authenticate,
+    optionalAuthenticateToken,
     authorize,
     socketAuthenticate,
     extractToken,

@@ -117,7 +117,7 @@ const MODEL_WHITELIST = [
   'Users', 'Token', 'Profile', 'Settings', 'Chats', 'ChatParticipant',
   'Messages', 'GroupMembers', 'TypingIndicator', 'UserStatus', 'ReadReceipt',
   'SharedMood', 'Notification', 'Friend', 'Calls', 'Groups', 'Media', 'Mood',
-  'Status', 'Category', 'Template', 'Notes', 'File', 'Features',
+  'Status', 'StatusView', 'StatusReaction', 'StatusReply', 'Category', 'Template', 'Notes', 'File', 'Features',
   // ── Marketplace models ──────────────────────────────────────────────────────
   'Tool', 'Order', 'Review'
 ];
@@ -311,6 +311,7 @@ async function createMissingTables() {
     'Messages', 'Message', 'Groups', 'Group', 'GroupMembers', 'GroupMember',
     'Settings', 'Profile', 'Notifications', 'Notification', 'Media',
     'Calls', 'Call', 'UserStatus', 'TypingIndicator', 'ReadReceipt',
+    'statuses', 'status_views', 'status_reactions', 'status_replies',
     // ── Marketplace ───────────────────────────────────────────────────────────
     'tools', 'marketplace_orders', 'marketplace_reviews'
   ];
@@ -473,9 +474,12 @@ async function addMissingColumns() {
     'Messages': [
       { name: 'chatId', type: Sequelize.INTEGER, allowNull: true },
       { name: 'senderId', type: Sequelize.INTEGER, allowNull: true },
+      { name: 'receiverId', type: Sequelize.INTEGER, allowNull: true },
       { name: 'content', type: Sequelize.TEXT, allowNull: true },
       { name: 'type', type: Sequelize.STRING(20), defaultValue: 'text', allowNull: false },
       { name: 'replyToId', type: Sequelize.INTEGER, allowNull: true },
+      { name: 'replyToStatusId', type: Sequelize.INTEGER, allowNull: true },
+      { name: 'statusPreview', type: Sequelize.TEXT, allowNull: true },
       { name: 'isEdited', type: Sequelize.BOOLEAN, defaultValue: false, allowNull: false },
       { name: 'editedAt', type: Sequelize.DATE, allowNull: true },
       { name: 'isDeleted', type: Sequelize.BOOLEAN, defaultValue: false, allowNull: false },
@@ -488,6 +492,28 @@ async function addMissingColumns() {
       { name: 'encryptionKey', type: Sequelize.STRING(100), allowNull: true },
       { name: 'sentAt', type: Sequelize.DATE, defaultValue: Sequelize.NOW, allowNull: false },
       { name: 'deliveredAt', type: Sequelize.DATE, allowNull: true }
+    ],
+    'statuses': [
+      { name: 'privacy', type: Sequelize.STRING(32), defaultValue: 'friends', allowNull: false },
+      { name: 'metadata', type: Sequelize.JSONB, defaultValue: {}, allowNull: false },
+      { name: 'expiresAt', type: Sequelize.DATE, allowNull: true }
+    ],
+    'status_views': [
+      { name: 'statusId', type: Sequelize.INTEGER, allowNull: false },
+      { name: 'userId', type: Sequelize.INTEGER, allowNull: false },
+      { name: 'viewedAt', type: Sequelize.DATE, defaultValue: Sequelize.NOW, allowNull: false }
+    ],
+    'status_reactions': [
+      { name: 'statusId', type: Sequelize.INTEGER, allowNull: false },
+      { name: 'userId', type: Sequelize.INTEGER, allowNull: false },
+      { name: 'emoji', type: Sequelize.STRING(32), allowNull: false }
+    ],
+    'status_replies': [
+      { name: 'statusId', type: Sequelize.INTEGER, allowNull: false },
+      { name: 'senderId', type: Sequelize.INTEGER, allowNull: false },
+      { name: 'receiverId', type: Sequelize.INTEGER, allowNull: false },
+      { name: 'messageId', type: Sequelize.INTEGER, allowNull: true },
+      { name: 'content', type: Sequelize.TEXT, allowNull: false }
     ],
     'settings': [
       { name: 'user_id', type: Sequelize.INTEGER, allowNull: false },
@@ -1249,6 +1275,9 @@ module.exports = {
   get Media() { return db.models.Media || null; },
   get Mood() { return db.models.Mood || null; },
   get Status() { return db.models.Status || null; },
+  get StatusView() { return db.models.StatusView || null; },
+  get StatusReaction() { return db.models.StatusReaction || null; },
+  get StatusReply() { return db.models.StatusReply || null; },
   get Call() { return db.models.Call || db.models.Calls || null; },
   get Category() { return db.models.Category || null; },
   get Template() { return db.models.Template || null; },
