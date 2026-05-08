@@ -327,6 +327,11 @@ class GroupService {
             }
 
             const formattedMember = formatMember(membership);
+            // FIX: update stats.totalMembers in real-time so GET /groups/:id returns correct count
+            try {
+                const liveCount = await GroupMembers.count({ where: { groupId, leftAt: null } });
+                await Groups.update({ stats: { ...(group.stats || {}), totalMembers: liveCount } }, { where: { id: groupId } });
+            } catch (_) {}
             console.log(`[GroupService] ✅ Member ${memberId} added to group ${groupId} as ${role}`);
             groupServiceEvents.emit('groupMutation', { action: 'member_add', groupId, member: formattedMember, userId: memberId, requestedBy: requestingUserId });
             return membership;
@@ -385,6 +390,11 @@ class GroupService {
             if (!membership) throw new Error('You are not a member of this group');
             if (membership.role === 'owner') throw new Error('Group owner cannot leave. Transfer ownership first.');
             await membership.update({ leftAt: new Date() });
+            // FIX: update stats.totalMembers so count is always real
+            try {
+                const liveCount = await GroupMembers.count({ where: { groupId, leftAt: null } });
+                await Groups?.update({ stats: { totalMembers: liveCount } }, { where: { id: groupId } });
+            } catch (_) {}
             console.log(`[GroupService] ✅ User ${userId} left group ${groupId}`);
             groupServiceEvents.emit('groupMutation', { action: 'member_leave', groupId, userId });
             return true;

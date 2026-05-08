@@ -288,7 +288,7 @@ class GroupMembersService {
     async inviteToGroup(groupId, inviterId, inviteeId, role = 'member', message = '') {
         try {
             const group = await resolveGroup(groupId);
-            await requireMembership(groupId, inviterId, 'admin');
+            await requireMembership(groupId, inviterId, 'member'); // FIX: any member can invite friends, not just admins;
 
             // ── Check if invitee is banned ─────────────────────────────────────
             const inviteeMember = await GroupMembers?.findOne({ where: { groupId, userId: inviteeId } });
@@ -751,9 +751,9 @@ class GroupMembersService {
     async getSentInvitations(groupId, requestingUserId) {
         if (!Invites) return { invitations: [], total: 0 };
         try {
-            await requireMembership(groupId, requestingUserId, 'admin');
+            await requireMembership(groupId, requestingUserId, 'member'); // FIX: sender only needs to be a member
             const rows = await withTimeout(Invites.findAll({
-                where: { groupId, inviterId: requestingUserId },
+                where: { inviterId: requestingUserId },  // FIX: return all sent invites, not scoped to one group
                 include: [{ model: Users, as: 'invitee', attributes: ['id','username','avatar'], foreignKey: 'targetUserId', required: false }],
                 order: [['createdAt', 'DESC']],
             }));
