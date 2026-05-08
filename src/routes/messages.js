@@ -264,12 +264,26 @@ router.post('/mark-read/batch', apiRateLimiter, asyncHandler(async (req, res) =>
       );
 
       await Promise.allSettled(
-        (senders || []).map((row) => wsService.sendToUser(row.senderId, 'message:read', {
-          chatId: safeChatId,
-          messageIds: safeIds,
-          readBy: userId,
-          readAt: new Date().toISOString()
-        }))
+        (senders || []).flatMap((row) => ([
+          wsService.sendToUser(row.senderId, 'message:read', {
+            chatId: safeChatId,
+            messageIds: safeIds,
+            readBy: userId,
+            readAt: new Date().toISOString()
+          }),
+          wsService.sendToUser(row.senderId, 'message_read', {
+            chatId: safeChatId,
+            messageIds: safeIds,
+            readBy: userId,
+            readAt: new Date().toISOString()
+          }),
+          wsService.sendToUser(row.senderId, 'message_seen', {
+            chatId: safeChatId,
+            messageIds: safeIds,
+            readBy: userId,
+            readAt: new Date().toISOString()
+          }),
+        ]))
       );
     } catch (notifyError) {
       console.warn('Failed to emit message:read websocket event:', notifyError.message);
@@ -575,8 +589,11 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
 
         // Emit message:new to every participant's personal user room (both naming conventions)
         // sendToUser() handles user:<id> room + user_<id> room + individual socket IDs
+        const messageEvents = ['message:new', 'new_message', 'receive_message'];
         const deliveryResults = await Promise.allSettled(
-          allParticipantIds.map(uid => wsService.sendToUser(uid, 'message:new', populatedMessage))
+          allParticipantIds.map(uid => Promise.allSettled(
+            messageEvents.map((eventName) => wsService.sendToUser(uid, eventName, populatedMessage))
+          ))
         );
 
         // Count successes for diagnostics
@@ -590,6 +607,7 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
         // via _joinUserChatRooms but isn't tracked in onlineUsers yet
         if (typeof wsService.broadcastToChat === 'function') {
           wsService.broadcastToChat(chatId, 'message:new', populatedMessage);
+          wsService.broadcastToChat(chatId, 'new_message', populatedMessage);
         }
 
         // Confirm to sender: their optimistic bubble can now show ✓ sent tick
@@ -601,10 +619,24 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
           status:    'sent',
           createdAt: populatedMessage.createdAt
         });
+        await wsService.sendToUser(senderId, 'message_sent', {
+          localId:   populatedMessage.localId || null,
+          messageId,
+          serverId:  messageId,
+          chatId,
+          status:    'sent',
+          createdAt: populatedMessage.createdAt
+        });
 
         // Tell sender when at least one recipient was targeted
         if (recipientIds.length > 0) {
           await wsService.sendToUser(senderId, 'message:delivered', {
+            messageId,
+            chatId,
+            deliveredTo: recipientIds,
+            deliveredAt: new Date().toISOString()
+          });
+          await wsService.sendToUser(senderId, 'message_delivered', {
             messageId,
             chatId,
             deliveredTo: recipientIds,
@@ -918,7 +950,12 @@ router.delete('/:messageId', apiRateLimiter, asyncHandler(async (req, res) => {
     const messageId = safeInt(req.params.messageId);
     if (!messageId) return res.status(400).json({ success: false, message: 'Invalid messageId' });
 
-    const { deleteForEveryone = 'false' } = req.query;
+    const deleteForEveryone = String(
+      req.query.deleteForEveryone
+      ?? req.query.forEveryone
+      ?? req.body?.forEveryone
+      ?? 'false'
+    );
     const sequelize = req.app.locals.db;
 
     const msgRows = await sequelize.query(
@@ -958,6 +995,13 @@ router.delete('/:messageId', apiRateLimiter, asyncHandler(async (req, res) => {
     try {
       const wsService = require('../services/webSocketService');
       wsService.broadcastToChat(msg.chatId, 'message:deleted', {
+        messageId,
+        chatId: msg.chatId,
+        deletedBy: req.user.id,
+        deleteForEveryone: deleteForEveryone === 'true',
+        timestamp: new Date().toISOString()
+      });
+      wsService.broadcastToChat(msg.chatId, 'message_deleted', {
         messageId,
         chatId: msg.chatId,
         deletedBy: req.user.id,

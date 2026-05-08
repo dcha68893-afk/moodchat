@@ -7,7 +7,13 @@
 // OPTIMIZED: Response compression, Query timeout (30s), UV_THREADPOOL_SIZE=16
 // =========================================================================
 // ========== ABSOLUTE FIRST LINE - LOAD ENVIRONMENT ==========
-require('dotenv').config();
+const path = require('path');
+const fs = require('fs');
+const dotenv = require('dotenv');
+const BACKEND_ROOT_DIR = path.resolve(__dirname, '..');
+const DEFAULT_ENV_PATH = path.resolve(BACKEND_ROOT_DIR, '.env');
+
+dotenv.config({ path: process.env.ENV_PATH || DEFAULT_ENV_PATH });
 
 // Set UV_THREADPOOL_SIZE for better concurrent operations
 process.env.UV_THREADPOOL_SIZE = process.env.UV_THREADPOOL_SIZE || '16';
@@ -22,8 +28,6 @@ console.log('PORT:', process.env.PORT);
 console.log('===============================');
 
 // ========== BOOTSTRAP & ENVIRONMENT ==========
-const path = require('path');
-const fs = require('fs');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
 const WebSocket = require('ws');
@@ -47,24 +51,27 @@ const ENV = {
     
     // Load environment files with precedence
     load: function() {
-        const envPath = process.env.ENV_PATH;
+        const envPath = process.env.ENV_PATH
+            ? path.resolve(process.cwd(), process.env.ENV_PATH)
+            : null;
         
         if (envPath && fs.existsSync(envPath)) {
-            require('dotenv').config({ path: envPath });
+            dotenv.config({ path: envPath, override: true });
             return;
         }
         
         // Environment-specific files
+        const nodeEnv = process.env.NODE_ENV || 'development';
         const envFiles = [
-            `.env.${process.env.NODE_ENV}.local`,
-            `.env.${process.env.NODE_ENV}`,
-            '.env.local',
-            '.env'
+            path.resolve(BACKEND_ROOT_DIR, `.env.${nodeEnv}.local`),
+            path.resolve(BACKEND_ROOT_DIR, `.env.${nodeEnv}`),
+            path.resolve(BACKEND_ROOT_DIR, '.env.local'),
+            DEFAULT_ENV_PATH
         ];
         
         for (const file of envFiles) {
             if (fs.existsSync(file)) {
-                require('dotenv').config({ path: file });
+                dotenv.config({ path: file, override: true });
                 break;
             }
         }
@@ -81,7 +88,7 @@ console.log('JWT_ACCESS_SECRET from process.env:', process.env.JWT_ACCESS_SECRET
 console.log('UV_THREADPOOL_SIZE:', process.env.UV_THREADPOOL_SIZE);
 console.log('==========================');
 
-require('dotenv').config();
+dotenv.config({ path: process.env.ENV_PATH || DEFAULT_ENV_PATH, override: false });
 
 console.log('=== AFTER dotenv.config() ===');
 console.log('JWT_SECRET after dotenv:', process.env.JWT_SECRET ? 'SET (length: ' + process.env.JWT_SECRET.length + ')' : 'NOT SET');

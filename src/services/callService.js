@@ -34,13 +34,12 @@ function ws() {
 // so every frontend listener (colon OR underscore) is triggered.
 async function emitToAll(participants, event, data) {
   const wsService = ws();
-  if (!wsService) return;
   const colon      = event.replace(/_/g, ':');   // call_ended  → call:ended
   const underscore = event.replace(/:/g, '_');   // call:ended  → call_ended
   const events     = [...new Set([event, colon, underscore])];
 
   // Resolve io: req.io → global.__socketIO → wsService internal
-  const resolvedIo = io || global.__socketIO || (wsService && wsService.getIO && wsService.getIO()) || null;
+  const resolvedIo = global.__socketIO || (wsService && wsService.getIO && wsService.getIO()) || null;
 
   // Try Socket.IO first for reliable real-time delivery
   if (resolvedIo) {
@@ -245,7 +244,10 @@ class CallService {
       callId:     call.id,
       callerId:   call.callerId,
       receiverId: call.receiverId,
+      callType:   call.type,
       type:       call.type,
+      participants: call.participants || [],
+      answeredBy: call.answeredBy || [],
       status:     'in-progress',
       startedAt:  call.startedAt,
       timestamp:  Date.now(),
@@ -285,6 +287,8 @@ class CallService {
       callId:     call.id,
       callerId:   call.callerId,
       receiverId: call.receiverId,
+      callType:   call.type,
+      participants: call.participants || [],
       declinedBy: call.declinedBy,
       status:     call.status,
       reason:     'declined',
@@ -315,6 +319,9 @@ class CallService {
     const eventData = {
       callId:    call.id,
       callerId:  call.callerId,
+      receiverId: call.receiverId,
+      callType:  call.type,
+      participants: call.participants || [],
       status:    'cancelled',
       endedAt:   call.endedAt,
       timestamp: Date.now(),
@@ -361,6 +368,8 @@ class CallService {
       callId:     call.id,
       callerId:   call.callerId,
       receiverId: call.receiverId,
+      callType:   call.type,
+      participants: call.participants || [],
       status:     call.status,
       duration:   call.duration,
       endedAt:    call.endedAt,

@@ -102,19 +102,19 @@ module.exports = (sequelize, DataTypes) => {
       freezeTableName: true,
       indexes: [
         {
-          fields: ['userId'],
+          fields: ['user_id'],
         },
         {
           fields: ['type'],
         },
         {
-          fields: ['isRead'],
+          fields: ['is_read'],
         },
         {
-          fields: ['createdAt'],
+          fields: ['created_at'],
         },
         {
-          fields: ['userId', 'isRead'],
+          fields: ['user_id', 'is_read'],
         },
       ],
     }

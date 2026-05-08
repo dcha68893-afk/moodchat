@@ -946,7 +946,13 @@ router.post('/:callId/join', apiRateLimiter, asyncHandler(async (req, res) => {
     await updateArrayField(call, 'answeredBy', userId, 'add');
 
     for (const pid of (call.participants || [])) {
-      await notifyUser(req.io, pid, 'call_participant_joined', { callId: call.id, userId, timestamp: new Date() });
+      await notifyUser(req.io, pid, 'call_participant_joined', {
+        callId: call.id,
+        userId,
+        userName: req.user.username || req.user.displayName || `User ${userId}`,
+        callType: call.type,
+        timestamp: new Date()
+      });
     }
 
     res.json({ status: 'success', message: 'Joined call', data: { callId: call.id } });
@@ -978,7 +984,13 @@ router.post('/:callId/leave', apiRateLimiter, asyncHandler(async (req, res) => {
       }
     } else {
       for (const pid of (call.participants || [])) {
-        await notifyUser(req.io, pid, 'call_participant_left', { callId: call.id, userId, timestamp: new Date() });
+        await notifyUser(req.io, pid, 'call_participant_left', {
+          callId: call.id,
+          userId,
+          userName: req.user.username || req.user.displayName || `User ${userId}`,
+          callType: call.type,
+          timestamp: new Date()
+        });
       }
     }
     await call.save();

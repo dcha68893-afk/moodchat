@@ -96,22 +96,22 @@ module.exports = (sequelize, DataTypes) => {
       freezeTableName: true,
       indexes: [
         {
-          fields: ['uploadedBy']
+          fields: ['uploaded_by']
         },
         {
-          fields: ['noteId']
+          fields: ['note_id']
         },
         {
-          fields: ['fileType']
+          fields: ['file_type']
         },
         {
-          fields: ['isPublic']
+          fields: ['is_public']
         },
         {
-          fields: ['uploadStatus']
+          fields: ['upload_status']
         },
         {
-          fields: ['expiresAt']
+          fields: ['expires_at']
         }
       ]
     }

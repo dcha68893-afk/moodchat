@@ -27,7 +27,7 @@ const config = {
   
   // Server configuration
   server: {
-    port: parseInteger(process.env.PORT, 3000),
+    port: parseInteger(process.env.PORT, 4000),
     host: process.env.HOST || '0.0.0.0',
   },
   
