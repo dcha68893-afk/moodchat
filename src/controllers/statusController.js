@@ -95,51 +95,42 @@ class StatusController {
 
       // FIX: Accept both content and text field names
       const statusContent = (req.body.content || req.body.text || '').trim();
-      const { mediaUrl, mediaType, background, expiresAt, privacy, type, moodType, isPublic } = req.body;
+      const { mediaUrl, mediaType, background, expiresAt, privacy, type, moodType, isPublic, duration } = req.body;
 
       if (!statusContent && !mediaUrl) {
         throw new AppError('Content or media is required', 400);
       }
 
-      // ── Resolve privacy string ──────────────────────────────────────────────
-      // The client sends either `privacy` ('public'|'friends'|'close-friends'|
-      // 'private'|'everyone') OR the legacy `isPublic` boolean.
-      // Default is 'friends' — statuses are friends-only unless explicitly public.
-      const resolvedPrivacy =
-          privacy ||
-          (isPublic === true  ? 'public'  :
-           isPublic === false ? 'friends' : 'friends');
+      // Resolve privacy string — default 'friends' (friends-only) not 'public'
+      const resolvedPrivacy = privacy
+          || (isPublic === true  ? 'public'
+           :  isPublic === false ? 'friends'
+           :  'friends');  // safe default
 
-      // ── Resolve expiry ───────────────────────────────────────────────────────
-      // Client may send:
-      //   expiresAt  — an ISO date string
-      //   duration   — seconds as a string ('86400' = 24 h, '604800' = 1 week)
-      // If neither is provided default to 24 h so statuses always expire.
-      const { duration } = req.body;
+      // Resolve expiry: explicit date > duration in seconds > 24 h default
       let resolvedExpiresAt;
       if (expiresAt) {
           resolvedExpiresAt = new Date(expiresAt);
       } else if (duration) {
-          const durationSecs = parseInt(duration, 10);
-          const ALLOWED_DURATIONS = [3600, 21600, 43200, 86400, 604800]; // 1h 6h 12h 24h 1week
-          const safeDuration = ALLOWED_DURATIONS.includes(durationSecs)
-              ? durationSecs
-              : 86400; // default 24 h for unrecognised values
-          resolvedExpiresAt = new Date(Date.now() + safeDuration * 1000);
+          const secs = parseInt(duration, 10);
+          const ALLOWED_DURATIONS = [3600, 21600, 43200, 86400, 604800];
+          const safeSecs = ALLOWED_DURATIONS.includes(secs) ? secs : 86400;
+          resolvedExpiresAt = new Date(Date.now() + safeSecs * 1000);
       } else {
-          resolvedExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 h default
+          resolvedExpiresAt = new Date(Date.now() + 86400 * 1000); // 24 h
       }
 
       const statusData = {
         userId,
         content: statusContent,
-        mediaUrl: mediaUrl || null,
-        mediaType: mediaType || null,
+        mediaUrl:   mediaUrl   || null,
+        mediaType:  mediaType  || null,
         background: background || null,
-        expiresAt: resolvedExpiresAt,
-        privacy: resolvedPrivacy,
-        type: type || 'text',
-        moodType: moodType || null
+        expiresAt:  resolvedExpiresAt,
+        privacy:    resolvedPrivacy,
+        duration:   duration   || null,
+        type:       type       || 'text',
+        moodType:   moodType   || null
       };
 
       logger.info(`[StatusController] Creating status for userId=${userId}`);
@@ -161,36 +152,33 @@ class StatusController {
         userId:    status.userId,
         type:      status.type,
         content:   status.content,
-        mediaUrl:  status.mediaUrl   || null,
+        mediaUrl:  status.mediaUrl  || null,
         createdAt: status.createdAt,
-        expiresAt: status.expiresAt  || null,
-        privacy:   status.privacy    || 'friends',
-        // Full object — primary way for clients to add to UI without second fetch
+        expiresAt: status.expiresAt || null,
+        privacy:   status.privacy   || resolvedPrivacy,
+        // Full status object — lets clients add to UI without a second fetch
         status,
         timestamp: new Date().toISOString()
       };
 
       // ── TARGETED FRIEND BROADCAST ────────────────────────────────────────────
-      // Emit only into "user:<friendId>" rooms so only accepted friends receive
-      // the event.  We send all three event-name aliases so every listener fires.
-      // We also emit back to the creator's own room so multi-tab / page-reload
-      // scenarios pick up the status without a server round-trip.
-      logger.info(`[StatusController] 📤 STATUS CREATED id=${status.id} — broadcasting to friends + creator`);
-
-      // Emit to each friend's personal room
+      // BUG WAS HERE: safeEmit used io.emit() = all sockets globally.
+      // FIX: emit only into "user:<friendId>" rooms so only accepted friends
+      //      receive the event. All three alias names sent so every listener fires.
+      console.log(`[StatusController] 📤 STATUS CREATED id=${status.id} — broadcasting to friends`);
+      // Emit to each accepted friend's personal room
       await safeEmitToFriends(io, 'status:created', wsPayload, userId);
       await safeEmitToFriends(io, 'new_status',     wsPayload, userId);
       await safeEmitToFriends(io, 'status_created', wsPayload, userId);
 
-      // Also emit to creator's own room (multi-tab awareness + ensures reload works)
+      // Also emit back to the creator's own room so multi-tab + page-reload work
       if (io) {
         try {
           io.to(`user:${userId}`).emit('status:created', wsPayload);
           io.to(`user:${userId}`).emit('new_status',     wsPayload);
         } catch (_) {}
       }
-
-      logger.info(`[StatusController] 📡 STATUS EMITTED to friend rooms + creator room user:${userId}`);
+      console.log(`[StatusController] 📡 STATUS EMITTED to friend rooms + creator room`);
 
       // ── RESPONSE ─────────────────────────────────────────────────────────────
       return res.status(201).json({
