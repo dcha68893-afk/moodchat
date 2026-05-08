@@ -125,7 +125,9 @@ if (this.environment === 'production' || this.isRender) {
     
     // Add server origins for internal API calls
     addServerOrigins() {
-        const host = process.env.HOST || '0.0.0.0';
+        const host = (process.env.RENDER === 'true' || process.env.RENDER_SERVICE_ID)
+            ? '0.0.0.0'
+            : (process.env.HOST || '0.0.0.0');
         const port = parseInt(process.env.PORT, 10) || 4000;
         
         this.allowedOrigins.add(`http://${host}:${port}`);
@@ -1821,9 +1823,10 @@ class ConfigurationManager {
             process.exit(1);
         }
         
+        const isRenderRuntime = process.env.RENDER === 'true' || process.env.RENDER_SERVICE_ID !== undefined;
         this.set('NODE_ENV', nodeEnv);
         this.set('PORT', parseInt(process.env.PORT, 10) || 4000);
-        this.set('HOST', process.env.HOST || '0.0.0.0');
+        this.set('HOST', isRenderRuntime ? '0.0.0.0' : (process.env.HOST || '0.0.0.0'));
         this.set('API_VERSION', process.env.API_VERSION || '1.0.0');
         this.set('APP_NAME', process.env.APP_NAME || 'MoodChat');
        
@@ -4899,8 +4902,15 @@ class Application {
                     // Socket.IO intercepts /socket.io upgrades before this runs, so there
                     // is zero conflict between the two.
                     (() => {
-                        const { WebSocketServer } = require('ws');
-                        const rawWss = new WebSocketServer({ noServer: true });
+                        const RawWebSocketServer =
+                            WebSocket?.WebSocketServer ||
+                            WebSocket?.Server;
+
+                        if (!RawWebSocketServer) {
+                            throw new Error('ws package does not expose a WebSocket server constructor');
+                        }
+
+                        const rawWss = new RawWebSocketServer({ noServer: true });
 
                         this.server.on('upgrade', (req, socket, head) => {
                             try {

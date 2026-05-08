@@ -181,7 +181,6 @@ module.exports = (sequelize, DataTypes) => {
         { fields: ['is_spotlight'] },
         { fields: ['is_featured'] },
         { fields: ['available'] },
-        { fields: ['created_at'] },
       ],
     }
   );
