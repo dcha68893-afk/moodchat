@@ -26,7 +26,7 @@ const { authenticateToken } = require('../middleware/auth');
 const { body, validationResult } = require('express-validator');
 
 // ── Model imports (used by inline route handlers below) ──────────────────────
-let db, User, Group, GroupMember, Invite, Chat;
+let db, User, Group, GroupMember, Invite, Chat, Message;
 try {
     db = require('../models');
     const m  = db.models || {};
@@ -35,6 +35,7 @@ try {
     GroupMember = m.GroupMembers || m.GroupMember || db.GroupMembers || db.GroupMember;
     Invite      = m.Invites      || m.Invite      || db.Invites      || db.Invite || null;
     Chat        = m.Chats        || m.Chat        || db.Chats        || db.Chat;
+    Message     = m.Messages     || m.Message     || db.Messages     || db.Message || null;
     console.log('[Groups Route] Models loaded — User:', !!User, 'Group:', !!Group, 'GroupMember:', !!GroupMember);
 } catch (error) {
     console.error('[Groups Route] Error loading models:', error.message);
@@ -47,6 +48,7 @@ const { Op } = require('sequelize');
 // This replaces the old inline GroupController class which had the broken
 // createGroup() that called Group.create() directly without creating a Chat.
 const groupController = require('../controllers/groupController');
+const callController = require('../controllers/callController');
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const getUserId = (req) => {
@@ -85,21 +87,44 @@ const withTimeout = (promise, ms = 10000) => {
 };
 
 // ── Helper: format a GroupMessage record for the client ──────────────────────
-function _fmtMessage(msg, currentUserId) {
+function _fmtMessage(msg, currentUserId, groupIdOverride = null) {
     const d = msg.toJSON ? msg.toJSON() : msg;
+    const metadata = d.metadata || {};
+    const attachment = metadata.attachment || null;
+    const parent = d.messageParent || d.parentMessage || metadata.replyTo || null;
     return {
         id          : d.id,
-        groupId     : d.groupId,
+        groupId     : groupIdOverride || d.groupId || metadata.groupId || null,
+        chatId      : d.chatId || metadata.chatId || null,
         senderId    : d.senderId    || d.userId,
-        senderName  : d.sender
-            ? ([d.sender.firstName, d.sender.lastName].filter(Boolean).join(' ') || d.sender.username || 'User')
-            : (d.senderName || 'User'),
-        senderAvatar: d.sender?.avatar || d.senderAvatar || null,
+        senderName  : metadata.anonymous
+            ? 'Anonymous'
+            : (d.messageSender
+                ? ([d.messageSender.firstName, d.messageSender.lastName].filter(Boolean).join(' ') || d.messageSender.username || 'User')
+                : (metadata.senderName || d.senderName || 'User')),
+        senderAvatar: metadata.anonymous ? null : (d.messageSender?.avatar || metadata.senderAvatar || d.senderAvatar || null),
         content     : d.content     || d.text || '',
         type        : d.type        || 'text',
-        topic       : d.topic       || null,
-        anonymous   : d.anonymous   || false,
-        readBy      : d.readBy      || [],
+        topic       : metadata.topic || d.topic || null,
+        anonymous   : Boolean(metadata.anonymous || d.anonymous),
+        readBy      : d.readBy      || metadata.readBy || (d.isRead ? [currentUserId] : []),
+        replyTo     : parent ? {
+            id: parent.id,
+            senderId: parent.senderId || parent.userId || null,
+            senderName: parent.messageSender
+                ? ([parent.messageSender.firstName, parent.messageSender.lastName].filter(Boolean).join(' ') || parent.messageSender.username || 'User')
+                : (parent.senderName || metadata.replyTo?.senderName || 'User'),
+            content: parent.content || metadata.replyTo?.content || '',
+            type: parent.type || metadata.replyTo?.type || 'text'
+        } : null,
+        metadata    : metadata,
+        attachment  : attachment,
+        mediaUrl    : attachment?.url || metadata.mediaUrl || null,
+        thumbnailUrl: attachment?.thumbnailUrl || metadata.thumbnailUrl || null,
+        fileName    : attachment?.name || metadata.fileName || null,
+        mimeType    : attachment?.mimeType || metadata.mimeType || null,
+        deliveredAt : d.deliveredAt || metadata.deliveredAt || null,
+        isRead      : Boolean(d.isRead || metadata.isRead),
         createdAt   : d.createdAt,
         timestamp   : d.createdAt   || d.timestamp,
     };
@@ -266,6 +291,38 @@ router.delete('/:groupId/invite-link', groupController.revokeInviteLink.bind(gro
 // ── Group actions ─────────────────────────────────────────────────────────────
 router.post('/:groupId/join',  groupController.joinGroup.bind(groupController));
 router.post('/:groupId/leave', groupController.leaveGroup.bind(groupController));
+router.post('/:groupId/call', async (req, res, next) => {
+    try {
+        const groupId = parseInt(req.params.groupId, 10);
+        const callerId = getUserId(req);
+        if (!callerId) return res.status(401).json({ success: false, message: 'Authentication required' });
+        if (isNaN(groupId)) return res.status(400).json({ success: false, message: 'Invalid group ID' });
+        if (GroupMember) {
+            const membership = await GroupMember.findOne({ where: { groupId, userId: callerId } });
+            if (!membership) return res.status(403).json({ success: false, message: 'You are not a member of this group' });
+        }
+        
+        const group = await Group.findByPk(groupId, { attributes: ['id', 'chatId', 'name'] });
+        if (!group) return res.status(404).json({ success: false, message: 'Group not found' });
+        
+        const members = await GroupMember.findAll({
+            where: { groupId },
+            attributes: ['userId']
+        });
+        const participantIds = members
+            .map(member => parseInt(member.userId || member.dataValues?.userId, 10))
+            .filter(id => id && id !== parseInt(callerId, 10));
+        
+        req.body = {
+            ...req.body,
+            participantIds,
+            chatId: group.chatId
+        };
+        return callController.initiateCall(req, res, next);
+    } catch (error) {
+        return next(error);
+    }
+});
 router.put('/:groupId/settings', groupController.updateGroupSettings.bind(groupController));
 
 // ── Group events (per-group) ──────────────────────────────────────────────────
@@ -316,22 +373,34 @@ router.get('/:groupId/messages', async (req, res) => {
             if (!membership) return res.status(403).json({ success: false, message: 'You are not a member of this group' });
         }
 
-        const GroupMessage = db?.models?.GroupMessages || db?.models?.GroupMessage || db?.GroupMessages || db?.GroupMessage || null;
-        if (!GroupMessage) {
-            console.warn('[Groups] GroupMessage model not available, returning []');
+        const group = await Group.findByPk(groupId, { attributes: ['id', 'chatId', 'stats'] });
+        if (!group) {
+            return res.status(404).json({ success: false, message: 'Group not found' });
+        }
+        if (!Message || !group.chatId) {
+            console.warn('[Groups] Messages model or group chatId missing, returning []');
             return res.json({ success: true, data: [], pagination: { limit, hasMore: false } });
         }
 
-        const where = { groupId };
+        const where = { chatId: group.chatId, isDeleted: false };
         if (before) where.id = { [Op.lt]: parseInt(before) };
 
-        const messages  = await withTimeout(GroupMessage.findAll({
+        const messages  = await withTimeout(Message.findAll({
             where,
             order  : [['createdAt', 'DESC']],
             limit,
-            include: [{ model: User, as: 'sender', attributes: ['id','username','firstName','lastName','avatar'], required: false }],
+            include: [
+                { model: User, as: 'messageSender', attributes: ['id','username','firstName','lastName','avatar'], required: false },
+                {
+                    model: Message,
+                    as: 'messageParent',
+                    attributes: ['id', 'content', 'type', 'senderId'],
+                    required: false,
+                    include: [{ model: User, as: 'messageSender', attributes: ['id','username','firstName','lastName','avatar'], required: false }]
+                }
+            ],
         }));
-        const formatted = messages.reverse().map(m => _fmtMessage(m, userId));
+        const formatted = messages.reverse().map(m => _fmtMessage(m, userId, groupId));
 
         return res.json({ success: true, data: formatted, pagination: { limit, hasMore: messages.length === limit } });
     } catch (error) {
@@ -344,15 +413,25 @@ router.post('/:groupId/messages', async (req, res) => {
     try {
         const userId  = getUserId(req);
         const groupId = parseInt(req.params.groupId);
-        const { content, type = 'text', topic = null, anonymous = false } = req.body;
+        const { content = '', type = 'text', topic = null, anonymous = false, metadata = {}, replyToId = null } = req.body;
 
         if (!userId)      return res.status(401).json({ success: false, message: 'Authentication required' });
         if (isNaN(groupId)) return res.status(400).json({ success: false, message: 'Invalid group ID' });
-        if (!content || !String(content).trim()) return res.status(400).json({ success: false, message: 'Message content is required' });
+        const trimmedContent = String(content || '').trim();
+        const attachment = metadata?.attachment || null;
+        if (!trimmedContent && !attachment) return res.status(400).json({ success: false, message: 'Message content is required' });
 
         if (GroupMember) {
             const membership = await GroupMember.findOne({ where: { groupId, userId } });
             if (!membership) return res.status(403).json({ success: false, message: 'You are not a member of this group' });
+        }
+
+        const group = await Group.findByPk(groupId, { attributes: ['id', 'chatId', 'stats'] });
+        if (!group) {
+            return res.status(404).json({ success: false, message: 'Group not found' });
+        }
+        if (!Message || !group.chatId) {
+            return res.status(503).json({ success: false, message: 'Group chat storage is not available' });
         }
 
         let senderName = 'User', senderAvatar = null;
@@ -367,36 +446,52 @@ router.post('/:groupId/messages', async (req, res) => {
             } catch (_) {}
         }
 
-        const GroupMessage = db?.models?.GroupMessages || db?.models?.GroupMessage || db?.GroupMessages || db?.GroupMessage || null;
-        let savedMessage;
-
-        if (GroupMessage) {
-            const record = await GroupMessage.create({
+        const record = await Message.create({
+            chatId: group.chatId,
+            senderId: userId,
+            content: trimmedContent || '',
+            type,
+            replyToId: replyToId ? parseInt(replyToId, 10) : null,
+            isRead: false,
+            reactions: {},
+            metadata: {
+                ...metadata,
                 groupId,
-                senderId   : userId,
-                senderName : anonymous ? 'Anonymous' : senderName,
-                content    : String(content).trim(),
-                type,
-                topic      : topic || null,
-                anonymous  : !!anonymous,
-                readBy     : [userId],
-                createdAt  : new Date(),
+                topic: topic || metadata.topic || null,
+                anonymous: !!anonymous,
+                senderName: anonymous ? 'Anonymous' : senderName,
+                senderAvatar: anonymous ? null : senderAvatar,
+                readBy: [userId],
+                attachment
+            },
+            sentAt: new Date(),
+            deliveredAt: new Date()
+        });
+
+        const savedRecord = await Message.findByPk(record.id, {
+            include: [
+                { model: User, as: 'messageSender', attributes: ['id','username','firstName','lastName','avatar'], required: false },
+                {
+                    model: Message,
+                    as: 'messageParent',
+                    attributes: ['id', 'content', 'type', 'senderId'],
+                    required: false,
+                    include: [{ model: User, as: 'messageSender', attributes: ['id','username','firstName','lastName','avatar'], required: false }]
+                }
+            ]
+        });
+        const savedMessage = _fmtMessage(savedRecord || record, userId, groupId);
+        
+        try {
+            const liveMessageCount = await Message.count({ where: { chatId: group.chatId, isDeleted: false } });
+            await group.update({
+                stats: {
+                    ...(group.stats || {}),
+                    totalMessages: liveMessageCount
+                }
             });
-            savedMessage = _fmtMessage(record, userId);
-            savedMessage.senderAvatar = senderAvatar;
-        } else {
-            console.warn('[Groups] GroupMessage model not available — message not persisted');
-            savedMessage = {
-                id: `msg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-                groupId, senderId: userId,
-                senderName  : anonymous ? 'Anonymous' : senderName,
-                senderAvatar,
-                content     : String(content).trim(),
-                type, topic : topic || null, anonymous: !!anonymous,
-                readBy      : [userId],
-                createdAt   : new Date().toISOString(),
-                timestamp   : new Date().toISOString(),
-            };
+        } catch (statsErr) {
+            console.warn('[Groups] Unable to refresh group message stats:', statsErr.message);
         }
 
         const io = global.__socketIO;
@@ -457,6 +552,18 @@ router.use((err, req, res, next) => {
 function setupGroupSocket(io) {
     if (!io) return;
     io.on('connection', (socket) => {
+        socket.on('join_group', ({ groupId } = {}) => {
+            if (!groupId) return;
+            socket.join(`group:${groupId}`);
+            console.log(`[GROUP SOCKET] Socket ${socket.id} joined group:${groupId}`);
+        });
+
+        socket.on('leave_group', ({ groupId } = {}) => {
+            if (!groupId) return;
+            socket.leave(`group:${groupId}`);
+            console.log(`[GROUP SOCKET] Socket ${socket.id} left group:${groupId}`);
+        });
+
         socket.on('join_group_rooms', ({ groupIds } = {}) => {
             if (!Array.isArray(groupIds)) return;
             groupIds.forEach(gid => { if (gid) socket.join(`group:${gid}`); });
@@ -485,6 +592,18 @@ function setupGroupSocket(io) {
                     console.log(`[GROUP SOCKET] Auto-joined user ${userId} to ${memberships.length} group room(s)`);
                 }
             } catch (_) {}
+        });
+
+        socket.on('typing', ({ groupId, userId, userName } = {}) => {
+            if (!groupId) return;
+            io.to(`group:${groupId}`).emit('typing', { groupId, userId, userName });
+            io.to(`group:${groupId}`).emit('group:typing', { groupId, userId, userName, isTyping: true });
+        });
+
+        socket.on('stop_typing', ({ groupId, userId, userName } = {}) => {
+            if (!groupId) return;
+            io.to(`group:${groupId}`).emit('stop_typing', { groupId, userId, userName });
+            io.to(`group:${groupId}`).emit('group:typing', { groupId, userId, userName, isTyping: false });
         });
     });
     console.log('[GROUP SOCKET] setupGroupSocket ✅ installed');
