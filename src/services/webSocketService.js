@@ -438,7 +438,15 @@ class WebSocketService {
             return delivered;
         }
 
-        for (const room of [`user:${uid}`, `user_${uid}`]) {
+        // Emit to ALL room name variants — client may have joined with int or string userId
+        const strUid = String(uid);
+        const rooms = [
+            `user:${uid}`,    // integer coerced
+            `user_${uid}`,    // integer underscore
+            `user:${strUid}`, // explicit string
+            `user_${strUid}`  // explicit string underscore
+        ];
+        for (const room of rooms) {
             try { io.to(room).emit(event, payload); delivered = true; } catch (_) {}
         }
 

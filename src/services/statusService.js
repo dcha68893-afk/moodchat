@@ -306,10 +306,28 @@ async function getUserStatuses(targetUserId, viewerId, options = {}) {
         const where = { userId: targetUserId };
 
         // Owner sees all their statuses (all visibility levels).
-        // Non-owners only see active, non-expired, public statuses.
+        // Friends see all non-private statuses (isPublic=false = friends-only, which IS allowed for accepted friends).
         if (String(targetUserId) !== String(viewerId)) {
             Object.assign(where, activeFilter());
-            where.isPublic = true;
+            // Check if viewer is a friend — friends see friends-only statuses too
+            if (Friend) {
+                const isFriend = await Friend.count({
+                    where: {
+                        status: 'accepted',
+                        [Op.or]: [
+                            { requesterId: viewerId, receiverId: targetUserId },
+                            { requesterId: targetUserId, receiverId: viewerId },
+                        ],
+                    }
+                }).catch(() => 0);
+                if (!isFriend) {
+                    // Not a friend — only show public statuses
+                    where.isPublic = true;
+                }
+                // Friend — show all (isPublic true AND false = friends-only)
+            } else {
+                where.isPublic = true;
+            }
         } else if (!includeExpired) {
             // Owner: filter expired but show all privacy levels
             Object.assign(where, activeFilter());
@@ -355,11 +373,12 @@ async function getTimeline(userId, options = {}) {
 
         const visibleUserIds = [userId, ...friendIds];
 
+        // Friends see ALL non-private statuses from friends.
+        // isPublic=false means "friends only" — being in visibleUserIds IS the access gate.
+        // Only truly private statuses (userId not in visibleUserIds) are excluded.
         const where = {
             userId: { [Op.in]: visibleUserIds },
             ...activeFilter(),
-            // Own statuses at all levels + friends' public/friends-only statuses
-            [Op.or]: [{ userId }, { isPublic: true }],
         };
 
         const { count, rows } = await Status.findAndCountAll({

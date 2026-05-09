@@ -352,7 +352,7 @@ router.get('/', apiRateLimiter, asyncHandler(async (req, res) => {
       `SELECT m.id, m."chatId", m."senderId", m.content,
               m.type as "messageType", m.reactions, m."isEdited",
               m."editedAt", m."isDeleted", m."createdAt", m."updatedAt",
-              m."replyToId",
+              m."replyToId", m.metadata,
               jsonb_build_object('id', u.id, 'username', u.username, 'avatar', u.avatar) as sender,
               CASE WHEN m."replyToId" IS NOT NULL THEN
                 jsonb_build_object(
@@ -369,14 +369,16 @@ router.get('/', apiRateLimiter, asyncHandler(async (req, res) => {
        LEFT JOIN "Messages" rm ON rm.id = m."replyToId" AND rm."isDeleted" = false
        LEFT JOIN "Users" ru ON ru.id = rm."senderId"
        WHERE m."chatId" = :chatId AND m."isDeleted" = false ${beforeClause} ${afterClause}
+         AND NOT COALESCE((m.metadata->'deletedFor') @> to_jsonb(:userId::int), false)
        ORDER BY m."createdAt" DESC LIMIT ${limit} OFFSET ${offset}`,
-      { replacements, type: sequelize.QueryTypes.SELECT }
+      { replacements: { ...replacements, userId: req.user.id }, type: sequelize.QueryTypes.SELECT }
     );
 
     const countResult = await sequelize.query(
       `SELECT COUNT(*) as total FROM "Messages" m
-       WHERE m."chatId" = :chatId AND m."isDeleted" = false ${beforeClause} ${afterClause}`,
-      { replacements, type: sequelize.QueryTypes.SELECT }
+       WHERE m."chatId" = :chatId AND m."isDeleted" = false ${beforeClause} ${afterClause}
+         AND NOT COALESCE((m.metadata->'deletedFor') @> to_jsonb(:userId::int), false)`,
+      { replacements: { ...replacements, userId: req.user.id }, type: sequelize.QueryTypes.SELECT }
     );
 
     const total = parseInt(countResult[0]?.total || 0);
@@ -882,6 +884,237 @@ router.get('/:chatId/search', apiRateLimiter, asyncHandler(async (req, res) => {
 }));
 
 // ============================================================================
+// POST /api/messages/bulk — Send one message to multiple conversations (Multi-Send)
+// ============================================================================
+router.post('/bulk', apiRateLimiter, asyncHandler(async (req, res) => {
+  try {
+    const { conversationIds, content, type = 'text', replyVisibility = 'public' } = req.body;
+    const senderId = req.user.id;
+
+    if (!content || content.trim().length === 0) {
+      return res.status(400).json({ success: false, message: 'Message content is required' });
+    }
+    if (!Array.isArray(conversationIds) || conversationIds.length === 0) {
+      return res.status(400).json({ success: false, message: 'conversationIds array is required' });
+    }
+    if (conversationIds.length > 50) {
+      return res.status(400).json({ success: false, message: 'Cannot send to more than 50 conversations at once' });
+    }
+
+    const safeChatIds = conversationIds.map(safeInt).filter(Boolean);
+    if (safeChatIds.length === 0) {
+      return res.status(400).json({ success: false, message: 'No valid conversationIds provided' });
+    }
+
+    const sequelize = req.app.locals.db;
+    const batchId = require('crypto').randomUUID();
+    const messageType = ALLOWED_MSG_TYPES.includes(type) ? type : 'text';
+    const results = [];
+
+    for (const chatId of safeChatIds) {
+      try {
+        // Verify sender is participant
+        const isParticipant = await sequelize.query(
+          `SELECT 1 FROM chat_participants WHERE "chatId" = :chatId AND "userId" = :senderId LIMIT 1`,
+          { replacements: { chatId, senderId }, type: sequelize.QueryTypes.SELECT }
+        );
+        if (!isParticipant || isParticipant.length === 0) continue;
+
+        const msgResult = await sequelize.query(
+          `INSERT INTO "Messages" ("chatId","senderId",content,type,reactions,"sentAt","deliveredAt","createdAt","updatedAt",metadata)
+           VALUES (:chatId,:senderId,:content,:type,'{}',NOW(),NOW(),NOW(),NOW(),:metadata)
+           RETURNING id,"chatId","senderId",content,type,"createdAt"`,
+          {
+            replacements: {
+              chatId, senderId, content: content.trim(), type: messageType,
+              metadata: JSON.stringify({ batchId, replyVisibility })
+            },
+            type: sequelize.QueryTypes.INSERT,
+          }
+        );
+
+        const messageId = msgResult[0][0].id;
+        await sequelize.query(
+          `UPDATE chats SET "updatedAt" = NOW(), "lastMessageId" = :messageId WHERE id = :chatId`,
+          { replacements: { messageId, chatId } }
+        );
+
+        const senderRows = await sequelize.query(
+          `SELECT id, username, avatar FROM "Users" WHERE id = :senderId`,
+          { replacements: { senderId }, type: sequelize.QueryTypes.SELECT }
+        );
+
+        const populatedMessage = {
+          id: messageId, chatId, senderId, content: content.trim(), type: messageType,
+          reactions: {}, batchId, replyVisibility,
+          createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+          sentAt: new Date().toISOString(), deliveredAt: new Date().toISOString(),
+          sender: senderRows[0] || null,
+        };
+
+        results.push({ chatId, messageId, success: true });
+
+        // Real-time delivery
+        try {
+          const wsService = require('../services/webSocketService');
+          const participants = await sequelize.query(
+            `SELECT DISTINCT "userId" FROM chat_participants WHERE "chatId" = :chatId`,
+            { replacements: { chatId }, type: sequelize.QueryTypes.SELECT }
+          );
+          const allParticipantIds = (participants || []).map(r => parseInt(r.userId, 10)).filter(Boolean);
+          const recipientIds = allParticipantIds.filter(id => id !== senderId);
+
+          await Promise.allSettled(
+            allParticipantIds.map(uid =>
+              Promise.allSettled([
+                wsService.sendToUser(uid, 'message:new', populatedMessage),
+                wsService.sendToUser(uid, 'new_message', populatedMessage),
+              ])
+            )
+          );
+          if (typeof wsService.broadcastToChat === 'function') {
+            wsService.broadcastToChat(chatId, 'message:new', populatedMessage);
+          }
+          // Notify recipients so they can display received message instantly
+          for (const rid of recipientIds) {
+            await wsService.sendToUser(rid, 'receive_message', populatedMessage);
+          }
+        } catch (notifyErr) {
+          console.warn('[bulk] Realtime delivery failed for chatId=' + chatId + ':', notifyErr.message);
+        }
+      } catch (err) {
+        results.push({ chatId, success: false, error: err.message });
+      }
+    }
+
+    const successCount = results.filter(r => r.success).length;
+    res.status(201).json({
+      success: true,
+      message: `Sent to ${successCount}/${safeChatIds.length} conversation(s)`,
+      data: { batchId, results, successCount, totalTargeted: safeChatIds.length }
+    });
+  } catch (error) {
+    console.error('Error in bulk send:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+}));
+
+// ============================================================================
+// GET /api/messages/bulk/history — Get multi-send history for current user
+// ============================================================================
+router.get('/bulk/history', apiRateLimiter, asyncHandler(async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const sequelize = req.app.locals.db;
+
+    // Fetch distinct batchIds from messages sent by this user
+    const rows = await sequelize.query(
+      `SELECT DISTINCT
+         metadata->>'batchId' AS "batchId",
+         content,
+         metadata->>'replyVisibility' AS "replyVisibility",
+         MIN("createdAt") AS "createdAt",
+         COUNT(*) AS "deliveryCount",
+         COUNT(CASE WHEN "isRead" = true THEN 1 END) AS "seenCount"
+       FROM "Messages"
+       WHERE "senderId" = :userId
+         AND metadata->>'batchId' IS NOT NULL
+         AND "isDeleted" = false
+       GROUP BY metadata->>'batchId', content, metadata->>'replyVisibility'
+       ORDER BY MIN("createdAt") DESC
+       LIMIT 50`,
+      { replacements: { userId }, type: sequelize.QueryTypes.SELECT }
+    );
+
+    // For each batch, get recipient list
+    const history = await Promise.all((rows || []).map(async (row) => {
+      try {
+        const recipients = await sequelize.query(
+          `SELECT m."chatId", m."createdAt", m."deliveredAt", m."isRead", m."readAt",
+                  u.id AS "userId", u.username, u.avatar
+           FROM "Messages" m
+           JOIN chat_participants cp ON cp."chatId" = m."chatId"
+           JOIN "Users" u ON u.id = cp."userId"
+           WHERE m."senderId" = :userId
+             AND m.metadata->>'batchId' = :batchId
+             AND cp."userId" != :userId
+             AND m."isDeleted" = false`,
+          { replacements: { userId, batchId: row.batchId }, type: sequelize.QueryTypes.SELECT }
+        );
+        return {
+          ...row,
+          recipients: recipients || [],
+          recipientIds: (recipients || []).map(r => r.userId),
+        };
+      } catch (_) {
+        return { ...row, recipients: [], recipientIds: [] };
+      }
+    }));
+
+    res.json({ success: true, data: history });
+  } catch (error) {
+    console.error('Error fetching bulk history:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+}));
+
+// ============================================================================
+// GET /api/messages/bulk/history/:batchId — Get detail for one multi-send batch
+// ============================================================================
+router.get('/bulk/history/:batchId', apiRateLimiter, asyncHandler(async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { batchId } = req.params;
+    if (!batchId) return res.status(400).json({ success: false, message: 'batchId required' });
+
+    const sequelize = req.app.locals.db;
+
+    const rows = await sequelize.query(
+      `SELECT m.id, m."chatId", m.content, m."createdAt", m."deliveredAt", m."isRead", m."readAt",
+              metadata->>'replyVisibility' AS "replyVisibility",
+              cp."userId", u.username, u.avatar
+       FROM "Messages" m
+       JOIN chat_participants cp ON cp."chatId" = m."chatId"
+       JOIN "Users" u ON u.id = cp."userId"
+       WHERE m."senderId" = :userId
+         AND m.metadata->>'batchId' = :batchId
+         AND cp."userId" != :userId
+         AND m."isDeleted" = false
+       ORDER BY m."createdAt" ASC`,
+      { replacements: { userId, batchId }, type: sequelize.QueryTypes.SELECT }
+    );
+
+    if (!rows || rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Batch not found' });
+    }
+
+    const detail = {
+      batchId,
+      content: rows[0].content,
+      replyVisibility: rows[0].replyVisibility || 'public',
+      createdAt: rows[0].createdAt,
+      recipients: rows.map(r => ({
+        userId: r.userId,
+        username: r.username,
+        displayName: r.username,
+        avatar: r.avatar,
+        chatId: r.chatId,
+        deliveredAt: r.deliveredAt,
+        readAt: r.readAt,
+      })),
+      deliveryCount: rows.length,
+      seenCount: rows.filter(r => r.isRead).length,
+    };
+
+    res.json({ success: true, data: detail });
+  } catch (error) {
+    console.error('Error fetching bulk history detail:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+}));
+
+
+// ============================================================================
 // PATCH /api/messages/:messageId - Edit a message
 // ============================================================================
 router.patch('/:messageId', apiRateLimiter, asyncHandler(async (req, res) => {
@@ -950,16 +1183,16 @@ router.delete('/:messageId', apiRateLimiter, asyncHandler(async (req, res) => {
     const messageId = safeInt(req.params.messageId);
     if (!messageId) return res.status(400).json({ success: false, message: 'Invalid messageId' });
 
-    const deleteForEveryone = String(
-      req.query.deleteForEveryone
-      ?? req.query.forEveryone
-      ?? req.body?.forEveryone
-      ?? 'false'
-    );
+    // Support both body and query string params
+    const rawForEveryone = req.body?.deleteForEveryone ?? req.body?.forEveryone
+      ?? req.query.deleteForEveryone ?? req.query.forEveryone ?? false;
+    const deleteForEveryone = rawForEveryone === true || rawForEveryone === 'true';
+    const userId = req.user.id;
     const sequelize = req.app.locals.db;
 
     const msgRows = await sequelize.query(
-      `SELECT id, "chatId", "senderId" FROM "Messages" WHERE id = :messageId AND "isDeleted" = false LIMIT 1`,
+      `SELECT id, "chatId", "senderId", metadata FROM "Messages"
+       WHERE id = :messageId AND "isDeleted" = false LIMIT 1`,
       { replacements: { messageId }, type: sequelize.QueryTypes.SELECT }
     );
 
@@ -969,53 +1202,80 @@ router.delete('/:messageId', apiRateLimiter, asyncHandler(async (req, res) => {
 
     const msg = msgRows[0];
 
-    if (deleteForEveryone === 'true') {
+    // Verify the requesting user is a participant in this chat
+    const isParticipant = await sequelize.query(
+      `SELECT 1 FROM chat_participants WHERE "chatId" = :chatId AND "userId" = :userId LIMIT 1`,
+      { replacements: { chatId: msg.chatId, userId }, type: sequelize.QueryTypes.SELECT }
+    );
+    if (!isParticipant || isParticipant.length === 0) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+
+    if (deleteForEveryone) {
+      // Only message owner or chat admin can delete for everyone
       const chatRows = await sequelize.query(
         `SELECT "createdBy" FROM chats WHERE id = :chatId LIMIT 1`,
         { replacements: { chatId: msg.chatId }, type: sequelize.QueryTypes.SELECT }
       );
-      const isAdmin = chatRows[0]?.createdBy === req.user.id;
-      const isOwner = msg.senderId === req.user.id;
+      const isAdmin = chatRows[0]?.createdBy === userId;
+      const isOwner = msg.senderId === userId;
       if (!isAdmin && !isOwner) {
         return res.status(403).json({ success: false, message: 'Not authorized to delete for everyone' });
       }
+
+      // Hard delete for everyone — mark isDeleted on the message
+      await sequelize.query(
+        `UPDATE "Messages" SET "isDeleted" = true, "deletedAt" = NOW(), "deletedBy" = :userId, "updatedAt" = NOW()
+         WHERE id = :messageId`,
+        { replacements: { userId, messageId } }
+      );
     } else {
-      if (msg.senderId !== req.user.id) {
-        return res.status(403).json({ success: false, message: 'Not authorized to delete this message' });
-      }
+      // DELETE FOR ME ONLY — store userId in metadata.deletedFor array
+      // This prevents the message appearing for this user without removing it for others
+      let metadata = {};
+      try { metadata = (typeof msg.metadata === 'string' ? JSON.parse(msg.metadata) : msg.metadata) || {}; } catch (_) {}
+      const deletedFor = Array.isArray(metadata.deletedFor) ? metadata.deletedFor : [];
+      if (!deletedFor.includes(userId)) deletedFor.push(userId);
+      metadata.deletedFor = deletedFor;
+
+      await sequelize.query(
+        `UPDATE "Messages" SET metadata = :metadata, "updatedAt" = NOW()
+         WHERE id = :messageId`,
+        { replacements: { metadata: JSON.stringify(metadata), messageId } }
+      );
     }
 
-    await sequelize.query(
-      `UPDATE "Messages" SET "isDeleted" = true, "deletedAt" = NOW(), "deletedBy" = :userId, "updatedAt" = NOW()
-       WHERE id = :messageId`,
-      { replacements: { userId: req.user.id, messageId } }
-    );
-
-    // Broadcast deletion to all chat participants
+    // Broadcast deletion event so all connected clients update instantly
     try {
       const wsService = require('../services/webSocketService');
-      wsService.broadcastToChat(msg.chatId, 'message:deleted', {
+      const deletePayload = {
         messageId,
         chatId: msg.chatId,
-        deletedBy: req.user.id,
-        deleteForEveryone: deleteForEveryone === 'true',
+        deletedBy: userId,
+        deleteForEveryone,
+        deletedFor: deleteForEveryone ? null : [userId],
         timestamp: new Date().toISOString()
-      });
-      wsService.broadcastToChat(msg.chatId, 'message_deleted', {
-        messageId,
-        chatId: msg.chatId,
-        deletedBy: req.user.id,
-        deleteForEveryone: deleteForEveryone === 'true',
-        timestamp: new Date().toISOString()
-      });
+      };
+      wsService.broadcastToChat(msg.chatId, 'message:deleted', deletePayload);
+      wsService.broadcastToChat(msg.chatId, 'message_deleted', deletePayload);
+      // Also send direct to all participants via user rooms for reliability
+      const participants = await sequelize.query(
+        `SELECT "userId" FROM chat_participants WHERE "chatId" = :chatId`,
+        { replacements: { chatId: msg.chatId }, type: sequelize.QueryTypes.SELECT }
+      );
+      await Promise.allSettled(
+        (participants || []).map(p =>
+          wsService.sendToUser(p.userId, 'message:deleted', deletePayload)
+        )
+      );
     } catch (notifyError) {
       console.warn('Failed to emit message:deleted websocket event:', notifyError.message);
     }
 
-    res.status(200).json({ status: 'success', message: 'Message deleted successfully' });
+    res.status(200).json({ success: true, message: 'Message deleted successfully' });
   } catch (error) {
     console.error('Error deleting message:', error);
-    res.status(500).json({ status: 'error', message: 'Failed to delete message' });
+    res.status(500).json({ success: false, message: 'Failed to delete message' });
   }
 }));
 

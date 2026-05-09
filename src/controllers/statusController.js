@@ -260,8 +260,13 @@ class StatusController {
 
       await statusService.deleteStatus(statusId, userId);
       const io = getIO(req);
-      safeEmit(io, 'status:deleted',  { statusId, userId });
-      safeEmit(io, 'status_deleted',  { statusId, userId }); // legacy alias
+      // Broadcast deletion to all friends
+      await safeEmitToFriends(io, 'status:deleted',  { statusId, userId }, userId);
+      await safeEmitToFriends(io, 'status_deleted',  { statusId, userId }, userId);
+      // Also notify creator's own room (multi-tab)
+      if (io) {
+        io.to(`user:${userId}`).emit('status:deleted', { statusId, userId });
+      }
 
       return res.status(200).json({
         success: true,
@@ -289,17 +294,19 @@ class StatusController {
 
       const result = await statusService.viewStatus(statusId, userId);
 
-      // FIX: Emit viewer update so status owner sees live view count
+      // Emit viewer update to status owner's room only
       const io = getIO(req);
       const ownerId = result && result.ownerId;
-      if (ownerId) {
-        safeEmit(io, 'status:viewed', {
+      if (io && ownerId) {
+        const viewPayload = {
           statusId,
           viewerId: userId,
           ownerId,
-          viewCount: result.viewCount || 0
-        });
-        safeEmit(io, 'status:viewer_update', {
+          viewCount: result.viewCount || 0,
+          timestamp: new Date().toISOString()
+        };
+        io.to(`user:${ownerId}`).emit('status:viewed', viewPayload);
+        io.to(`user:${ownerId}`).emit('status:viewer_update', {
           statusId,
           viewerCount: result.viewCount || 0
         });
@@ -687,14 +694,27 @@ class StatusController {
 
       const result = await statusService.addReaction(statusId, userId, emoji.trim());
 
-      // Notify status owner via socket
+      // Notify status owner via socket (targeted to owner room only)
       const io = getIO(req);
       if (io && result.ownerId) {
+        // Fetch reactor name for rich notification
+        let reactorName = null;
+        try {
+          const db = require('../models');
+          const Users = db.Users || db.User;
+          if (Users) {
+            const reactor = await Users.findByPk(userId, { attributes: ['username', 'firstName', 'lastName'] });
+            if (reactor) reactorName = reactor.firstName || reactor.username;
+          }
+        } catch (_) {}
+
         io.to(`user:${result.ownerId}`).emit('status:reaction', {
           statusId,
           reactorId: userId,
+          reactorName,
           emoji: result.emoji,
           count: result.count,
+          timestamp: new Date().toISOString(),
         });
       }
 
@@ -743,15 +763,31 @@ class StatusController {
 
       const result = await statusService.replyToStatus(statusId, senderId, null, content.trim());
 
-      // Push message to recipient via socket
+      // Push reply to recipient (status owner) via socket
       const io = getIO(req);
       if (io && result.recipientId) {
-        io.to(`user:${result.recipientId}`).emit('new_message', {
+        let senderName = null;
+        try {
+          const db = require('../models');
+          const Users = db.Users || db.User;
+          if (Users) {
+            const sender = await Users.findByPk(senderId, { attributes: ['username', 'firstName'] });
+            if (sender) senderName = sender.firstName || sender.username;
+          }
+        } catch (_) {}
+
+        const replyPayload = {
           message: result.message,
           chatId: result.chatId,
           type: 'status_reply',
           statusPreview: result.statusPreview,
-        });
+          statusId,
+          senderId,
+          senderName,
+          timestamp: new Date().toISOString(),
+        };
+        io.to(`user:${result.recipientId}`).emit('new_message', replyPayload);
+        io.to(`user:${result.recipientId}`).emit('status:reply', replyPayload);
       }
 
       return res.status(201).json({

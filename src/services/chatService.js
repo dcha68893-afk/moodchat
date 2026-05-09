@@ -1042,21 +1042,44 @@ class ChatService {
         const sequelize = getDB();
         try {
             const [chat] = await sequelize.query(
-                `SELECT id, type, "createdBy" FROM chats WHERE id = :chatId AND "isActive" = true LIMIT 1`,
+                `SELECT id, type, "createdBy", metadata FROM chats WHERE id = :chatId AND "isActive" = true LIMIT 1`,
                 { replacements: { chatId }, type: sequelize.QueryTypes.SELECT }
             );
             if (!chat) throw new NotFoundError('Chat not found');
-            if (chat.type === 'group' && String(chat.createdBy) !== String(userId)) {
-                throw new AuthorizationError('Only group creator can delete the group');
-            }
 
-            await sequelize.query(
-                `UPDATE chats SET "isActive" = false, "deletedAt" = NOW(), "deletedBy" = :userId, "updatedAt" = NOW()
-                 WHERE id = :chatId`,
-                { replacements: { chatId, userId } }
+            // Verify the user is a participant
+            const [participant] = await sequelize.query(
+                `SELECT 1 FROM chat_participants WHERE "chatId" = :chatId AND "userId" = :userId LIMIT 1`,
+                { replacements: { chatId, userId }, type: sequelize.QueryTypes.SELECT }
             );
-            if (chat.type === 'group') {
+            if (!participant) throw new AuthorizationError('Not a participant in this chat');
+
+            if (chat.type === 'group' && String(chat.createdBy) === String(userId)) {
+                // Group creator deletes for everyone
+                await sequelize.query(
+                    `UPDATE chats SET "isActive" = false, "deletedAt" = NOW(), "deletedBy" = :userId, "updatedAt" = NOW()
+                     WHERE id = :chatId`,
+                    { replacements: { chatId, userId } }
+                );
                 await sequelize.query(`DELETE FROM chat_participants WHERE "chatId" = :chatId`, { replacements: { chatId } });
+            } else {
+                // Any user: remove them from participants (hides chat for them only)
+                // Store deleted userId in chat metadata so it persists after refresh
+                let metadata = {};
+                try { metadata = (typeof chat.metadata === 'string' ? JSON.parse(chat.metadata) : chat.metadata) || {}; } catch (_) {}
+                const deletedFor = Array.isArray(metadata.deletedFor) ? metadata.deletedFor : [];
+                if (!deletedFor.includes(userId)) deletedFor.push(userId);
+                metadata.deletedFor = deletedFor;
+
+                await sequelize.query(
+                    `UPDATE chats SET metadata = :metadata, "updatedAt" = NOW() WHERE id = :chatId`,
+                    { replacements: { metadata: JSON.stringify(metadata), chatId } }
+                );
+                // Remove them from participants so getUserChats won't return it
+                await sequelize.query(
+                    `DELETE FROM chat_participants WHERE "chatId" = :chatId AND "userId" = :userId`,
+                    { replacements: { chatId, userId } }
+                );
             }
             return true;
         } catch (error) {

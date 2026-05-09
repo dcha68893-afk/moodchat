@@ -348,6 +348,38 @@ class FriendController {
             next(error);
         }
     }
+
+    // FIX: New endpoint — called by NearbyManager._updatePresence() to push user's
+    // current location to the DB so they appear in other users' nearby queries.
+    async updatePresence(req, res, next) {
+        try {
+            const userId = req.user.id;
+            const { lat, lng, status = 'online' } = req.body;
+            if (!lat || !lng) return res.json({ success: true, skipped: true });
+            // Update the user's lat/lng in the DB (best-effort, non-fatal if columns missing)
+            try {
+                const db = require('../models');
+                const User = db.User || db.Users;
+                if (User) {
+                    const tableDesc = await User.describe().catch(() => null);
+                    if (tableDesc) {
+                        const updates = { status };
+                        if ('lat' in tableDesc)       updates.lat       = parseFloat(lat);
+                        if ('latitude' in tableDesc)  updates.latitude  = parseFloat(lat);
+                        if ('lng' in tableDesc)       updates.lng       = parseFloat(lng);
+                        if ('longitude' in tableDesc) updates.longitude = parseFloat(lng);
+                        if (Object.keys(updates).length > 1) {
+                            await User.update(updates, { where: { id: userId } });
+                        }
+                    }
+                }
+            } catch (_) { /* non-fatal */ }
+            res.json({ success: true });
+        } catch (error) {
+            logger.error('Update presence controller error:', error);
+            next(error);
+        }
+    }
 }
 
 module.exports = new FriendController();

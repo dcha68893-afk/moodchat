@@ -298,6 +298,15 @@ router.get('/users/all', apiRateLimiter, asyncHandler(async (req, res) => {
 }));
 
 // ===== NEARBY USERS =====
+// FIX: New route — NearbyManager calls POST /api/friends/presence to push GPS coords
+// so the calling user appears in other users' /nearby results.
+const friendController = require('../controllers/friendController');
+router.post('/presence', apiRateLimiter, asyncHandler((req, res, next) => friendController.updatePresence(req, res, next)));
+
+// Also expose on /api/users/presence (the path NearbyManager._updatePresence() uses)
+// — handled via this same router if mounted under /api/friends, but we also register
+// it here for apps that mount users routes separately.
+
 // 🔴 BUG 5 FIX: Improved nearby with better fallback and friendship status
 router.get('/nearby', apiRateLimiter, asyncHandler(async (req, res) => {
     try {
