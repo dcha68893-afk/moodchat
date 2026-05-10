@@ -218,4 +218,25 @@ router.get('/premium/features',         apiRateLimiter, toolsController.getPremi
 router.post('/payments/process',        apiRateLimiter, toolsController.processPayment.bind(toolsController));
 router.post('/payments/mpesa/callback', toolsController.mpesaCallback.bind(toolsController)); // no rate limit — Safaricom push
 
+// ═════════════════════════════════════════════════════════════════════════════
+// FULL ECOMMERCE MARKETPLACE — marketplace.routes.js mounted here
+// Adds: products, wishlist, orders, payments, reviews, seller dashboard,
+//       delivery, categories, admin, image upload, M-Pesa, card payment.
+// Exposed at /api/tools/marketplace/* (forwards to /api/marketplace/*)
+// ═════════════════════════════════════════════════════════════════════════════
+(function _mountEcomRoutes() {
+    let mpRouter;
+    try {
+        mpRouter = require('./marketplace.routes');
+    } catch (_) {
+        try { mpRouter = require('../routes/marketplace.routes'); } catch (_) {}
+    }
+    if (mpRouter) {
+        router.use('/marketplace', mpRouter);
+        console.log('[tools.js] ✅ Marketplace ecommerce routes mounted at /api/tools/marketplace');
+    } else {
+        console.warn('[tools.js] ⚠️ marketplace.routes.js not found — ecom routes unavailable');
+    }
+})();
+
 module.exports = router;

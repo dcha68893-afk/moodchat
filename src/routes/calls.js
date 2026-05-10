@@ -663,6 +663,19 @@ router.post('/:callId/accept', apiRateLimiter, asyncHandler(async (req, res) => 
 
     const user = await User.findByPk(userId, { attributes: ['id', 'username', 'avatar'] });
 
+    if (call.isGroupCall || (call.participants || []).length > 2) {
+      for (const pid of (call.participants || [])) {
+        await notifyUser(req.io, pid, 'call_participant_joined', {
+          callId: call.id,
+          userId,
+          userName: user ? user.username : (req.user.username || req.user.displayName || `User ${userId}`),
+          userAvatar: user ? user.avatar : (req.user.avatar || null),
+          callType: call.type,
+          timestamp: new Date()
+        });
+      }
+    }
+
     // Notify all participants
     for (const pid of (call.participants || [])) {
       await notifyUser(req.io, pid, 'call_accepted', {
@@ -705,6 +718,19 @@ router.post('/:callId/answer', apiRateLimiter, asyncHandler(async (req, res) => 
     }
 
     const user = await User.findByPk(userId, { attributes: ['id', 'username', 'avatar'] });
+
+    if (call.isGroupCall || (call.participants || []).length > 2) {
+      for (const pid of (call.participants || [])) {
+        await notifyUser(req.io, pid, 'call_participant_joined', {
+          callId: call.id,
+          userId,
+          userName: user ? user.username : (req.user.username || req.user.displayName || `User ${userId}`),
+          userAvatar: user ? user.avatar : (req.user.avatar || null),
+          callType: call.type,
+          timestamp: new Date()
+        });
+      }
+    }
 
     for (const pid of (call.participants || [])) {
       await notifyUser(req.io, pid, 'call_accepted', {
@@ -959,6 +985,104 @@ router.post('/:callId/join', apiRateLimiter, asyncHandler(async (req, res) => {
   } catch (err) {
     console.error('[POST /:callId/join]', err.message);
     res.status(500).json({ status: 'error', message: 'Failed to join call' });
+  }
+}));
+
+// POST /:callId/participants
+router.post('/:callId/participants', apiRateLimiter, asyncHandler(async (req, res) => {
+  try {
+    const auth = checkAuth(req, res); if (!auth) return;
+    const { userId } = auth;
+    if (!checkModels(res)) return;
+
+    const { callId } = req.params;
+    const {
+      targetUserId,
+      targetUserName = null,
+      callType = 'audio'
+    } = req.body || {};
+
+    const normalizedTargetUserId = parseInt(targetUserId, 10);
+    if (!normalizedTargetUserId) {
+      return res.status(400).json({ status: 'error', message: 'targetUserId is required' });
+    }
+    if (normalizedTargetUserId === userId) {
+      return res.status(400).json({ status: 'error', message: 'Cannot invite yourself to the call' });
+    }
+
+    const call = await Call.findOne({
+      where: {
+        id: callId,
+        participants: { [Op.contains]: [userId] },
+        status: { [Op.in]: ['ringing', 'initiated', 'in-progress'] }
+      }
+    });
+    if (!call) {
+      return res.status(404).json({ status: 'error', message: 'Call not found or not active' });
+    }
+
+    const targetUser = await User.findByPk(normalizedTargetUserId, { attributes: ['id', 'username', 'avatar'] });
+    if (!targetUser) {
+      return res.status(404).json({ status: 'error', message: 'Target user not found' });
+    }
+
+    const caller = await User.findByPk(call.callerId, { attributes: ['id', 'username', 'avatar'] });
+    const alreadyParticipant = (call.participants || []).includes(normalizedTargetUserId);
+
+    if (!alreadyParticipant) {
+      call.participants = [...new Set([...(call.participants || []), normalizedTargetUserId])];
+      call.isGroupCall = true;
+      call.metadata = {
+        ...(call.metadata || {}),
+        lastInviteAt: new Date().toISOString(),
+        lastInvitedUserId: normalizedTargetUserId
+      };
+      await call.save();
+    }
+
+    const invitePayload = {
+      callId: call.id,
+      callerId: call.callerId,
+      callerName: (caller && caller.username) || req.user.username || req.user.displayName || 'Unknown',
+      callerAvatar: (caller && caller.avatar) || req.user.avatar || null,
+      callType: call.type || callType,
+      type: call.type || callType,
+      isGroupCall: true,
+      participantIds: call.participants || [],
+      invitedBy: userId,
+      targetUserId: normalizedTargetUserId,
+      targetUserName: targetUserName || targetUser.username || 'User',
+      timestamp: new Date()
+    };
+
+    await notifyUser(req.io, normalizedTargetUserId, 'call_incoming', invitePayload);
+    await notifyUser(req.io, normalizedTargetUserId, 'call:ringing', invitePayload);
+
+    for (const pid of (call.participants || []).filter(pid => pid !== normalizedTargetUserId)) {
+      await notifyUser(req.io, pid, 'call_participant_joined', {
+        callId: call.id,
+        userId: normalizedTargetUserId,
+        userName: targetUser.username || 'User',
+        userAvatar: targetUser.avatar || null,
+        callType: call.type || callType,
+        pending: true,
+        invited: true,
+        timestamp: new Date()
+      });
+    }
+
+    res.status(alreadyParticipant ? 200 : 201).json({
+      status: 'success',
+      message: alreadyParticipant ? 'Participant already in call' : 'Participant invited',
+      data: {
+        callId: call.id,
+        targetUser: { id: targetUser.id, username: targetUser.username, avatar: targetUser.avatar },
+        participants: call.participants || []
+      }
+    });
+  } catch (err) {
+    console.error('[POST /:callId/participants]', err.message);
+    res.status(500).json({ status: 'error', message: 'Failed to invite participant' });
   }
 }));
 
