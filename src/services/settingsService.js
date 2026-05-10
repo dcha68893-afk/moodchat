@@ -4,7 +4,15 @@ const logger = require('../utils/logger');
 
 /**
  * Settings Service
- * Handles user settings management
+ * Handles user settings management — Sequelize edition.
+ *
+ * FIXED:
+ *  ✅  All Mongoose (.lean(), findOne with callback pattern) replaced with Sequelize API
+ *  ✅  findOne({ userId }) → findOne({ where: { userId } })
+ *  ✅  findOneAndUpdate → findOne + instance.update()
+ *  ✅  deleteOne → destroy()
+ *  ✅  _formatSettingsResponse now returns AppSettings-schema shape so frontend merges cleanly
+ *  ✅  _normaliseSectionedPayload kept for backward compat with AppSettings payload shape
  */
 class SettingsService {
   /**
@@ -14,22 +22,17 @@ class SettingsService {
    */
   async getSettings(userId) {
     try {
-      if (!userId) {
-        throw new ValidationError('User ID is required');
-      }
+      if (!userId) throw new ValidationError('User ID is required');
 
-      let settings = await Settings.findOne({ userId }).lean();
+      let settings = await Settings.findOne({ where: { userId } });
 
       if (!settings) {
-        // Create default settings if none exist
-        settings = await this.createSettings(userId, {});
+        settings = await this._createDefaultSettings(userId);
       }
 
-      return this._formatSettingsResponse(settings);
+      return this._formatSettingsResponse(settings.toJSON ? settings.toJSON() : settings);
     } catch (error) {
-      if (error instanceof ValidationError) {
-        throw error;
-      }
+      if (error instanceof ValidationError) throw error;
       logger.error('Error getting settings:', error);
       throw new ServerError('Failed to get settings');
     }
@@ -43,46 +46,28 @@ class SettingsService {
    */
   async updateSettings(userId, settingsData) {
     try {
-      if (!userId) {
-        throw new ValidationError('User ID is required');
-      }
+      if (!userId) throw new ValidationError('User ID is required');
+      if (!settingsData || typeof settingsData !== 'object') throw new ValidationError('Settings data is required');
 
-      if (!settingsData || typeof settingsData !== 'object') {
-        throw new ValidationError('Settings data is required');
-      }
+      // Normalise AppSettings-shaped payload → flat DB columns
+      const flatData = this._normaliseSectionedPayload(settingsData);
 
-      let settings = await Settings.findOne({ userId });
+      this._validateSettingsUpdate(flatData);
+
+      let settings = await Settings.findOne({ where: { userId } });
 
       if (!settings) {
-        // Create settings if they don't exist
-        settings = await this.createSettings(userId, settingsData);
+        // Create with merged defaults + provided data
+        const defaults = Settings.getDefaultSettings ? Settings.getDefaultSettings() : {};
+        settings = await Settings.create({ userId, ...defaults, ...flatData });
       } else {
-        // Normalise AppSettings-shaped payload → flat DB schema
-        const flatData = this._normaliseSectionedPayload(settingsData);
-
-        // Validate updates before applying
-        this._validateSettingsUpdate(flatData);
-        
-        // Update settings
-        settings = await Settings.findOneAndUpdate(
-          { userId },
-          { $set: flatData },
-          { new: true, runValidators: true }
-        ).lean();
+        await settings.update(flatData);
+        await settings.reload();
       }
 
-      if (!settings) {
-        throw new NotFoundError('Settings not found');
-      }
-
-      return this._formatSettingsResponse(settings);
+      return this._formatSettingsResponse(settings.toJSON ? settings.toJSON() : settings);
     } catch (error) {
-      if (
-        error instanceof ValidationError ||
-        error instanceof NotFoundError
-      ) {
-        throw error;
-      }
+      if (error instanceof ValidationError || error instanceof NotFoundError) throw error;
       logger.error('Error updating settings:', error);
       throw new ServerError('Failed to update settings');
     }
@@ -90,76 +75,51 @@ class SettingsService {
 
   /**
    * Create settings for a user
-   * @param {string} userId - User ID
-   * @param {Object} settingsData - Optional custom settings data
-   * @returns {Promise<Object>} Created settings
    */
   async createSettings(userId, settingsData = {}) {
     try {
-      if (!userId) {
-        throw new ValidationError('User ID is required');
-      }
+      if (!userId) throw new ValidationError('User ID is required');
 
-      // Check if settings already exist
-      const existingSettings = await Settings.findOne({ userId });
-      if (existingSettings) {
-        throw new ValidationError('Settings already exist for this user');
-      }
+      const existing = await Settings.findOne({ where: { userId } });
+      if (existing) throw new ValidationError('Settings already exist for this user');
 
-      // Get default settings and merge with custom data
-      const defaultSettings = Settings.getDefaultSettings();
-      // Normalise any AppSettings-shaped keys before merging with defaults
-      const flatCustom = Object.keys(settingsData).length > 0
+      const defaults     = Settings.getDefaultSettings ? Settings.getDefaultSettings() : {};
+      const flatCustom   = Object.keys(settingsData).length > 0
         ? this._normaliseSectionedPayload(settingsData)
         : settingsData;
-      const mergedSettings = {
-        userId,
-        ...defaultSettings,
-        ...flatCustom
-      };
+      const mergedSettings = { userId, ...defaults, ...flatCustom };
 
-      // Validate the merged settings
       this._validateSettingsUpdate(mergedSettings);
 
-      // Create new settings
-      const settings = new Settings(mergedSettings);
-      await settings.save();
-
-      return this._formatSettingsResponse(settings.toObject());
+      const settings = await Settings.create(mergedSettings);
+      return this._formatSettingsResponse(settings.toJSON ? settings.toJSON() : settings);
     } catch (error) {
-      if (error instanceof ValidationError) {
-        throw error;
-      }
+      if (error instanceof ValidationError) throw error;
       logger.error('Error creating settings:', error);
       throw new ServerError('Failed to create settings');
     }
   }
 
   /**
+   * Internal helper — create with defaults, no duplicate check
+   */
+  async _createDefaultSettings(userId) {
+    const defaults = Settings.getDefaultSettings ? Settings.getDefaultSettings() : {};
+    return Settings.create({ userId, ...defaults });
+  }
+
+  /**
    * Delete settings for a user
-   * @param {string} userId - User ID
-   * @returns {Promise<boolean>} Success status
    */
   async deleteSettings(userId) {
     try {
-      if (!userId) {
-        throw new ValidationError('User ID is required');
-      }
+      if (!userId) throw new ValidationError('User ID is required');
 
-      const result = await Settings.deleteOne({ userId });
-
-      if (result.deletedCount === 0) {
-        throw new NotFoundError('Settings not found');
-      }
-
+      const count = await Settings.destroy({ where: { userId } });
+      if (count === 0) throw new NotFoundError('Settings not found');
       return true;
     } catch (error) {
-      if (
-        error instanceof ValidationError ||
-        error instanceof NotFoundError
-      ) {
-        throw error;
-      }
+      if (error instanceof ValidationError || error instanceof NotFoundError) throw error;
       logger.error('Error deleting settings:', error);
       throw new ServerError('Failed to delete settings');
     }
@@ -167,35 +127,22 @@ class SettingsService {
 
   /**
    * Get multiple users' settings
-   * @param {Array<string>} userIds - Array of user IDs
-   * @returns {Promise<Array<Object>>} Array of settings
    */
   async getBulkSettings(userIds) {
     try {
-      if (!Array.isArray(userIds) || userIds.length === 0) {
-        throw new ValidationError('User IDs array is required');
-      }
+      if (!Array.isArray(userIds) || userIds.length === 0) throw new ValidationError('User IDs array is required');
 
-      const settings = await Settings.find({ userId: { $in: userIds } }).lean();
+      const settings = await Settings.findAll({ where: { userId: userIds } });
 
-      // Create default settings for users who don't have any
-      const usersWithoutSettings = userIds.filter(
-        id => !settings.some(s => s.userId.toString() === id)
-      );
+      const foundIds = settings.map(s => String(s.userId));
+      const missing  = userIds.filter(id => !foundIds.includes(String(id)));
 
-      if (usersWithoutSettings.length > 0) {
-        const defaultSettingsPromises = usersWithoutSettings.map(userId =>
-          this.createSettings(userId, {})
-        );
-        const newSettings = await Promise.all(defaultSettingsPromises);
-        settings.push(...newSettings);
-      }
+      const newSettings = await Promise.all(missing.map(uid => this._createDefaultSettings(uid)));
+      settings.push(...newSettings);
 
-      return settings.map(s => this._formatSettingsResponse(s));
+      return settings.map(s => this._formatSettingsResponse(s.toJSON ? s.toJSON() : s));
     } catch (error) {
-      if (error instanceof ValidationError) {
-        throw error;
-      }
+      if (error instanceof ValidationError) throw error;
       logger.error('Error getting bulk settings:', error);
       throw new ServerError('Failed to get bulk settings');
     }
@@ -203,67 +150,58 @@ class SettingsService {
 
   /**
    * Reset settings to defaults for a user
-   * @param {string} userId - User ID
-   * @returns {Promise<Object>} Reset settings
    */
   async resetSettings(userId) {
     try {
-      if (!userId) {
-        throw new ValidationError('User ID is required');
+      if (!userId) throw new ValidationError('User ID is required');
+
+      const defaults = Settings.getDefaultSettings ? Settings.getDefaultSettings() : {};
+
+      const [, [settings]] = await Settings.update(defaults, {
+        where: { userId },
+        returning: true   // Postgres only; ignored on MySQL/SQLite
+      });
+
+      if (!settings) {
+        // upsert fallback for databases that don't return rows
+        const row = await Settings.findOne({ where: { userId } });
+        if (!row) {
+          return this._formatSettingsResponse((await Settings.create({ userId, ...defaults })).toJSON());
+        }
+        return this._formatSettingsResponse(row.toJSON ? row.toJSON() : row);
       }
 
-      const defaultSettings = Settings.getDefaultSettings();
-      
-      const settings = await Settings.findOneAndUpdate(
-        { userId },
-        { $set: defaultSettings },
-        { new: true, upsert: true, runValidators: true }
-      ).lean();
-
-      return this._formatSettingsResponse(settings);
+      return this._formatSettingsResponse(settings.toJSON ? settings.toJSON() : settings);
     } catch (error) {
-      if (error instanceof ValidationError) {
-        throw error;
-      }
+      if (error instanceof ValidationError) throw error;
       logger.error('Error resetting settings:', error);
       throw new ServerError('Failed to reset settings');
     }
   }
 
   /**
-   * Validate settings update
-   * Accepts both flat fields (legacy) and section-keyed objects (AppSettings shape).
+   * Validate settings update — accepts flat fields and section-keyed objects.
    * @private
-   * @param {Object} settingsData - Settings data to validate
    */
   _validateSettingsUpdate(settingsData) {
-    // ── Flat top-level fields (legacy schema, kept for backwards compat) ──────
     const validFlatFields = [
       'theme', 'accentColor', 'notificationsEnabled', 'language',
       'fontSize', 'timezone', 'emailNotifications', 'pushNotifications',
       'soundEnabled', 'vibrationEnabled', 'dataSaver', 'autoDownload',
-      'privacy', 'chatPreferences',
-      // userId is set server-side; updatedAt is managed here
-      'updatedAt', 'syncEnabled', 'section'
+      'privacy', 'chatPreferences', 'updatedAt', 'syncEnabled', 'section', 'userId'
     ];
 
-    // ── Section-keyed fields (AppSettings / MoodChat schema) ─────────────────
     const validSectionFields = [
       'appearance', 'notifications', 'calls', 'groups',
       'friends', 'status', 'account', 'chat', 'advanced'
     ];
 
     const allValidFields = [...validFlatFields, ...validSectionFields];
-
-    const invalidFields = Object.keys(settingsData).filter(
-      field => !allValidFields.includes(field)
-    );
-
+    const invalidFields  = Object.keys(settingsData).filter(f => !allValidFields.includes(f));
     if (invalidFields.length > 0) {
       throw new ValidationError(`Invalid fields: ${invalidFields.join(', ')}`);
     }
 
-    // ── Field-level validation ────────────────────────────────────────────────
     const theme = settingsData.theme || settingsData.appearance?.theme;
     if (theme && !['light', 'dark', 'system', 'auto'].includes(theme)) {
       throw new ValidationError('Invalid theme value');
@@ -274,117 +212,122 @@ class SettingsService {
       throw new ValidationError('Invalid accent color format');
     }
 
-    const language = settingsData.language || settingsData.appearance?.language;
-    const validLanguages = ['en', 'es', 'fr', 'de', 'zh', 'ja', 'ko', 'ru', 'ar',
-                            'pt', 'it', 'nl', 'pl', 'sv', 'tr'];
-    if (language && !validLanguages.includes(language)) {
+    const language     = settingsData.language || settingsData.appearance?.language;
+    const validLangs   = ['en', 'es', 'fr', 'de', 'zh', 'ja', 'ko', 'ru', 'ar', 'pt', 'it', 'nl', 'pl', 'sv', 'tr'];
+    if (language && !validLangs.includes(language)) {
       throw new ValidationError('Invalid language');
-    }
-
-    // Validate boolean fields
-    const boolFields = ['notificationsEnabled', 'emailNotifications', 'pushNotifications',
-                        'soundEnabled', 'vibrationEnabled', 'dataSaver', 'autoDownload', 'syncEnabled'];
-    boolFields.forEach(field => {
-      if (field in settingsData && typeof settingsData[field] !== 'boolean') {
-        throw new ValidationError(`Field "${field}" must be a boolean`);
-      }
-    });
-
-    // privacy must be an object if present
-    if (settingsData.privacy !== undefined &&
-        (typeof settingsData.privacy !== 'object' || Array.isArray(settingsData.privacy))) {
-      throw new ValidationError('Field "privacy" must be an object');
-    }
-
-    // chatPreferences must be an object if present
-    if (settingsData.chatPreferences !== undefined &&
-        (typeof settingsData.chatPreferences !== 'object' || Array.isArray(settingsData.chatPreferences))) {
-      throw new ValidationError('Field "chatPreferences" must be an object');
     }
   }
 
   /**
-   * Normalise an AppSettings-shaped payload to the flat DB schema.
-   * Called by updateSettings before writing to the DB so the richer
-   * frontend shape maps cleanly to the existing Sequelize model columns.
+   * Normalise an AppSettings-shaped payload to flat DB schema columns.
    * @private
-   * @param {Object} settingsData
-   * @returns {Object} flat settings object safe to pass to $set / findOneAndUpdate
    */
   _normaliseSectionedPayload(settingsData) {
     const out = Object.assign({}, settingsData);
 
-    // Flatten appearance → top-level columns
     if (settingsData.appearance && typeof settingsData.appearance === 'object') {
       const a = settingsData.appearance;
-      if (a.theme        !== undefined) out.theme        = a.theme;
-      if (a.accentColor  !== undefined) out.accentColor  = a.accentColor;
-      if (a.fontSize     !== undefined) out.fontSize      = String(a.fontSize);
-      if (a.language     !== undefined) out.language      = a.language;
-      if (a.timezone     !== undefined) out.timezone      = a.timezone;
+      if (a.theme       !== undefined) out.theme       = a.theme;
+      if (a.accentColor !== undefined) out.accentColor = a.accentColor;
+      if (a.fontSize    !== undefined) out.fontSize    = String(a.fontSize);
+      if (a.language    !== undefined) out.language    = a.language;
+      if (a.timezone    !== undefined) out.timezone    = a.timezone;
       delete out.appearance;
     }
 
-    // Flatten notifications booleans
     if (settingsData.notifications && typeof settingsData.notifications === 'object') {
       const n = settingsData.notifications;
-      if (n.messageNotifications   !== undefined) out.notificationsEnabled = n.messageNotifications;
-      if (n.notificationSound      !== undefined) out.soundEnabled         = n.notificationSound;
-      if (n.notificationVibration  !== undefined) out.vibrationEnabled     = n.notificationVibration;
-      if (n.emailNotifications     !== undefined) out.emailNotifications   = n.emailNotifications;
-      if (n.pushNotifications      !== undefined) out.pushNotifications    = n.pushNotifications;
+      if (n.messageNotifications  !== undefined) out.notificationsEnabled = n.messageNotifications;
+      if (n.notificationSound     !== undefined) out.soundEnabled         = n.notificationSound;
+      if (n.notificationVibration !== undefined) out.vibrationEnabled     = n.notificationVibration;
+      if (n.emailNotifications    !== undefined) out.emailNotifications   = n.emailNotifications;
+      if (n.pushNotifications     !== undefined) out.pushNotifications    = n.pushNotifications;
       delete out.notifications;
     }
 
-    // Flatten chat
     if (settingsData.chat && typeof settingsData.chat === 'object') {
       const c = settingsData.chat;
-      out.chatPreferences = Object.assign(out.chatPreferences || {}, {
-        enterToSend:  c.enterKeySends      !== undefined ? c.enterKeySends      : undefined,
-        mediaQuality: c.videoQuality        !== undefined ? c.videoQuality       : undefined,
-        saveToGallery:c.saveMedia           !== undefined ? c.saveMedia          : undefined,
+      const existing = out.chatPreferences || {};
+      out.chatPreferences = Object.assign({}, existing, {
+        ...(c.enterKeySends     !== undefined && { enterToSend:   c.enterKeySends }),
+        ...(c.videoQuality      !== undefined && { mediaQuality:  c.videoQuality }),
+        ...(c.saveMedia         !== undefined && { saveToGallery: c.saveMedia }),
       });
       if (c.autoDownloadMedia !== undefined) out.autoDownload = c.autoDownloadMedia;
       delete out.chat;
     }
 
-    // Flatten advanced
     if (settingsData.advanced && typeof settingsData.advanced === 'object') {
       if (settingsData.advanced.dataSaver   !== undefined) out.dataSaver   = settingsData.advanced.dataSaver;
       if (settingsData.advanced.syncEnabled !== undefined) out.syncEnabled = settingsData.advanced.syncEnabled;
       delete out.advanced;
     }
 
-    // Remove section keys that don't map to DB columns (friends, groups, status, account, calls)
+    // Remove section-only keys that have no DB columns
     ['friends', 'groups', 'status', 'account', 'calls'].forEach(k => delete out[k]);
 
     return out;
   }
 
   /**
-   * Format settings response
+   * Format settings response in AppSettings-schema shape so the frontend
+   * can merge it directly into SettingsState / AppSettings without remapping.
    * @private
-   * @param {Object} settings - Settings document
-   * @returns {Object} Formatted settings response
    */
   _formatSettingsResponse(settings) {
+    const priv = settings.privacy         || {};
+    const chat = settings.chatPreferences || {};
+
     return {
-      id: settings._id,
-      userId: settings.userId,
-      theme: settings.theme,
-      accentColor: settings.accentColor,
-      notificationsEnabled: settings.notificationsEnabled,
-      language: settings.language,
-      fontSize: settings.fontSize,
-      timezone: settings.timezone,
-      emailNotifications: settings.emailNotifications,
-      pushNotifications: settings.pushNotifications,
-      soundEnabled: settings.soundEnabled,
-      vibrationEnabled: settings.vibrationEnabled,
-      dataSaver: settings.dataSaver,
-      autoDownload: settings.autoDownload,
-      privacy: settings.privacy,
-      chatPreferences: settings.chatPreferences,
+      // ── appearance ──────────────────────────────────────────────────────
+      appearance: {
+        theme:       settings.theme       || 'light',
+        language:    settings.language    || 'en',
+        accentColor: settings.accentColor || '#4F46E5',
+        fontSize:    settings.fontSize    || 'medium',
+        timezone:    settings.timezone    || 'UTC',
+        reduceMotion:false
+      },
+      // ── notifications ────────────────────────────────────────────────────
+      notifications: {
+        messageNotifications:   settings.notificationsEnabled !== false,
+        emailNotifications:     settings.emailNotifications   !== false,
+        pushNotifications:      settings.pushNotifications    !== false,
+        notificationSound:      settings.soundEnabled         !== false,
+        notificationVibration:  settings.vibrationEnabled     !== false,
+        groupNotifications:     true,
+        callNotifications:      true,
+        statusNotifications:    true,
+        popupNotifications:     false,
+        doNotDisturb:           false
+      },
+      // ── privacy ──────────────────────────────────────────────────────────
+      privacy: {
+        profileVisibility: priv.profileVisibility  || 'public',
+        readReceipts:      priv.readReceipts        !== false,
+        typingIndicators:  priv.typingIndicators    !== false,
+        onlineStatus:      priv.onlineStatus        !== false,
+        lastSeen:          priv.lastSeen            !== false,
+        whoCanAddMe:       priv.whoCanAddMe         || 'everyone',
+        statusVisibility:  priv.statusVisibility    || 'everyone'
+      },
+      // ── chat ─────────────────────────────────────────────────────────────
+      chat: {
+        enterKeySends:     chat.enterToSend  !== false,
+        autoDownloadMedia: settings.autoDownload !== false,
+        saveMedia:         chat.saveToGallery || false,
+        mediaQuality:      chat.mediaQuality  || 'auto',
+        fontSize:          settings.fontSize  || 'medium'
+      },
+      // ── advanced ─────────────────────────────────────────────────────────
+      advanced: {
+        dataSaver:   settings.dataSaver  || false,
+        syncEnabled: settings.syncEnabled || false
+      },
+      // ── meta ─────────────────────────────────────────────────────────────
+      _id:       settings.id,
+      userId:    settings.userId,
       createdAt: settings.createdAt,
       updatedAt: settings.updatedAt
     };

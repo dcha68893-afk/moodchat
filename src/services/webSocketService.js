@@ -173,6 +173,30 @@ class WebSocketService {
                 this.removeUser(userId, socket);
                 console.log(`[WSService] socket disconnected uid=${userId} sid=${socket.id} reason=${reason}`);
             });
+
+            // ── SETTINGS: client can push a settings change from one device so
+            //    the server relays it to all other sockets of the same user.
+            //    This enables cross-device settings sync without polling.
+            socket.on('settings:update', (payload) => {
+                try {
+                    if (!payload || typeof payload !== 'object') return;
+                    const settings = payload.settings || payload;
+                    // Relay to all OTHER sockets of this user (not the sender)
+                    const io = this.getIO();
+                    if (!io) return;
+                    const updateMsg = {
+                        type:      'settings_updated',
+                        userId:    String(userId),
+                        settings,
+                        timestamp: Date.now()
+                    };
+                    [`user:${userId}`, `user_${userId}`, `user:${String(userId)}`, `user_${String(userId)}`].forEach(room => {
+                        io.to(room).except(socket.id).emit('settings_updated', updateMsg);
+                    });
+                } catch (e) {
+                    console.warn('[WSService] settings:update relay error:', e.message);
+                }
+            });
         });
 
         console.log('[WSService] Connection handler registered ✅');
@@ -477,6 +501,24 @@ class WebSocketService {
 
     async sendNotification(userId, notification = {}) {
         return this.sendToUser(userId, 'notification:new', notification);
+    }
+
+    /**
+     * Emit settings_updated to all sockets for a user so every open
+     * tab or device receives the change and can re-apply settings immediately.
+     *
+     * @param {number|string} userId
+     * @param {Object}        settings  Partial or full AppSettings-schema object
+     * @returns {boolean} true if delivered to at least one socket
+     */
+    async notifySettingsUpdated(userId, settings = {}) {
+        const payload = {
+            type:      'settings_updated',
+            userId:    String(userId),
+            settings,
+            timestamp: new Date().toISOString()
+        };
+        return this.sendToUser(userId, 'settings_updated', payload);
     }
 
     async notifyMoodShared(userId, payload = {})  { return this.sendToUser(userId, 'mood:shared', payload); }

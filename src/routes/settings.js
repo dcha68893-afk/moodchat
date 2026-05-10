@@ -49,6 +49,138 @@ const getUserId = (req) => {
     return req.user.userId || req.user.id;
 };
 
+// ─── Helper: emit settings_updated socket event to the requesting user ───────
+function _emitSettingsUpdated(req, settingsPayload) {
+    try {
+        const io = global.__socketIO || global.__io || global.io;
+        if (!io) return;
+        const userId = getUserId(req);
+        if (!userId) return;
+        // Emit to all sockets for this user so every open tab/device receives the update
+        [`user:${userId}`, `user_${userId}`, `user:${String(userId)}`, `user_${String(userId)}`].forEach(room => {
+            io.to(room).emit('settings_updated', {
+                type: 'settings_updated',
+                userId,
+                settings: settingsPayload,
+                timestamp: Date.now()
+            });
+        });
+    } catch (e) {
+        console.warn('[Settings] Socket emit failed (non-critical):', e.message);
+    }
+}
+
+// ─── Helper: build the full AppSettings-schema response from DB rows ─────────
+function _buildSettingsResponse(user, settings) {
+    const priv  = (settings && settings.privacy)         || {};
+    const chat  = (settings && settings.chatPreferences) || {};
+
+    return {
+        // ── appearance ──────────────────────────────────────────────────────
+        appearance: {
+            theme:        (user && user.theme)    || (settings && settings.theme)    || 'light',
+            language:     (user && user.language) || (settings && settings.language) || 'en',
+            accentColor:  (settings && settings.accentColor)  || '#4F46E5',
+            fontSize:     (settings && settings.fontSize)     || 'medium',
+            reduceMotion: false,
+            timeFormat:   '12h',
+            dateFormat:   'mm/dd/yyyy'
+        },
+        // ── notifications ────────────────────────────────────────────────────
+        notifications: {
+            messageNotifications:       (settings && settings.notificationsEnabled) !== false,
+            emailNotifications:         (settings && settings.emailNotifications)   !== false,
+            pushNotifications:          (settings && settings.pushNotifications)    !== false,
+            groupNotifications:         true,
+            callNotifications:          true,
+            statusNotifications:        true,
+            notificationSound:          (settings && settings.soundEnabled)         !== false,
+            notificationVibration:      (settings && settings.vibrationEnabled)     !== false,
+            popupNotifications:         false,
+            doNotDisturb:               false,
+            doNotDisturbStart:          '22:00',
+            doNotDisturbEnd:            '08:00'
+        },
+        // ── privacy ──────────────────────────────────────────────────────────
+        privacy: {
+            profileVisibility:  priv.profileVisibility  || 'public',
+            readReceipts:       priv.readReceipts        !== false,
+            typingIndicators:   priv.typingIndicators    !== false,
+            onlineStatus:       priv.onlineStatus        !== false,
+            lastSeen:           priv.lastSeen            !== false,
+            whoCanAddMe:        priv.whoCanAddMe         || 'everyone',
+            contactDiscovery:   priv.contactDiscovery    !== false,
+            statusVisibility:   priv.statusVisibility    || 'everyone'
+        },
+        // ── chat ─────────────────────────────────────────────────────────────
+        chat: {
+            enterKeySends:       chat.enterToSend         !== false,
+            mediaDownload:       (settings && settings.autoDownload) ? 'always' : 'wifi',
+            autoDownloadMedia:   (settings && settings.autoDownload) !== false,
+            saveMedia:           chat.saveToGallery        || false,
+            disappearingMessages:'off',
+            fontSize:            (settings && settings.fontSize) || 'medium'
+        },
+        // ── account ──────────────────────────────────────────────────────────
+        account: {
+            id:            user && user.id,
+            username:      (user && user.username)   || 'User',
+            email:         (user && user.email)      || '',
+            avatar:        (user && user.avatar)     || null,
+            firstName:     (user && user.firstName)  || null,
+            lastName:      (user && user.lastName)   || null,
+            bio:           (user && user.bio)        || null,
+            loginAlerts:   true,
+            securityAlerts:true,
+            autoBackup:    false,
+            backupFrequency:'weekly',
+            deleteAccountAfter: 'never'
+        },
+        // ── advanced ─────────────────────────────────────────────────────────
+        advanced: {
+            dataSaver:    (settings && settings.dataSaver)   || false,
+            syncEnabled:  false,
+            offlineMode:  true,
+            debugMode:    false,
+            lowBandwidth: false
+        },
+        // ── calls (persisted in chatPreferences JSONB for now) ───────────────
+        calls: {
+            whoCanCallMe:       'friends',
+            ringtone:           'default',
+            callVibration:      true,
+            autoAnswer:         false,
+            videoQuality:       chat.mediaQuality || 'auto',
+            noiseCancellation:  true,
+            echoCancellation:   true,
+            liveReactions:      true,
+            inCallChat:         true
+        },
+        // ── groups / friends / status — static defaults (no DB columns yet) ──
+        groups: {
+            groupInvitations:   'friends',
+            groupPrivacy:       'public',
+            groupAnnouncements: true,
+            groupSpamDetection: true,
+            memberWarnings:     true,
+            messageApproval:    false,
+            keywordFiltering:   false,
+            groupMediaDownload: false
+        },
+        friends: {
+            friendSuggestions:  true,
+            nearbyDiscovery:    false,
+            friendCategories:   true,
+            trustScore:         false
+        },
+        status: {
+            visibility:        'everyone',
+            autoDownloadMedia: true,
+            moodAutoShare:     false
+        }
+    };
+}
+
 // Get all settings for current user
 router.get(
     '/',
@@ -64,7 +196,7 @@ router.get(
                 });
             }
 
-            // Get user with only existing fields
+            // Get user
             const user = await safeDbQuery(
                 () => User.findByPk(userId, {
                     attributes: ['id', 'username', 'email', 'avatar', 'firstName', 'lastName', 'bio', 'theme', 'language']
@@ -72,104 +204,59 @@ router.get(
                 { username: 'User', email: 'user@example.com' }
             );
 
-            // Get or create settings - FIXED: Use findOrCreate to avoid manual ID
+            // Get or create settings
             let settings = null;
             if (Settings) {
-                const [foundSettings, created] = await Settings.findOrCreate({
+                const [foundSettings] = await Settings.findOrCreate({
                     where: { userId: userId },
                     defaults: {
-                        userId: userId,
-                        theme: 'light',
-                        language: 'en',
+                        userId:               userId,
+                        theme:                'light',
+                        language:             'en',
                         notificationsEnabled: true,
-                        emailNotifications: true,
-                        pushNotifications: true,
-                        soundEnabled: true,
-                        vibrationEnabled: true,
-                        accentColor: '#000000',
-                        fontSize: 'medium',
-                        timezone: 'UTC',
-                        dataSaver: false,
-                        autoDownload: false,
+                        emailNotifications:   true,
+                        pushNotifications:    true,
+                        soundEnabled:         true,
+                        vibrationEnabled:     true,
+                        accentColor:          '#4F46E5',
+                        fontSize:             'medium',
+                        timezone:             'UTC',
+                        dataSaver:            false,
+                        autoDownload:         false,
                         privacy: {
                             profileVisibility: 'public',
-                            readReceipts: true,
-                            typingIndicators: true,
-                            onlineStatus: true,
-                            lastSeen: true
+                            readReceipts:      true,
+                            typingIndicators:  true,
+                            onlineStatus:      true,
+                            lastSeen:          true,
+                            whoCanAddMe:       'everyone',
+                            statusVisibility:  'everyone'
                         },
                         chatPreferences: {
-                            enterToSend: true,
-                            mediaQuality: 'auto',
+                            enterToSend:   true,
+                            mediaQuality:  'auto',
                             saveToGallery: false,
                             messageBackup: true
                         }
                     }
                 });
                 settings = foundSettings;
-                if (created) {
-                    console.log(`[Settings] Created new settings for user ${userId}`);
-                }
             }
 
+            // Return in AppSettings-schema format so frontend state merges cleanly
+            const settingsPayload = _buildSettingsResponse(user, settings);
+
             res.status(200).json({
-                status: 'success',
-                data: {
-                    profile: {
-                        id: user?.id,
-                        username: user?.username || 'User',
-                        email: user?.email || '',
-                        avatar: user?.avatar || null,
-                        firstName: user?.firstName || null,
-                        lastName: user?.lastName || null,
-                        bio: user?.bio || null,
-                        theme: user?.theme || settings?.theme || 'light',
-                        language: user?.language || settings?.language || 'en'
-                    },
-                    notifications: {
-                        emailNotifications: settings?.emailNotifications !== undefined ? settings.emailNotifications : true,
-                        pushNotifications: settings?.pushNotifications !== undefined ? settings.pushNotifications : true,
-                        messageNotifications: true,
-                        callNotifications: true,
-                        groupNotifications: true,
-                        soundEnabled: settings?.soundEnabled !== undefined ? settings.soundEnabled : true,
-                        vibrationEnabled: settings?.vibrationEnabled !== undefined ? settings.vibrationEnabled : true,
-                        doNotDisturb: false,
-                        doNotDisturbStart: '22:00',
-                        doNotDisturbEnd: '08:00'
-                    },
-                    privacy: {
-                        profileVisibility: 'public',
-                        onlineStatus: 'all',
-                        lastSeen: 'all',
-                        readReceipts: true,
-                        typingIndicators: true,
-                        blockedUsers: [],
-                        whoCanAddMe: 'everyone',
-                        syncContacts: true,
-                        dataSaver: false
-                    },
-                    account: {
-                        loginAlerts: true,
-                        securityAlerts: true,
-                        autoBackup: false,
-                        backupFrequency: 'weekly',
-                        dataRetention: '30d',
-                        deleteAccountAfter: 'never'
-                    }
-                }
+                success: true,
+                status:  'success',
+                data:    { settings: settingsPayload }
             });
         } catch (error) {
-            console.error('Error getting settings:', error);
-            // Return default settings on error
+            console.error('[Settings] GET / error:', error);
             res.status(200).json({
-                status: 'success',
-                data: {
-                    profile: { username: 'User' },
-                    notifications: {},
-                    privacy: {},
-                    account: {}
-                }
+                success: true,
+                status:  'success',
+                data:    { settings: _buildSettingsResponse(null, null) }
             });
         }
     })
@@ -220,17 +307,29 @@ router.put(
                 await User.update(updateData, { where: { id: userId } });
             }
 
+            // Sync theme/language into Settings table too
+            const settingsSync = {};
+            if (updateData.theme)    settingsSync.theme    = updateData.theme;
+            if (updateData.language) settingsSync.language = updateData.language;
+            if (Object.keys(settingsSync).length > 0 && Settings) {
+                await Settings.update(settingsSync, { where: { userId } }).catch(() => {});
+            }
+
             const updatedUser = await User.findByPk(userId, {
                 attributes: ['id', 'username', 'email', 'avatar', 'firstName', 'lastName', 'bio', 'theme', 'language']
             });
 
+            // Emit socket update so other tabs/devices react instantly
+            _emitSettingsUpdated(req, { appearance: { theme: updatedUser?.theme, language: updatedUser?.language } });
+
             res.status(200).json({
+                success: true,
                 status: 'success',
                 message: 'Profile updated successfully',
                 data: { profile: updatedUser }
             });
         } catch (error) {
-            console.error('Error updating profile:', error);
+            console.error('[Settings] PUT /profile error:', error);
             res.status(500).json({
                 status: 'error',
                 message: 'Failed to update profile'
@@ -239,7 +338,7 @@ router.put(
     })
 );
 
-// Update notification settings
+// Update notification settings — handles ALL notification keys the frontend sends
 router.put(
     '/notifications',
     apiRateLimiter,
@@ -254,31 +353,45 @@ router.put(
                 });
             }
             
-            const {
-                emailNotifications,
-                pushNotifications,
-                soundEnabled,
-                vibrationEnabled
-            } = req.body;
-
+            const body = req.body || {};
             const updateData = {};
 
-            if (emailNotifications !== undefined) updateData.emailNotifications = emailNotifications;
-            if (pushNotifications !== undefined) updateData.pushNotifications = pushNotifications;
-            if (soundEnabled !== undefined) updateData.soundEnabled = soundEnabled;
-            if (vibrationEnabled !== undefined) updateData.vibrationEnabled = vibrationEnabled;
+            // Map from AppSettings notification keys → Settings table columns
+            const notifMap = {
+                emailNotifications:       'emailNotifications',
+                pushNotifications:        'pushNotifications',
+                notificationSound:        'soundEnabled',
+                soundEnabled:             'soundEnabled',
+                notificationVibration:    'vibrationEnabled',
+                vibrationEnabled:         'vibrationEnabled',
+                messageNotifications:     'notificationsEnabled',
+                notificationsEnabled:     'notificationsEnabled',
+            };
+
+            Object.entries(notifMap).forEach(([bodyKey, dbKey]) => {
+                if (body[bodyKey] !== undefined) updateData[dbKey] = body[bodyKey];
+            });
+
+            // Also accept the raw key name if it's a direct Settings column
+            ['emailNotifications','pushNotifications','soundEnabled','vibrationEnabled','notificationsEnabled'].forEach(k => {
+                if (body[k] !== undefined) updateData[k] = body[k];
+            });
 
             if (Object.keys(updateData).length > 0 && Settings) {
-                await Settings.update(updateData, { where: { userId: userId } });
+                await Settings.update(updateData, { where: { userId } });
             }
 
+            // Emit socket update for cross-device/tab propagation
+            _emitSettingsUpdated(req, { notifications: body });
+
             res.status(200).json({
-                status: 'success',
+                success: true,
+                status:  'success',
                 message: 'Notification settings updated',
-                data: { notifications: updateData }
+                data:    { notifications: updateData }
             });
         } catch (error) {
-            console.error('Error updating notification settings:', error);
+            console.error('[Settings] PUT /notifications error:', error);
             res.status(500).json({
                 status: 'error',
                 message: 'Failed to update notification settings'
@@ -304,7 +417,7 @@ router.put(
             
             const { theme } = req.body;
 
-            if (!theme || !['light', 'dark', 'system'].includes(theme)) {
+            if (!theme || !['light', 'dark', 'system', 'auto'].includes(theme)) {
                 return res.status(400).json({
                     status: 'error',
                     message: 'Invalid theme selection'
@@ -314,16 +427,19 @@ router.put(
             await User.update({ theme }, { where: { id: userId } });
 
             if (Settings) {
-                await Settings.update({ theme }, { where: { userId: userId } });
+                await Settings.update({ theme }, { where: { userId } });
             }
 
+            _emitSettingsUpdated(req, { appearance: { theme } });
+
             res.status(200).json({
+                success: true,
                 status: 'success',
                 message: 'Theme updated successfully',
                 data: { theme }
             });
         } catch (error) {
-            console.error('Error updating theme:', error);
+            console.error('[Settings] PUT /theme error:', error);
             res.status(500).json({
                 status: 'error',
                 message: 'Failed to update theme'
@@ -359,20 +475,151 @@ router.put(
             await User.update({ language }, { where: { id: userId } });
 
             if (Settings) {
-                await Settings.update({ language }, { where: { userId: userId } });
+                await Settings.update({ language }, { where: { userId } });
             }
 
+            _emitSettingsUpdated(req, { appearance: { language } });
+
             res.status(200).json({
+                success: true,
                 status: 'success',
                 message: 'Language updated successfully',
                 data: { language }
             });
         } catch (error) {
-            console.error('Error updating language:', error);
+            console.error('[Settings] PUT /language error:', error);
             res.status(500).json({
                 status: 'error',
                 message: 'Failed to update language'
             });
+        }
+    })
+);
+
+// ── PUT /privacy — persist privacy settings and broadcast globally ────────────
+router.put(
+    '/privacy',
+    apiRateLimiter,
+    asyncHandler(async (req, res) => {
+        try {
+            const userId = getUserId(req);
+            if (!userId) {
+                return res.status(401).json({ status: 'error', message: 'Authentication required' });
+            }
+
+            const privacyUpdate = req.body || {};
+            // Merge into existing JSONB privacy column
+            if (Settings) {
+                const existing = await Settings.findOne({ where: { userId } });
+                if (existing) {
+                    const merged = Object.assign({}, existing.privacy || {}, privacyUpdate);
+                    await existing.update({ privacy: merged });
+                } else {
+                    await Settings.create({ userId, privacy: privacyUpdate });
+                }
+            }
+
+            _emitSettingsUpdated(req, { privacy: privacyUpdate });
+
+            res.status(200).json({
+                success: true,
+                status:  'success',
+                message: 'Privacy settings updated',
+                data:    { privacy: privacyUpdate }
+            });
+        } catch (error) {
+            console.error('[Settings] PUT /privacy error:', error);
+            res.status(500).json({ status: 'error', message: 'Failed to update privacy settings' });
+        }
+    })
+);
+
+// ── PUT / — bulk settings update (accepts AppSettings-shaped payload) ─────────
+router.put(
+    '/',
+    apiRateLimiter,
+    asyncHandler(async (req, res) => {
+        try {
+            const userId = getUserId(req);
+            if (!userId) {
+                return res.status(401).json({ status: 'error', message: 'Authentication required' });
+            }
+
+            const body = req.body || {};
+            const dbUpdate = {};
+
+            // Map AppSettings sections → flat DB columns
+            const app = body.appearance || {};
+            if (app.theme)       dbUpdate.theme       = app.theme;
+            if (app.language)    dbUpdate.language    = app.language;
+            if (app.accentColor) dbUpdate.accentColor = app.accentColor;
+            if (app.fontSize)    dbUpdate.fontSize    = String(app.fontSize);
+
+            const notif = body.notifications || {};
+            if (notif.messageNotifications  !== undefined) dbUpdate.notificationsEnabled = notif.messageNotifications;
+            if (notif.emailNotifications    !== undefined) dbUpdate.emailNotifications   = notif.emailNotifications;
+            if (notif.pushNotifications     !== undefined) dbUpdate.pushNotifications    = notif.pushNotifications;
+            if (notif.notificationSound     !== undefined) dbUpdate.soundEnabled         = notif.notificationSound;
+            if (notif.notificationVibration !== undefined) dbUpdate.vibrationEnabled     = notif.notificationVibration;
+
+            const adv = body.advanced || {};
+            if (adv.dataSaver !== undefined) dbUpdate.dataSaver = adv.dataSaver;
+
+            const chat = body.chat || {};
+            if (chat.autoDownloadMedia !== undefined) dbUpdate.autoDownload = chat.autoDownloadMedia;
+
+            // Persist to Settings table
+            if (Settings && Object.keys(dbUpdate).length > 0) {
+                const [count] = await Settings.update(dbUpdate, { where: { userId } });
+                if (count === 0) {
+                    await Settings.create({ userId, ...dbUpdate });
+                }
+            }
+
+            // Sync theme/language to User table too
+            const userSync = {};
+            if (dbUpdate.theme)    userSync.theme    = dbUpdate.theme;
+            if (dbUpdate.language) userSync.language = dbUpdate.language;
+            if (Object.keys(userSync).length > 0) {
+                await User.update(userSync, { where: { id: userId } }).catch(() => {});
+            }
+
+            // Persist privacy section separately (JSONB merge)
+            if (body.privacy && Settings) {
+                const existing = await Settings.findOne({ where: { userId } });
+                if (existing) {
+                    const merged = Object.assign({}, existing.privacy || {}, body.privacy);
+                    await existing.update({ privacy: merged });
+                }
+            }
+
+            // Persist chat preferences
+            if (body.chat && Settings) {
+                const existing = await Settings.findOne({ where: { userId } });
+                if (existing) {
+                    const chatPref = Object.assign({}, existing.chatPreferences || {}, {
+                        enterToSend:   body.chat.enterKeySends  !== undefined ? body.chat.enterKeySends  : undefined,
+                        mediaQuality:  body.chat.videoQuality   !== undefined ? body.chat.videoQuality   : undefined,
+                        saveToGallery: body.chat.saveMedia      !== undefined ? body.chat.saveMedia      : undefined,
+                    });
+                    // Remove undefined keys
+                    Object.keys(chatPref).forEach(k => chatPref[k] === undefined && delete chatPref[k]);
+                    await existing.update({ chatPreferences: chatPref });
+                }
+            }
+
+            // Broadcast to all devices/tabs via socket
+            _emitSettingsUpdated(req, body);
+
+            res.status(200).json({
+                success: true,
+                status:  'success',
+                message: 'Settings updated successfully',
+                data:    { settings: body }
+            });
+        } catch (error) {
+            console.error('[Settings] PUT / error:', error);
+            res.status(500).json({ status: 'error', message: 'Failed to update settings' });
         }
     })
 );

@@ -298,14 +298,38 @@ router.get('/users/all', apiRateLimiter, asyncHandler(async (req, res) => {
 }));
 
 // ===== NEARBY USERS =====
-// FIX: New route — NearbyManager calls POST /api/friends/presence to push GPS coords
-// so the calling user appears in other users' /nearby results.
-const friendController = require('../controllers/friendController');
-router.post('/presence', apiRateLimiter, asyncHandler((req, res, next) => friendController.updatePresence(req, res, next)));
+// ===== NEARBY PRESENCE — push user GPS coords so they appear in others' nearby results =====
+router.post('/nearby/presence', apiRateLimiter, asyncHandler(async (req, res) => {
+    try {
+        const userId = getUserId(req);
+        if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
 
-// Also expose on /api/users/presence (the path NearbyManager._updatePresence() uses)
-// — handled via this same router if mounted under /api/friends, but we also register
-// it here for apps that mount users routes separately.
+        const { lat, lng, status = 'online' } = req.body;
+        if (!lat || !lng || isNaN(parseFloat(lat)) || isNaN(parseFloat(lng))) {
+            return res.json({ success: true, skipped: true });
+        }
+
+        // Best-effort update — non-fatal if columns don't exist
+        try {
+            const tableDesc = await User.describe().catch(() => null);
+            if (tableDesc) {
+                const updates = {};
+                if ('lat' in tableDesc)       updates.lat       = parseFloat(lat);
+                if ('latitude' in tableDesc)  updates.latitude  = parseFloat(lat);
+                if ('lng' in tableDesc)       updates.lng       = parseFloat(lng);
+                if ('longitude' in tableDesc) updates.longitude = parseFloat(lng);
+                if ('status' in tableDesc)    updates.status    = status;
+                if (Object.keys(updates).length > 0) {
+                    await User.update(updates, { where: { id: userId } });
+                }
+            }
+        } catch (_) { /* non-fatal */ }
+
+        return res.json({ success: true });
+    } catch (e) {
+        return res.json({ success: true }); // never block the client for a presence ping
+    }
+}));
 
 // 🔴 BUG 5 FIX: Improved nearby with better fallback and friendship status
 router.get('/nearby', apiRateLimiter, asyncHandler(async (req, res) => {
