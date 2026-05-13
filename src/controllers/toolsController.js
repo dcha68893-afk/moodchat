@@ -661,16 +661,20 @@ class ToolsController {
 
     async createListing(req, res, next) {
         try {
-            console.log('[TOOLS FLOW] Step 1: Backend createListing triggered', { userId: req.user?.id });
-
             const { title, description, price, category, type, images, tags, stock, currency, metadata, condition } = req.body;
-            if (!title) throw new AppError('title is required', 400);
+            if (!title || !title.trim()) {
+                return res.status(400).json({ success: false, message: 'title is required' });
+            }
+            if (!req.user?.id) {
+                return res.status(401).json({ success: false, message: 'Authentication required' });
+            }
 
-            console.log('[TOOLS FLOW] Step 2: Payload validated', { title, type, category, price, userId: req.user.id });
-
-            const db = require('../models');
+            let db;
+            try { db = require('../models'); } catch(e) {
+                return res.status(503).json({ success: false, message: 'Database not available: ' + e.message });
+            }
             if (!db.Tool) {
-                return res.status(503).json({ success: false, message: 'Marketplace DB table not ready. Run migration.' });
+                return res.status(503).json({ success: false, message: 'Marketplace not ready — run: npx sequelize db:migrate' });
             }
 
             const typeMap          = { services: 'service', digital: 'digital', premium: 'premium', physical: 'physical' };
