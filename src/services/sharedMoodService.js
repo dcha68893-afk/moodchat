@@ -580,7 +580,7 @@ class SharedMoodService {
   async _getFollowingUsers(userId) {
     // Implement your following logic here
     // This is a placeholder
-    const Follow = require('../models/Follow');
+    const Follow = null /* Follow model removed */;
     const follows = await Follow.find({
       follower: userId,
       isActive: true,

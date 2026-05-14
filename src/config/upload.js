@@ -2,7 +2,7 @@ const config = require('./index');
 
 module.exports = {
   limits: {
-    fileSize: config.upload.maxFileSize,
+    fileSize: parseInt(process.env.MAX_FILE_SIZE, 10) || 52428800,
   },
 
   // FIX-026: Hardened MIME type allowlist — prevents arbitrary file upload (shell scripts, binaries, etc.)
@@ -41,7 +41,7 @@ module.exports = {
 
   storage: {
     destination: function (req, file, cb) {
-      let uploadPath = config.upload.uploadPath;
+      let uploadPath = process.env.UPLOAD_DIR || './uploads';
 
       if (file.mimetype.startsWith('image/')) {
         uploadPath += 'images/';

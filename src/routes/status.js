@@ -1277,11 +1277,7 @@ router.delete('/:statusId', authenticateToken, apiRateLimiter, asyncHandler(asyn
             statusId: Number(statusId),
             deleted: true,
         });
-        // FIX: status:deleted already emitted above — removing duplicate
-        // await emitStatusEvent(req, 'status_deleted', status, {
-            statusId: Number(statusId),
-            deleted: true,
-        });
+        // FIX: status:deleted already emitted above — duplicate removed
     }
 
     res.json({ success: true, message: 'Status deleted successfully' });

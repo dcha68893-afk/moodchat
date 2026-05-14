@@ -547,7 +547,7 @@ router.use((err, req, res, next) => {
 
 // ============================================================================
 // SOCKET SETUP — call once from server.js after io is ready:
-//   require('./routes/group').setupGroupSocket(io);
+//   webSocketService.setupGroupSocket(io); // self-ref removed
 // ============================================================================
 function setupGroupSocket(io) {
     if (!io) return;

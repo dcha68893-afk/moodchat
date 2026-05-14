@@ -5,7 +5,7 @@ const logger = require('../utils/logger');
 // Resolve Socket.IO without hard-coupling to server.js.
 function getIO() {
     if (global.io) return global.io;
-    try { return require('../socket').io || require('../realtime').io || null; } catch (_) { return null; }
+    try { return require('../services/webSocketService').io || require('../services/webSocketService').io || null; } catch (_) { return null; }
 }
 
 class FriendController {

@@ -30,7 +30,7 @@ let _db = null;
 function getDb() {
     if (_db) return _db;
     try { _db = require('../models'); } catch (_) {}
-    if (!_db) try { _db = require('../../models'); } catch (_) {}
+    if (!_db) try { _db = require('../models'); } catch (_) {}
     return _db || {};
 }
 const Model = {
