@@ -12,8 +12,11 @@ const jwt = require('jsonwebtoken');
 
 class TokenService {
   constructor() {
-    this.accessSecret = process.env.JWT_ACCESS_SECRET || process.env.JWT_SECRET;
-    this.refreshSecret = process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET;
+    // FIX-018: Read from centralized config so resolution order is consistent everywhere
+    let _cfg = {};
+    try { _cfg = require('../config').jwt || {}; } catch(_) {}
+    this.accessSecret  = _cfg.accessSecret  || process.env.JWT_ACCESS_SECRET  || process.env.JWT_SECRET;
+    this.refreshSecret = _cfg.refreshSecret || process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET;
 
     if (!this.accessSecret) {
       throw new Error('JWT_SECRET or JWT_ACCESS_SECRET must be set');

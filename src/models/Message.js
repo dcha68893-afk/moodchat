@@ -296,7 +296,7 @@ module.exports = (sequelize, DataTypes) => {
       Messages.belongsTo(models.Chats, {
         foreignKey: 'chatId',
         as: 'messageChat',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });
@@ -306,7 +306,7 @@ module.exports = (sequelize, DataTypes) => {
       Messages.belongsTo(models.Users, {
         foreignKey: 'senderId',
         as: 'messageSender',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });
@@ -340,7 +340,7 @@ module.exports = (sequelize, DataTypes) => {
       Messages.hasMany(models.Messages, {
         foreignKey: 'replyToId',
         as: 'messageReplies',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });
@@ -350,7 +350,7 @@ module.exports = (sequelize, DataTypes) => {
       Messages.hasMany(models.Media, {
         foreignKey: 'messageId',
         as: 'messageMediaAttachments',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });
@@ -360,7 +360,7 @@ module.exports = (sequelize, DataTypes) => {
       Messages.hasMany(models.ReadReceipt, {
         foreignKey: 'messageId',
         as: 'messageReadReceipts',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });

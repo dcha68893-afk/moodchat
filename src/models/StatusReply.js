@@ -61,7 +61,7 @@ module.exports = (sequelize, DataTypes) => {
       StatusReply.belongsTo(models.Status, {
         foreignKey: 'statusId',
         as: 'status',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });
@@ -71,7 +71,7 @@ module.exports = (sequelize, DataTypes) => {
       StatusReply.belongsTo(models.Users, {
         foreignKey: 'senderId',
         as: 'replySender',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });
@@ -79,7 +79,7 @@ module.exports = (sequelize, DataTypes) => {
       StatusReply.belongsTo(models.Users, {
         foreignKey: 'receiverId',
         as: 'replyReceiver',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });

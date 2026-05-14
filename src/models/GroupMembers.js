@@ -146,7 +146,7 @@ module.exports = (sequelize, DataTypes) => {
       GroupMembers.belongsTo(models.Groups, {
         foreignKey: 'groupId',
         as: 'userGroup',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });
@@ -156,7 +156,7 @@ module.exports = (sequelize, DataTypes) => {
       GroupMembers.belongsTo(models.Users, {
         foreignKey: 'userId',
         as: 'groupMemberUser',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });

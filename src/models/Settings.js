@@ -180,7 +180,7 @@ module.exports = (sequelize, DataTypes) => {
       Settings.belongsTo(models.Users, {
         foreignKey: 'userId',
         as: 'settingOwner',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });

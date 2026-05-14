@@ -4912,7 +4912,7 @@ class Application {
 
                         const rawWss = new RawWebSocketServer({ noServer: true });
 
-                        this.server.on('upgrade', (req, socket, head) => {
+                        this.server.on('upgrade', async (req, socket, head) => {
                             try {
                                 const reqUrl  = new URL(req.url, `http://${req.headers.host || 'x'}`);
                                 if (reqUrl.pathname !== '/ws') return; // Socket.IO owns /socket.io — ignore
@@ -4949,6 +4949,25 @@ class Application {
                                     socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
                                     socket.destroy();
                                     return;
+                                }
+
+                                // FIX-027: Verify user still exists and is active in DB
+                                // Prevents banned/deleted users from connecting via valid but old tokens
+                                try {
+                                    const db = require('./models');
+                                    const UserModel = db.Users || db.User;
+                                    if (UserModel) {
+                                        const dbUser = await UserModel.findByPk(userId, { attributes: ['id', 'isActive', 'isBanned'] });
+                                        if (!dbUser || dbUser.isActive === false || dbUser.isBanned === true) {
+                                            console.warn(`[RawWS] Upgrade rejected: user ${userId} not found or inactive`);
+                                            socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+                                            socket.destroy();
+                                            return;
+                                        }
+                                    }
+                                } catch (dbErr) {
+                                    console.warn('[RawWS] DB check failed (non-fatal):', dbErr.message);
+                                    // Non-fatal: allow connection if DB check fails (degraded mode)
                                 }
 
                                 rawWss.handleUpgrade(req, socket, head, (ws) => {

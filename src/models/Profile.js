@@ -137,7 +137,7 @@ module.exports = (sequelize, DataTypes) => {
       Profile.belongsTo(models.Users, {
         foreignKey: 'userId',
         as: 'profileOwner',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });

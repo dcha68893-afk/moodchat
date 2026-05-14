@@ -87,33 +87,28 @@ const checkModels = (res) => {
 // Emits BOTH colon-style and underscore-style event names.
 // FIXED: if io param is null/undefined (req.io not set), pull from global.__socketIO
 const notifyUser = async (io, userId, event, data) => {
-  const uid        = parseInt(userId, 10);
-  const colon      = event.replace(/_/g, ':');
-  const underscore = event.replace(/:/g, '_');
-  const events     = [...new Set([event, colon, underscore])];
+  const uid = parseInt(userId, 10);
+  // FIX-003 (calls.js): Normalize to single canonical colon-style event.
+  // Old triple-emit (colon + underscore + original) caused ring twice + black screen on 2nd call.
+  const canonicalEvent = event.includes(':') ? event : event.startsWith('call_') ? 'call:' + event.slice(5) : event;
 
-  // Resolve io: req.io → global.__socketIO → wsService internal
   const resolvedIo = io || global.__socketIO || (getWsService() && getWsService().getIO && getWsService().getIO()) || null;
-
-  // Try wsService path (reaches all rooms + raw WS clients)
   const svc = getWsService();
+
   if (svc && typeof svc.sendToUser === 'function') {
-    for (const ev of events) {
-      try { await svc.sendToUser(uid, ev, data); } catch (_) {}
-    }
-    return true;
+    try { await svc.sendToUser(uid, canonicalEvent, data); return true; } catch (_) {}
   }
 
-  // Fallback: Socket.IO room emit
   if (resolvedIo) {
-    for (const ev of events) {
-      try { resolvedIo.to(`user:${uid}`).emit(ev, data); } catch (_) {}
-      try { resolvedIo.to(`user_${uid}`).emit(ev, data); } catch (_) {}
-    }
+    const uidStr = String(uid);
+    try { resolvedIo.to(`user:${uid}`).emit(canonicalEvent, data); } catch (_) {}
+    try { resolvedIo.to(`user_${uid}`).emit(canonicalEvent, data); } catch (_) {}
+    try { resolvedIo.to(`user:${uidStr}`).emit(canonicalEvent, data); } catch (_) {}
+    try { resolvedIo.to(`user_${uidStr}`).emit(canonicalEvent, data); } catch (_) {}
     return true;
   }
 
-  console.warn(`[calls.js] notifyUser: no delivery channel for uid=${uid} event=${event}`);
+  console.warn(`[calls.js] notifyUser: no delivery channel for uid=${uid} event=${canonicalEvent}`);
   return false;
 };
 

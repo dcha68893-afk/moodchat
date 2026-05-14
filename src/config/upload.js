@@ -5,17 +5,37 @@ module.exports = {
     fileSize: config.upload.maxFileSize,
   },
 
-  fileFilter: (req, file, cb) => {
-    const allowedTypes = [
-      ...config.upload.allowedImageTypes,
-      ...config.upload.allowedVideoTypes,
-      ...config.upload.allowedAudioTypes,
-    ];
+  // FIX-026: Hardened MIME type allowlist — prevents arbitrary file upload (shell scripts, binaries, etc.)
+  // Extensions are NOT trusted — only the actual mimetype reported by multer is checked.
+  ALLOWED_MIME_TYPES: new Set([
+    // Images
+    'image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp', 'image/svg+xml',
+    // Video
+    'video/mp4', 'video/webm', 'video/ogg', 'video/quicktime', 'video/x-msvideo',
+    // Audio
+    'audio/mpeg', 'audio/mp3', 'audio/ogg', 'audio/wav', 'audio/webm', 'audio/aac',
+    'audio/x-m4a', 'audio/mp4',
+    // Documents
+    'application/pdf',
+    'application/msword',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'application/vnd.ms-excel',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'text/plain',
+    // Archives (limited)
+    'application/zip',
+  ]),
 
-    if (allowedTypes.includes(file.mimetype)) {
+  fileFilter: function(req, file, cb) {
+    // Re-read the allowlist from the module itself so it stays DRY
+    const allowed = module.exports.ALLOWED_MIME_TYPES;
+    if (allowed.has(file.mimetype)) {
       cb(null, true);
     } else {
-      cb(new Error('Invalid file type'), false);
+      const err = new Error(`File type not allowed: ${file.mimetype}`);
+      err.code = 'INVALID_FILE_TYPE';
+      err.status = 415;
+      cb(err, false);
     }
   },
 

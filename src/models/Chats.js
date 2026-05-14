@@ -245,7 +245,7 @@ module.exports = (sequelize, DataTypes) => {
       Chats.hasMany(models.Messages, {
         foreignKey: 'chatId',
         as: 'chatMessages',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });
@@ -255,7 +255,7 @@ module.exports = (sequelize, DataTypes) => {
       Chats.hasMany(models.ChatParticipant, {
         foreignKey: 'chatId',
         as: 'chatParticipants',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });

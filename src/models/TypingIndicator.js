@@ -162,7 +162,7 @@ module.exports = (sequelize, DataTypes) => {
       TypingIndicator.belongsTo(models.Chats, {
         foreignKey: 'chatId',
         as: 'indicatorChat',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });
@@ -172,7 +172,7 @@ module.exports = (sequelize, DataTypes) => {
       TypingIndicator.belongsTo(models.Users, {
         foreignKey: 'userId',
         as: 'indicatorUser',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });

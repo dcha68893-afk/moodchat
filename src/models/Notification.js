@@ -236,7 +236,7 @@ module.exports = (sequelize, DataTypes) => {
       Notification.belongsTo(models.Users, {
         foreignKey: 'userId',
         as: 'notificationRecipient',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });

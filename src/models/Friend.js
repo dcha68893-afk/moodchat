@@ -221,7 +221,7 @@ module.exports = (sequelize, DataTypes) => {
       Friend.belongsTo(models.Users, {
         foreignKey: 'requesterId',
         as: 'friendRequesterUser',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });
@@ -229,7 +229,7 @@ module.exports = (sequelize, DataTypes) => {
       Friend.belongsTo(models.Users, {
         foreignKey: 'receiverId',
         as: 'friendReceiverUser',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });

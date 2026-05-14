@@ -987,12 +987,25 @@ function _sanitizeType(type) {
     return ['service','digital','premium','physical'].includes(type) ? type : 'physical';
 }
 
-function _socketBroadcast(req, event, data) {
+function _socketBroadcast(req, event, data, targetUserId = null) {
     try {
-        const io = req.app?.get?.('io') || global._io;
-        if (io) { io.emit(event, data); return; }
-        const rt = global.KynectaRealtime;
-        if (rt?.emit) rt.emit(event, data);
+        const io = req.app?.get?.('io') || global.__socketIO || global._io;
+        if (targetUserId) {
+            // Targeted delivery to specific user
+            const uid = parseInt(targetUserId, 10);
+            const wsService = (() => { try { return require('../services/webSocketService'); } catch(_) { return null; } })();
+            if (wsService && typeof wsService.sendToUser === 'function') {
+                wsService.sendToUser(uid, event, data);
+            } else if (io) {
+                io.to(`user:${uid}`).emit(event, data);
+                io.to(`user_${uid}`).emit(event, data);
+            }
+        } else {
+            // Broadcast to all connected clients
+            if (io) { io.emit(event, data); return; }
+            const rt = global.KynectaRealtime;
+            if (rt?.emit) rt.emit(event, data);
+        }
     } catch(_) {}
 }
 

@@ -197,7 +197,7 @@ module.exports = (sequelize, DataTypes) => {
       Groups.belongsTo(models.Chats, {
         foreignKey: 'chatId',
         as: 'groupChat',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });
@@ -207,7 +207,7 @@ module.exports = (sequelize, DataTypes) => {
       Groups.belongsTo(models.Users, {
         foreignKey: 'createdBy',
         as: 'groupCreator',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });
@@ -217,7 +217,7 @@ module.exports = (sequelize, DataTypes) => {
       Groups.hasMany(models.GroupMembers, {
         foreignKey: 'groupId',
         as: 'groupMembers',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });

@@ -303,7 +303,7 @@ module.exports = (sequelize, DataTypes) => {
       ChatParticipant.belongsTo(models.Users, {
         foreignKey: 'userId',
         as: 'chatParticipantUser',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });
@@ -313,7 +313,7 @@ module.exports = (sequelize, DataTypes) => {
       ChatParticipant.belongsTo(models.Chats, {
         foreignKey: 'chatId',
         as: 'chatParticipantChat',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });

@@ -156,7 +156,7 @@ module.exports = (sequelize, DataTypes) => {
       Notes.belongsTo(models.Users, {
         foreignKey: 'createdBy',
         as: 'noteAuthor',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });
@@ -166,7 +166,7 @@ module.exports = (sequelize, DataTypes) => {
       Notes.hasMany(models.File, {
         foreignKey: 'noteId',
         as: 'noteAttachments',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });

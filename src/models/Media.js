@@ -242,7 +242,7 @@ module.exports = (sequelize, DataTypes) => {
       Media.belongsTo(models.Users, {
         foreignKey: 'userId',
         as: 'mediaOwner',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });
@@ -252,7 +252,7 @@ module.exports = (sequelize, DataTypes) => {
       Media.belongsTo(models.Messages, {
         foreignKey: 'messageId',
         as: 'mediaMessage',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });

@@ -53,7 +53,7 @@ module.exports = (sequelize, DataTypes) => {
       StatusReaction.belongsTo(models.Status, {
         foreignKey: 'statusId',
         as: 'status',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });
@@ -63,7 +63,7 @@ module.exports = (sequelize, DataTypes) => {
       StatusReaction.belongsTo(models.Users, {
         foreignKey: 'userId',
         as: 'reactionUser',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });

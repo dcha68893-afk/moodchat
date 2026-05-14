@@ -793,7 +793,7 @@ module.exports = (sequelize, DataTypes) => {
       Status.belongsTo(models.Users, {
         foreignKey: 'userId',
         as: 'statusUser',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });
@@ -803,7 +803,7 @@ module.exports = (sequelize, DataTypes) => {
       Status.hasMany(models.StatusLike, {
         foreignKey: 'statusId',
         as: 'statusLikes',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });
@@ -813,7 +813,7 @@ module.exports = (sequelize, DataTypes) => {
       Status.hasMany(models.StatusComment, {
         foreignKey: 'statusId',
         as: 'statusComments',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });
@@ -823,7 +823,7 @@ module.exports = (sequelize, DataTypes) => {
       Status.hasMany(models.StatusView, {
         foreignKey: 'statusId',
         as: 'statusViews',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });
@@ -834,7 +834,7 @@ module.exports = (sequelize, DataTypes) => {
       Status.hasMany(ReactModel, {
         foreignKey: 'statusId',
         as: 'statusReactions',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });

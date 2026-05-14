@@ -48,10 +48,12 @@ try {
         }
     };
     console.log('[WSService] Token verification delegated to tokenService ✅');
-} catch (_) {
-    // Fallback: if tokenService isn't available, allow connection (dev safety net)
-    _jwtVerify = () => ({ valid: true, userId: null, reason: 'tokenService-not-available' });
-    console.warn('[WSService] tokenService not available — token verification disabled');
+} catch (err) {
+    // FIX: Hard fail — do NOT allow connections when tokenService is missing.
+    // The old bypass (valid: true) was a security hole that let unauthenticated
+    // sockets connect in production when there was a circular dependency.
+    console.error('[WSService] CRITICAL: tokenService failed to load:', err.message);
+    _jwtVerify = () => ({ valid: false, userId: null, reason: 'tokenService-unavailable' });
 }
 
 const STALE_REAPER_INTERVAL = 60_000;
@@ -144,15 +146,15 @@ class WebSocketService {
             this._joinUserChatRooms(userId, socket).catch(() => {});
 
             // Allow client to join additional rooms
-            socket.on('join', ({ room } = {}) => {
+            // FIX-002: socket.off() before every socket.on() prevents listener accumulation on reconnect
+            socket.off('join').on('join', ({ room } = {}) => {
                 if (room && typeof room === 'string') {
                     socket.join(room);
                     console.log(`[WSService] uid=${userId} joined room: ${room}`);
                 }
             });
 
-            // FIX: Validate join_user_room matches authenticated user
-            socket.on('join_user_room', ({ userId: uid } = {}) => {
+            socket.off('join_user_room').on('join_user_room', ({ userId: uid } = {}) => {
                 const rid = parseInt(uid, 10);
                 if (rid && rid === userId) {
                     const strRid = String(rid);
@@ -169,15 +171,13 @@ class WebSocketService {
                 }
             });
 
-            socket.on('disconnect', (reason) => {
+            socket.off('disconnect').on('disconnect', (reason) => {
                 this.removeUser(userId, socket);
                 console.log(`[WSService] socket disconnected uid=${userId} sid=${socket.id} reason=${reason}`);
             });
 
-            // ── SETTINGS: client can push a settings change from one device so
-            //    the server relays it to all other sockets of the same user.
-            //    This enables cross-device settings sync without polling.
-            socket.on('settings:update', (payload) => {
+            // SETTINGS: relay cross-device settings changes
+            socket.off('settings:update').on('settings:update', (payload) => {
                 try {
                     if (!payload || typeof payload !== 'object') return;
                     const settings = payload.settings || payload;
@@ -490,8 +490,10 @@ class WebSocketService {
     // ── CALL / SIGNAL HELPERS ─────────────────────────────────────────────────
 
     async notifyCallInitiated(userId, data = {}) {
+        // FIX-003: single canonical event 'call:incoming' only
+        // The previous dual-emit ('call:incoming' + 'incoming_call') caused phones to ring twice
+        // and black screens on call end. Frontend listens for 'call:incoming' (colon-style).
         await this.sendToUser(userId, 'call:incoming', data);
-        await this.sendToUser(userId, 'incoming_call',  data);
         return true;
     }
 

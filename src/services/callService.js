@@ -2,7 +2,7 @@
  * callService.js — Sequelize/PostgreSQL call service
  * FIXED VERSION — patches:
  *  1. answerCall: was checking startedAt (null) for timeout instead of createdAt/metadata.ringStartedAt
- *  2. All WS emits now fire both colon-style (call:xxx) and underscore-style (call_xxx) events
+ *  2. FIX-003: All WS emits now use ONE canonical colon-style event name (call:xxx only)
  *     so calls-core.js socket listeners get them regardless of naming convention.
  *  3. getCallDetails(callId) — accepts 1-arg form used by callController.getCallDetails
  *  4. _forceCleanupStaleCallsForUsers — emits 'call_force_ended' + 'CALL_FORCE_ENDED' (postMessage)
@@ -30,45 +30,52 @@ function ws() {
   return _wsService;
 }
 
-// Emit an event to ALL participants using both naming conventions
-// so every frontend listener (colon OR underscore) is triggered.
+// FIX-003: Emit ONE canonical colon-style event per participant.
+// Previous triple-emit (call:ended + call_ended + original) caused:
+//   - Phone ringing twice (two call:incoming events)
+//   - Black screen on 2nd call (UI destroyed twice by two call:ended events)
+//   - ICE candidate handlers firing twice → broken peer connection
+// Frontend calls-core.js must listen for colon-style events only.
+function _normalizeCallEvent(event) {
+  if (!event) return event;
+  if (event.includes(':')) return event;
+  if (event.startsWith('call_')) return 'call:' + event.slice(5);
+  return event;
+}
+
 async function emitToAll(participants, event, data) {
   const wsService = ws();
-  const colon      = event.replace(/_/g, ':');   // call_ended  → call:ended
-  const underscore = event.replace(/:/g, '_');   // call:ended  → call_ended
-  const events     = [...new Set([event, colon, underscore])];
-
-  // Resolve io: req.io → global.__socketIO → wsService internal
+  const canonicalEvent = _normalizeCallEvent(event);
   const resolvedIo = global.__socketIO || (wsService && wsService.getIO && wsService.getIO()) || null;
 
-  // Try Socket.IO first for reliable real-time delivery
-  if (resolvedIo) {
-    for (const participant of participants) {
-      const uid = typeof participant === 'object' ? participant.id || participant.userId : participant;
-      for (const ev of events) {
-        try { 
-          resolvedIo.to(`user:${uid}`).emit(ev, data); 
-          resolvedIo.to(`user_${uid}`).emit(ev, data); 
-          console.log(`[CallService] 🚀 Socket.IO sent ${ev} to user:${uid}`);
-        } catch (_) {}
-      }
-    }
-    return true;
+  if (!resolvedIo && !wsService) {
+    console.warn(`[CallService] emitToAll: no delivery channel for event=${canonicalEvent}`);
+    return false;
   }
 
-  // Fallback: wsService path (reaches all rooms + raw WS clients)
-  if (wsService && typeof wsService.sendToUser === 'function' && !resolvedIo) {
-    for (const participant of participants) {
-      const uid = typeof participant === 'object' ? participant.id || participant.userId : participant;
-      for (const ev of events) {
-        try { await wsService.sendToUser(uid, ev, data); } catch (_) {}
-      }
-    }
-    return true;
-  }
+  let delivered = false;
+  for (const participant of participants) {
+    const uid = typeof participant === 'object' ? (participant.id || participant.userId) : participant;
+    if (!uid) continue;
+    const uidInt = parseInt(uid, 10);
+    const uidStr = String(uidInt);
 
-  console.warn(`[calls.js] notifyUser: no delivery channel for event=${event}`);
-  return false;
+    if (resolvedIo) {
+      try {
+        resolvedIo.to(`user:${uidInt}`).emit(canonicalEvent, data);
+        resolvedIo.to(`user_${uidInt}`).emit(canonicalEvent, data);
+        resolvedIo.to(`user:${uidStr}`).emit(canonicalEvent, data);
+        resolvedIo.to(`user_${uidStr}`).emit(canonicalEvent, data);
+        console.log(`[CallService] emitToAll: ${canonicalEvent} → uid:${uidInt}`);
+        delivered = true;
+      } catch (e) {
+        console.warn(`[CallService] emit error uid=${uidInt}:`, e.message);
+      }
+    } else if (wsService && typeof wsService.sendToUser === 'function') {
+      try { await wsService.sendToUser(uidInt, canonicalEvent, data); delivered = true; } catch (_) {}
+    }
+  }
+  return delivered;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

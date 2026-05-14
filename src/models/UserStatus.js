@@ -281,7 +281,7 @@ module.exports = (sequelize, DataTypes) => {
       UserStatus.belongsTo(models.Users, {
         foreignKey: 'userId',
         as: 'userStatusOwner',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });

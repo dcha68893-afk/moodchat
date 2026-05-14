@@ -103,6 +103,12 @@ const errorHandler = (err, req, res, next) => {
     return res.status(403).json(response);
   }
 
+  // FIX-026: MIME type rejection from hardened upload fileFilter
+  if (err.code === 'INVALID_FILE_TYPE' || (err.status === 415)) {
+    response.message = err.message || 'File type not allowed';
+    return res.status(415).json(response);
+  }
+
   // Default to 500 internal server error
   res.status(err.status || 500).json(response);
 };

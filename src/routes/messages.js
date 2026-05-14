@@ -265,19 +265,8 @@ router.post('/mark-read/batch', apiRateLimiter, asyncHandler(async (req, res) =>
 
       await Promise.allSettled(
         (senders || []).flatMap((row) => ([
+          // FIX-010: Single canonical 'message:read' event
           wsService.sendToUser(row.senderId, 'message:read', {
-            chatId: safeChatId,
-            messageIds: safeIds,
-            readBy: userId,
-            readAt: new Date().toISOString()
-          }),
-          wsService.sendToUser(row.senderId, 'message_read', {
-            chatId: safeChatId,
-            messageIds: safeIds,
-            readBy: userId,
-            readAt: new Date().toISOString()
-          }),
-          wsService.sendToUser(row.senderId, 'message_seen', {
             chatId: safeChatId,
             messageIds: safeIds,
             readBy: userId,
@@ -500,34 +489,38 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
       return res.status(403).json({ success: false, message: 'Access denied to this chat' });
     }
 
-    // Insert message fully parameterized
-    const msgResult = await sequelize.query(
-      `INSERT INTO "Messages" ("chatId","senderId",content,type,reactions,"replyToId","sentAt","deliveredAt","createdAt","updatedAt")
-       VALUES (:chatId,:senderId,:content,:type,'{}',:replyToId,NOW(),NOW(),NOW(),NOW())
-       RETURNING id,"chatId","senderId",content,type,"replyToId","createdAt"`,
-      {
-        replacements: { 
-          chatId, 
-          senderId, 
-          content: content.trim(), 
-          type: messageType,
-          replyToId: safeReplyToId
-        },
-        type: sequelize.QueryTypes.INSERT,
-      }
-    );
+    // FIX-068: Wrap message INSERT + chat UPDATE in a transaction for atomicity
+    // Without this, a crash between the two queries leaves the chat with an orphan message
+    let messageId, senderRows;
+    const t = await sequelize.transaction();
+    try {
+      const msgResult = await sequelize.query(
+        `INSERT INTO "Messages" ("chatId","senderId",content,type,reactions,"replyToId","sentAt","deliveredAt","createdAt","updatedAt")
+         VALUES (:chatId,:senderId,:content,:type,'{}',:replyToId,NOW(),NOW(),NOW(),NOW())
+         RETURNING id,"chatId","senderId",content,type,"replyToId","createdAt"`,
+        {
+          replacements: { chatId, senderId, content: content.trim(), type: messageType, replyToId: safeReplyToId },
+          type: sequelize.QueryTypes.INSERT,
+          transaction: t,
+        }
+      );
+      messageId = msgResult[0][0].id;
 
-    const messageId = msgResult[0][0].id;
+      await sequelize.query(
+        `UPDATE chats SET "updatedAt" = NOW(), "lastMessageId" = :messageId WHERE id = :chatId`,
+        { replacements: { messageId, chatId }, transaction: t }
+      );
 
-    const senderRows = await sequelize.query(
-      `SELECT id, username, avatar FROM "Users" WHERE id = :senderId`,
-      { replacements: { senderId }, type: sequelize.QueryTypes.SELECT }
-    );
+      await t.commit();
 
-    await sequelize.query(
-      `UPDATE chats SET "updatedAt" = NOW(), "lastMessageId" = :messageId WHERE id = :chatId`,
-      { replacements: { messageId, chatId } }
-    );
+      senderRows = await sequelize.query(
+        `SELECT id, username, avatar FROM "Users" WHERE id = :senderId`,
+        { replacements: { senderId }, type: sequelize.QueryTypes.SELECT }
+      );
+    } catch (txErr) {
+      await t.rollback();
+      throw txErr;
+    }
 
     // ✅ FIX: Fetch replyTo content so receiver gets preview immediately
     let replyToData = null;
@@ -591,11 +584,11 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
 
         // Emit message:new to every participant's personal user room (both naming conventions)
         // sendToUser() handles user:<id> room + user_<id> room + individual socket IDs
-        const messageEvents = ['message:new', 'new_message', 'receive_message'];
+        // FIX-010: Single canonical 'message:new' event per participant
+        // sendToUser() already emits to all room name variants (user:X, user_X, user:Xstr, user_Xstr)
+        // so we don't need multiple event names — that was causing triple delivery
         const deliveryResults = await Promise.allSettled(
-          allParticipantIds.map(uid => Promise.allSettled(
-            messageEvents.map((eventName) => wsService.sendToUser(uid, eventName, populatedMessage))
-          ))
+          allParticipantIds.map(uid => wsService.sendToUser(uid, 'message:new', populatedMessage))
         );
 
         // Count successes for diagnostics
@@ -607,21 +600,13 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
 
         // Also broadcast to the chat:<id> room — catches any socket that joined
         // via _joinUserChatRooms but isn't tracked in onlineUsers yet
+        // FIX-010: Single event name for broadcastToChat
         if (typeof wsService.broadcastToChat === 'function') {
           wsService.broadcastToChat(chatId, 'message:new', populatedMessage);
-          wsService.broadcastToChat(chatId, 'new_message', populatedMessage);
         }
 
-        // Confirm to sender: their optimistic bubble can now show ✓ sent tick
+        // FIX-010: Single canonical 'message:sent' event — sendToUser() covers all room variants
         await wsService.sendToUser(senderId, 'message:sent', {
-          localId:   populatedMessage.localId || null,
-          messageId,
-          serverId:  messageId,
-          chatId,
-          status:    'sent',
-          createdAt: populatedMessage.createdAt
-        });
-        await wsService.sendToUser(senderId, 'message_sent', {
           localId:   populatedMessage.localId || null,
           messageId,
           serverId:  messageId,
@@ -632,13 +617,8 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
 
         // Tell sender when at least one recipient was targeted
         if (recipientIds.length > 0) {
+          // FIX-010: Single canonical 'message:delivered' — no dual emit needed
           await wsService.sendToUser(senderId, 'message:delivered', {
-            messageId,
-            chatId,
-            deliveredTo: recipientIds,
-            deliveredAt: new Date().toISOString()
-          });
-          await wsService.sendToUser(senderId, 'message_delivered', {
             messageId,
             chatId,
             deliveredTo: recipientIds,
@@ -964,20 +944,12 @@ router.post('/bulk', apiRateLimiter, asyncHandler(async (req, res) => {
           const allParticipantIds = (participants || []).map(r => parseInt(r.userId, 10)).filter(Boolean);
           const recipientIds = allParticipantIds.filter(id => id !== senderId);
 
+          // FIX-010: Single canonical 'message:new' event — sendToUser() covers all room variants
           await Promise.allSettled(
-            allParticipantIds.map(uid =>
-              Promise.allSettled([
-                wsService.sendToUser(uid, 'message:new', populatedMessage),
-                wsService.sendToUser(uid, 'new_message', populatedMessage),
-              ])
-            )
+            allParticipantIds.map(uid => wsService.sendToUser(uid, 'message:new', populatedMessage))
           );
           if (typeof wsService.broadcastToChat === 'function') {
             wsService.broadcastToChat(chatId, 'message:new', populatedMessage);
-          }
-          // Notify recipients so they can display received message instantly
-          for (const rid of recipientIds) {
-            await wsService.sendToUser(rid, 'receive_message', populatedMessage);
           }
         } catch (notifyErr) {
           console.warn('[bulk] Realtime delivery failed for chatId=' + chatId + ':', notifyErr.message);

@@ -180,7 +180,7 @@ module.exports = (sequelize, DataTypes) => {
       File.belongsTo(models.Users, {
         foreignKey: 'uploadedBy',
         as: 'fileUploader',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });

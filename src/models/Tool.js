@@ -416,7 +416,7 @@ module.exports = (sequelize, DataTypes) => {
       Tool.belongsTo(models.Users, {
         foreignKey: 'sellerId',
         as: 'seller',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });

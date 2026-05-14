@@ -250,7 +250,7 @@ module.exports = (sequelize, DataTypes) => {
       Mood.belongsTo(models.Users, {
         foreignKey: 'userId',
         as: 'moodOwner',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });
@@ -260,7 +260,7 @@ module.exports = (sequelize, DataTypes) => {
       Mood.hasMany(models.SharedMood, {
         foreignKey: 'moodId',
         as: 'moodShares',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });

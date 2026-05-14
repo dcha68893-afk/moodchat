@@ -32,9 +32,15 @@ const config = {
   },
   
   // JWT configuration
+  // FIX-018: Single canonical resolution order — JWT_ACCESS_SECRET takes priority,
+  // falls back to JWT_SECRET for backwards compatibility with older deployments.
+  // tokenService.js and auth.js both read from this config — no more secret mismatches.
   jwt: {
-    secret: process.env.JWT_SECRET || 'your-jwt-secret-key-change-in-production',
-    accessExpiresIn: process.env.JWT_ACCESS_EXPIRES_IN || '15m',
+    accessSecret: process.env.JWT_ACCESS_SECRET || process.env.JWT_SECRET || 'change-this-in-production-min-32-chars!!',
+    refreshSecret: process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET || 'change-this-in-production-min-32-chars!!',
+    // Alias 'secret' kept for legacy modules that read config.jwt.secret
+    get secret() { return this.accessSecret; },
+    accessExpiresIn: process.env.JWT_ACCESS_EXPIRES_IN || '24h',
     refreshExpiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '7d',
   },
   

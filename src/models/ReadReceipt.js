@@ -141,7 +141,7 @@ module.exports = (sequelize, DataTypes) => {
       ReadReceipt.belongsTo(models.Messages, {
         foreignKey: 'messageId',
         as: 'readMessage',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });
@@ -151,7 +151,7 @@ module.exports = (sequelize, DataTypes) => {
       ReadReceipt.belongsTo(models.Users, {
         foreignKey: 'userId',
         as: 'readUser',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });

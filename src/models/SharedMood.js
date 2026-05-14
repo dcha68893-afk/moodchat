@@ -445,7 +445,7 @@ module.exports = (sequelize, DataTypes) => {
       SharedMood.belongsTo(models.Users, {
         foreignKey: 'senderId',
         as: 'sharedMoodSender',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });
@@ -453,7 +453,7 @@ module.exports = (sequelize, DataTypes) => {
       SharedMood.belongsTo(models.Users, {
         foreignKey: 'receiverId',
         as: 'sharedMoodReceiver',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });
@@ -463,7 +463,7 @@ module.exports = (sequelize, DataTypes) => {
       SharedMood.belongsTo(models.Mood, {
         foreignKey: 'moodId',
         as: 'sharedMood',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });

@@ -739,17 +739,16 @@ router.post(
             };
 
             // Emit to creator's own room so their other tabs/devices update
-            io.to(`user:${userId}`).emit('status:created', wsPayload);
-            io.to(`user:${userId}`).emit('new_status',     wsPayload);
+            // FIX: Single canonical 'status:new' event
+            io.to(`user:${userId}`).emit('status:new', wsPayload);
 
             // Emit to each accepted friend's room asynchronously (non-blocking)
             const { getAcceptedFriendIds } = require('../services/statusService');
             getAcceptedFriendIds(userId).then(friendIds => {
                 friendIds.forEach(fid => {
                     try {
-                        io.to(`user:${fid}`).emit('status:created', wsPayload);
-                        io.to(`user:${fid}`).emit('new_status',     wsPayload);
-                        io.to(`user:${fid}`).emit('status_created', wsPayload);
+                        // FIX: Single canonical 'status:new' event per friend
+                        io.to(`user:${fid}`).emit('status:new', wsPayload);
                     } catch (_) {}
                 });
                 logger.info(`[status.js] 📡 status:created emitted to ${friendIds.length} friend rooms for userId=${userId}`);
@@ -759,15 +758,14 @@ router.post(
             });
         }
 
-        await emitStatusEvent(req, 'status:created', created, {
+        await emitStatusEvent(req, 'status:new', created, {
             type: created.type,
             content: created.content,
             mediaUrl: created.mediaUrl || null,
             createdAt: created.createdAt,
             expiresAt: created.expiresAt || null,
         });
-        await emitStatusEvent(req, 'new_status', created);
-        await emitStatusEvent(req, 'status_created', created);
+        // FIX: status:new already emitted above
 
         res.status(201).json({
             success: true,
@@ -1279,7 +1277,8 @@ router.delete('/:statusId', authenticateToken, apiRateLimiter, asyncHandler(asyn
             statusId: Number(statusId),
             deleted: true,
         });
-        await emitStatusEvent(req, 'status_deleted', status, {
+        // FIX: status:deleted already emitted above — removing duplicate
+        // await emitStatusEvent(req, 'status_deleted', status, {
             statusId: Number(statusId),
             deleted: true,
         });

@@ -54,7 +54,7 @@ module.exports = (sequelize, DataTypes) => {
       StatusView.belongsTo(models.Status, {
         foreignKey: 'statusId',
         as: 'status',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });
@@ -64,7 +64,7 @@ module.exports = (sequelize, DataTypes) => {
       StatusView.belongsTo(models.Users, {
         foreignKey: 'userId',
         as: 'viewerUser',
-        constraints: false,
+        constraints: true,
         onDelete: 'CASCADE',
         onUpdate: 'CASCADE',
       });

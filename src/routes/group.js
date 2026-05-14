@@ -499,8 +499,8 @@ router.post('/:groupId/messages', async (req, res) => {
             const socketPayload    = { groupId, message: savedMessage, senderId: userId, senderName: anonymous ? 'Anonymous' : senderName, timestamp: new Date() };
             const localSyncPayload = { action: 'message', groupId, message: savedMessage };
 
-            io.to(`group:${groupId}`).emit('group:message',   socketPayload);
-            io.to(`group:${groupId}`).emit('group_message',   socketPayload);
+            // FIX: Single canonical 'group:message' event — frontend handles via kyn: bridge
+            io.to(`group:${groupId}`).emit('group:message', socketPayload);
             io.to(`group:${groupId}`).emit('group:localSync', localSyncPayload);
 
             // Also emit to every member's user room (fallback for members who haven't joined the group room yet)
@@ -518,8 +518,8 @@ router.post('/:groupId/messages', async (req, res) => {
                                 if (sock) sock.join(`group:${groupId}`);
                             });
                         }
-                        io.to(`user:${mid}`).emit('group:message',   socketPayload);
-                        io.to(`user:${mid}`).emit('group_message',   socketPayload);
+                        // FIX: Single canonical 'group:message' per member
+                        io.to(`user:${mid}`).emit('group:message', socketPayload);
                         io.to(`user:${mid}`).emit('group:localSync', localSyncPayload);
                     });
                 }
