@@ -90,6 +90,9 @@ const sequelize = dbConfig.url
     });
 
 // ===== DATABASE CONNECTION TEST =====
+global.__dbReadyPromise = new Promise(r => { global.__dbReadyResolve = r; });
+// If DB init completes in <1s, resolve immediately
+setTimeout(() => { if (global.__dbReadyResolve && !global.__dbReady) {} }, 60000);
 sequelize.authenticate()
   .then(() => {
     console.log(`[Database] ✅ Connection to ${dbConfig.database || 'database'} (${env}) established successfully`);
@@ -1245,6 +1248,8 @@ console.log('[Database] =================================\n');
 
 if (status.coreOperational) {
   console.log('[Database] 🚀 Database ready');
+    global.__dbReady = true;
+    if (global.__dbReadyResolve) { global.__dbReadyResolve(); }
   console.log('[Database] ✅ No destructive operations');
   console.log('[Database] ✅ Associations loaded');
   console.log('[Database] ✅ Auto-migration enabled');
