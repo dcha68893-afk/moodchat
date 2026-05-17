@@ -5271,6 +5271,125 @@ async function main() {
     }
 }
 
+// ============================================================================
+// STATUS EXPIRY CRON — runs every 5 minutes to soft-delete expired statuses
+// (24h lifetime). Broadcasts socket events to affected users so their UI
+// removes expired statuses without needing a refresh.
+// ============================================================================
+(function _installStatusExpiryCron() {
+    const EXPIRY_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+    async function _pruneExpiredStatuses() {
+        try {
+            const db = require('./models');
+            const Status = db.models?.Status || db.Status;
+            const Op = db.Sequelize ? db.Sequelize.Op : (require('sequelize').Op);
+            if (!Status || !Op) return;
+
+            const cutoff = new Date(Date.now() - EXPIRY_MS);
+            // Find statuses that are still active but older than 24h
+            const expired = await Status.findAll({
+                where: {
+                    isDeleted: false,
+                    createdAt: { [Op.lt]: cutoff }
+                },
+                attributes: ['id', 'userId', 'mediaUrl'],
+                limit: 100
+            });
+
+            if (expired.length === 0) return;
+
+            const ids = expired.map(s => s.id);
+            await Status.update({ isDeleted: true, deletedAt: new Date() }, { where: { id: ids } });
+
+            // Broadcast expiration to each status owner + their friends
+            const io = global.__socketIO;
+            if (io) {
+                // Group by userId to batch
+                const byUser = {};
+                expired.forEach(s => { (byUser[s.userId] = byUser[s.userId] || []).push(s.id); });
+                for (const [userId, statusIds] of Object.entries(byUser)) {
+                    const payload = { statusIds, expiredAt: new Date().toISOString() };
+                    io.to(`user:${userId}`).emit('status:expired', payload);
+                    io.to(`user_${userId}`).emit('status:expired', payload);
+                }
+            }
+
+            console.log(`[StatusExpiryCron] Pruned ${ids.length} expired status(es)`);
+        } catch (err) {
+            // Non-fatal — just log
+            console.warn('[StatusExpiryCron] Error:', err.message);
+        }
+    }
+
+    // Run after 30s startup delay, then every 5 minutes
+    setTimeout(_pruneExpiredStatuses, 30000);
+    setInterval(_pruneExpiredStatuses, 5 * 60 * 1000);
+    console.log('[StatusExpiryCron] ✅ Installed (runs every 5 minutes)');
+})();
+
+// ── SMART GROUPS OS ROUTES ──────────────────────────────────────────────────
+// Additive: mounts at /api/groups alongside existing group routes.
+// All routes are prefixed with /:groupId/tasks, /:groupId/polls etc.
+(function _mountSmartGroupRoutes() {
+    try {
+        const sgRoutes = require('./routes/smart-groups');
+        // Find the express app
+        const app = global.__expressApp;
+        if (!app) {
+            console.warn('[SmartGroups] Express app not found in global.__expressApp — routes not mounted');
+            return;
+        }
+        app.use('/api/groups', sgRoutes);
+        console.log('[SmartGroups] ✅ Smart Group OS routes mounted at /api/groups');
+    } catch(err) {
+        console.warn('[SmartGroups] Could not mount routes:', err.message);
+    }
+})();
+
+// ── SMART GROUPS ANALYTICS CRON ──────────────────────────────────────────────
+// Updates GroupAnalytics daily row for message count
+(function _installGroupAnalyticsCron() {
+    setInterval(async () => {
+        try {
+            const db  = require('./models');
+            const GA  = db.models?.GroupAnalytics || db.GroupAnalytics;
+            const GM  = db.models?.GroupMembers   || db.GroupMembers;
+            if (!GA || !GM) return;
+            const today = new Date().toISOString().slice(0,10);
+            // Get all groups with active members
+            const groups = await (db.models?.Groups || db.Groups)?.findAll({ attributes: ['id'] }).catch(()=>[]);
+            for (const g of (groups||[])) {
+                const active = await GM.count({ where: { groupId: g.id, leftAt: null } }).catch(()=>0);
+                await GA.upsert({ groupId: g.id, date: today, activeMembers: active }).catch(()=>{});
+            }
+        } catch(_) {}
+    }, 60 * 60_000); // every hour
+    console.log('[GroupAnalyticsCron] ✅ Installed');
+})();
+
+// ── MESH RELAY INSTALLATION ─────────────────────────────────────────────────
+// Installs the server-side mesh relay after Socket.IO is ready.
+// Must run after global.__socketIO is set by WebSocketService.
+(function _mountMeshRelay() {
+    try {
+        const meshRelay = require('./mesh-relay');
+        // Delay slightly to ensure Socket.IO is fully set up
+        const _tryMount = () => {
+            const io = global.__socketIO;
+            if (!io) { setTimeout(_tryMount, 1000); return; }
+            const relayInfo = meshRelay(io, null);
+            if (relayInfo) {
+                console.log('[MeshRelay] ✅ Mounted on Socket.IO');
+                global.__meshRelay = relayInfo;
+            }
+        };
+        setTimeout(_tryMount, 2000);
+    } catch(err) {
+        console.warn('[MeshRelay] Could not mount:', err.message);
+    }
+})();
+
 // Export for testing and programmatic use
 module.exports = {
     Application,

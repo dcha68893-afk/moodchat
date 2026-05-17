@@ -133,11 +133,23 @@ class MessageService {
                 return;
             }
 
+            // Check blocked relationships before delivering
+            let blockedUserIds = new Set();
+            try {
+                const { isBlocked } = require('./friendService');
+                for (const { userId } of participants) {
+                    const blocked = await isBlocked(senderId, userId);
+                    if (blocked) blockedUserIds.add(String(userId));
+                }
+            } catch(_) { /* friendService unavailable – deliver to all */ }
+
             // Get Socket.IO instance directly for reliable delivery
             const io = ws.getIO();
             if (io) {
                 // Use Socket.IO for real-time delivery to all participants
                 for (const { userId } of participants) {
+                    // CRITICAL: skip blocked users
+                    if (blockedUserIds.has(String(userId))) continue;
                     // Send to user's Socket.IO room
                     io.to(`user:${userId}`).emit('message:new', payload);
                     io.to(`user_${userId}`).emit('new_message', payload);
@@ -265,10 +277,17 @@ class MessageService {
             { replacements:{userId,messageId} }
         );
 
-        // Notify chat participants of deletion
+        // Notify chat participants of deletion - using full broadcast to user rooms
         const ws = getWS();
-        if (ws && typeof ws.broadcastToChat === 'function') {
-            ws.broadcastToChat(message.chatId, 'message:deleted', { messageId, chatId: message.chatId, deletedBy: userId });
+        if (ws) {
+            const delPayload = { messageId, messageIds: [messageId], chatId: message.chatId, deletedBy: userId, deleteForEveryone };
+            if (typeof ws.broadcastToChatFull === 'function') {
+                ws.broadcastToChatFull(message.chatId, 'message:deleted', delPayload).catch(() => {
+                    if (typeof ws.broadcastToChat === 'function') ws.broadcastToChat(message.chatId, 'message:deleted', delPayload);
+                });
+            } else if (typeof ws.broadcastToChat === 'function') {
+                ws.broadcastToChat(message.chatId, 'message:deleted', delPayload);
+            }
         }
 
         return { success:true, message:'Message deleted successfully' };

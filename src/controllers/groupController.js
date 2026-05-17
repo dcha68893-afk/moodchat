@@ -278,7 +278,31 @@ class GroupController {
             const userId = getUserId(req);
             if (!groupId) throw new AppError('Group ID is required', 400);
 
+            // Get members BEFORE deleting so we can notify them
+            let memberIds = [];
+            try {
+                const db = require('../models');
+                const GM = db.models?.GroupMembers || db.models?.GroupMember || db.GroupMembers || db.GroupMember;
+                if (GM) {
+                    const members = await GM.findAll({ where: { groupId }, attributes: ['userId'] });
+                    memberIds = members.map(m => m.userId || m.dataValues?.userId).filter(Boolean);
+                }
+            } catch(_) {}
+
             await groupService.deleteGroup(groupId, userId);
+
+            // Broadcast group:deleted to all members via their user rooms
+            const io = global.__socketIO;
+            if (io) {
+                const delPayload = { groupId, deletedBy: userId, timestamp: new Date().toISOString() };
+                io.to(`group:${groupId}`).emit('group:deleted', delPayload);
+                io.to(`group_${groupId}`).emit('group:deleted', delPayload);
+                memberIds.forEach(mid => {
+                    io.to(`user:${mid}`).emit('group:deleted', delPayload);
+                    io.to(`user_${mid}`).emit('group:localSync', { action: 'delete', groupId, deletedBy: userId });
+                });
+            }
+
             res.status(200).json({
                 success: true,
                 message: 'Group deleted successfully',

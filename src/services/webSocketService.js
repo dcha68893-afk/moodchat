@@ -585,15 +585,45 @@ class WebSocketService {
         try { io.emit(event, data); return true; } catch (_) { return false; }
     }
 
-    broadcastToChat(chatId, event, payload = {}) {
+    broadcastToChat(chatId, event, payload = {}, participantIds = null) {
         const io = this.getIO();
         if (!io || !chatId || !event) return false;
         try {
-            io.to(`chat:${chatId}`).emit(event, {
-                ...payload, timestamp: payload.timestamp || new Date().toISOString()
-            });
+            const enriched = { ...payload, chatId, timestamp: payload.timestamp || new Date().toISOString() };
+            // Emit to chat room (members who joined)
+            io.to(`chat:${chatId}`).emit(event, enriched);
+            io.to(`chat_${chatId}`).emit(event, enriched);
+            // CRITICAL FIX: Also emit to each participant's user room
+            // This ensures delivery even when the receiver hasn't joined the chat room
+            if (Array.isArray(participantIds) && participantIds.length > 0) {
+                for (const uid of participantIds) {
+                    if (uid) {
+                        io.to(`user:${uid}`).emit(event, enriched);
+                        io.to(`user_${uid}`).emit(event, enriched);
+                    }
+                }
+            }
             return true;
         } catch (_) { return false; }
+    }
+
+    // broadcastToChatWithParticipants: fetches participants from DB then broadcasts
+    async broadcastToChatFull(chatId, event, payload = {}) {
+        const io = this.getIO();
+        if (!io || !chatId || !event) return false;
+        try {
+            const db = require('../models');
+            const sequelize = db.sequelize || db;
+            const participants = await sequelize.query(
+                'SELECT "userId" FROM chat_participants WHERE "chatId" = :chatId',
+                { replacements: { chatId }, type: sequelize.QueryTypes.SELECT }
+            );
+            const ids = (participants || []).map(p => p.userId);
+            return this.broadcastToChat(chatId, event, payload, ids);
+        } catch (err) {
+            // Fallback to room-only broadcast
+            return this.broadcastToChat(chatId, event, payload);
+        }
     }
 
     broadcastToGroup(groupId, event, payload = {}, excludeSenderId = null) {
@@ -601,13 +631,42 @@ class WebSocketService {
         if (!io || !groupId || !event) return false;
         try {
             const groupPayload = { ...payload, groupId, timestamp: payload.timestamp || new Date().toISOString() };
+            // Emit to group rooms (joined members)
             io.to(`group:${groupId}`).emit(event, groupPayload);
+            io.to(`group_${groupId}`).emit(event, groupPayload);
+            // Also send to sender user rooms (multi-device support)
             if (excludeSenderId) {
                 io.to(`user:${excludeSenderId}`).emit(event, groupPayload);
+                io.to(`user_${excludeSenderId}`).emit(event, groupPayload);
             }
             return true;
         } catch (error) {
             console.error('[WSService] Group broadcast failed:', error);
+            return false;
+        }
+    }
+
+    // Fallback: send group event to all members via user rooms
+    async broadcastGroupMessageToMembers(groupId, event, payload) {
+        const io = this.getIO();
+        if (!io || !groupId) return false;
+        try {
+            const db = require('../models');
+            const sequelize = db.sequelize || db;
+            if (!sequelize) return false;
+            const members = await sequelize.query(
+                'SELECT "userId" FROM "GroupMembers" WHERE "groupId" = :groupId',
+                { replacements: { groupId }, type: sequelize.QueryTypes.SELECT }
+            );
+            const groupPayload = { ...payload, groupId, timestamp: payload.timestamp || new Date().toISOString() };
+            for (const { userId } of (members || [])) {
+                io.to(`user:${userId}`).emit(event, groupPayload);
+                io.to(`user_${userId}`).emit(event, groupPayload);
+            }
+            io.to(`group:${groupId}`).emit(event, groupPayload);
+            return true;
+        } catch (err) {
+            console.warn('[WSService] broadcastGroupMessageToMembers failed:', err.message);
             return false;
         }
     }
@@ -693,24 +752,67 @@ class WebSocketService {
             const sequelize = db.sequelize || db;
             if (!sequelize || typeof sequelize.query !== 'function') return;
 
-            const rows = await sequelize.query(
+            // Join all private chat rooms
+            const chatRows = await sequelize.query(
                 'SELECT "chatId" FROM chat_participants WHERE "userId" = :userId',
                 { replacements: { userId }, type: sequelize.QueryTypes.SELECT }
             );
-
-            for (const { chatId } of (rows || [])) {
+            for (const { chatId } of (chatRows || [])) {
                 if (chatId) {
                     socket.join(`chat:${chatId}`);
-                    socket.join(`group:${chatId}`);
+                    socket.join(`chat_${chatId}`);
                 }
             }
 
-            if (rows && rows.length > 0) {
-                console.log(`[WSService] uid=${userId} auto-joined ${rows.length} chat+group room(s)`);
+            // CRITICAL FIX: Also join group rooms from GroupMembers table
+            // Groups use a separate table — without this, group messages never reach members
+            let groupRows = [];
+            try {
+                groupRows = await sequelize.query(
+                    'SELECT "groupId" FROM "GroupMembers" WHERE "userId" = :userId AND status != \'left\' AND status != \'banned\'',
+                    { replacements: { userId }, type: sequelize.QueryTypes.SELECT }
+                );
+            } catch (gErr) {
+                // Try without status filter if column doesn't exist
+                try {
+                    groupRows = await sequelize.query(
+                        'SELECT "groupId" FROM "GroupMembers" WHERE "userId" = :userId',
+                        { replacements: { userId }, type: sequelize.QueryTypes.SELECT }
+                    );
+                } catch (_) {}
+            }
+            for (const { groupId } of (groupRows || [])) {
+                if (groupId) {
+                    socket.join(`group:${groupId}`);
+                    socket.join(`group_${groupId}`);
+                }
+            }
+
+            const totalRooms = (chatRows || []).length + (groupRows || []).length;
+            if (totalRooms > 0) {
+                console.log(`[WSService] uid=${userId} auto-joined ${(chatRows||[]).length} chat room(s) + ${(groupRows||[]).length} group room(s)`);
             }
         } catch (err) {
             console.warn(`[WSService] _joinUserChatRooms failed for uid=${userId}:`, err.message);
         }
+    }
+
+    // Allow external code to re-join rooms (called after group join/create)
+    async rejoinGroupRoom(userId, groupId) {
+        const io = this.getIO();
+        if (!io || !userId || !groupId) return;
+        const sids = this.onlineUsers.get(Number(userId)) || this.onlineUsers.get(String(userId));
+        if (!sids) return;
+        for (const sid of sids) {
+            try {
+                const socket = io.sockets.sockets.get(sid);
+                if (socket) {
+                    socket.join(`group:${groupId}`);
+                    socket.join(`group_${groupId}`);
+                }
+            } catch (_) {}
+        }
+        console.log(`[WSService] uid=${userId} rejoined group:${groupId}`);
     }
 }
 

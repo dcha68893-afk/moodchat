@@ -537,6 +537,66 @@ router.post('/:groupId/messages', async (req, res) => {
     }
 });
 
+// ============================================================================
+// GROUP MESSAGE DELETE — DELETE /api/groups/:groupId/messages/:messageId
+// ============================================================================
+router.delete('/:groupId/messages/:messageId', async (req, res) => {
+    try {
+        const userId    = getUserId(req);
+        const groupId   = parseInt(req.params.groupId);
+        const messageId = parseInt(req.params.messageId);
+        if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
+        if (isNaN(groupId) || isNaN(messageId)) return res.status(400).json({ success: false, message: 'Invalid IDs' });
+
+        if (!Message) return res.status(500).json({ success: false, message: 'Message model unavailable' });
+
+        const msg = await Message.findByPk(messageId);
+        if (!msg) return res.status(404).json({ success: false, message: 'Message not found' });
+
+        // Only sender or group admin can delete
+        if (String(msg.senderId) !== String(userId)) {
+            const membership = GroupMember ? await GroupMember.findOne({ where: { groupId, userId } }) : null;
+            const isAdmin = membership && (membership.role === 'admin' || membership.role === 'owner');
+            if (!isAdmin) return res.status(403).json({ success: false, message: 'Not authorized to delete this message' });
+        }
+
+        // Soft-delete
+        msg.isDeleted   = true;
+        msg.deletedAt   = new Date();
+        msg.deletedBy   = userId;
+        msg.content     = '';
+        await msg.save();
+
+        // Broadcast deletion to all group members
+        const io = global.__socketIO;
+        if (io) {
+            const delPayload = { messageId, groupId, deletedBy: userId, timestamp: new Date().toISOString() };
+            io.to(`group:${groupId}`).emit('group:message:deleted', delPayload);
+            io.to(`group_${groupId}`).emit('group:message:deleted', delPayload);
+            // Also emit to each member's user room
+            try {
+                const db  = require('../models');
+                const GM  = db.models?.GroupMembers || db.models?.GroupMember || db.GroupMembers || db.GroupMember;
+                if (GM) {
+                    const members = await GM.findAll({ where: { groupId }, attributes: ['userId'] });
+                    members.forEach(m => {
+                        const mid = m.userId || m.dataValues?.userId;
+                        if (mid) {
+                            io.to(`user:${mid}`).emit('group:message:deleted', delPayload);
+                            io.to(`user_${mid}`).emit('group:message:deleted', delPayload);
+                        }
+                    });
+                }
+            } catch(_) {}
+        }
+
+        return res.json({ success: true, message: 'Message deleted', data: { messageId, groupId } });
+    } catch (error) {
+        console.error('[Groups] DELETE message error:', error.message);
+        return res.status(500).json({ success: false, message: 'Failed to delete message' });
+    }
+});
+
 // ── Validation error middleware ───────────────────────────────────────────────
 router.use((err, req, res, next) => {
     if (err.type === 'validation') {
