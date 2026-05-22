@@ -4891,6 +4891,86 @@ class Application {
 
                     logger.success('Socket.IO initialized with middleware auth ✅', 'WEBSOCKET');
 
+// ── PHASE 1: FOUNDATION ───────────────────────────────────────────────────────
+try {
+    const { initPhase1 } = require('./core/phase1.bootstrap');
+    global.__phase1 = initPhase1(this.io, this.app, {
+        adminToken: process.env.INTERNAL_DIAG_TOKEN,
+        adminPath:  '/internal/diagnostics',
+        logger:     console,
+    });
+    console.log('[Phase1] ✅ Foundation initialized');
+} catch (err) {
+    console.warn('[Phase1] Failed:', err.message);
+    global.__phase1 = {};
+}
+
+// ── PHASE 2: HYBRID TRANSPORT ─────────────────────────────────────────────────
+setTimeout(() => {
+    try {
+        const { initPhase2 } = require('./services/phase2/phase2.bootstrap');
+        global.__phase2 = initPhase2(this.io, this.app, {
+            phase1: global.__phase1, logger: console,
+        });
+        console.log('[Phase2] ✅ Hybrid Transport initialized');
+    } catch (err) {
+        console.warn('[Phase2] Failed:', err.message);
+        global.__phase2 = {};
+    }
+}, 1000);
+
+// ── PHASE 3: WEBRTC CALL ENGINE ───────────────────────────────────────────────
+setTimeout(() => {
+    try {
+        const { initPhase3 } = require('./services/phase3/phase3.bootstrap');
+        const wsService = this.websocket || this.wsService
+            || require('./services/webSocketService');
+        global.__phase3 = initPhase3(this.io, this.app, {
+            phase1: global.__phase1, phase2: global.__phase2,
+            wsService, logger: console,
+        });
+        console.log('[Phase3] ✅ WebRTC Call Engine initialized');
+    } catch (err) {
+        console.warn('[Phase3] Failed:', err.message);
+        global.__phase3 = {};
+    }
+}, 2000);
+
+// ── PHASE 4: SOCIAL ECOSYSTEM ─────────────────────────────────────────────────
+setTimeout(() => {
+    try {
+        const { initPhase4 } = require('./services/phase4/phase4.bootstrap');
+        const wsService = this.websocket || this.wsService
+            || require('./services/webSocketService');
+        global.__phase4 = initPhase4(this.io, this.app, {
+            phase1: global.__phase1, phase2: global.__phase2,
+            phase3: global.__phase3, wsService, logger: console,
+        });
+        console.log('[Phase4] ✅ Social Ecosystem initialized');
+    } catch (err) {
+        console.warn('[Phase4] Failed:', err.message);
+        global.__phase4 = {};
+    }
+}, 3000);
+
+// ── PHASE 5: PRODUCTION RELIABILITY ──────────────────────────────────────────
+setTimeout(() => {
+    try {
+        const { initPhase5 } = require('./services/phase5/phase5.bootstrap');
+        const wsService = this.websocket || this.wsService
+            || require('./services/webSocketService');
+        global.__phase5 = initPhase5(this.io, this.app, {
+            phase1: global.__phase1, phase2: global.__phase2,
+            phase3: global.__phase3, phase4: global.__phase4,
+            wsService, logger: console,
+        });
+        console.log('[Phase5] ✅ Production Reliability initialized');
+    } catch (err) {
+        console.warn('[Phase5] Failed:', err.message);
+        global.__phase5 = {};
+    }
+}, 4000);
+
                     // ── Real /ws raw-WebSocket endpoint ───────────────────────────────────
                     // app.realtime.socket.js falls back to wss://<host>/ws?token=<jwt>
                     // when the Socket.IO client library is unavailable.  Without this
