@@ -4891,85 +4891,104 @@ class Application {
 
                     logger.success('Socket.IO initialized with middleware auth ✅', 'WEBSOCKET');
 
-// ── PHASE 1: FOUNDATION ───────────────────────────────────────────────────────
-try {
-    const { initPhase1 } = require('./core/phase1.bootstrap');
-    global.__phase1 = initPhase1(this.io, this.app, {
-        adminToken: process.env.INTERNAL_DIAG_TOKEN,
-        adminPath:  '/internal/diagnostics',
-        logger:     console,
-    });
-    console.log('[Phase1] ✅ Foundation initialized');
-} catch (err) {
-    console.warn('[Phase1] Failed:', err.message);
-    global.__phase1 = {};
-}
+                    // ═══════════════════════════════════════════════════════════════════════
+                    // MOODCHAT INFRASTRUCTURE PHASES 1-6 — AUTO-INITIALIZES AFTER SOCKET INIT
+                    // Non-destructive: each phase wraps existing services, never replaces them.
+                    // ═══════════════════════════════════════════════════════════════════════
 
-// ── PHASE 2: HYBRID TRANSPORT ─────────────────────────────────────────────────
-setTimeout(() => {
-    try {
-        const { initPhase2 } = require('./services/phase2/phase2.bootstrap');
-        global.__phase2 = initPhase2(this.io, this.app, {
-            phase1: global.__phase1, logger: console,
-        });
-        console.log('[Phase2] ✅ Hybrid Transport initialized');
-    } catch (err) {
-        console.warn('[Phase2] Failed:', err.message);
-        global.__phase2 = {};
-    }
-}, 1000);
+                    // ── PHASE 1: FOUNDATION ───────────────────────────────────────────────
+                    try {
+                        const { initPhase1 } = require('./core/phase1.bootstrap');
+                        global.__phase1 = initPhase1(this.io, this.app, {
+                            adminToken: process.env.INTERNAL_DIAG_TOKEN,
+                            adminPath:  '/internal/diagnostics',
+                            logger:     console,
+                        });
+                        logger.success('MoodChat Phase 1 — Foundation Layer ✅', 'PHASE1');
+                    } catch (err) {
+                        console.warn('[Phase1] Init failed (non-fatal):', err.message);
+                        global.__phase1 = {};
+                    }
 
-// ── PHASE 3: WEBRTC CALL ENGINE ───────────────────────────────────────────────
-setTimeout(() => {
-    try {
-        const { initPhase3 } = require('./services/phase3/phase3.bootstrap');
-        const wsService = this.websocket || this.wsService
-            || require('./services/webSocketService');
-        global.__phase3 = initPhase3(this.io, this.app, {
-            phase1: global.__phase1, phase2: global.__phase2,
-            wsService, logger: console,
-        });
-        console.log('[Phase3] ✅ WebRTC Call Engine initialized');
-    } catch (err) {
-        console.warn('[Phase3] Failed:', err.message);
-        global.__phase3 = {};
-    }
-}, 2000);
+                    // ── PHASE 2: HYBRID TRANSPORT ─────────────────────────────────────────
+                    setTimeout(() => {
+                        try {
+                            const { initPhase2 } = require('./services/phase2/phase2.bootstrap');
+                            global.__phase2 = initPhase2(this.io, this.app, {
+                                phase1: global.__phase1, logger: console,
+                            });
+                            logger.success('MoodChat Phase 2 — Hybrid Transport Engine ✅', 'PHASE2');
+                        } catch (err) {
+                            console.warn('[Phase2] Init failed (non-fatal):', err.message);
+                            global.__phase2 = {};
+                        }
+                    }, 1000);
 
-// ── PHASE 4: SOCIAL ECOSYSTEM ─────────────────────────────────────────────────
-setTimeout(() => {
-    try {
-        const { initPhase4 } = require('./services/phase4/phase4.bootstrap');
-        const wsService = this.websocket || this.wsService
-            || require('./services/webSocketService');
-        global.__phase4 = initPhase4(this.io, this.app, {
-            phase1: global.__phase1, phase2: global.__phase2,
-            phase3: global.__phase3, wsService, logger: console,
-        });
-        console.log('[Phase4] ✅ Social Ecosystem initialized');
-    } catch (err) {
-        console.warn('[Phase4] Failed:', err.message);
-        global.__phase4 = {};
-    }
-}, 3000);
+                    // ── PHASE 3: WEBRTC CALL ENGINE ───────────────────────────────────────
+                    setTimeout(() => {
+                        try {
+                            const { initPhase3 } = require('./services/phase3/phase3.bootstrap');
+                            global.__phase3 = initPhase3(this.io, this.app, {
+                                phase1: global.__phase1, phase2: global.__phase2,
+                                wsService: this.websocket, logger: console,
+                            });
+                            logger.success('MoodChat Phase 3 — WebRTC Call Engine ✅', 'PHASE3');
+                        } catch (err) {
+                            console.warn('[Phase3] Init failed (non-fatal):', err.message);
+                            global.__phase3 = {};
+                        }
+                    }, 2000);
 
-// ── PHASE 5: PRODUCTION RELIABILITY ──────────────────────────────────────────
-setTimeout(() => {
-    try {
-        const { initPhase5 } = require('./services/phase5/phase5.bootstrap');
-        const wsService = this.websocket || this.wsService
-            || require('./services/webSocketService');
-        global.__phase5 = initPhase5(this.io, this.app, {
-            phase1: global.__phase1, phase2: global.__phase2,
-            phase3: global.__phase3, phase4: global.__phase4,
-            wsService, logger: console,
-        });
-        console.log('[Phase5] ✅ Production Reliability initialized');
-    } catch (err) {
-        console.warn('[Phase5] Failed:', err.message);
-        global.__phase5 = {};
-    }
-}, 4000);
+                    // ── PHASE 4: SOCIAL ECOSYSTEM ─────────────────────────────────────────
+                    setTimeout(() => {
+                        try {
+                            const { initPhase4 } = require('./services/phase4/phase4.bootstrap');
+                            global.__phase4 = initPhase4(this.io, this.app, {
+                                phase1: global.__phase1, phase2: global.__phase2,
+                                phase3: global.__phase3, wsService: this.websocket,
+                                logger: console,
+                            });
+                            logger.success('MoodChat Phase 4 — Social Ecosystem ✅', 'PHASE4');
+                        } catch (err) {
+                            console.warn('[Phase4] Init failed (non-fatal):', err.message);
+                            global.__phase4 = {};
+                        }
+                    }, 3000);
+
+                    // ── PHASE 5: PRODUCTION RELIABILITY ──────────────────────────────────
+                    setTimeout(() => {
+                        try {
+                            const { initPhase5 } = require('./services/phase5/phase5.bootstrap');
+                            global.__phase5 = initPhase5(this.io, this.app, {
+                                phase1: global.__phase1, phase2: global.__phase2,
+                                phase3: global.__phase3, phase4: global.__phase4,
+                                wsService: this.websocket, logger: console,
+                            });
+                            logger.success('MoodChat Phase 5 — Production Reliability ✅', 'PHASE5');
+                        } catch (err) {
+                            console.warn('[Phase5] Init failed (non-fatal):', err.message);
+                            global.__phase5 = {};
+                        }
+                    }, 4000);
+
+                    // ── PHASE 6: RUNTIME INTEGRATION VALIDATOR ────────────────────────────
+                    setTimeout(() => {
+                        try {
+                            const { initPhase6 } = require('./services/phase6/phase6.bootstrap');
+                            global.__phase6 = initPhase6(this.io, this.app, {
+                                phase1: global.__phase1, phase2: global.__phase2,
+                                phase3: global.__phase3, phase4: global.__phase4,
+                                phase5: global.__phase5, wsService: this.websocket,
+                                logger: console,
+                            });
+                            logger.success('MoodChat Phase 6 — Runtime Integration ✅', 'PHASE6');
+                        } catch (err) {
+                            console.warn('[Phase6] Init failed (non-fatal):', err.message);
+                            global.__phase6 = {};
+                        }
+                    }, 5000);
+
+                    // ═══════════════════════════════════════════════════════════════════════
 
                     // ── Real /ws raw-WebSocket endpoint ───────────────────────────────────
                     // app.realtime.socket.js falls back to wss://<host>/ws?token=<jwt>
