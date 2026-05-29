@@ -239,7 +239,13 @@ class GroupService {
                 ? !!(await GroupMembers.findOne({ where: { groupId, userId, leftAt: null } }))
                 : false;
             if (!group.isPublic && !isMember) throw new Error('You do not have permission to view this group');
-            return formatGroup(group);
+            const memberCount = GroupMembers
+                ? await GroupMembers.count({ where: { groupId, leftAt: null } })
+                : 0;
+            return formatGroup(group, {
+                memberCount,
+                stats: { ...(group.stats || {}), totalMembers: memberCount }
+            });
         } catch (e) {
             console.error('[GroupService] ❌ getGroupById failed:', e.message);
             throw e;
