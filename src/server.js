@@ -5489,6 +5489,44 @@ async function main() {
     }
 })();
 
+// ── LAN Discovery Service — peer subnet tracking for campus/LAN messaging ──
+(function _mountLANDiscovery() {
+    try {
+        const LANDiscoveryService = require('./services/phase2/LANDiscoveryService');
+        const _tryMount = () => {
+            const io = global.__socketIO;
+            if (!io) { setTimeout(_tryMount, 1000); return; }
+            const lanService = new LANDiscoveryService(io, { logger: console });
+            lanService.attach();
+            global.__lanDiscoveryService = lanService;
+            console.log('[LANDiscovery] ✅ Mounted on Socket.IO');
+
+            // Also handle server-relay for AP-isolated subnets
+            // When direct LAN WS fails, relay the message via server
+            io.on('connection', socket => {
+                socket.on('lan:relay_message', (data, ack) => {
+                    try {
+                        const { targetSocketId, payload } = data || {};
+                        if (!targetSocketId || !payload) return;
+                        const targetSocket = io.sockets.sockets?.get(targetSocketId);
+                        if (targetSocket) {
+                            targetSocket.emit('lan:message', payload);
+                            if (typeof ack === 'function') ack({ ok: true });
+                        } else {
+                            if (typeof ack === 'function') ack({ ok: false, reason: 'peer_not_found' });
+                        }
+                    } catch(e) {
+                        if (typeof ack === 'function') ack({ ok: false, reason: e.message });
+                    }
+                });
+            });
+        };
+        setTimeout(_tryMount, 2500);
+    } catch(err) {
+        console.warn('[LANDiscovery] Could not mount:', err.message);
+    }
+})();
+
 // Export for testing and programmatic use
 module.exports = {
     Application,

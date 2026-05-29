@@ -216,15 +216,18 @@ class LANDiscoveryService extends EventEmitter {
       const peers = this._registry.getPeersOnSubnet(localIP, socket.id);
 
       // Send peer list back to this socket
+      // Include ALL same-subnet peers — even without local WS (use server relay for AP isolation)
       const peerList = peers.map(p => ({
-        id:       p.socketId,
-        userId:   p.userId,
-        deviceId: p.deviceId,
-        wsUrl:    p.wsPort && p.ip ? `ws://${p.ip}:${p.wsPort}` : null,
+        id:         p.socketId,
+        userId:     p.userId,
+        deviceId:   p.deviceId,
+        socketId:   p.socketId,   // for server-relay fallback
+        wsUrl:      p.wsPort && p.ip ? `ws://${p.ip}:${p.wsPort}` : null,
         sameSubnet: true,
-      })).filter(p => p.wsUrl); // only peers with local WS server
+        relayable:  true,         // can always relay via server
+      }));
 
-      socket.emit('lan:peer_list', { peers: peerList });
+      socket.emit('lan:peer_list', { peers: peerList, subnetKey: key });
 
       // Notify existing peers about new arrival
       for (const peer of peers) {
