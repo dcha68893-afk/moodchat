@@ -277,10 +277,20 @@ class MessageService {
             { replacements:{userId,messageId} }
         );
 
+        // PHASE10: Record tombstone in entity store + hydration engine BEFORE broadcast
+        try {
+            global.__MessageEntityStore?.recordDelete?.(messageId, message.chatId, 'deleted');
+            global.__HydrationEngine?.recordDeletion?.('message', messageId, message.chatId, 'deleted');
+        } catch(_) {}
+
         // Notify chat participants of deletion - using full broadcast to user rooms
         const ws = getWS();
         if (ws) {
-            const delPayload = { messageId, messageIds: [messageId], chatId: message.chatId, deletedBy: userId, deleteForEveryone };
+            const delPayload = {
+                messageId, messageIds: [messageId],
+                chatId: message.chatId, deletedBy: userId, deleteForEveryone,
+                _tombstone: true, ts: Date.now()
+            };
             if (typeof ws.broadcastToChatFull === 'function') {
                 ws.broadcastToChatFull(message.chatId, 'message:deleted', delPayload).catch(() => {
                     if (typeof ws.broadcastToChat === 'function') ws.broadcastToChat(message.chatId, 'message:deleted', delPayload);

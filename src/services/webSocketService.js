@@ -142,6 +142,20 @@ class WebSocketService {
             // Tell client auth succeeded
             socket.emit('authenticated', { userId, authenticated: true, timestamp: Date.now() });
 
+            // PHASE10: Register with HybridTransportRuntime for offline queue flush
+            try {
+                const htr = global.__HybridTransportRuntime;
+                if (htr) {
+                    const ip = socket.handshake?.address || '';
+                    const subnetKey = ip.split('.').slice(0, 3).join('.');
+                    htr.lan.register(String(userId), socket.id, subnetKey);
+                    // Flush any queued messages for this user
+                    htr.flushOfflineQueue(String(userId));
+                    // Store userId on socket for HybridTransportRuntime lookups
+                    socket._authenticatedUserId = String(userId);
+                }
+            } catch(_) {}
+
             // Proactively join all chat rooms
             this._joinUserChatRooms(userId, socket).catch(() => {});
 
@@ -438,6 +452,16 @@ class WebSocketService {
             console.log(`[WSService] EMITTING TO: uid=${uid} event=${event}`);
         }
 
+        // PHASE10: Route through HybridTransportRuntime when available
+        // This gives us LAN routing + offline queue + mesh fallback
+        const htr = global.__HybridTransportRuntime;
+        if (htr) {
+            const result = await htr.deliver(String(uid), event, data).catch(() => null);
+            if (result?.ok) return true;
+            // If queued (user offline), still return true — message will deliver on reconnect
+            if (result?.queued) return true;
+        }
+
         const payload = { ...data, timestamp: data.timestamp || new Date().toISOString() };
         let delivered = false;
         const io      = this.getIO();
@@ -554,7 +578,15 @@ class WebSocketService {
     }
 
     async notifyStatusDeleted(statusId, userId) {
-        return this.broadcast('status:deleted', { statusId, userId, timestamp: new Date().toISOString() });
+        // PHASE10: Record in hydration engine to prevent stale status resurrection
+        try {
+            global.__HydrationEngine?.recordDeletion?.('status', statusId, null, 'deleted');
+        } catch(_) {}
+        return this.broadcast('status:deleted', {
+            statusId, userId,
+            entityType: 'status', entityId: String(statusId),
+            timestamp: new Date().toISOString()
+        });
     }
 
     // ── RAW WS CLIENT REGISTRATION ────────────────────────────────────────────
@@ -590,6 +622,35 @@ class WebSocketService {
         if (!io || !chatId || !event) return false;
         try {
             const enriched = { ...payload, chatId, timestamp: payload.timestamp || new Date().toISOString() };
+
+            // PHASE10: Record tombstones and emit entity:deleted for cache invalidation
+            const _isDeletion = event === 'message:deleted' || event === 'MESSAGE_DELETED' ||
+                                event === 'message:delete' || event === 'msg_deleted';
+            const _isChatDeletion = event === 'chat:deleted' || event === 'CHAT_DELETED';
+            if (_isDeletion) {
+                const msgId = payload.messageId || payload.id;
+                if (msgId) {
+                    // Record in MessageEntityStore
+                    try { global.__MessageEntityStore?.recordDelete?.(msgId, chatId, 'deleted'); } catch(_) {}
+                    // Record in HydrationEngine
+                    try { global.__HydrationEngine?.recordDeletion?.('message', msgId, chatId, 'deleted'); } catch(_) {}
+                    // Broadcast entity:deleted so client DeletionRegistry can evict caches
+                    const deletionPayload = { entityType: 'message', entityId: String(msgId), chatId, ts: Date.now() };
+                    io.to(`chat:${chatId}`).emit('entity:deleted', deletionPayload);
+                    io.to(`chat_${chatId}`).emit('entity:deleted', deletionPayload);
+                }
+            }
+            if (_isChatDeletion) {
+                try { global.__HydrationEngine?.recordDeletion?.('chat', chatId, null, 'deleted'); } catch(_) {}
+                const deletionPayload = { entityType: 'chat', entityId: String(chatId), ts: Date.now() };
+                io.to(`chat:${chatId}`).emit('entity:deleted', deletionPayload);
+                if (Array.isArray(participantIds)) {
+                    participantIds.forEach(uid => {
+                        if (uid) io.to(`user:${uid}`).emit('entity:deleted', deletionPayload);
+                    });
+                }
+            }
+
             // Emit to chat room (members who joined)
             io.to(`chat:${chatId}`).emit(event, enriched);
             io.to(`chat_${chatId}`).emit(event, enriched);
@@ -631,6 +692,17 @@ class WebSocketService {
         if (!io || !groupId || !event) return false;
         try {
             const groupPayload = { ...payload, groupId, timestamp: payload.timestamp || new Date().toISOString() };
+
+            // PHASE10: Record group message deletions in entity stores
+            const _isGroupDel = event === 'group:message:deleted' || event === 'GROUP_MESSAGE_DELETED';
+            if (_isGroupDel) {
+                const msgId = payload.messageId || payload.id;
+                if (msgId) {
+                    try { global.__MessageEntityStore?.recordDelete?.(msgId, `group:${groupId}`, 'deleted'); } catch(_) {}
+                    try { global.__HydrationEngine?.recordDeletion?.('message', msgId, `group:${groupId}`, 'deleted'); } catch(_) {}
+                }
+            }
+
             // Emit to group rooms (joined members)
             io.to(`group:${groupId}`).emit(event, groupPayload);
             io.to(`group_${groupId}`).emit(event, groupPayload);

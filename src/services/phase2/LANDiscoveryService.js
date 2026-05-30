@@ -242,6 +242,17 @@ class LANDiscoveryService extends EventEmitter {
       }
 
       this.emit('lan:peer_joined', { userId, ip: localIP, subnetKey: key });
+
+      // PHASE10: Register peer in HybridTransportRuntime for LAN delivery routing
+      try {
+        const htr = global.__HybridTransportRuntime;
+        if (htr && userId) {
+          const subnetKey = localIP.split('.').slice(0, 3).join('.');
+          htr.lan.register(String(userId), socket.id, subnetKey);
+          htr.health.setAvail('LAN', true);
+          console.log(`[LANDiscovery] PHASE10: Registered uid=${userId} in HybridTransportRuntime`);
+        }
+      } catch(_) {}
     });
 
     // Handle LAN relay failure (AP isolation detection)

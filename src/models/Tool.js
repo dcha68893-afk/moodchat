@@ -75,8 +75,7 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: false,
         defaultValue: 'other',
         validate: {
-          isIn: [['electronics', 'furniture', 'clothing', 'books', 'services', 'digital', 'premium',
-                   'fashion', 'home', 'beauty', 'sports', 'toys', 'food', 'automotive', 'health', 'other']],
+          isIn: [['electronics', 'furniture', 'clothing', 'books', 'services', 'digital', 'premium', 'other']],
         },
       },
       type: {
@@ -121,57 +120,6 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.DATE,
         allowNull: true,
         field: 'boost_expires_at',
-      },
-      // ── Flash Sale fields ───────────────────────────────────────────────────
-      isFlashSale: {
-        type: DataTypes.BOOLEAN,
-        defaultValue: false,
-        field: 'is_flash_sale',
-      },
-      flashSalePrice: {
-        type: DataTypes.DECIMAL(10, 2),
-        allowNull: true,
-        field: 'flash_sale_price',
-        comment: 'Discounted price during flash sale',
-      },
-      flashSaleEnd: {
-        type: DataTypes.DATE,
-        allowNull: true,
-        field: 'flash_sale_end',
-        comment: 'When the flash sale expires',
-      },
-      flashSaleStock: {
-        type: DataTypes.INTEGER,
-        allowNull: true,
-        field: 'flash_sale_stock',
-        comment: 'Limited stock for flash sale (null = no limit)',
-      },
-      isNewArrival: {
-        type: DataTypes.BOOLEAN,
-        defaultValue: false,
-        field: 'is_new_arrival',
-      },
-      comparePrice: {
-        type: DataTypes.DECIMAL(10, 2),
-        allowNull: true,
-        field: 'compare_price',
-        comment: 'Original price for strikethrough display',
-      },
-      currency: {
-        type: DataTypes.STRING(3),
-        defaultValue: 'KES',
-        allowNull: false,
-      },
-      weight: {
-        type: DataTypes.DECIMAL(8, 2),
-        allowNull: true,
-        comment: 'Weight in KG for delivery calculation',
-      },
-      sku: {
-        type: DataTypes.STRING(64),
-        allowNull: true,
-        unique: true,
-        comment: 'Stock Keeping Unit',
       },
       views: {
         type: DataTypes.INTEGER,

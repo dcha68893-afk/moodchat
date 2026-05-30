@@ -4005,6 +4005,43 @@ class Application {
                 });
             });
             
+            // PHASE10: Transport runtime diagnostics dashboard
+            this.app.get('/api/transport', (req, res) => {
+                try {
+                    const htr  = global.__HybridTransportRuntime;
+                    const mes  = global.__MessageEntityStore;
+                    const hyd  = global.__HydrationEngine;
+                    const p10  = global.__phase10;
+                    res.json({
+                        ok        : true,
+                        phase10   : !!p10,
+                        transport : htr?.getDiagnostics()  || { error: 'not_initialized' },
+                        entities  : mes?.getDiagnostics()  || { error: 'not_initialized' },
+                        hydration : hyd?.getDiagnostics()  || { error: 'not_initialized' },
+                        timestamp : Date.now(),
+                    });
+                } catch (err) {
+                    res.status(500).json({ ok: false, error: err.message });
+                }
+            });
+
+            // PHASE10: Socket health endpoint
+            this.app.get('/api/socket-health', (req, res) => {
+                try {
+                    const io = this.io;
+                    res.json({
+                        ok          : true,
+                        clients     : io?.engine?.clientsCount || 0,
+                        rooms       : io?.sockets?.adapter?.rooms?.size || 0,
+                        transport   : global.__HybridTransportRuntime?.getDiagnostics()?.health || {},
+                        offline     : global.__HybridTransportRuntime?.getDiagnostics()?.offline || {},
+                        timestamp   : Date.now(),
+                    });
+                } catch (err) {
+                    res.status(500).json({ ok: false, error: err.message });
+                }
+            });
+
             // Cache stats endpoint
             this.app.get('/api/cache-stats', (req, res) => {
                 logger.logPublicRouteAccess(req.path, req.method);
@@ -4988,6 +5025,23 @@ class Application {
                         }
                     }, 5000);
 
+                    // ── PHASE 10: Full Production Hardening ───────────────────────────────
+                    setTimeout(() => {
+                        try {
+                            const { initPhase10 } = require('./services/phase10/phase10.bootstrap');
+                            global.__phase10 = initPhase10(this.io, this.app, {
+                                phase1: global.__phase1, phase2: global.__phase2,
+                                phase3: global.__phase3, phase4: global.__phase4,
+                                phase5: global.__phase5, phase6: global.__phase6,
+                                wsService: this.websocket, logger: console,
+                            });
+                            console.log('[Server] ✅ Phase 10 Production Hardening active');
+                        } catch (err) {
+                            console.warn('[Phase10] Init failed (non-fatal):', err.message, err.stack);
+                            global.__phase10 = {};
+                        }
+                    }, 6000);
+
                     // ═══════════════════════════════════════════════════════════════════════
 
                     // ── Real /ws raw-WebSocket endpoint ───────────────────────────────────
@@ -5506,15 +5560,50 @@ async function main() {
             io.on('connection', socket => {
                 socket.on('lan:relay_message', (data, ack) => {
                     try {
-                        const { targetSocketId, payload } = data || {};
-                        if (!targetSocketId || !payload) return;
-                        const targetSocket = io.sockets.sockets?.get(targetSocketId);
-                        if (targetSocket) {
-                            targetSocket.emit('lan:message', payload);
-                            if (typeof ack === 'function') ack({ ok: true });
-                        } else {
-                            if (typeof ack === 'function') ack({ ok: false, reason: 'peer_not_found' });
+                        const { targetSocketId, payload, targetUserId } = data || {};
+                        if (!payload) return;
+
+                        let delivered = false;
+
+                        // 1. Direct socket relay (AP-isolated peers)
+                        if (targetSocketId) {
+                            const targetSocket = io.sockets.sockets?.get(targetSocketId);
+                            if (targetSocket && targetSocket.connected) {
+                                targetSocket.emit('lan:message', { ...payload, _transport: 'LAN' });
+                                delivered = true;
+                            }
                         }
+
+                        // PHASE10: Also deliver via user room so multi-device + offline queue work
+                        const uid = targetUserId || payload.receiverId || payload.targetUserId;
+                        if (uid) {
+                            const wsService = global.__phase1?.wsService ||
+                                              require('./services/webSocketService');
+                            try {
+                                const lanPayload = { ...payload, _transport: 'LAN', _lanRelayed: true };
+                                io.to(`user:${uid}`).emit('lan:message', lanPayload);
+                                io.to(`user_${uid}`).emit('lan:message', lanPayload);
+                                // Also emit as new_message so messages-core picks it up
+                                io.to(`user:${uid}`).emit('new_message', lanPayload);
+                                delivered = true;
+                            } catch(_) {}
+                        }
+
+                        // PHASE10: Record in MessageEntityStore for history
+                        if (payload.id || payload.localId) {
+                            try {
+                                global.__MessageEntityStore?.recordCreate?.({
+                                    id:      payload.id || payload.localId,
+                                    localId: payload.localId,
+                                    chatId:  payload.chatId || payload.conversationId,
+                                    content: payload.content,
+                                    senderId: socket._authenticatedUserId,
+                                    _transport: 'LAN',
+                                });
+                            } catch(_) {}
+                        }
+
+                        if (typeof ack === 'function') ack({ ok: delivered, transport: 'LAN' });
                     } catch(e) {
                         if (typeof ack === 'function') ack({ ok: false, reason: e.message });
                     }
