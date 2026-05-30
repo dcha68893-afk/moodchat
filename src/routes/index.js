@@ -94,6 +94,7 @@ const ROUTE_MAPPING = {
   'readReceipt.js': '/api/read-receipts',
   'sharedMood.js': '/api/shared-moods',
   'tools.js': '/api/tools',
+  'marketplace.routes.js': '/api/marketplace',
   'typingIndicator.js': '/api/typing-indicators',
   'userStatus.js': '/api/user-status',
   'chatsParticipant.js': '/api/chats-participant',

@@ -203,6 +203,51 @@ module.exports = (sequelize, DataTypes) => {
           }
         }
       },
+      // ── Marketplace extended data ─────────────────────────────────────────
+      metadata: {
+        type: DataTypes.JSONB,
+        defaultValue: {},
+        allowNull: true,
+        comment: 'Marketplace: cart, addresses, wallet, loyalty, referral, preferences',
+      },
+      walletBalance: {
+        type: DataTypes.DECIMAL(12, 2),
+        defaultValue: 0.00,
+        allowNull: false,
+        comment: 'Customer wallet balance in KES',
+      },
+      loyaltyPoints: {
+        type: DataTypes.INTEGER,
+        defaultValue: 0,
+        allowNull: false,
+        comment: 'Accumulated loyalty/reward points',
+      },
+      loyaltyTier: {
+        type: DataTypes.ENUM('bronze', 'silver', 'gold', 'platinum'),
+        defaultValue: 'bronze',
+        allowNull: false,
+      },
+      referralCode: {
+        type: DataTypes.STRING(12),
+        allowNull: true,
+        unique: true,
+        comment: 'Unique referral code for this user',
+      },
+      referredBy: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+        comment: 'User ID who referred this user',
+      },
+      totalOrders: {
+        type: DataTypes.INTEGER,
+        defaultValue: 0,
+        allowNull: false,
+      },
+      totalSpent: {
+        type: DataTypes.DECIMAL(14, 2),
+        defaultValue: 0.00,
+        allowNull: false,
+      },
       createdAt: {
         type: DataTypes.DATE,
         defaultValue: DataTypes.NOW,

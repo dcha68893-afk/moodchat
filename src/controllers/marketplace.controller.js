@@ -839,6 +839,726 @@ class MarketplaceController {
         } catch(e) { err(next, e, 'adminGetStats'); }
     }
 
+    // ══════════════════════════════════════════════════════════════════════════
+    // PRODUCTS — aliases & extras
+    // ══════════════════════════════════════════════════════════════════════════
+
+    async listProducts(req, res, next) { return this.getProducts(req, res, next); }
+    async getProduct(req, res, next)   { return this.getProductById(req, res, next); }
+
+    async getFeaturedProducts(req, res, next) {
+        try {
+            const T = Model.Tool;
+            if (!T) return ok(res, { products: [] });
+            const rows = await T.findAll({ where: { isFeatured: true, status: 'active', available: true }, order: [['createdAt','DESC']], limit: 20 });
+            return ok(res, { products: rows.map(_formatProduct) });
+        } catch(e) { err(next, e, 'getFeaturedProducts'); }
+    }
+
+    async getFlashSales(req, res, next) {
+        try {
+            const T = Model.Tool;
+            if (!T) return ok(res, { products: [] });
+            const rows = await T.findAll({ where: { isFlashSale: true, status: 'active', available: true }, order: [['createdAt','DESC']], limit: 20 });
+            return ok(res, { products: rows.map(_formatProduct) });
+        } catch(e) { err(next, e, 'getFlashSales'); }
+    }
+
+    async getTrendingProducts(req, res, next) {
+        try {
+            const T = Model.Tool;
+            if (!T) return ok(res, { products: [] });
+            const rows = await T.findAll({ where: { status: 'active', available: true }, order: [['views','DESC']], limit: 20 });
+            return ok(res, { products: rows.map(_formatProduct) });
+        } catch(e) { err(next, e, 'getTrendingProducts'); }
+    }
+
+    async getNewArrivals(req, res, next) {
+        try {
+            const T = Model.Tool;
+            if (!T) return ok(res, { products: [] });
+            const rows = await T.findAll({ where: { status: 'active', available: true }, order: [['createdAt','DESC']], limit: 20 });
+            return ok(res, { products: rows.map(_formatProduct) });
+        } catch(e) { err(next, e, 'getNewArrivals'); }
+    }
+
+    async getSellerProducts(req, res, next) {
+        req.query.seller_id = req.params.sellerId;
+        return this.getProducts(req, res, next);
+    }
+
+    async getSellerOrders(req, res, next) {
+        try {
+            const O = Model.Order;
+            const sellerId = req.user?.id;
+            if (!O || !sellerId) return ok(res, { orders: [] });
+            const rows = await O.findAll({ where: { sellerId }, order: [['createdAt','DESC']], limit: 100 });
+            return ok(res, { orders: rows.map(_formatOrder) });
+        } catch(e) { err(next, e, 'getSellerOrders'); }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // SEARCH
+    // ══════════════════════════════════════════════════════════════════════════
+
+    async searchProducts(req, res, next) {
+        req.query.search = req.query.q || req.query.query || req.query.search || '';
+        return this.getProducts(req, res, next);
+    }
+
+    async getSearchSuggestions(req, res, next) {
+        try {
+            const q = (req.query.q || '').trim().toLowerCase();
+            if (!q || q.length < 2) return ok(res, { suggestions: [] });
+            const T = Model.Tool;
+            if (!T) return ok(res, { suggestions: [] });
+            const rows = await T.findAll({
+                where: { title: { [Op.or]: [{ [Op.iLike]: `%${q}%` }, { [Op.like]: `%${q}%` }] }, status: 'active' },
+                attributes: ['title', 'category'],
+                limit: 8,
+            });
+            const seen = new Set();
+            const suggestions = rows
+                .map(r => r.title)
+                .filter(t => { if (seen.has(t)) return false; seen.add(t); return true; });
+            return ok(res, { suggestions });
+        } catch(e) { err(next, e, 'getSearchSuggestions'); }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // CART (server-side persistence)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    async getCart(req, res, next) {
+        try {
+            const userId = req.user?.id;
+            if (!userId) return ok(res, { items: [], subtotal: 0, total: 0 });
+            // Cart stored in user profile metadata or separate cart store
+            const U = Model.User;
+            if (!U) return ok(res, { items: [], subtotal: 0, total: 0 });
+            const user = await U.findByPk(userId, { attributes: ['id', 'metadata'] });
+            const cart = user?.metadata?.cart || [];
+            const subtotal = cart.reduce((s, i) => s + (i.price || 0) * (i.quantity || 1), 0);
+            return ok(res, { items: cart, subtotal, total: subtotal, currency: 'KES' });
+        } catch(e) { err(next, e, 'getCart'); }
+    }
+
+    async addToCart(req, res, next) {
+        try {
+            const userId = req.user?.id;
+            const { product_id, quantity = 1, variant = null } = req.body;
+            if (!userId || !product_id) return next(new AppError('Invalid request', 400));
+
+            const T = Model.Tool;
+            const product = T ? await T.findByPk(product_id) : null;
+            if (!product) return next(new AppError('Product not found', 404));
+            if (!product.available) return next(new AppError('Product not available', 400));
+
+            const U = Model.User;
+            if (!U) return ok(res, { success: true, message: 'Cart updated (local)' });
+            const user = await U.findByPk(userId, { attributes: ['id', 'metadata'] });
+            const cart = user?.metadata?.cart || [];
+            const existIdx = cart.findIndex(i => i.product_id === product_id);
+            if (existIdx >= 0) {
+                cart[existIdx].quantity += parseInt(quantity);
+            } else {
+                cart.push({
+                    product_id, quantity: parseInt(quantity), variant,
+                    title: product.title, price: parseFloat(product.price),
+                    image: product.images?.[0] || '',
+                    added_at: new Date().toISOString(),
+                });
+            }
+            await user.update({ metadata: { ...(user.metadata || {}), cart } });
+            return ok(res, { items: cart, added: true });
+        } catch(e) { err(next, e, 'addToCart'); }
+    }
+
+    async updateCartItem(req, res, next) {
+        try {
+            const userId = req.user?.id;
+            const { itemId } = req.params;
+            const { quantity } = req.body;
+            const U = Model.User;
+            if (!U || !userId) return ok(res, { success: true });
+            const user = await U.findByPk(userId, { attributes: ['id', 'metadata'] });
+            const cart = user?.metadata?.cart || [];
+            const idx = cart.findIndex(i => i.product_id === itemId);
+            if (idx >= 0) {
+                if (parseInt(quantity) <= 0) { cart.splice(idx, 1); }
+                else { cart[idx].quantity = parseInt(quantity); }
+                await user.update({ metadata: { ...(user.metadata || {}), cart } });
+            }
+            return ok(res, { items: cart });
+        } catch(e) { err(next, e, 'updateCartItem'); }
+    }
+
+    async removeFromCart(req, res, next) {
+        try {
+            const userId = req.user?.id;
+            const { itemId } = req.params;
+            const U = Model.User;
+            if (!U || !userId) return ok(res, { success: true });
+            const user = await U.findByPk(userId, { attributes: ['id', 'metadata'] });
+            const cart = (user?.metadata?.cart || []).filter(i => i.product_id !== itemId);
+            await user.update({ metadata: { ...(user.metadata || {}), cart } });
+            return ok(res, { items: cart, removed: true });
+        } catch(e) { err(next, e, 'removeFromCart'); }
+    }
+
+    async clearCart(req, res, next) {
+        try {
+            const userId = req.user?.id;
+            const U = Model.User;
+            if (!U || !userId) return ok(res, { success: true });
+            const user = await U.findByPk(userId, { attributes: ['id', 'metadata'] });
+            await user.update({ metadata: { ...(user.metadata || {}), cart: [] } });
+            return ok(res, { items: [], cleared: true });
+        } catch(e) { err(next, e, 'clearCart'); }
+    }
+
+    async syncCart(req, res, next) {
+        try {
+            const userId = req.user?.id;
+            const { items = [] } = req.body;
+            const U = Model.User;
+            if (!U || !userId) return ok(res, { items, synced: false });
+            const user = await U.findByPk(userId, { attributes: ['id', 'metadata'] });
+            const serverCart = user?.metadata?.cart || [];
+            // Merge: server cart + client cart, deduplicate by product_id
+            const merged = [...serverCart];
+            items.forEach(ci => {
+                const idx = merged.findIndex(i => i.product_id === ci.product_id);
+                if (idx >= 0) { merged[idx].quantity = Math.max(merged[idx].quantity, ci.quantity); }
+                else { merged.push(ci); }
+            });
+            await user.update({ metadata: { ...(user.metadata || {}), cart: merged } });
+            return ok(res, { items: merged, synced: true });
+        } catch(e) { err(next, e, 'syncCart'); }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // ADDRESSES
+    // ══════════════════════════════════════════════════════════════════════════
+
+    async getAddresses(req, res, next) {
+        try {
+            const userId = req.user?.id;
+            const U = Model.User;
+            if (!U || !userId) return ok(res, { addresses: [] });
+            const user = await U.findByPk(userId, { attributes: ['id', 'metadata'] });
+            const addresses = user?.metadata?.addresses || [];
+            return ok(res, { addresses });
+        } catch(e) { err(next, e, 'getAddresses'); }
+    }
+
+    async addAddress(req, res, next) {
+        try {
+            const userId = req.user?.id;
+            const { name, phone, address, city, region, country = 'Kenya', postal_code = '', is_default = false } = req.body;
+            if (!name || !address || !city) return next(new AppError('Name, address and city are required', 400));
+            const U = Model.User;
+            if (!U || !userId) return ok(res, { success: true });
+            const user = await U.findByPk(userId, { attributes: ['id', 'metadata'] });
+            const addresses = user?.metadata?.addresses || [];
+            const newAddr = { id: crypto.randomUUID(), name, phone, address, city, region, country, postal_code, is_default: !addresses.length || is_default, created_at: new Date().toISOString() };
+            if (is_default) addresses.forEach(a => a.is_default = false);
+            if (!addresses.length) newAddr.is_default = true;
+            addresses.push(newAddr);
+            await user.update({ metadata: { ...(user.metadata || {}), addresses } });
+            return ok(res, { address: newAddr, addresses }, 'Address added', 201);
+        } catch(e) { err(next, e, 'addAddress'); }
+    }
+
+    async updateAddress(req, res, next) {
+        try {
+            const userId = req.user?.id;
+            const { id } = req.params;
+            const U = Model.User;
+            if (!U || !userId) return ok(res, { success: true });
+            const user = await U.findByPk(userId, { attributes: ['id', 'metadata'] });
+            const addresses = user?.metadata?.addresses || [];
+            const idx = addresses.findIndex(a => a.id === id);
+            if (idx < 0) return next(new AppError('Address not found', 404));
+            addresses[idx] = { ...addresses[idx], ...req.body, id };
+            if (req.body.is_default) addresses.forEach((a, i) => { if (i !== idx) a.is_default = false; });
+            await user.update({ metadata: { ...(user.metadata || {}), addresses } });
+            return ok(res, { address: addresses[idx], addresses });
+        } catch(e) { err(next, e, 'updateAddress'); }
+    }
+
+    async deleteAddress(req, res, next) {
+        try {
+            const userId = req.user?.id;
+            const { id } = req.params;
+            const U = Model.User;
+            if (!U || !userId) return ok(res, { success: true });
+            const user = await U.findByPk(userId, { attributes: ['id', 'metadata'] });
+            const addresses = (user?.metadata?.addresses || []).filter(a => a.id !== id);
+            await user.update({ metadata: { ...(user.metadata || {}), addresses } });
+            return ok(res, { addresses, deleted: true });
+        } catch(e) { err(next, e, 'deleteAddress'); }
+    }
+
+    async setDefaultAddress(req, res, next) {
+        try {
+            const userId = req.user?.id;
+            const { id } = req.params;
+            const U = Model.User;
+            if (!U || !userId) return ok(res, { success: true });
+            const user = await U.findByPk(userId, { attributes: ['id', 'metadata'] });
+            const addresses = user?.metadata?.addresses || [];
+            addresses.forEach(a => { a.is_default = a.id === id; });
+            await user.update({ metadata: { ...(user.metadata || {}), addresses } });
+            return ok(res, { addresses });
+        } catch(e) { err(next, e, 'setDefaultAddress'); }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // DELIVERY ESTIMATE
+    // ══════════════════════════════════════════════════════════════════════════
+
+    async estimateDelivery(req, res, next) {
+        try {
+            const { buyer_location, seller_location, weight = 0, zone_id } = req.body;
+            const zones = [
+                { id:'nairobi',  name:'Nairobi CBD',      fee:50,  eta:'1-2 hours',    eta_days:0 },
+                { id:'suburbs',  name:'Nairobi Suburbs',  fee:150, eta:'2-4 hours',    eta_days:0 },
+                { id:'kenya',    name:'Rest of Kenya',    fee:300, eta:'1-3 days',     eta_days:3 },
+                { id:'express',  name:'Express Nairobi',  fee:250, eta:'30-60 min',    eta_days:0 },
+                { id:'pickup',   name:'Self Pickup',      fee:0,   eta:'Anytime',      eta_days:0 },
+            ];
+            const zone = zones.find(z => z.id === zone_id) || zones[2];
+            const weightSurcharge = weight > 5 ? (weight - 5) * 10 : 0;
+            const estimatedDate = new Date(Date.now() + zone.eta_days * 24*60*60*1000);
+            return ok(res, {
+                zones,
+                selected_zone: zone,
+                fee: zone.fee + weightSurcharge,
+                eta: zone.eta,
+                estimated_delivery: estimatedDate.toISOString(),
+                currency: 'KES',
+            });
+        } catch(e) { err(next, e, 'estimateDelivery'); }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // CHECKOUT — creates order(s) from cart items
+    // ══════════════════════════════════════════════════════════════════════════
+
+    async validateCheckout(req, res, next) {
+        try {
+            const { items = [], delivery_address, delivery_zone } = req.body;
+            if (!items.length) return next(new AppError('Cart is empty', 400));
+            if (!delivery_address?.address) return next(new AppError('Delivery address required', 400));
+            const T = Model.Tool;
+            const validations = [];
+            if (T) {
+                for (const item of items) {
+                    const p = await T.findByPk(item.product_id);
+                    validations.push({
+                        product_id: item.product_id,
+                        available: !!(p?.available),
+                        price: parseFloat(p?.price || 0),
+                        title: p?.title || item.title,
+                    });
+                }
+            }
+            const subtotal = validations.reduce((s, v) => s + v.price * (items.find(i => i.product_id === v.product_id)?.quantity || 1), 0);
+            return ok(res, { valid: true, validations, subtotal, currency: 'KES' });
+        } catch(e) { err(next, e, 'validateCheckout'); }
+    }
+
+    async checkout(req, res, next) {
+        try {
+            const O = Model.Order;
+            const T = Model.Tool;
+            const U = Model.User;
+            const buyerId = req.user?.id;
+            if (!buyerId) return next(new AppError('Authentication required', 401));
+
+            const { items = [], delivery_address = {}, delivery_zone = 'kenya', payment_method = 'cod', coupon_code, notes = '' } = req.body;
+            if (!items.length) return next(new AppError('Cart is empty', 400));
+
+            const deliveryFees = { nairobi: 50, suburbs: 150, kenya: 300, express: 250, pickup: 0 };
+            const deliveryFee = deliveryFees[delivery_zone] ?? 300;
+
+            // Calculate totals
+            const enrichedItems = [];
+            let subtotal = 0;
+            for (const item of items) {
+                const product = T ? await T.findByPk(item.product_id) : null;
+                const price = parseFloat(product?.price || item.price || 0);
+                const qty = parseInt(item.quantity || 1);
+                subtotal += price * qty;
+                enrichedItems.push({
+                    product_id: item.product_id,
+                    title:      product?.title || item.title || 'Product',
+                    image:      product?.images?.[0] || item.image || '',
+                    price,
+                    quantity:   qty,
+                    seller_id:  product?.sellerId || item.seller_id || null,
+                });
+            }
+
+            // Apply coupon if any
+            let discount = 0;
+            if (coupon_code) {
+                const coupons = { 'SAVE10': 0.10, 'SAVE20': 0.20, 'FLAT100': null };
+                if (coupons[coupon_code] !== undefined) {
+                    discount = coupons[coupon_code] ? subtotal * coupons[coupon_code] : 100;
+                }
+            }
+
+            const total = Math.max(0, subtotal + deliveryFee - discount);
+
+            if (!O) {
+                // Return a local order
+                const localOrder = {
+                    id:               crypto.randomUUID(),
+                    buyer_id:         buyerId,
+                    status:           payment_method === 'cod' ? 'confirmed' : 'pending',
+                    items:            enrichedItems,
+                    subtotal,
+                    delivery_fee:     deliveryFee,
+                    discount,
+                    total_price:      total,
+                    currency:         'KES',
+                    payment_method,
+                    delivery_address,
+                    delivery_zone,
+                    notes,
+                    created_at:       new Date().toISOString(),
+                };
+                return ok(res, { order: localOrder, requires_payment: payment_method !== 'cod' }, 'Order created', 201);
+            }
+
+            // Group items by seller to create per-seller orders if needed
+            // For simplicity: one combined order
+            const firstSellerId = enrichedItems[0]?.seller_id || buyerId;
+            const order = await O.create({
+                buyerId,
+                sellerId:       firstSellerId,
+                productId:      enrichedItems[0].product_id,
+                status:         payment_method === 'cod' ? 'confirmed' : 'pending',
+                quantity:       enrichedItems.reduce((s, i) => s + i.quantity, 0),
+                totalPrice:     total,
+                currency:       'KES',
+                paymentMethod:  payment_method,
+                deliveryAddress: delivery_address,
+                notes,
+                metadata: {
+                    items:        enrichedItems,
+                    subtotal,
+                    delivery_fee: deliveryFee,
+                    discount,
+                    delivery_zone,
+                    coupon_code,
+                },
+            });
+
+            // Clear server cart after order
+            if (U) {
+                const user = await U.findByPk(buyerId, { attributes: ['id','metadata'] }).catch(() => null);
+                if (user) await user.update({ metadata: { ...(user.metadata||{}), cart: [] } }).catch(() => {});
+            }
+
+            // Broadcast new order
+            _socketBroadcast(req, 'order:created', { order_id: order.id, buyer_id: buyerId, seller_id: firstSellerId });
+
+            return ok(res, {
+                order: _formatOrder(order),
+                requires_payment: payment_method !== 'cod',
+                payment_method,
+            }, 'Order created', 201);
+        } catch(e) { err(next, e, 'checkout'); }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // ORDERS — extras
+    // ══════════════════════════════════════════════════════════════════════════
+
+    async getOrderTracking(req, res, next) {
+        try {
+            const O = Model.Order;
+            if (!O) return ok(res, { tracking: null });
+            const order = await O.findOne({ where: { id: req.params.id, buyerId: req.user?.id } });
+            if (!order) return next(new AppError('Order not found', 404));
+            const r = order.toJSON();
+
+            const statusTimeline = [
+                { status: 'pending',          label: 'Order Placed',         icon: '🛍️', done: true,  time: r.createdAt },
+                { status: 'confirmed',         label: 'Order Confirmed',      icon: '✅', done: ['confirmed','packed','shipped','out_for_delivery','delivered'].includes(r.status), time: r.metadata?.confirmed_at || null },
+                { status: 'packed',            label: 'Packed',               icon: '📦', done: ['packed','shipped','out_for_delivery','delivered'].includes(r.status), time: r.metadata?.packed_at || null },
+                { status: 'shipped',           label: 'Shipped',              icon: '🚚', done: ['shipped','out_for_delivery','delivered'].includes(r.status), time: r.shippedAt },
+                { status: 'out_for_delivery',  label: 'Out for Delivery',     icon: '🏍️', done: ['out_for_delivery','delivered'].includes(r.status), time: r.metadata?.out_for_delivery_at || null },
+                { status: 'delivered',         label: 'Delivered',            icon: '🎉', done: r.status === 'delivered', time: r.deliveredAt },
+            ];
+
+            return ok(res, {
+                order_id:         r.id,
+                status:           r.status,
+                tracking_number:  r.trackingNumber,
+                estimated_delivery: r.metadata?.eta || '2-3 business days',
+                delivery_address: r.deliveryAddress,
+                timeline:         statusTimeline,
+                items:            r.metadata?.items || [],
+                total_price:      parseFloat(r.totalPrice),
+                currency:         r.currency || 'KES',
+            });
+        } catch(e) { err(next, e, 'getOrderTracking'); }
+    }
+
+    async getOrderEta(req, res, next) {
+        try {
+            const O = Model.Order;
+            if (!O) return ok(res, { eta: '2-3 business days' });
+            const order = await O.findByPk(req.params.id);
+            if (!order) return next(new AppError('Order not found', 404));
+            const eta = order.metadata?.eta || '2-3 business days';
+            return ok(res, { eta, order_id: req.params.id });
+        } catch(e) { err(next, e, 'getOrderEta'); }
+    }
+
+    async updateOrderTracking(req, res, next) {
+        try {
+            const O = Model.Order;
+            if (!O) return ok(res, { success: true });
+            const order = await O.findByPk(req.params.id);
+            if (!order) return next(new AppError('Order not found', 404));
+            const { status, tracking_number, note, eta } = req.body;
+            const updates = {};
+            const metaUpdates = { ...(order.metadata || {}) };
+            if (status) {
+                updates.status = status;
+                metaUpdates[`${status}_at`] = new Date().toISOString();
+                if (status === 'shipped') updates.shippedAt = new Date();
+                if (status === 'delivered') updates.deliveredAt = new Date();
+            }
+            if (tracking_number) updates.trackingNumber = tracking_number;
+            if (eta) metaUpdates.eta = eta;
+            if (note) { metaUpdates.notes = [...(metaUpdates.notes || []), { note, at: new Date().toISOString() }]; }
+            updates.metadata = metaUpdates;
+            await order.update(updates);
+            _socketBroadcast(req, 'order:status_changed', { order_id: order.id, status: order.status, buyer_id: order.buyerId }, order.buyerId);
+            return ok(res, { order: _formatOrder(order) });
+        } catch(e) { err(next, e, 'updateOrderTracking'); }
+    }
+
+    async cancelOrder(req, res, next) {
+        try {
+            const O = Model.Order;
+            if (!O) return ok(res, { success: true });
+            const order = await O.findOne({ where: { id: req.params.id, buyerId: req.user?.id } });
+            if (!order) return next(new AppError('Order not found', 404));
+            if (!['pending','confirmed'].includes(order.status)) return next(new AppError('Order cannot be cancelled', 400));
+            await order.update({ status: 'cancelled', metadata: { ...(order.metadata||{}), cancelled_at: new Date().toISOString(), cancel_reason: req.body.reason || '' } });
+            _socketBroadcast(req, 'order:cancelled', { order_id: order.id }, order.sellerId);
+            return ok(res, { order: _formatOrder(order) }, 'Order cancelled');
+        } catch(e) { err(next, e, 'cancelOrder'); }
+    }
+
+    async requestRefund(req, res, next) {
+        try {
+            const O = Model.Order;
+            if (!O) return ok(res, { success: true });
+            const order = await O.findOne({ where: { id: req.params.id, buyerId: req.user?.id } });
+            if (!order) return next(new AppError('Order not found', 404));
+            if (!['paid','shipped','delivered'].includes(order.status)) return next(new AppError('Order not eligible for refund', 400));
+            const meta = { ...(order.metadata||{}), refund_requested_at: new Date().toISOString(), refund_reason: req.body.reason || '', refund_status: 'pending' };
+            await order.update({ status: 'refunded', metadata: meta });
+            _socketBroadcast(req, 'order:refund_requested', { order_id: order.id, buyer_id: order.buyerId }, order.sellerId);
+            return ok(res, { order: _formatOrder(order) }, 'Refund requested');
+        } catch(e) { err(next, e, 'requestRefund'); }
+    }
+
+    async confirmDelivery(req, res, next) {
+        try {
+            const O = Model.Order;
+            if (!O) return ok(res, { success: true });
+            const order = await O.findOne({ where: { id: req.params.id, buyerId: req.user?.id } });
+            if (!order) return next(new AppError('Order not found', 404));
+            await order.update({ status: 'delivered', deliveredAt: new Date(), metadata: { ...(order.metadata||{}), delivery_confirmed_by_buyer: true } });
+            _socketBroadcast(req, 'order:delivered', { order_id: order.id }, order.sellerId);
+            return ok(res, { order: _formatOrder(order) }, 'Delivery confirmed');
+        } catch(e) { err(next, e, 'confirmDelivery'); }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // PAYMENTS — mpesa verify + callback + wallet + cod
+    // ══════════════════════════════════════════════════════════════════════════
+
+    async mpesaPayment(req, res, next) {
+        try {
+            const { phone, amount, order_id, description } = req.body;
+            if (!phone || !amount) return next(new AppError('Phone and amount required', 400));
+
+            const normalized = phone.replace(/^0/, '254').replace(/^\+/, '');
+            const callbackUrl = `${process.env.APP_URL || 'https://moodchat.onrender.com'}/api/marketplace/payment/mpesa/callback`;
+
+            const O = Model.Order;
+            if (O && order_id) {
+                await O.update({ paymentMethod: 'mpesa', paymentRef: `PENDING_${Date.now()}` }, { where: { id: order_id } });
+            }
+
+            let stkResult;
+            try {
+                stkResult = await _mpesaStkPush({ phone: normalized, amount, orderId: order_id, description: description||'Marketplace Payment', callbackUrl });
+            } catch(e) {
+                stkResult = { CheckoutRequestID: 'MOCK_' + Date.now(), mock: true };
+            }
+
+            const checkoutRequestId = stkResult?.CheckoutRequestID || stkResult?.checkout_request_id;
+
+            if (O && order_id && checkoutRequestId) {
+                await O.update({ paymentRef: checkoutRequestId }, { where: { id: order_id } });
+            }
+
+            return ok(res, {
+                checkout_request_id: checkoutRequestId,
+                message:             stkResult?.CustomerMessage || 'Please check your phone for the M-Pesa prompt',
+                mock:                stkResult?.mock || false,
+            }, 'STK push initiated');
+        } catch(e) { err(next, e, 'mpesaPayment'); }
+    }
+
+    async mpesaVerify(req, res, next) {
+        try {
+            const { request_id, order_id } = req.body;
+            const O = Model.Order;
+            const order = O && order_id ? await O.findByPk(order_id) : null;
+            const isPaid = order?.status === 'paid';
+            if (isPaid) return ok(res, { paid: true, order: _formatOrder(order) }, 'Payment confirmed');
+            // Poll Daraja for status (simplified)
+            return ok(res, { paid: false, message: 'Payment pending — please wait' });
+        } catch(e) { err(next, e, 'mpesaVerify'); }
+    }
+
+    async mpesaCallback(req, res, next) {
+        try {
+            const body = req.body?.Body?.stkCallback || req.body;
+            await _handleMpesaSuccess(body);
+            return res.json({ ResultCode: 0, ResultDesc: 'Accepted' });
+        } catch(e) { err(next, e, 'mpesaCallback'); }
+    }
+
+    async cardPayment(req, res, next) {
+        try {
+            const { order_id, card_token, amount } = req.body;
+            // Placeholder — integrate Stripe/Flutterwave in production
+            const O = Model.Order;
+            if (O && order_id) {
+                await O.update({ status: 'paid', paidAt: new Date(), paymentMethod: 'card', paymentRef: 'CARD_' + Date.now() }, { where: { id: order_id } });
+            }
+            return ok(res, { paid: true, order_id }, 'Card payment processed');
+        } catch(e) { err(next, e, 'cardPayment'); }
+    }
+
+    async walletPayment(req, res, next) {
+        try {
+            const { order_id, amount } = req.body;
+            const buyerId = req.user?.id;
+            const U = Model.User;
+            const user = U && buyerId ? await U.findByPk(buyerId, { attributes: ['id','metadata'] }) : null;
+            const balance = user?.metadata?.walletBalance || 0;
+            if (balance < amount) return next(new AppError('Insufficient wallet balance', 400));
+            if (user) await user.update({ metadata: { ...(user.metadata||{}), walletBalance: balance - amount } });
+            const O = Model.Order;
+            if (O && order_id) await O.update({ status: 'paid', paidAt: new Date(), paymentMethod: 'wallet', paymentRef: 'WALLET_' + Date.now() }, { where: { id: order_id } });
+            _socketBroadcast(req, 'payment:confirmed', { order_id, payment_method: 'wallet' }, buyerId);
+            return ok(res, { paid: true, order_id, new_balance: balance - amount }, 'Wallet payment successful');
+        } catch(e) { err(next, e, 'walletPayment'); }
+    }
+
+    async codPayment(req, res, next) {
+        try {
+            const { order_id } = req.body;
+            const O = Model.Order;
+            if (O && order_id) {
+                await O.update({ status: 'confirmed', paymentMethod: 'cod' }, { where: { id: order_id } });
+            }
+            return ok(res, { confirmed: true, order_id, payment_method: 'cod' }, 'Cash on delivery confirmed');
+        } catch(e) { err(next, e, 'codPayment'); }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // REVIEWS — add aliases
+    // ══════════════════════════════════════════════════════════════════════════
+
+    async getProductReviews(req, res, next) { return this.getReviews(req, res, next); }
+    async createProductReview(req, res, next) { return this.addReview(req, res, next); }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // WISHLIST — extras
+    // ══════════════════════════════════════════════════════════════════════════
+
+    async moveWishlistToCart(req, res, next) {
+        try {
+            const userId = req.user?.id;
+            const productId = req.params.id;
+            // Remove from wishlist
+            const T = Model.Tool;
+            if (T) {
+                const p = await T.findByPk(productId);
+                if (p && p.savedBy) {
+                    const saved = (p.savedBy || []).filter(id => id !== userId);
+                    await p.update({ savedBy: saved });
+                }
+            }
+            // Add to cart
+            req.body = { product_id: productId, quantity: 1 };
+            return this.addToCart(req, res, next);
+        } catch(e) { err(next, e, 'moveWishlistToCart'); }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // COUPONS / VOUCHERS
+    // ══════════════════════════════════════════════════════════════════════════
+
+    async validateCoupon(req, res, next) {
+        try {
+            const { code, subtotal = 0 } = req.body;
+            const coupons = {
+                'SAVE10':    { type: 'percent', value: 10, min_order: 200,  description: '10% off your order' },
+                'SAVE20':    { type: 'percent', value: 20, min_order: 500,  description: '20% off your order' },
+                'FLAT100':   { type: 'flat',    value: 100,min_order: 400,  description: 'KES 100 off your order' },
+                'NEWUSER50': { type: 'flat',    value: 50, min_order: 100,  description: 'KES 50 off for new users' },
+                'WELCOME':   { type: 'percent', value: 15, min_order: 300,  description: '15% off welcome offer' },
+            };
+            const coupon = coupons[code?.toUpperCase()];
+            if (!coupon) return next(new AppError('Invalid coupon code', 400));
+            if (subtotal < coupon.min_order) return next(new AppError(`Minimum order of KES ${coupon.min_order} required`, 400));
+            const discount = coupon.type === 'percent' ? subtotal * (coupon.value / 100) : coupon.value;
+            return ok(res, { valid: true, coupon: { ...coupon, code: code.toUpperCase() }, discount });
+        } catch(e) { err(next, e, 'validateCoupon'); }
+    }
+
+    async applyCoupon(req, res, next) {
+        return this.validateCoupon(req, res, next);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // SUPPORT
+    // ══════════════════════════════════════════════════════════════════════════
+
+    async createSupportTicket(req, res, next) {
+        try {
+            const userId = req.user?.id;
+            const { order_id, subject, message, type = 'general' } = req.body;
+            if (!subject || !message) return next(new AppError('Subject and message required', 400));
+            const ticket = { id: crypto.randomUUID(), user_id: userId, order_id, subject, message, type, status: 'open', created_at: new Date().toISOString() };
+            // In production: store in DB / send to support system
+            return ok(res, { ticket }, 'Ticket created', 201);
+        } catch(e) { err(next, e, 'createSupportTicket'); }
+    }
+
+    async getSupportTickets(req, res, next) {
+        try {
+            // In production: fetch from DB
+            return ok(res, { tickets: [] });
+        } catch(e) { err(next, e, 'getSupportTickets'); }
+    }
+
 } // end class MarketplaceController
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -1086,3 +1806,318 @@ async function _handleMpesaSuccess(callbackData) {
 }
 
 module.exports = new MarketplaceController();
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ENTERPRISE EXTENSION — Wallet, Loyalty, Referral, Flash Sales, AI, Compare
+// Appended after initial controller instantiation. Uses Object.assign to merge
+// into the already-exported instance without rebuilding the class.
+// ══════════════════════════════════════════════════════════════════════════════
+
+const _ctrl = module.exports;
+
+// ── WALLET ─────────────────────────────────────────────────────────────────────
+_ctrl.getWallet = async function(req, res, next) {
+    try {
+        const U = Model.User; const userId = req.user?.id;
+        if (!U || !userId) return ok(res, { balance:0, transactions:[], currency:'KES' });
+        const user = await U.findByPk(userId, { attributes:['id','walletBalance','metadata','loyaltyTier','loyaltyPoints'] });
+        const balance   = parseFloat(user?.walletBalance||0);
+        const txHistory = user?.metadata?.walletTransactions || [];
+        return ok(res, { balance, currency:'KES', transactions:txHistory.slice(0,50), loyaltyTier:user?.loyaltyTier||'bronze', loyaltyPoints:user?.loyaltyPoints||0 });
+    } catch(e) { err(next, e, 'getWallet'); }
+};
+
+_ctrl.topUpWallet = async function(req, res, next) {
+    try {
+        const U = Model.User; const userId = req.user?.id;
+        const { amount, payment_method='mpesa', reference='' } = req.body;
+        if (!amount || parseFloat(amount) <= 0) return next(new AppError('Invalid amount',400));
+        if (!U || !userId) return ok(res, { success:true, new_balance: parseFloat(amount) });
+        const user = await U.findByPk(userId, { attributes:['id','walletBalance','metadata'] });
+        const newBalance = parseFloat(user?.walletBalance||0) + parseFloat(amount);
+        const tx = { id: crypto.randomUUID(), type:'topup', amount:parseFloat(amount), balance_after:newBalance, reference, payment_method, created_at:new Date().toISOString() };
+        const txHistory = [...(user?.metadata?.walletTransactions||[]), tx].slice(-100);
+        await user.update({ walletBalance: newBalance, metadata: { ...(user.metadata||{}), walletTransactions: txHistory } });
+        return ok(res, { success:true, new_balance:newBalance, transaction:tx, currency:'KES' }, 'Wallet topped up');
+    } catch(e) { err(next, e, 'topUpWallet'); }
+};
+
+_ctrl.getWalletTransactions = async function(req, res, next) {
+    try {
+        const U = Model.User; const userId = req.user?.id;
+        if (!U || !userId) return ok(res, { transactions:[] });
+        const user = await U.findByPk(userId, { attributes:['id','metadata'] });
+        return ok(res, { transactions: (user?.metadata?.walletTransactions||[]).reverse().slice(0,100) });
+    } catch(e) { err(next, e, 'getWalletTransactions'); }
+};
+
+// ── LOYALTY ───────────────────────────────────────────────────────────────────
+const _TIERS = {
+    bronze:   { min:0,     max:999,   next:'silver',   color:'#cd7f32', perks:['Free delivery on orders over KES 2,000'] },
+    silver:   { min:1000,  max:4999,  next:'gold',     color:'#9ca3af', perks:['Free delivery on orders over KES 1,000','5% cashback'] },
+    gold:     { min:5000,  max:14999, next:'platinum', color:'#f59e0b', perks:['Free delivery on all orders','10% cashback','Priority support'] },
+    platinum: { min:15000, max:1e9,   next:null,       color:'#8b5cf6', perks:['Free express delivery','15% cashback','VIP support','Early flash sale access'] },
+};
+function _calcTier(points) { for (const [k,t] of Object.entries(_TIERS)) { if (points>=t.min && points<=t.max) return k; } return 'bronze'; }
+function _buildLoyaltyRes(user) {
+    const pts   = user?.loyaltyPoints||0;
+    const tier  = user?.loyaltyTier||_calcTier(pts);
+    const ti    = _TIERS[tier];
+    const next  = ti.next ? _TIERS[ti.next] : null;
+    const prog  = next ? Math.min(100, Math.round((pts-ti.min)/(ti.max-ti.min+1)*100)) : 100;
+    return { points:pts, tier, tier_color:ti.color, next_tier:ti.next, points_to_next: next?Math.max(0,ti.max+1-pts):0, progress_pct:prog, value_kes:pts*0.5, total_spent:parseFloat(user?.totalSpent||0), total_orders:user?.totalOrders||0, perks:ti.perks||[] };
+}
+
+_ctrl.getLoyalty = async function(req, res, next) {
+    try {
+        const U = Model.User; const userId = req.user?.id;
+        if (!U || !userId) return ok(res, { points:0, tier:'bronze', progress_pct:0, value_kes:0, perks:[] });
+        const user = await U.findByPk(userId, { attributes:['id','loyaltyPoints','loyaltyTier','totalSpent','totalOrders'] });
+        return ok(res, _buildLoyaltyRes(user));
+    } catch(e) { err(next, e, 'getLoyalty'); }
+};
+
+_ctrl.redeemPoints = async function(req, res, next) {
+    try {
+        const U = Model.User; const userId = req.user?.id;
+        const pts = parseInt(req.body.points||0);
+        if (pts<=0) return next(new AppError('Invalid points',400));
+        if (!U || !userId) return ok(res, { success:false });
+        const user = await U.findByPk(userId, { attributes:['id','loyaltyPoints'] });
+        if ((user?.loyaltyPoints||0) < pts) return next(new AppError('Insufficient points',400));
+        const discount = pts * 0.5;
+        await user.update({ loyaltyPoints: user.loyaltyPoints - pts });
+        return ok(res, { success:true, points_redeemed:pts, discount_kes:discount }, `Redeemed ${pts} pts = KES ${discount}`);
+    } catch(e) { err(next, e, 'redeemPoints'); }
+};
+
+// ── REFERRAL ──────────────────────────────────────────────────────────────────
+function _genRefCode(userId) {
+    const chars='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    let code='KN';
+    for(let i=0;i<6;i++) code+=chars[Math.floor(Math.random()*chars.length)];
+    return code;
+}
+
+_ctrl.getReferral = async function(req, res, next) {
+    try {
+        const U = Model.User; const userId = req.user?.id;
+        if (!U || !userId) return ok(res, { referral_code:'', referral_url:'', total_referrals:0, total_earned:0 });
+        let user = await U.findByPk(userId, { attributes:['id','referralCode','metadata'] });
+        if (!user.referralCode) { const c=_genRefCode(userId); await user.update({referralCode:c}); user.referralCode=c; }
+        const base = process.env.APP_URL||'https://moodchat.onrender.com';
+        const refs  = user?.metadata?.referrals||[];
+        return ok(res, { referral_code:user.referralCode, referral_url:`${base}/register?ref=${user.referralCode}`, total_referrals:refs.length, total_earned_kes:refs.reduce((s,r)=>s+(r.bonus||0),0), referrals:refs.slice(0,20) });
+    } catch(e) { err(next, e, 'getReferral'); }
+};
+
+_ctrl.applyReferral = async function(req, res, next) {
+    try {
+        const U = Model.User; const userId = req.user?.id;
+        const { referral_code } = req.body;
+        if (!referral_code || !U) return ok(res, { applied:false });
+        const referrer = await U.findOne({ where:{ referralCode: referral_code.toUpperCase() } });
+        if (!referrer) return next(new AppError('Invalid referral code',400));
+        if (referrer.id===userId) return next(new AppError('Cannot use your own code',400));
+        const newUser = await U.findByPk(userId, { attributes:['id','referredBy','walletBalance','metadata'] });
+        if (newUser?.referredBy) return next(new AppError('Referral already applied',400));
+        const BONUS=100;
+        const refs=[...(referrer.metadata?.referrals||[]),{user_id:userId,bonus:BONUS,created_at:new Date().toISOString()}];
+        await referrer.update({ walletBalance:parseFloat(referrer.walletBalance||0)+BONUS, metadata:{...(referrer.metadata||{}),referrals:refs} });
+        await newUser.update({ referredBy:referrer.id, walletBalance:parseFloat(newUser.walletBalance||0)+BONUS });
+        return ok(res, { applied:true, bonus_kes:BONUS, message:`KES ${BONUS} added to your wallet!` });
+    } catch(e) { err(next, e, 'applyReferral'); }
+};
+
+// ── FLASH SALES ────────────────────────────────────────────────────────────────
+_ctrl.getActiveFlashSales = async function(req, res, next) {
+    try {
+        const T = Model.Tool;
+        if (!T) return ok(res, { flash_sales:[], ends_at:null });
+        const { Op:SOP } = require('sequelize');
+        const now = new Date();
+        const rows = await T.findAll({ where:{ isFlashSale:true, available:true, flashSaleEnd:{[SOP.gt]:now} }, order:[['flashSaleEnd','ASC']], limit:30 });
+        const nearestEnd = rows[0]?.flashSaleEnd||null;
+        const fmt = r => {
+            const rj = r.toJSON ? r.toJSON() : r;
+            const end = rj.flashSaleEnd ? new Date(rj.flashSaleEnd) : null;
+            const rem = end ? Math.max(0, Math.floor((end-now)/1000)) : 0;
+            return { ..._formatProduct(r), flash_price:parseFloat(rj.flashSalePrice||rj.price), flash_ends_at:rj.flashSaleEnd, flash_remaining_seconds:rem, flash_stock:rj.flashSaleStock, savings_pct: rj.price&&rj.flashSalePrice ? Math.round((1-rj.flashSalePrice/rj.price)*100) : 0 };
+        };
+        return ok(res, { flash_sales:rows.map(fmt), ends_at:nearestEnd, total:rows.length });
+    } catch(e) { err(next, e, 'getActiveFlashSales'); }
+};
+
+_ctrl.createFlashSale = async function(req, res, next) {
+    try {
+        const T = Model.Tool;
+        const { product_id, flash_price, ends_at, flash_stock } = req.body;
+        if (!product_id || !flash_price || !ends_at) return next(new AppError('product_id, flash_price, ends_at required',400));
+        if (!T) return ok(res, { success:true });
+        const product = await T.findByPk(product_id);
+        if (!product) return next(new AppError('Product not found',404));
+        await product.update({ isFlashSale:true, flashSalePrice:flash_price, flashSaleEnd:new Date(ends_at), flashSaleStock:flash_stock||null });
+        return ok(res, { success:true }, 'Flash sale created');
+    } catch(e) { err(next, e, 'createFlashSale'); }
+};
+
+_ctrl.endFlashSale = async function(req, res, next) {
+    try {
+        const T = Model.Tool;
+        if (!T) return ok(res, { ended:true });
+        await T.update({ isFlashSale:false, flashSalePrice:null, flashSaleEnd:null }, { where:{ id:req.params.id } });
+        return ok(res, { ended:true });
+    } catch(e) { err(next, e, 'endFlashSale'); }
+};
+
+// ── AI RECOMMENDATIONS ─────────────────────────────────────────────────────────
+_ctrl.getRecommendations = async function(req, res, next) {
+    try {
+        const T = Model.Tool; const U = Model.User; const userId = req.user?.id;
+        if (!T) return ok(res, { products:[], type:'trending' });
+        const { Op:SOP } = require('sequelize');
+        const user = U && userId ? await U.findByPk(userId, { attributes:['id','metadata'] }) : null;
+        const viewed    = user?.metadata?.viewedProducts||[];
+        const purchases = user?.metadata?.purchasedCategories||[];
+        let products=[];
+        if (purchases.length) {
+            products = await T.findAll({ where:{ category:{[SOP.in]:purchases}, available:true, id:{[SOP.notIn]:viewed.slice(0,20)} }, order:[['rating','DESC'],['views','DESC']], limit:20 });
+        }
+        if (!products.length) {
+            products = await T.findAll({ where:{ available:true, status:'active' }, order:[['views','DESC'],['rating','DESC']], limit:20 });
+        }
+        return ok(res, { products:products.map(_formatProduct), type: purchases.length?'personalized':'trending' });
+    } catch(e) { err(next, e, 'getRecommendations'); }
+};
+
+_ctrl.trackBehavior = async function(req, res, next) {
+    try {
+        const U = Model.User; const userId = req.user?.id;
+        if (!U || !userId) return ok(res, { tracked:false });
+        const { product_id, category, search_query } = req.body;
+        const user = await U.findByPk(userId, { attributes:['id','metadata'] });
+        const meta = { ...(user?.metadata||{}) };
+        if (product_id) { const v=meta.viewedProducts||[]; if(!v.includes(product_id)){v.unshift(product_id);meta.viewedProducts=v.slice(0,50);} }
+        if (category)   { const c=meta.searchedCategories||[]; if(!c.includes(category)){c.unshift(category);meta.searchedCategories=c.slice(0,20);} }
+        if (search_query){ const s=meta.recentSearches||[]; if(!s.includes(search_query)){s.unshift(search_query);meta.recentSearches=s.slice(0,20);} }
+        await user.update({ metadata: meta });
+        return ok(res, { tracked:true });
+    } catch(e) { err(next, e, 'trackBehavior'); }
+};
+
+// ── BUY NOW ────────────────────────────────────────────────────────────────────
+_ctrl.buyNow = async function(req, res, next) {
+    try {
+        const T = Model.Tool;
+        const { product_id, quantity=1, delivery_address, payment_method='mpesa', delivery_zone='kenya' } = req.body;
+        if (!product_id) return next(new AppError('product_id required',400));
+        const product = T ? await T.findByPk(product_id) : null;
+        if (!product) return next(new AppError('Product not found',404));
+        req.body = {
+            items:[{ product_id, quantity:parseInt(quantity), title:product.title, price:parseFloat(product.flashSalePrice||product.price), image:product.images?.[0]||'' }],
+            delivery_address, payment_method, delivery_zone
+        };
+        return _ctrl.checkout(req, res, next);
+    } catch(e) { err(next, e, 'buyNow'); }
+};
+
+// ── PRODUCT COMPARISON ────────────────────────────────────────────────────────
+_ctrl.compareProducts = async function(req, res, next) {
+    try {
+        const T = Model.Tool;
+        const ids = (req.query.ids||'').split(',').filter(Boolean).slice(0,4);
+        if (ids.length<2) return next(new AppError('At least 2 product IDs required',400));
+        if (!T) return ok(res, { products:[], specs:[] });
+        const { Op:SOP } = require('sequelize');
+        const products = await T.findAll({ where:{ id:{[SOP.in]:ids} } });
+        const formatted = products.map(_formatProduct);
+        const specs = [
+            { key:'Price',    values: formatted.map(p=>`KES ${parseFloat(p.price||0).toLocaleString()}`) },
+            { key:'Rating',   values: formatted.map(p=>`${p.rating||0} ★ (${p.rating_count||0})`) },
+            { key:'Category', values: formatted.map(p=>p.category||'—') },
+            { key:'In Stock', values: formatted.map(p=>p.available?'✓ Available':'✗ Out of stock') },
+            { key:'Shipping', values: formatted.map(()=>'Nationwide') },
+        ];
+        return ok(res, { products:formatted, specs, count:products.length });
+    } catch(e) { err(next, e, 'compareProducts'); }
+};
+
+// ── INVOICE ────────────────────────────────────────────────────────────────────
+_ctrl.getOrderInvoice = async function(req, res, next) {
+    try {
+        const O = Model.Order; const userId = req.user?.id;
+        if (!O) return next(new AppError('Orders unavailable',503));
+        const order = await O.findOne({ where:{ id:req.params.id, buyerId:userId } });
+        if (!order) return next(new AppError('Order not found',404));
+        const r = order.toJSON();
+        const items = r.metadata?.items||[];
+        const invoice = { invoice_number:`INV-${String(r.id).slice(-8).toUpperCase()}`, order_id:r.id, issued_at:new Date().toISOString(), buyer:r.deliveryAddress||{}, items, subtotal:parseFloat(r.metadata?.subtotal||r.totalPrice||0), delivery_fee:parseFloat(r.metadata?.delivery_fee||0), discount:parseFloat(r.metadata?.discount||0), total:parseFloat(r.totalPrice||0), currency:r.currency||'KES', payment_method:r.paymentMethod, status:r.status };
+        return ok(res, { invoice });
+    } catch(e) { err(next, e, 'getOrderInvoice'); }
+};
+
+// ── QR CODE ────────────────────────────────────────────────────────────────────
+_ctrl.getOrderQR = async function(req, res, next) {
+    try {
+        const O = Model.Order;
+        const order = O ? await O.findOne({ where:{ id:req.params.id, buyerId:req.user?.id } }) : null;
+        if (!order) return next(new AppError('Order not found',404));
+        const qrData = JSON.stringify({ order_id:order.id, buyer_id:order.buyerId, total:order.totalPrice, ts:Date.now() });
+        return ok(res, { qr_data:qrData, order_id:order.id, tracking_number:order.trackingNumber });
+    } catch(e) { err(next, e, 'getOrderQR'); }
+};
+
+// ── SMART DELIVERY ─────────────────────────────────────────────────────────────
+_ctrl.smartDeliveryEstimate = async function(req, res, next) {
+    try {
+        const { lat, lng, weight=0 } = req.body;
+        let zone='kenya', fee=300, eta='1-3 days';
+        if (lat && lng) {
+            const dist = Math.sqrt(Math.pow(lat-(-1.2864),2) + Math.pow(lng-36.8172,2)) * 111;
+            if (dist<5)       { zone='nairobi';  fee=50;  eta='1-2 hours'; }
+            else if (dist<20) { zone='suburbs';  fee=150; eta='2-4 hours'; }
+            else if (dist<50) { zone='regional'; fee=250; eta='Same day';  }
+        }
+        const wSurcharge = parseFloat(weight)>5 ? (parseFloat(weight)-5)*10 : 0;
+        const hrs = zone==='nairobi'?2 : zone==='suburbs'?4 : zone==='regional'?24 : 72;
+        return ok(res, { zone, fee:fee+wSurcharge, eta, estimated_delivery: new Date(Date.now()+hrs*3600000).toISOString(), currency:'KES' });
+    } catch(e) { err(next, e, 'smartDeliveryEstimate'); }
+};
+
+// ── ADMIN extras ──────────────────────────────────────────────────────────────
+_ctrl.adminCreateCoupon = async function(req, res, next) {
+    try {
+        const C = Model.Coupon;
+        if (!C) {
+            // In-memory fallback: return as if created
+            return ok(res, { coupon: { ...req.body, id: Date.now() } }, 'Coupon saved (in-memory)', 201);
+        }
+        const { code, type, value, min_order_amt, max_discount, usage_limit, per_user_limit, starts_at, expires_at, category_slug, seller_id, user_id, description, is_public } = req.body;
+        if (!code || !type || !value) return next(new AppError('code, type, value required',400));
+        const coupon = await C.create({ code, type, value, minOrderAmt:min_order_amt||0, maxDiscount:max_discount, usageLimit:usage_limit||9999, perUserLimit:per_user_limit||1, startsAt:starts_at, expiresAt:expires_at, categorySlug:category_slug, sellerId:seller_id, userId:user_id, description, isPublic:is_public!==false });
+        return ok(res, { coupon }, 'Coupon created', 201);
+    } catch(e) { err(next, e, 'adminCreateCoupon'); }
+};
+
+_ctrl.listCoupons = async function(req, res, next) {
+    try {
+        const C = Model.Coupon;
+        if (!C) return ok(res, { coupons: _defaultCoupons() });
+        const coupons = await C.findAll({ where:{ isActive:true, isPublic:true }, order:[['createdAt','DESC']], limit:50 });
+        return ok(res, { coupons: coupons.map(c=>c.toJSON()) });
+    } catch(e) { err(next, e, 'listCoupons'); }
+};
+
+function _defaultCoupons() {
+    return [
+        { code:'SAVE10',    type:'percent', value:10,  minOrderAmt:200, description:'10% off orders over KES 200' },
+        { code:'SAVE20',    type:'percent', value:20,  minOrderAmt:500, description:'20% off orders over KES 500' },
+        { code:'FLAT100',   type:'fixed',   value:100, minOrderAmt:400, description:'KES 100 off your order' },
+        { code:'NEWUSER50', type:'fixed',   value:50,  minOrderAmt:100, description:'KES 50 off your first order' },
+        { code:'WELCOME',   type:'percent', value:15,  minOrderAmt:300, description:'15% welcome offer' },
+    ];
+}
+
+// Add Model.Coupon getter
+Object.defineProperty(Model, 'Coupon', { get() { return getDb().Coupon||null; }, configurable:true });
+
