@@ -569,20 +569,20 @@ router.post('/start', apiRateLimiter, asyncHandler(async (req, res) => {
 
     const caller = await User.findByPk(userId, { attributes: ['id', 'username', 'avatar'] });
 
-    for (const pid of participants) {
-      // Always notify — let the socket deliver if online, no-op if not.
-      // safeIsUserOnline is unreliable; skipping notification causes "missed call" false positives.
-      await notifyUser(req.io, pid, 'call_incoming', {
-        callId:       call.id,
-        callerId:     userId,
-        callerName:   caller && caller.username || 'Unknown',
-        callerAvatar: caller && caller.avatar   || null,
-        callType,
-        isGroupCall,
-        chatId:       chatId || null,
-        timestamp:    new Date(),
-      });
-    }
+    // FIX-AUDIT-7: Batch parallel delivery — no N+1 sequential awaits
+    const _callIncomingPayload = {
+      callId:       call.id,
+      callerId:     userId,
+      callerName:   caller && caller.username || 'Unknown',
+      callerAvatar: caller && caller.avatar   || null,
+      callType,
+      isGroupCall,
+      chatId:       chatId || null,
+      timestamp:    new Date(),
+    };
+    await Promise.allSettled(
+      participants.map(pid => notifyUser(req.io, pid, 'call_incoming', _callIncomingPayload))
+    );
 
     res.status(201).json({
       status:  'success',

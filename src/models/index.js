@@ -316,7 +316,7 @@ async function createMissingTables() {
     'Calls', 'Call', 'UserStatus', 'TypingIndicator', 'ReadReceipt',
     'statuses', 'status_views', 'status_reactions', 'status_replies',
     // ── Marketplace ───────────────────────────────────────────────────────────
-    'tools', 'marketplace_orders', 'marketplace_reviews', 'coupons'
+    'tools', 'marketplace_orders', 'marketplace_reviews'
   ];
   
   const missingTables = [];
@@ -428,16 +428,7 @@ async function addMissingColumns() {
       { name: 'last_active', type: Sequelize.DATE, allowNull: true },
       { name: 'is_online', type: Sequelize.BOOLEAN, defaultValue: false, allowNull: false },
       { name: 'avatar', type: Sequelize.STRING(255), allowNull: true },
-      { name: 'bio', type: Sequelize.TEXT, allowNull: true },
-      // ── Marketplace columns ─────────────────────────────────────────────────
-      { name: 'metadata',       type: Sequelize.JSONB,           defaultValue: {}, allowNull: true },
-      { name: 'walletBalance',  type: Sequelize.DECIMAL(12, 2),  defaultValue: 0.00, allowNull: false },
-      { name: 'loyaltyPoints',  type: Sequelize.INTEGER,         defaultValue: 0, allowNull: false },
-      { name: 'loyaltyTier',    type: Sequelize.STRING(20),      defaultValue: 'bronze', allowNull: false },
-      { name: 'referralCode',   type: Sequelize.STRING(12),      allowNull: true },
-      { name: 'referredBy',     type: Sequelize.INTEGER,         allowNull: true },
-      { name: 'totalOrders',    type: Sequelize.INTEGER,         defaultValue: 0, allowNull: false },
-      { name: 'totalSpent',     type: Sequelize.DECIMAL(14, 2),  defaultValue: 0.00, allowNull: false },
+      { name: 'bio', type: Sequelize.TEXT, allowNull: true }
     ],
     'chats': [
       { name: 'name', type: Sequelize.STRING(100), allowNull: true },
@@ -568,24 +559,9 @@ async function addMissingColumns() {
       { name: 'status', type: Sequelize.STRING(20), defaultValue: 'active', allowNull: false },
       { name: 'currency', type: Sequelize.STRING(10), defaultValue: 'KES', allowNull: true },
       { name: 'stock', type: Sequelize.INTEGER, allowNull: true },
-      { name: 'is_flash_sale', type: Sequelize.BOOLEAN, defaultValue: false, allowNull: false },
-      { name: 'flash_sale_price', type: Sequelize.DECIMAL(10, 2), allowNull: true },
-      { name: 'flash_sale_end', type: Sequelize.DATE, allowNull: true },
-      { name: 'flash_sale_stock', type: Sequelize.INTEGER, allowNull: true },
-      { name: 'is_new_arrival', type: Sequelize.BOOLEAN, defaultValue: false, allowNull: false },
-      { name: 'compare_price', type: Sequelize.DECIMAL(10, 2), allowNull: true },
-      { name: 'weight', type: Sequelize.DECIMAL(8, 2), allowNull: true },
-      { name: 'sku', type: Sequelize.STRING(64), allowNull: true },
-      { name: 'stock_quantity', type: Sequelize.INTEGER, defaultValue: 0, allowNull: false },
-      { name: 'sold_count', type: Sequelize.INTEGER, defaultValue: 0, allowNull: false },
-      // ── Approval workflow ────────────────────────────────────────────────────
-      { name: 'approval_status', type: Sequelize.STRING(20), defaultValue: 'pending', allowNull: false },
-      { name: 'approved_by', type: Sequelize.INTEGER, allowNull: true },
-      { name: 'approved_at', type: Sequelize.DATE, allowNull: true },
-      { name: 'rejection_reason', type: Sequelize.TEXT, allowNull: true },
-      { name: 'submitted_at', type: Sequelize.DATE, allowNull: true },
       { name: 'metadata', type: Sequelize.JSONB, defaultValue: {}, allowNull: true }
     ],
+    // ── Marketplace: orders ───────────────────────────────────────────────────
     'marketplace_orders': [
       { name: 'product_id', type: Sequelize.UUID, allowNull: false },
       { name: 'buyer_id', type: Sequelize.UUID, allowNull: false },

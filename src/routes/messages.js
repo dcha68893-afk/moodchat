@@ -591,6 +591,19 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
           allParticipantIds.map(uid => wsService.sendToUser(uid, 'message:new', populatedMessage))
         );
 
+        // FIX-AUDIT-2: Also emit group:message for group chats so group.html receives it
+        if (chat && (chat.type === 'group' || chat.isGroup)) {
+          try {
+            const groupPayload = { ...populatedMessage, groupId: safeChatId, chatId: safeChatId };
+            const io = wsService.getIO?.() || wsService.io;
+            if (io) {
+              io.to(`group:${safeChatId}`).emit('group:message', groupPayload);
+              io.to(`group_${safeChatId}`).emit('group:message', groupPayload);
+              io.to(`chat:${safeChatId}`).emit('new_group_message', groupPayload);
+            }
+          } catch(_) {}
+        }
+
         // Count successes for diagnostics
         const delivered = deliveryResults.filter(r => r.status === 'fulfilled' && r.value === true).length;
         const failed    = deliveryResults.length - delivered;

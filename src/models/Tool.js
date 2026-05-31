@@ -75,8 +75,7 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: false,
         defaultValue: 'other',
         validate: {
-          isIn: [['electronics', 'furniture', 'clothing', 'books', 'services', 'digital', 'premium',
-                   'fashion', 'home', 'beauty', 'sports', 'toys', 'food', 'automotive', 'health', 'other']],
+          isIn: [['electronics', 'furniture', 'clothing', 'books', 'services', 'digital', 'premium', 'other']],
         },
       },
       type: {
@@ -122,85 +121,6 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: true,
         field: 'boost_expires_at',
       },
-      // ── Flash Sale fields ───────────────────────────────────────────────────
-      isFlashSale: {
-        type: DataTypes.BOOLEAN,
-        defaultValue: false,
-        field: 'is_flash_sale',
-      },
-      flashSalePrice: {
-        type: DataTypes.DECIMAL(10, 2),
-        allowNull: true,
-        field: 'flash_sale_price',
-        comment: 'Discounted price during flash sale',
-      },
-      flashSaleEnd: {
-        type: DataTypes.DATE,
-        allowNull: true,
-        field: 'flash_sale_end',
-        comment: 'When the flash sale expires',
-      },
-      flashSaleStock: {
-        type: DataTypes.INTEGER,
-        allowNull: true,
-        field: 'flash_sale_stock',
-        comment: 'Limited stock for flash sale (null = no limit)',
-      },
-      isNewArrival: {
-        type: DataTypes.BOOLEAN,
-        defaultValue: false,
-        field: 'is_new_arrival',
-      },
-      // ── Approval workflow fields ────────────────────────────────────────────
-      approvalStatus: {
-        type: DataTypes.ENUM('pending', 'approved', 'rejected'),
-        defaultValue: 'pending',
-        field: 'approval_status',
-      },
-      approvedBy: {
-        type: DataTypes.INTEGER,
-        allowNull: true,
-        field: 'approved_by',
-        comment: 'Admin user ID who approved/rejected',
-      },
-      approvedAt: {
-        type: DataTypes.DATE,
-        allowNull: true,
-        field: 'approved_at',
-      },
-      rejectionReason: {
-        type: DataTypes.TEXT,
-        allowNull: true,
-        field: 'rejection_reason',
-      },
-      submittedAt: {
-        type: DataTypes.DATE,
-        allowNull: true,
-        field: 'submitted_at',
-        comment: 'When seller submitted for review',
-      },
-      comparePrice: {
-        type: DataTypes.DECIMAL(10, 2),
-        allowNull: true,
-        field: 'compare_price',
-        comment: 'Original price for strikethrough display',
-      },
-      currency: {
-        type: DataTypes.STRING(3),
-        defaultValue: 'KES',
-        allowNull: false,
-      },
-      weight: {
-        type: DataTypes.DECIMAL(8, 2),
-        allowNull: true,
-        comment: 'Weight in KG for delivery calculation',
-      },
-      sku: {
-        type: DataTypes.STRING(64),
-        allowNull: true,
-        unique: true,
-        comment: 'Stock Keeping Unit',
-      },
       views: {
         type: DataTypes.INTEGER,
         defaultValue: 0,
@@ -228,20 +148,8 @@ module.exports = (sequelize, DataTypes) => {
         validate: { min: 0 },
       },
       status: {
-        type: DataTypes.ENUM(
-          'draft',           // Seller saved, not submitted
-          'pending_review',  // Submitted, awaiting admin approval — NOT visible to buyers
-          'approved',        // Admin approved — visible to buyers (maps to old 'active')
-          'active',          // Legacy alias for approved
-          'rejected',        // Admin rejected — seller must edit & resubmit
-          'inactive',        // Seller deactivated
-          'sold',            // Sold out / marked sold
-          'archived',        // Seller archived
-          'suspended',       // Admin suspended
-          'removed',         // Admin removed
-          'deleted'          // Soft-deleted
-        ),
-        defaultValue: 'pending_review',  // NEW products start as pending — not visible to buyers
+        type: DataTypes.ENUM('active', 'inactive', 'sold', 'deleted'),
+        defaultValue: 'active',
         allowNull: false,
       },
       currency: {

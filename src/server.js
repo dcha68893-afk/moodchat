@@ -5026,7 +5026,9 @@ class Application {
                     }, 5000);
 
                     // ── PHASE 11: Unified Runtime Orchestrator ────────────────────────────
-                    setTimeout(() => {
+                    // FIX-AUDIT-3: Increased to 12s so Phase 10 (6s) + init time is complete
+                    // Also polls until global.__HybridTransportRuntime exists
+                    const _initPhase11 = () => {
                         try {
                             const { initPhase11 } = require('./services/phase11/phase11.bootstrap');
                             global.__phase11 = initPhase11(this.io, this.app, {
@@ -5036,7 +5038,55 @@ class Application {
                         } catch (err) {
                             console.warn('[Phase11] Init failed (non-fatal):', err.message);
                         }
-                    }, 8000);
+                    };
+                    setTimeout(() => {
+                        // Wait for HybridTransportRuntime to be ready, poll every 500ms up to 15s
+                        let _p11Attempts = 0;
+                        const _p11Poll = setInterval(() => {
+                            _p11Attempts++;
+                            if (global.__HybridTransportRuntime || _p11Attempts >= 30) {
+                                clearInterval(_p11Poll);
+                                _initPhase11();
+                            }
+                        }, 500);
+                    }, 7000);
+
+                    // ── FIX-AUDIT-8: Status auto-expiration background job ────────────────
+                    setInterval(async () => {
+                        try {
+                            const db = this.app?.locals?.db || require('./models');
+                            const sequelize = db.sequelize || db;
+                            if (!sequelize || typeof sequelize.query !== 'function') return;
+                            const result = await sequelize.query(
+                                `UPDATE "Statuses"
+                                 SET "isExpired" = true, "updatedAt" = NOW()
+                                 WHERE "expiresAt" < NOW()
+                                   AND "isExpired" = false
+                                   AND "isDeleted" = false`,
+                                { type: sequelize.QueryTypes.UPDATE }
+                            );
+                            // Notify connected clients of any newly expired statuses
+                            if (result && result[1] > 0) {
+                                const expired = await sequelize.query(
+                                    `SELECT id, "userId" FROM "Statuses"
+                                     WHERE "expiresAt" < NOW()
+                                       AND "isExpired" = true
+                                       AND "updatedAt" > NOW() - INTERVAL '2 minutes'`,
+                                    { type: sequelize.QueryTypes.SELECT }
+                                );
+                                for (const s of (expired || [])) {
+                                    this.io?.emit('status:expired', {
+                                        statusId: s.id,
+                                        userId: s.userId,
+                                        timestamp: new Date()
+                                    });
+                                }
+                                console.log(`[StatusExpiry] Expired ${result[1]} status(es)`);
+                            }
+                        } catch (err) {
+                            // Non-fatal
+                        }
+                    }, 5 * 60 * 1000); // every 5 minutes
 
                     // ── PHASE 10: Full Production Hardening ───────────────────────────────
                     setTimeout(() => {
