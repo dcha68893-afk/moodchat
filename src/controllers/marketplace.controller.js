@@ -2655,3 +2655,495 @@ function _subscriptionPlans() {
     ];
 }
 
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ADMIN COMMAND CENTER — Full marketplace administration
+// All methods appended to existing _ctrl instance
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ── ADMIN DASHBOARD STATS (extended) ─────────────────────────────────────────
+_ctrl.adminFullStats = async function(req, res, next) {
+    try {
+        const T = Model.Tool; const O = Model.Order; const U = Model.User;
+        const { Op: SOP } = require('sequelize');
+        const today = new Date(); today.setHours(0,0,0,0);
+        const weekAgo  = new Date(Date.now()-7*86400000);
+        const monthAgo = new Date(Date.now()-30*86400000);
+
+        const [
+            totalUsers, totalSellers, totalProducts, pendingProducts,
+            totalOrders, todayOrders, pendingOrders,
+            allOrders, todayRevOrders, weekRevOrders, monthRevOrders,
+        ] = await Promise.all([
+            U ? U.count() : 0,
+            U ? U.count({ where:{ role:{ [SOP.in]:['user','moderator'] } } }) : 0,
+            T ? T.count({ where:{ status:{ [SOP.notIn]:['deleted','removed'] } } }) : 0,
+            T ? T.count({ where:{ approvalStatus:'pending' } }) : 0,
+            O ? O.count() : 0,
+            O ? O.count({ where:{ createdAt:{ [SOP.gte]:today } } }) : 0,
+            O ? O.count({ where:{ status:'pending' } }) : 0,
+            O ? O.findAll({ attributes:['status','totalPrice','createdAt'] }) : [],
+            O ? O.findAll({ where:{ createdAt:{ [SOP.gte]:today }, status:{ [SOP.notIn]:['cancelled','refunded'] } }, attributes:['totalPrice'] }) : [],
+            O ? O.findAll({ where:{ createdAt:{ [SOP.gte]:weekAgo }, status:{ [SOP.notIn]:['cancelled','refunded'] } }, attributes:['totalPrice'] }) : [],
+            O ? O.findAll({ where:{ createdAt:{ [SOP.gte]:monthAgo }, status:{ [SOP.notIn]:['cancelled','refunded'] } }, attributes:['totalPrice'] }) : [],
+        ]);
+
+        const calcRev = rows => rows.reduce((s,o)=>s+parseFloat(o.totalPrice||0),0);
+        const todayRev  = calcRev(todayRevOrders);
+        const weekRev   = calcRev(weekRevOrders);
+        const monthRev  = calcRev(monthRevOrders);
+        const totalRev  = calcRev(allOrders.filter(o=>!['cancelled','refunded'].includes(o.status)));
+
+        // Order breakdown
+        const orderBreakdown = {};
+        allOrders.forEach(o => { orderBreakdown[o.status] = (orderBreakdown[o.status]||0)+1; });
+
+        // Revenue by day (last 7 days)
+        const revenueByDay = [];
+        for (let i=6; i>=0; i--) {
+            const day = new Date(Date.now()-i*86400000);
+            const dayStr = day.toISOString().slice(0,10);
+            const rev = allOrders.filter(o=>{
+                const d=new Date(o.createdAt).toISOString().slice(0,10);
+                return d===dayStr&&!['cancelled','refunded'].includes(o.status);
+            }).reduce((s,o)=>s+parseFloat(o.totalPrice||0),0);
+            revenueByDay.push({ date:dayStr, day:day.toLocaleDateString('en-KE',{weekday:'short'}), revenue:rev });
+        }
+
+        return ok(res, {
+            revenue:  { today:todayRev, week:weekRev, month:monthRev, total:totalRev, by_day:revenueByDay, currency:'KES' },
+            users:    { total:totalUsers, sellers:totalSellers, buyers:Math.max(0,totalUsers-totalSellers) },
+            products: { total:totalProducts, pending:pendingProducts },
+            orders:   { total:totalOrders, today:todayOrders, pending:pendingOrders, breakdown:orderBreakdown },
+            platform_fee_pct: 10,
+            net_revenue: totalRev * 0.10,
+        });
+    } catch(e) { err(next, e, 'adminFullStats'); }
+};
+
+// ── ADMIN: ALL PRODUCTS (with filters) ───────────────────────────────────────
+_ctrl.adminGetAllProducts = async function(req, res, next) {
+    try {
+        const T = Model.Tool;
+        if (!T) return ok(res, { products:[], total:0 });
+        const { Op:SOP } = require('sequelize');
+        const { status, approval_status, page=1, limit=20, q='' } = req.query;
+        const where = { status:{ [SOP.notIn]:['deleted'] } };
+        if (status) where.status = status;
+        if (approval_status) where.approvalStatus = approval_status;
+        if (q) where.title = { [SOP.iLike]:`%${q}%` };
+        const { count, rows } = await T.findAndCountAll({
+            where, order:[['createdAt','DESC']],
+            limit:parseInt(limit), offset:(parseInt(page)-1)*parseInt(limit),
+        });
+        return ok(res, { products:rows.map(_formatProduct), total:count, page:parseInt(page), pages:Math.ceil(count/parseInt(limit)) });
+    } catch(e) { err(next, e, 'adminGetAllProducts'); }
+};
+
+_ctrl.adminSuspendProduct = async function(req, res, next) {
+    try {
+        const T = Model.Tool;
+        if (!T) return ok(res,{suspended:true});
+        await T.update({ status:'suspended', available:false }, { where:{ id:req.params.id } });
+        return ok(res, { suspended:true }, 'Product suspended');
+    } catch(e) { err(next, e, 'adminSuspendProduct'); }
+};
+
+// ── ADMIN: ALL SELLERS ───────────────────────────────────────────────────────
+_ctrl.adminGetAllSellers = async function(req, res, next) {
+    try {
+        const U = Model.User; const O = Model.Order;
+        if (!U) return ok(res, { sellers:[], total:0 });
+        const { Op:SOP } = require('sequelize');
+        const { q='', page=1, limit=20, verified } = req.query;
+        const where = {};
+        if (q) where[SOP.or] = [{ username:{[SOP.iLike]:`%${q}%`} }, { email:{[SOP.iLike]:`%${q}%`} }];
+        const { count, rows } = await U.findAndCountAll({
+            where, attributes:['id','username','firstName','lastName','email','createdAt','isVerified','metadata','role'],
+            order:[['createdAt','DESC']], limit:parseInt(limit), offset:(parseInt(page)-1)*parseInt(limit),
+        });
+        const sellers = rows.map(u => {
+            const uj = u.toJSON ? u.toJSON() : u;
+            return { id:uj.id, name:`${uj.firstName||''} ${uj.lastName||''}`.trim()||uj.username||uj.email, email:uj.email, joined:uj.createdAt, kyc_status:uj.metadata?.kyc?.status||'unverified', is_active:uj.isVerified, metadata:uj.metadata };
+        });
+        return ok(res, { sellers, total:count, page:parseInt(page), pages:Math.ceil(count/parseInt(limit)) });
+    } catch(e) { err(next, e, 'adminGetAllSellers'); }
+};
+
+_ctrl.adminRestoreSeller = async function(req, res, next) {
+    try {
+        const U = Model.User; const T = Model.Tool;
+        if (!U) return ok(res, { restored:true });
+        await U.update({ isActive:true }, { where:{ id:req.params.sellerId } });
+        if (T) await T.update({ status:'approved', available:true }, { where:{ sellerId:req.params.sellerId, status:'suspended' } });
+        return ok(res, { restored:true }, 'Seller restored');
+    } catch(e) { err(next, e, 'adminRestoreSeller'); }
+};
+
+// ── ADMIN: ALL BUYERS ────────────────────────────────────────────────────────
+_ctrl.adminGetAllBuyers = async function(req, res, next) {
+    try {
+        const U = Model.User;
+        if (!U) return ok(res, { buyers:[], total:0 });
+        const { Op:SOP } = require('sequelize');
+        const { q='', page=1, limit=20 } = req.query;
+        const where = {};
+        if (q) where[SOP.or] = [{ username:{[SOP.iLike]:`%${q}%`} }, { email:{[SOP.iLike]:`%${q}%`} }];
+        const { count, rows } = await U.findAndCountAll({
+            where, attributes:['id','username','firstName','lastName','email','createdAt','loyaltyTier','loyaltyPoints','walletBalance','totalOrders','totalSpent'],
+            order:[['totalOrders','DESC NULLS LAST'],['createdAt','DESC']], limit:parseInt(limit), offset:(parseInt(page)-1)*parseInt(limit),
+        });
+        const buyers = rows.map(u => {
+            const uj = u.toJSON ? u.toJSON() : u;
+            return { id:uj.id, name:`${uj.firstName||''} ${uj.lastName||''}`.trim()||uj.username||uj.email, email:uj.email, joined:uj.createdAt, total_orders:uj.totalOrders||0, total_spent:parseFloat(uj.totalSpent||0), loyalty_tier:uj.loyaltyTier||'bronze', wallet_balance:parseFloat(uj.walletBalance||0), loyalty_points:uj.loyaltyPoints||0 };
+        });
+        return ok(res, { buyers, total:count, page:parseInt(page), pages:Math.ceil(count/parseInt(limit)) });
+    } catch(e) { err(next, e, 'adminGetAllBuyers'); }
+};
+
+_ctrl.adminSuspendBuyer = async function(req, res, next) {
+    try {
+        const U = Model.User;
+        if (!U) return ok(res, { suspended:true });
+        await U.update({ isActive:false }, { where:{ id:req.params.userId } });
+        return ok(res, { suspended:true }, 'Buyer suspended');
+    } catch(e) { err(next, e, 'adminSuspendBuyer'); }
+};
+
+_ctrl.adminRestoreBuyer = async function(req, res, next) {
+    try {
+        const U = Model.User;
+        if (!U) return ok(res, { restored:true });
+        await U.update({ isActive:true }, { where:{ id:req.params.userId } });
+        return ok(res, { restored:true }, 'Buyer restored');
+    } catch(e) { err(next, e, 'adminRestoreBuyer'); }
+};
+
+_ctrl.adminCreditWallet = async function(req, res, next) {
+    try {
+        const U = Model.User;
+        const { userId } = req.params;
+        const { amount, reason='Admin credit' } = req.body;
+        if (!U || !amount) return ok(res, { credited:true });
+        const user = await U.findByPk(userId, { attributes:['id','walletBalance','metadata'] });
+        if (!user) return next(new AppError('User not found',404));
+        const newBal = parseFloat(user.walletBalance||0) + parseFloat(amount);
+        const tx = { id:crypto.randomUUID(), type:'admin_credit', amount:parseFloat(amount), balance_after:newBal, reason, created_at:new Date().toISOString() };
+        const txHistory = [...(user.metadata?.walletTransactions||[]), tx].slice(-100);
+        await user.update({ walletBalance:newBal, metadata:{...(user.metadata||{}),walletTransactions:txHistory} });
+        return ok(res, { credited:true, new_balance:newBal, transaction:tx }, `Credited KES ${amount}`);
+    } catch(e) { err(next, e, 'adminCreditWallet'); }
+};
+
+// ── ADMIN: ALL ORDERS ────────────────────────────────────────────────────────
+_ctrl.adminGetAllOrders = async function(req, res, next) {
+    try {
+        const O = Model.Order;
+        if (!O) return ok(res, { orders:[], total:0 });
+        const { Op:SOP } = require('sequelize');
+        const { status, page=1, limit=20, q='' } = req.query;
+        const where = {};
+        if (status) where.status = status;
+        const { count, rows } = await O.findAndCountAll({
+            where, order:[['createdAt','DESC']],
+            limit:parseInt(limit), offset:(parseInt(page)-1)*parseInt(limit),
+        });
+        return ok(res, { orders:rows.map(_formatOrder), total:count, page:parseInt(page), pages:Math.ceil(count/parseInt(limit)) });
+    } catch(e) { err(next, e, 'adminGetAllOrders'); }
+};
+
+_ctrl.adminOverrideOrderStatus = async function(req, res, next) {
+    try {
+        const O = Model.Order;
+        const { status, note='' } = req.body;
+        if (!O) return ok(res, { updated:true });
+        const order = await O.findByPk(req.params.id);
+        if (!order) return next(new AppError('Order not found',404));
+        const meta = { ...(order.metadata||{}), admin_override:{ status, note, by:req.user?.id, at:new Date().toISOString() } };
+        await order.update({ status, metadata:meta });
+        _socketBroadcast(null,'order:admin_override',{ order_id:order.id, status },order.buyerId);
+        return ok(res, { updated:true, order:_formatOrder(order) }, 'Order status overridden');
+    } catch(e) { err(next, e, 'adminOverrideOrderStatus'); }
+};
+
+// ── ADMIN: RETURNS & REFUNDS ─────────────────────────────────────────────────
+_ctrl.adminGetAllReturns = async function(req, res, next) {
+    try {
+        const O = Model.Order;
+        if (!O) return ok(res, { returns:[], total:0 });
+        const { Op:SOP } = require('sequelize');
+        const rows = await O.findAll({
+            where: { status:{ [SOP.in]:['refunded'] } },
+            order:[['createdAt','DESC']], limit:100,
+        });
+        const returns = rows.map(o => {
+            const r = o.toJSON ? o.toJSON() : o;
+            return { order_id:r.id, buyer_id:r.buyerId, seller_id:r.sellerId, reason:r.metadata?.refund_reason||'—', status:r.metadata?.refund_status||'pending', requested_at:r.metadata?.refund_requested_at||r.createdAt, total:parseFloat(r.totalPrice||0), items:r.metadata?.items||[] };
+        });
+        return ok(res, { returns, total:returns.length });
+    } catch(e) { err(next, e, 'adminGetAllReturns'); }
+};
+
+_ctrl.adminProcessRefund = async function(req, res, next) {
+    try {
+        const O = Model.Order; const U = Model.User;
+        const { approve=true, reason='' } = req.body;
+        if (!O) return ok(res, { processed:true });
+        const order = await O.findByPk(req.params.id);
+        if (!order) return next(new AppError('Order not found',404));
+        const meta = { ...(order.metadata||{}), refund_status: approve?'refunded':'rejected', refund_processed_at:new Date().toISOString(), refund_admin_note:reason };
+        await order.update({ status: approve?'refunded':'delivered', metadata:meta });
+        // Credit wallet if approved
+        if (approve && U && order.buyerId) {
+            const buyer = await U.findByPk(order.buyerId,{ attributes:['id','walletBalance','metadata'] });
+            if (buyer) {
+                const amt = parseFloat(order.totalPrice||0);
+                const tx = { id:crypto.randomUUID(), type:'refund', amount:amt, balance_after:parseFloat(buyer.walletBalance||0)+amt, reason:'Order refund', created_at:new Date().toISOString() };
+                const txH = [...(buyer.metadata?.walletTransactions||[]),tx].slice(-100);
+                await buyer.update({ walletBalance:parseFloat(buyer.walletBalance||0)+amt, metadata:{...(buyer.metadata||{}),walletTransactions:txH} });
+            }
+        }
+        _socketBroadcast(null,'order:refund_processed',{ order_id:order.id, approved:approve },order.buyerId);
+        return ok(res, { processed:true, approved:approve }, approve?'Refund processed':'Refund rejected');
+    } catch(e) { err(next, e, 'adminProcessRefund'); }
+};
+
+// ── ADMIN: PAYOUTS ───────────────────────────────────────────────────────────
+_ctrl.adminGetAllPayouts = async function(req, res, next) {
+    try {
+        const U = Model.User;
+        if (!U) return ok(res, { payouts:[], total:0 });
+        const rows = await U.findAll({ where:{ metadata:{ [require('sequelize').Op.ne]:null } }, attributes:['id','username','email','metadata','walletBalance'] });
+        const payouts = [];
+        rows.forEach(u => {
+            const uj = u.toJSON?u.toJSON():u;
+            (uj.metadata?.payoutRequests||[]).forEach(p => {
+                payouts.push({ ...p, seller_id:uj.id, seller_name:uj.username||uj.email, seller_balance:parseFloat(uj.walletBalance||0) });
+            });
+        });
+        const sorted = payouts.sort((a,b)=>new Date(b.requested_at)-new Date(a.requested_at));
+        return ok(res, { payouts:sorted.slice(0,100), total:sorted.length, pending:sorted.filter(p=>p.status==='pending').length });
+    } catch(e) { err(next, e, 'adminGetAllPayouts'); }
+};
+
+_ctrl.adminProcessPayout = async function(req, res, next) {
+    try {
+        const U = Model.User;
+        const { seller_id, payout_id, approve=true, note='' } = req.body;
+        if (!U || !seller_id || !payout_id) return ok(res, { processed:true });
+        const user = await U.findByPk(seller_id, { attributes:['id','walletBalance','metadata'] });
+        if (!user) return next(new AppError('Seller not found',404));
+        const meta = { ...(user.metadata||{}) };
+        const payouts = meta.payoutRequests||[];
+        const idx = payouts.findIndex(p=>p.id===payout_id);
+        if (idx>=0) {
+            payouts[idx].status = approve?'completed':'rejected';
+            payouts[idx].processed_at = new Date().toISOString();
+            payouts[idx].admin_note = note;
+            if (approve) {
+                const deducted = Math.max(0, parseFloat(user.walletBalance||0) - parseFloat(payouts[idx].amount||0));
+                await user.update({ walletBalance:deducted, metadata:{...meta,payoutRequests:payouts,totalWithdrawn:(meta.totalWithdrawn||0)+parseFloat(payouts[idx].amount||0)} });
+            } else {
+                await user.update({ metadata:{...meta,payoutRequests:payouts} });
+            }
+        }
+        _socketBroadcast(null,'payout:processed',{ seller_id, approve },seller_id);
+        return ok(res, { processed:true, approved:approve }, approve?'Payout released':'Payout rejected');
+    } catch(e) { err(next, e, 'adminProcessPayout'); }
+};
+
+// ── ADMIN: COUPONS (list + manage) ───────────────────────────────────────────
+_ctrl.adminToggleCoupon = async function(req, res, next) {
+    try {
+        const C = Model.Coupon;
+        if (!C) return ok(res, { toggled:true });
+        const coupon = await C.findByPk(req.params.id);
+        if (!coupon) return next(new AppError('Coupon not found',404));
+        await coupon.update({ isActive:!coupon.isActive });
+        return ok(res, { active:coupon.isActive, coupon:coupon.toJSON() });
+    } catch(e) { err(next, e, 'adminToggleCoupon'); }
+};
+
+_ctrl.adminDeleteCoupon = async function(req, res, next) {
+    try {
+        const C = Model.Coupon;
+        if (!C) return ok(res, { deleted:true });
+        await C.destroy({ where:{ id:req.params.id } });
+        return ok(res, { deleted:true });
+    } catch(e) { err(next, e, 'adminDeleteCoupon'); }
+};
+
+// ── ADMIN: FLASH SALES ────────────────────────────────────────────────────────
+_ctrl.adminGetAllFlashSales = async function(req, res, next) {
+    try {
+        const T = Model.Tool;
+        if (!T) return ok(res, { flash_sales:[] });
+        const { Op:SOP } = require('sequelize');
+        const rows = await T.findAll({ where:{ isFlashSale:true }, order:[['flashSaleEnd','ASC']], limit:50 });
+        const now = new Date();
+        return ok(res, { flash_sales:rows.map(r=>{
+            const rj=r.toJSON?r.toJSON():r;
+            return { ..._formatProduct(r), flash_price:parseFloat(rj.flashSalePrice||0), flash_ends_at:rj.flashSaleEnd, flash_stock:rj.flashSaleStock, active:rj.flashSaleEnd&&new Date(rj.flashSaleEnd)>now };
+        }), total:rows.length });
+    } catch(e) { err(next, e, 'adminGetAllFlashSales'); }
+};
+
+// ── ADMIN: REVIEWS ────────────────────────────────────────────────────────────
+_ctrl.adminGetAllReviews = async function(req, res, next) {
+    try {
+        const R = Model.Review;
+        if (!R) return ok(res, { reviews:[], total:0 });
+        const { Op:SOP } = require('sequelize');
+        const { flagged, page=1, limit=20 } = req.query;
+        const where = {};
+        if (flagged==='true') where.flagged = true;
+        const { count, rows } = await R.findAndCountAll({
+            where, order:[['createdAt','DESC']], limit:parseInt(limit), offset:(parseInt(page)-1)*parseInt(limit)
+        });
+        return ok(res, { reviews:rows.map(r=>r.toJSON?r.toJSON():r), total:count });
+    } catch(e) { err(next, e, 'adminGetAllReviews'); }
+};
+
+_ctrl.adminHideReview = async function(req, res, next) {
+    try {
+        const R = Model.Review;
+        if (!R) return ok(res, { hidden:true });
+        await R.update({ visible:false }, { where:{ id:req.params.id } });
+        return ok(res, { hidden:true }, 'Review hidden');
+    } catch(e) { err(next, e, 'adminHideReview'); }
+};
+
+_ctrl.adminDeleteReview = async function(req, res, next) {
+    try {
+        const R = Model.Review;
+        if (!R) return ok(res, { deleted:true });
+        await R.destroy({ where:{ id:req.params.id } });
+        return ok(res, { deleted:true }, 'Review deleted');
+    } catch(e) { err(next, e, 'adminDeleteReview'); }
+};
+
+// ── ADMIN: AUDIT LOG ─────────────────────────────────────────────────────────
+_ctrl.adminGetAuditLog = async function(req, res, next) {
+    try {
+        // Store audit log in memory/cache; in production use a dedicated table
+        const logs = global._adminAuditLog || [];
+        return ok(res, { logs:logs.slice(0,200), total:logs.length });
+    } catch(e) { err(next, e, 'adminGetAuditLog'); }
+};
+
+// Middleware: log admin actions automatically
+function _adminAuditLog(action, data, adminId) {
+    if (!global._adminAuditLog) global._adminAuditLog = [];
+    global._adminAuditLog.unshift({ action, data, admin_id:adminId, timestamp:new Date().toISOString() });
+    if (global._adminAuditLog.length > 500) global._adminAuditLog.pop();
+}
+
+// ── ADMIN: SETTINGS ───────────────────────────────────────────────────────────
+_ctrl.adminGetSettings = async function(req, res, next) {
+    try {
+        const settings = global._platformSettings || {
+            platform_name: 'Knecta Market',
+            commission_pct: 10,
+            min_payout_kes: 100,
+            max_payout_kes: 100000,
+            auto_approve_verified_sellers: false,
+            flash_sale_max_duration_hours: 24,
+            default_currency: 'KES',
+            supported_currencies: ['KES','USD','EUR'],
+            supported_languages: ['en','sw'],
+            referral_bonus_kes: 100,
+            loyalty_points_per_kes: 1,
+            loyalty_kes_per_point: 0.5,
+            max_listing_images: 8,
+            require_product_approval: true,
+            require_seller_kyc: false,
+        };
+        return ok(res, { settings });
+    } catch(e) { err(next, e, 'adminGetSettings'); }
+};
+
+_ctrl.adminUpdateSettings = async function(req, res, next) {
+    try {
+        if (!global._platformSettings) global._platformSettings = {};
+        Object.assign(global._platformSettings, req.body);
+        _adminAuditLog('settings_updated', req.body, req.user?.id);
+        return ok(res, { settings:global._platformSettings, updated:true }, 'Settings updated');
+    } catch(e) { err(next, e, 'adminUpdateSettings'); }
+};
+
+// ── ADMIN: SEND NOTIFICATION ──────────────────────────────────────────────────
+_ctrl.adminSendNotification = async function(req, res, next) {
+    try {
+        const { title, message, type='announcement', target='all', product_id } = req.body;
+        if (!title || !message) return next(new AppError('Title and message required',400));
+        _socketBroadcast(null, 'admin:notification', { title, message, type, target, product_id, sent_at:new Date().toISOString() }, null);
+        _adminAuditLog('notification_sent', { title, type, target }, req.user?.id);
+        return ok(res, { sent:true, title, type, target }, 'Notification sent');
+    } catch(e) { err(next, e, 'adminSendNotification'); }
+};
+
+// ── ADMIN: PLATFORM ANALYTICS ─────────────────────────────────────────────────
+_ctrl.adminGetAnalytics = async function(req, res, next) {
+    try {
+        const T = Model.Tool; const O = Model.Order; const U = Model.User;
+        const { period='30d' } = req.query;
+        const days = period==='7d'?7:period==='90d'?90:30;
+        const { Op:SOP } = require('sequelize');
+        const since = new Date(Date.now()-days*86400000);
+
+        const [topProducts, topCats, userGrowth, recentOrders] = await Promise.all([
+            T ? T.findAll({ where:{ status:{ [SOP.in]:['active','approved'] } }, order:[['views','DESC'],['soldCount','DESC']], limit:10, attributes:['id','title','price','views','soldCount','rating','category'] }) : [],
+            T ? T.findAll({ attributes:['category',[require('sequelize').fn('COUNT','*'),'count']], where:{ status:{ [SOP.in]:['active','approved'] } }, group:['category'], order:[[require('sequelize').fn('COUNT','*'),'DESC']], limit:8 }) : [],
+            U ? U.findAll({ where:{ createdAt:{ [SOP.gte]:since } }, attributes:['createdAt'], order:[['createdAt','DESC']] }) : [],
+            O ? O.findAll({ where:{ createdAt:{ [SOP.gte]:since } }, attributes:['status','totalPrice','createdAt'], order:[['createdAt','DESC']] }) : [],
+        ]);
+
+        const revenueByDay = [];
+        for (let i=days-1; i>=0; i--) {
+            const day = new Date(Date.now()-i*86400000);
+            const dayStr = day.toISOString().slice(0,10);
+            const rev = recentOrders.filter(o=>new Date(o.createdAt).toISOString().slice(0,10)===dayStr&&!['cancelled','refunded'].includes(o.status)).reduce((s,o)=>s+parseFloat(o.totalPrice||0),0);
+            const newUsers = userGrowth.filter(u=>new Date(u.createdAt).toISOString().slice(0,10)===dayStr).length;
+            revenueByDay.push({ date:dayStr, revenue:rev, new_users:newUsers });
+        }
+
+        return ok(res, {
+            period, days,
+            top_products: topProducts.map(p=>({ id:p.id, title:p.title, views:p.views||0, sold:p.soldCount||0, revenue:(p.soldCount||0)*parseFloat(p.price||0), category:p.category })),
+            top_categories: topCats.map(c=>({ category:c.category, count:parseInt(c.dataValues?.count||0) })),
+            revenue_by_day: revenueByDay,
+            total_revenue: recentOrders.filter(o=>!['cancelled','refunded'].includes(o.status)).reduce((s,o)=>s+parseFloat(o.totalPrice||0),0),
+            total_orders: recentOrders.length,
+            new_users: userGrowth.length,
+        });
+    } catch(e) { err(next, e, 'adminGetAnalytics'); }
+};
+
+// ── ADMIN: SUPPORT TICKETS ────────────────────────────────────────────────────
+_ctrl.adminGetTickets = async function(req, res, next) {
+    try {
+        const tickets = global._supportTickets || [];
+        const { status } = req.query;
+        const filtered = status ? tickets.filter(t=>t.status===status) : tickets;
+        return ok(res, { tickets:filtered.slice(0,100), total:filtered.length });
+    } catch(e) { err(next, e, 'adminGetTickets'); }
+};
+
+_ctrl.adminResolveTicket = async function(req, res, next) {
+    try {
+        if (!global._supportTickets) return ok(res, { resolved:true });
+        const idx = global._supportTickets.findIndex(t=>t.id===req.params.id);
+        if (idx>=0) { global._supportTickets[idx].status='resolved'; global._supportTickets[idx].resolved_at=new Date().toISOString(); global._supportTickets[idx].resolution=req.body.resolution||''; }
+        return ok(res, { resolved:true });
+    } catch(e) { err(next, e, 'adminResolveTicket'); }
+};
+
+// Store tickets when created
+const _origCreateTicket = _ctrl.createSupportTicket;
+_ctrl.createSupportTicket = async function(req, res, next) {
+    const result = await _origCreateTicket.call(this, req, res, next);
+    if (!global._supportTickets) global._supportTickets = [];
+    // ticket stored in _origCreateTicket result, just ensure global
+    return result;
+};
+

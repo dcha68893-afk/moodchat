@@ -273,6 +273,73 @@ if (ctrl) {
     router.post('/support/ticket',                     noop(ctrl.createSupportTicket?.bind(ctrl)));
     router.get('/support/tickets',                     noop(ctrl.getSupportTickets?.bind(ctrl)));
 
+    // ════════════════════════════════════════════════
+    // ADMIN — Full command center routes
+    // ════════════════════════════════════════════════
+    router.get('/admin/stats',                         noop(ctrl.adminGetStats?.bind(ctrl)));
+    router.get('/admin/stats/full',                    noop(ctrl.adminFullStats?.bind(ctrl)));
+    router.get('/admin/analytics',                     noop(ctrl.adminGetAnalytics?.bind(ctrl)));
+
+    // Products
+    router.get('/admin/products',                      noop(ctrl.adminGetAllProducts?.bind(ctrl)));
+    router.get('/admin/products/pending',              noop(ctrl.adminListPendingProducts?.bind(ctrl)));
+    router.post('/admin/products/:id/approve',         noop(ctrl.adminApproveProduct?.bind(ctrl)));
+    router.post('/admin/products/:id/reject',          noop(ctrl.adminRejectProduct?.bind(ctrl)));
+    router.post('/admin/products/:id/suspend',         noop(ctrl.adminSuspendProduct?.bind(ctrl)));
+    router.delete('/admin/products/:id',               noop(ctrl.adminRemoveProduct?.bind(ctrl)));
+
+    // Sellers
+    router.get('/admin/sellers',                       noop(ctrl.adminGetAllSellers?.bind(ctrl)));
+    router.post('/admin/sellers/:sellerId/verify',     noop(ctrl.adminVerifySeller?.bind(ctrl)));
+    router.post('/admin/sellers/:sellerId/ban',        noop(ctrl.adminBanSeller?.bind(ctrl)));
+    router.post('/admin/sellers/:sellerId/restore',    noop(ctrl.adminRestoreSeller?.bind(ctrl)));
+
+    // Buyers
+    router.get('/admin/buyers',                        noop(ctrl.adminGetAllBuyers?.bind(ctrl)));
+    router.post('/admin/buyers/:userId/suspend',       noop(ctrl.adminSuspendBuyer?.bind(ctrl)));
+    router.post('/admin/buyers/:userId/restore',       noop(ctrl.adminRestoreBuyer?.bind(ctrl)));
+    router.post('/admin/buyers/:userId/credit-wallet', noop(ctrl.adminCreditWallet?.bind(ctrl)));
+
+    // Orders
+    router.get('/admin/orders',                        noop(ctrl.adminGetAllOrders?.bind(ctrl)));
+    router.put('/admin/orders/:id/status',             noop(ctrl.adminOverrideOrderStatus?.bind(ctrl)));
+
+    // Returns & Refunds
+    router.get('/admin/returns',                       noop(ctrl.adminGetAllReturns?.bind(ctrl)));
+    router.post('/admin/returns/:id/process',          noop(ctrl.adminProcessRefund?.bind(ctrl)));
+
+    // Payouts
+    router.get('/admin/payouts',                       noop(ctrl.adminGetAllPayouts?.bind(ctrl)));
+    router.post('/admin/payouts/process',              noop(ctrl.adminProcessPayout?.bind(ctrl)));
+
+    // Coupons
+    router.get('/admin/coupons',                       noop(ctrl.listCoupons?.bind(ctrl)));
+    router.post('/admin/coupons',                      noop(ctrl.adminCreateCoupon?.bind(ctrl)));
+    router.patch('/admin/coupons/:id/toggle',          noop(ctrl.adminToggleCoupon?.bind(ctrl)));
+    router.delete('/admin/coupons/:id',                noop(ctrl.adminDeleteCoupon?.bind(ctrl)));
+
+    // Flash Sales
+    router.get('/admin/flash-sales',                   noop(ctrl.adminGetAllFlashSales?.bind(ctrl)));
+    router.post('/admin/flash-sales',                  noop(ctrl.createFlashSale?.bind(ctrl)));
+    router.delete('/admin/flash-sales/:id',            noop(ctrl.endFlashSale?.bind(ctrl)));
+
+    // Reviews
+    router.get('/admin/reviews',                       noop(ctrl.adminGetAllReviews?.bind(ctrl)));
+    router.post('/admin/reviews/:id/hide',             noop(ctrl.adminHideReview?.bind(ctrl)));
+    router.delete('/admin/reviews/:id',                noop(ctrl.adminDeleteReview?.bind(ctrl)));
+
+    // Support Tickets
+    router.get('/admin/tickets',                       noop(ctrl.adminGetTickets?.bind(ctrl)));
+    router.post('/admin/tickets/:id/resolve',          noop(ctrl.adminResolveTicket?.bind(ctrl)));
+
+    // Notifications
+    router.post('/admin/notifications/send',           noop(ctrl.adminSendNotification?.bind(ctrl)));
+
+    // Audit & Settings
+    router.get('/admin/audit-log',                     noop(ctrl.adminGetAuditLog?.bind(ctrl)));
+    router.get('/admin/settings',                      noop(ctrl.adminGetSettings?.bind(ctrl)));
+    router.put('/admin/settings',                      noop(ctrl.adminUpdateSettings?.bind(ctrl)));
+
 } else {
     // Fallback: all routes return empty success so frontend doesn't break
     router.all('*', (req, res) => res.json({ success: true, data: {}, message: 'Marketplace controller unavailable' }));

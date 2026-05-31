@@ -5025,6 +5025,19 @@ class Application {
                         }
                     }, 5000);
 
+                    // ── PHASE 11: Unified Runtime Orchestrator ────────────────────────────
+                    setTimeout(() => {
+                        try {
+                            const { initPhase11 } = require('./services/phase11/phase11.bootstrap');
+                            global.__phase11 = initPhase11(this.io, this.app, {
+                                logger: console, phase10: global.__phase10,
+                            });
+                            console.log('[Server] ✅ Phase 11 Unified Runtime Orchestrator active');
+                        } catch (err) {
+                            console.warn('[Phase11] Init failed (non-fatal):', err.message);
+                        }
+                    }, 8000);
+
                     // ── PHASE 10: Full Production Hardening ───────────────────────────────
                     setTimeout(() => {
                         try {
