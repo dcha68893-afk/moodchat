@@ -432,12 +432,32 @@ class GroupService {
                 order : [['joinedAt', 'DESC']],
             }));
 
+            // FIX: Fetch real member counts for user's groups
+            const groupIds = memberships.map(m => m.userGroup?.id).filter(Boolean);
+            let mcMap = {};
+            if (groupIds.length > 0) {
+                try {
+                    const mcRows = await GroupMembers.findAll({
+                        where: { groupId: groupIds, leftAt: null },
+                        attributes: ['groupId', [require('sequelize').fn('COUNT', require('sequelize').col('id')), 'cnt']],
+                        group: ['groupId'],
+                        raw: true,
+                    });
+                    mcRows.forEach(r => { mcMap[r.groupId] = parseInt(r.cnt) || 0; });
+                } catch(_) {}
+            }
+
             const groups = memberships.map(m => {
                 if (!m.userGroup) return null;
+                const gid = m.userGroup.id;
+                const mc  = mcMap[gid] || 0;
                 return formatGroup(m.userGroup, {
-                    isAdmin  : ['owner', 'admin'].includes(m.role),
-                    isCreator: m.role === 'owner',
-                    role     : m.role,
+                    isAdmin        : ['owner', 'admin'].includes(m.role),
+                    isCreator      : m.role === 'owner',
+                    role           : m.role,
+                    memberCount    : mc,
+                    participantCount: mc,
+                    stats          : { totalMembers: mc, totalMessages: 0 },
                 });
             }).filter(Boolean);
 
@@ -477,7 +497,32 @@ class GroupService {
                 attributes: ['id','name','description','avatar','purpose','isPublic','maxMembers','createdBy','createdAt'],
             }));
             const totalPages = Math.ceil(count / limitNum);
-            return { groups: rows.map(g => formatGroup(g)), pagination: { currentPage: pageNum, totalPages, totalGroups: count, hasNext: pageNum < totalPages, hasPrevious: pageNum > 1 } };
+
+            // FIX: Fetch real member counts for all groups in one query
+            let memberCountMap = {};
+            if (GroupMembers && rows.length > 0) {
+                try {
+                    const groupIds = rows.map(g => g.id);
+                    const memberCounts = await GroupMembers.findAll({
+                        where: { groupId: groupIds, leftAt: null },
+                        attributes: ['groupId', [require('sequelize').fn('COUNT', require('sequelize').col('id')), 'count']],
+                        group: ['groupId'],
+                        raw: true,
+                    });
+                    memberCounts.forEach(mc => {
+                        memberCountMap[mc.groupId] = parseInt(mc.count) || 0;
+                    });
+                } catch (_) {}
+            }
+
+            return {
+                groups: rows.map(g => formatGroup(g, {
+                    memberCount    : memberCountMap[g.id] || 0,
+                    participantCount: memberCountMap[g.id] || 0,
+                    stats          : { totalMembers: memberCountMap[g.id] || 0, totalMessages: 0 },
+                })),
+                pagination: { currentPage: pageNum, totalPages, totalGroups: count, hasNext: pageNum < totalPages, hasPrevious: pageNum > 1 }
+            };
         } catch (e) {
             console.error('[GroupService] ❌ searchGroups failed:', e.message);
             return empty;
