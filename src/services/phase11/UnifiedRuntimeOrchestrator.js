@@ -157,19 +157,34 @@ class UnifiedRuntimeOrchestrator extends EventEmitter {
 
     this._tracker.track(`${uid}:${event}:${Date.now()}`, DELIVERY_STATE.ROUTING, { userId: uid, event });
 
-    // Determine best transport
-    const transport = this._routing.getBestTransport(uid, options.senderSubnet);
+    // CRITICAL FIX: For time-sensitive events (calls, messages), ALWAYS try
+    // direct Socket.IO first — never let them go to the offline queue silently.
+    // The HTR offline queue is for true offline users, not latency optimization.
+    const timesSensitive = [
+      'call:incoming', 'incoming_call', 'call_incoming', 'call_initiated',
+      'message:new', 'new_message', 'group:message', 'new_group_message',
+      'call:ended', 'call:accepted', 'call:rejected',
+    ].includes(event) || normEv.startsWith('call:') || normEv.startsWith('message:');
 
-    // Try HybridTransportRuntime first (Phase 10 — has LAN registry + offline queue)
+    if (timesSensitive) {
+      // Always try direct Socket.IO first for real-time events
+      const directOk = this._sendSocketIO(uid, event, data);
+      if (directOk) {
+        this._stats.delivered++;
+        this._stats.routed_internet++;
+        this._tracker.track(`${uid}:${event}`, DELIVERY_STATE.SENT, { transport: 'INTERNET' });
+        return { ok: true, transport: 'INTERNET' };
+      }
+    }
+
+    // For non-time-sensitive events, try HTR (has LAN + offline queue logic)
     const htr = global.__HybridTransportRuntime;
-    if (htr) {
+    if (htr && !timesSensitive) {
       const result = await htr.deliver(uid, event, data, options).catch(() => null);
       if (result?.ok) {
         this._stats.delivered++;
-        this._stats[`routed_${transport.toLowerCase()}`]++;
-        this._tracker.track(`${uid}:${event}`, DELIVERY_STATE.SENT, { transport });
-        this.emit('delivered', { userId: uid, event: normEv, transport });
-        return { ok: true, transport };
+        this._tracker.track(`${uid}:${event}`, DELIVERY_STATE.SENT, { transport: 'HTR' });
+        return { ok: true, transport: 'HTR' };
       }
       if (result?.queued) {
         this.emit('queued', { userId: uid, event: normEv });
@@ -177,7 +192,7 @@ class UnifiedRuntimeOrchestrator extends EventEmitter {
       }
     }
 
-    // Fallback: direct Socket.IO
+    // Final fallback: direct Socket.IO (also catches time-sensitive that failed above)
     const delivered = this._sendSocketIO(uid, event, data);
     if (delivered) {
       this._stats.delivered++;
@@ -185,11 +200,13 @@ class UnifiedRuntimeOrchestrator extends EventEmitter {
       return { ok: true, transport: 'INTERNET' };
     }
 
-    // Queue offline
-    htr?.offline?.enqueue(uid, event, data);
+    // Only queue truly non-real-time events
+    if (!timesSensitive && htr) {
+      htr.offline?.enqueue?.(uid, event, data);
+    }
     this._stats.failed++;
-    this.emit('queued', { userId: uid, event: normEv });
-    return { ok: false, queued: true };
+    this.emit('failed', { userId: uid, event: normEv });
+    return { ok: false, queued: false };
   }
 
   // Broadcast to a room

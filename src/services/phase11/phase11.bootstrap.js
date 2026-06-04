@@ -51,11 +51,30 @@ function _wireWebSocketService(uro, logger) {
     const _orig = ws.sendToUser?.bind(ws);
 
     ws.sendToUser = async function(userId, event, data = {}) {
-      // Route through URO for intelligent transport selection
+      // Route through URO (which now always tries direct Socket.IO first for
+      // time-sensitive events like calls and messages)
       const result = await uro.deliver(String(userId), event, data).catch(() => null);
-      if (result?.ok || result?.queued) return true;
-      // Fallback to original
-      if (_orig) return _orig(userId, event, data);
+      if (result?.ok) return true;
+
+      // Fallback 1: original sendToUser (pre-Phase11 implementation)
+      if (_orig) {
+        try {
+          const origResult = await _orig(userId, event, data);
+          if (origResult) return true;
+        } catch (_) {}
+      }
+
+      // Fallback 2: direct io emit as last resort
+      try {
+        const _io = global.__io || uro.io;
+        if (_io) {
+          const uid = String(userId);
+          _io.to(`user:${uid}`).emit(event, data);
+          _io.to(`user_${uid}`).emit(event, data);
+          return true;
+        }
+      } catch (_) {}
+
       return false;
     };
 

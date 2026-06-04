@@ -4920,6 +4920,7 @@ class Application {
                     // Init WebSocket service AFTER attaching auth middleware
                     this.websocket = WebSocketService;
                     this.websocket.init(this.io);
+                    global.__io = this.io; // Phase11: direct io access for fallback delivery
 
                     // setupConnectionHandler handles room-join & presence only.
                     // verifyToken inside it is now a harmless secondary check —
