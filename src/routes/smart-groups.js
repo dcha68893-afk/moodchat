@@ -26,7 +26,8 @@ function auth(req, res, next) {
         const jwt = require('jsonwebtoken');
         const tok = (req.headers.authorization||'').replace('Bearer ','').trim();
         if (!tok) return res.status(401).json({ success:false, message:'No token' });
-        const secret = process.env.JWT_SECRET || process.env.JWT_ACCESS_SECRET || 'secret';
+        const secret = process.env.JWT_SECRET || process.env.JWT_ACCESS_SECRET;
+        if (!secret) return res.status(500).json({ success: false, message: 'Server misconfiguration: JWT secret not set', code: 'MISCONFIGURED' });
         const decoded = jwt.verify(tok, secret);
         req.user = decoded;
         next();

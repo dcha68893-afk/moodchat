@@ -443,15 +443,10 @@ class MarketplaceController {
             if (!items?.length) return next(new AppError('Cart is empty', 400));
             if (!delivery_address) return next(new AppError('Delivery address required', 400));
 
-            // If no Order model, return optimistic response
+            // FIX-P12: The fake order fallback was silently returning a non-persisted order UUID.
+            // Buyers would receive a success response for an order that never existed in the DB.
             if (!O || !T) {
-                const fakeOrder = {
-                    id: crypto.randomUUID(),
-                    buyer_id: buyerId, status: 'pending',
-                    items, delivery_address, payment_method, total: total||0, currency,
-                    created_at: new Date().toISOString(),
-                };
-                return ok(res, { order: fakeOrder }, 'Order placed', 201);
+                return next(new AppError('Checkout service is temporarily unavailable. Please try again later.', 503));
             }
 
             // Create one order per seller (group items by seller)
@@ -707,38 +702,34 @@ class MarketplaceController {
     }
 
     async cardPayment(req, res, next) {
-        try {
-            const { card_number, expiry_month, expiry_year, cvv, holder_name, amount, order_id } = req.body;
-            if (!card_number || !amount || !order_id) return next(new AppError('Card details and order_id required', 400));
-
-            // In production: integrate Stripe/Flutterwave. Simplified validation:
-            if (String(card_number).replace(/\s/g,'').length < 13) return next(new AppError('Invalid card number', 400));
-
-            const transactionId = 'TXN-' + crypto.randomUUID().toUpperCase().slice(0,12);
-
-            // Update order status
-            const O = Model.Order;
-            if (O) {
-                await O.update({ status:'paid', paidAt: new Date(), paymentMethod:'card', paymentRef: transactionId }, { where: { id: order_id } });
-                _socketBroadcast(req, 'payment:confirmed', { order_id, method: 'card' });
-            }
-
-            return ok(res, { transaction_id: transactionId, status: 'paid' }, 'Payment successful');
-        } catch(e) { err(next, e, 'cardPayment'); }
+        // FIX-P12: Card payment was a fake stub that marked any order as 'paid'
+        // without a real charge. This is a critical financial integrity issue.
+        // Returning 501 until Stripe/Flutterwave is integrated.
+        return res.status(501).json({
+            success: false,
+            message: 'Card payment integration is not yet configured. Please use M-Pesa or contact support.',
+            code: 'PAYMENT_PROVIDER_NOT_CONFIGURED'
+        });
     }
 
     async walletPayment(req, res, next) {
-        try {
-            const { user_id, amount, order_id } = req.body;
-            // Wallet logic depends on your Users model. Simplified:
-            return ok(res, { status: 'paid', order_id }, 'Wallet payment processed');
-        } catch(e) { err(next, e, 'walletPayment'); }
+        // FIX-P12: Wallet payment was a fake stub that always returned 'paid'
+        // with no balance check or deduction. Returning 501 until implemented.
+        return res.status(501).json({
+            success: false,
+            message: 'Wallet payment is not yet implemented.',
+            code: 'NOT_IMPLEMENTED'
+        });
     }
 
     async getWalletBalance(req, res, next) {
-        try {
-            return ok(res, { balance: 0, currency: 'KES' });
-        } catch(e) { err(next, e, 'getWalletBalance'); }
+        // FIX-P12: Was always returning balance: 0 (hardcoded stub).
+        // Returning 501 until wallet system is built.
+        return res.status(501).json({
+            success: false,
+            message: 'Wallet system is not yet implemented.',
+            code: 'NOT_IMPLEMENTED'
+        });
     }
 
     // ══════════════════════════════════════════════════════════════════════════

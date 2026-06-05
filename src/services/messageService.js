@@ -56,10 +56,10 @@ class MessageService {
         // CRITICAL SECURITY: Use parameterized query to prevent SQL injection
         const [rows] = await sequelize.query(
             `INSERT INTO "Messages"
-               ("chatId","senderId",content,type,reactions,"isEdited","isDeleted","sentAt","deliveredAt","createdAt","updatedAt")
-             VALUES (:chatId,:senderId,:content,:type,'{}',false,false,NOW(),NOW(),NOW(),NOW())
+               ("chatId","senderId",content,type,reactions,"isEdited","isDeleted","replyToId","sentAt","deliveredAt","createdAt","updatedAt")
+             VALUES (:chatId,:senderId,:content,:type,'{}',false,false,:replyToId,NOW(),NOW(),NOW(),NOW())
              RETURNING *`,
-            { replacements: { chatId, senderId, content: sanitizedContent, type },
+            { replacements: { chatId, senderId, content: sanitizedContent, type, replyToId: replyToId || null },
               type: sequelize.QueryTypes.INSERT }
         );
         

@@ -3915,6 +3915,7 @@ const helmet = require('helmet');
 class Application {
     constructor() {
         this.app = express();
+        global.__expressApp = this.app; // FIX-P12: required by SmartGroups IIFE mount
         this.server = null;
         this.initialized = false;
         
@@ -5052,42 +5053,9 @@ class Application {
                         }, 500);
                     }, 7000);
 
-                    // ── FIX-AUDIT-8: Status auto-expiration background job ────────────────
-                    setInterval(async () => {
-                        try {
-                            const db = this.app?.locals?.db || require('./models');
-                            const sequelize = db.sequelize || db;
-                            if (!sequelize || typeof sequelize.query !== 'function') return;
-                            const result = await sequelize.query(
-                                `UPDATE "Statuses"
-                                 SET "isExpired" = true, "updatedAt" = NOW()
-                                 WHERE "expiresAt" < NOW()
-                                   AND "isExpired" = false
-                                   AND "isDeleted" = false`,
-                                { type: sequelize.QueryTypes.UPDATE }
-                            );
-                            // Notify connected clients of any newly expired statuses
-                            if (result && result[1] > 0) {
-                                const expired = await sequelize.query(
-                                    `SELECT id, "userId" FROM "Statuses"
-                                     WHERE "expiresAt" < NOW()
-                                       AND "isExpired" = true
-                                       AND "updatedAt" > NOW() - INTERVAL '2 minutes'`,
-                                    { type: sequelize.QueryTypes.SELECT }
-                                );
-                                for (const s of (expired || [])) {
-                                    this.io?.emit('status:expired', {
-                                        statusId: s.id,
-                                        userId: s.userId,
-                                        timestamp: new Date()
-                                    });
-                                }
-                                console.log(`[StatusExpiry] Expired ${result[1]} status(es)`);
-                            }
-                        } catch (err) {
-                            // Non-fatal
-                        }
-                    }, 5 * 60 * 1000); // every 5 minutes
+                    // ── FIX-P12: Removed duplicate inline status expiry cron.
+                    // _installStatusExpiryCron() IIFE at module level handles this.
+                    // The inline version was running simultaneously causing double DB writes.
 
                     // ── PHASE 10: Full Production Hardening ───────────────────────────────
                     setTimeout(() => {
