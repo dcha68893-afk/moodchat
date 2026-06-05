@@ -38,6 +38,7 @@ const Model = {
     get Order()  { return getDb().Order  || null; },
     get Review() { return getDb().Review || null; },
     get User()   { return getDb().Users  || getDb().User || null; },
+    // FIX (Forensic Audit P1): Cart model now exists — resolves to the Cart Sequelize model
     get Cart()   { return getDb().Cart   || null; },
 };
 
@@ -259,6 +260,124 @@ class MarketplaceController {
             ];
             return ok(res, { categories }, 'Categories fetched');
         } catch(e) { err(next, e, 'getCategories'); }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // CART (FIX: Forensic Audit P1 — Cart model + endpoints added)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    async getCart(req, res, next) {
+        try {
+            const userId = req.user?.id;
+            if (!userId) return next(new AppError('Authentication required', 401));
+            const CartModel = getDb().Cart;
+            if (!CartModel) {
+                // Graceful degradation if migration not yet run
+                return ok(res, { cart: { items: [], subtotal: 0, item_count: 0 } }, 'OK');
+            }
+            const cart = await CartModel.getOrCreate(userId);
+            return ok(res, {
+                cart: {
+                    id:           cart.id,
+                    items:        cart.items || [],
+                    item_count:   cart.getItemCount(),
+                    subtotal:     parseFloat(cart.getSubtotal().toFixed(2)),
+                    currency:     cart.currency,
+                    coupon_code:  cart.couponCode,
+                    discount:     parseFloat(cart.discountAmount || 0),
+                    expires_at:   cart.expiresAt,
+                }
+            });
+        } catch(e) { err(next, e, 'getCart'); }
+    }
+
+    async addToCart(req, res, next) {
+        try {
+            const userId = req.user?.id;
+            if (!userId) return next(new AppError('Authentication required', 401));
+            const { product_id, seller_id, title, price, quantity = 1, image, variant } = req.body;
+            if (!product_id) return next(new AppError('product_id required', 400));
+            if (!price && price !== 0) return next(new AppError('price required', 400));
+
+            const CartModel = getDb().Cart;
+            if (!CartModel) return next(new AppError('Cart service not available', 503));
+
+            const cart = await CartModel.getOrCreate(userId);
+            await cart.addItem({ product_id, seller_id, title, price, quantity, image, variant });
+            await cart.reload();
+
+            _socketBroadcast(req, 'cart:updated', { user_id: userId, item_count: cart.getItemCount() });
+            return ok(res, {
+                cart: {
+                    id:         cart.id,
+                    items:      cart.items,
+                    item_count: cart.getItemCount(),
+                    subtotal:   parseFloat(cart.getSubtotal().toFixed(2)),
+                }
+            }, 'Item added to cart');
+        } catch(e) { err(next, e, 'addToCart'); }
+    }
+
+    async removeFromCart(req, res, next) {
+        try {
+            const userId = req.user?.id;
+            if (!userId) return next(new AppError('Authentication required', 401));
+            const { product_id, variant } = req.body;
+            if (!product_id) return next(new AppError('product_id required', 400));
+
+            const CartModel = getDb().Cart;
+            if (!CartModel) return next(new AppError('Cart service not available', 503));
+
+            const cart = await CartModel.getOrCreate(userId);
+            await cart.removeItem(product_id, variant || null);
+            await cart.reload();
+
+            return ok(res, {
+                cart: {
+                    id:         cart.id,
+                    items:      cart.items,
+                    item_count: cart.getItemCount(),
+                    subtotal:   parseFloat(cart.getSubtotal().toFixed(2)),
+                }
+            }, 'Item removed from cart');
+        } catch(e) { err(next, e, 'removeFromCart'); }
+    }
+
+    async updateCartItem(req, res, next) {
+        try {
+            const userId = req.user?.id;
+            if (!userId) return next(new AppError('Authentication required', 401));
+            const { product_id, quantity, variant } = req.body;
+            if (!product_id || !quantity) return next(new AppError('product_id and quantity required', 400));
+
+            const CartModel = getDb().Cart;
+            if (!CartModel) return next(new AppError('Cart service not available', 503));
+
+            const cart = await CartModel.getOrCreate(userId);
+            await cart.updateItemQuantity(product_id, quantity, variant || null);
+            await cart.reload();
+
+            return ok(res, {
+                cart: {
+                    id:         cart.id,
+                    items:      cart.items,
+                    item_count: cart.getItemCount(),
+                    subtotal:   parseFloat(cart.getSubtotal().toFixed(2)),
+                }
+            }, 'Cart updated');
+        } catch(e) { err(next, e, 'updateCartItem'); }
+    }
+
+    async clearCart(req, res, next) {
+        try {
+            const userId = req.user?.id;
+            if (!userId) return next(new AppError('Authentication required', 401));
+            const CartModel = getDb().Cart;
+            if (!CartModel) return next(new AppError('Cart service not available', 503));
+            const cart = await CartModel.getOrCreate(userId);
+            await cart.clear();
+            return ok(res, { cart: { id: cart.id, items: [], item_count: 0, subtotal: 0 } }, 'Cart cleared');
+        } catch(e) { err(next, e, 'clearCart'); }
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -537,8 +656,23 @@ class MarketplaceController {
             const { phone, amount, order_id, description, callback_url } = req.body;
             if (!phone || !amount || !order_id) return next(new AppError('phone, amount, order_id required', 400));
 
+            // FIX (Forensic Audit P2): Validate/derive callbackUrl.
+            // If caller doesn't supply one, auto-derive from BACKEND_URL env var.
+            // Without a valid callbackUrl, M-Pesa never delivers payment confirmation.
+            const backendUrl = process.env.BACKEND_URL || process.env.RENDER_EXTERNAL_URL || '';
+            const resolvedCallback = callback_url
+                || (backendUrl ? `${backendUrl.replace(/\/$/, '')}/api/tools/marketplace/payment/mpesa/callback` : null);
+
+            if (!resolvedCallback) {
+                logger.error('[Marketplace] initiateMpesa: callbackUrl is empty. Set BACKEND_URL env var.');
+                return next(new AppError(
+                    'Payment callback URL could not be resolved. Set BACKEND_URL environment variable.',
+                    500
+                ));
+            }
+
             // M-Pesa STK Push via Safaricom Daraja API
-            const result = await _mpesaStkPush({ phone, amount, orderId: order_id, description, callbackUrl: callback_url });
+            const result = await _mpesaStkPush({ phone, amount, orderId: order_id, description, callbackUrl: resolvedCallback });
             return ok(res, result, 'STK Push sent');
         } catch(e) { err(next, e, 'initiateMpesa'); }
     }

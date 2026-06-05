@@ -64,13 +64,5 @@ module.exports = {
     refreshSecret: process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET,
     accessExpiresIn: process.env.JWT_ACCESS_EXPIRES_IN || '24h',
     refreshExpiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '7d'
-  },
-
-  // ── CANONICAL SECRET RESOLUTION (FIX: Forensic Audit P0) ──────────────────
-  // All modules MUST use these instead of reading process.env directly.
-  // Priority matches tokenService.js: JWT_ACCESS_SECRET first, JWT_SECRET fallback.
-  // Inconsistent priority in authController and authService caused token verify
-  // failures when JWT_SECRET !== JWT_ACCESS_SECRET in production environments.
-  canonicalAccessSecret:  process.env.JWT_ACCESS_SECRET  || process.env.JWT_SECRET,
-  canonicalRefreshSecret: process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET,
+  }
 };

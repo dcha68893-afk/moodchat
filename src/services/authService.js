@@ -362,7 +362,8 @@ async refreshToken(refreshToken) {
   }
 
 validateJWTConfig() {
-    const secret = process.env.JWT_SECRET || process.env.JWT_ACCESS_SECRET;
+    // FIX (Forensic Audit P0): JWT_ACCESS_SECRET first to match tokenService.js signing order
+    const secret = process.env.JWT_ACCESS_SECRET || process.env.JWT_SECRET;
     // Check if secret is properly configured (not using default fallback)
     if (!secret) {
         console.warn('JWT_SECRET not properly configured');

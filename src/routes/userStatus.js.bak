@@ -5,8 +5,8 @@ const userStatusController = require('../controllers/userStatusController');
 const { authenticate } = require('../middleware/auth');
 const { apiRateLimiter } = require('../middleware/rateLimiter');
 
-// Apply authentication to all routes — FIX: was imported but never applied (security bug)
-router.use(authenticate);
+// Apply authentication to all routes
+
 
 // Update user status
 router.post('/update', apiRateLimiter, userStatusController.updateStatus);

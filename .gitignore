@@ -122,3 +122,6 @@ Thumbs.db
 *.swp
 *.swo
 *~
+# Backup directories should not be committed (Forensic Audit cleanup)
+backups_final_*/
+*.backup

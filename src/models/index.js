@@ -316,7 +316,7 @@ async function createMissingTables() {
     'Calls', 'Call', 'UserStatus', 'TypingIndicator', 'ReadReceipt',
     'statuses', 'status_views', 'status_reactions', 'status_replies',
     // ── Marketplace ───────────────────────────────────────────────────────────
-    'tools', 'marketplace_orders', 'marketplace_reviews'
+    'tools', 'marketplace_orders', 'marketplace_reviews', 'marketplace_carts'
   ];
   
   const missingTables = [];
@@ -593,6 +593,16 @@ async function addMissingColumns() {
       { name: 'helpful_count', type: Sequelize.INTEGER, defaultValue: 0, allowNull: false },
       { name: 'seller_reply', type: Sequelize.TEXT, allowNull: true },
       { name: 'seller_replied_at', type: Sequelize.DATE, allowNull: true }
+    ],
+    // FIX (Forensic Audit P1): marketplace_carts table — was missing entirely
+    'marketplace_carts': [
+      { name: 'user_id',         type: Sequelize.UUID,           allowNull: false },
+      { name: 'items',           type: Sequelize.JSONB,          allowNull: false, defaultValue: [] },
+      { name: 'currency',        type: Sequelize.STRING(10),     allowNull: false, defaultValue: 'KES' },
+      { name: 'coupon_code',     type: Sequelize.STRING(100),    allowNull: true },
+      { name: 'discount_amount', type: Sequelize.DECIMAL(10,2),  allowNull: false, defaultValue: 0 },
+      { name: 'expires_at',      type: Sequelize.DATE,           allowNull: true },
+      { name: 'metadata',        type: Sequelize.JSONB,          allowNull: true, defaultValue: {} }
     ]
   };
   

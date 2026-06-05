@@ -1,0 +1,3 @@
+// CANONICAL JWT SECRET RESOLUTION — single source of truth
+// All services MUST use these exports instead of reading process.env directly.
+// Priority: JWT_ACCESS_SECRET || JWT_SECRET (matches tokenService.js signing order)

@@ -6,9 +6,11 @@ const { Op } = require('sequelize');
 const tokenService = require('../services/tokenService');
 
 // SECURITY FIX #1: Crash fast if secret is absent — never fall through to a hardcoded literal.
-const JWT_SECRET = process.env.JWT_SECRET || process.env.JWT_ACCESS_SECRET;
+// FIX (Forensic Audit P0): Use JWT_ACCESS_SECRET first to match tokenService.js signing order.
+// Previously used JWT_SECRET first, causing verify failures when both env vars are set differently.
+const JWT_SECRET = process.env.JWT_ACCESS_SECRET || process.env.JWT_SECRET;
 if (!JWT_SECRET) {
-  throw new Error('FATAL: JWT_SECRET env variable is not set. Server will not start.');
+  throw new Error('FATAL: JWT_SECRET or JWT_ACCESS_SECRET env variable is not set. Server will not start.');
 }
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '24h';
 
