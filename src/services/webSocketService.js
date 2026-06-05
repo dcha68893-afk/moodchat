@@ -819,6 +819,18 @@ class WebSocketService {
 
     async _joinUserChatRooms(userId, socket) {
         if (!userId || !socket || typeof socket.join !== 'function') return;
+
+        // ── CRITICAL: Join personal user rooms FIRST (sync, no DB needed) ────
+        // sendToUser() emits to user:ID and user_ID rooms.
+        // Without joining these rooms, the receiver NEVER gets messages or calls.
+        const uid    = parseInt(userId, 10);
+        const strUid = String(uid);
+        socket.join(`user:${uid}`);
+        socket.join(`user_${uid}`);
+        socket.join(`user:${strUid}`);
+        socket.join(`user_${strUid}`);
+        console.log(`[WSService] uid=${userId} joined personal user rooms: user:${uid}, user_${uid}`);
+
         try {
             const db = require('../models');
             const sequelize = db.sequelize || db;
