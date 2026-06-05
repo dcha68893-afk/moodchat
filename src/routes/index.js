@@ -101,7 +101,9 @@ const ROUTE_MAPPING = {
   'templates.js': '/api/templates',
   'categories.js': '/api/categories',
   'files.js': '/api/files',
-  'tokens.js': '/api/tokens'
+  'tokens.js': '/api/tokens',
+  // FIX B-01: marketplace.routes.js was missing — all marketplace endpoints returned 404
+  'marketplace.routes.js': '/api/marketplace'
 };
 
 // ===== HELPER FUNCTIONS =====

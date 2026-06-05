@@ -100,26 +100,11 @@ class WebSocketService {
             return this;
         }
 
-        // ── STEP 1: Auth middleware runs BEFORE connection ────────────────────
-        // Rejecting here (next(error)) causes Socket.IO to emit 'connect_error'
-        // on the client, NOT "io server disconnect".
-        io.use((socket, next) => {
-            const token = (socket.handshake.auth && socket.handshake.auth.token)
-                || socket.handshake.query.token
-                || null;
-
-            const { valid, userId, reason } = this.verifyTokenOnly(token);
-
-            if (!valid) {
-                console.warn(`[WSService] ⛔ Auth rejected socket ${socket.id}: ${reason}`);
-                // FIX: return next(error) — NOT socket.disconnect()
-                return next(new Error(`Authentication failed: ${reason}`));
-            }
-
-            // Attach to socket for use in connection handler
-            socket._authenticatedUserId = userId;
-            next();
-        });
+        // ── STEP 1: Auth is handled by server.js before setupConnectionHandler() is called ──
+        // FIX B-10: Removed duplicate io.use() auth middleware — server.js already applies
+        // socketAuthenticate via io.use() before calling this method. Having two auth
+        // middlewares doubles token verification on every connection.
+        // socket._authenticatedUserId is set by the server.js middleware and available here.
 
         // ── STEP 2: Connection handler — auth is already verified ─────────────
         io.on('connection', (socket) => {
