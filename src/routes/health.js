@@ -6,9 +6,22 @@ const asyncHandler = require('express-async-handler');
 
 console.log('✅ Health routes initialized');
 
+// FIX: Add CORS headers to health endpoint so browser probes from any origin succeed
+// NetworkIntelligenceManager uses no-cors mode now, but this keeps things robust.
+router.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') {
+    return res.status(204).end();
+  }
+  next();
+});
+
 /**
  * Health check endpoint
  * GET /health
+ * HEAD /health  — FIX: Added HEAD support for NetworkIntelligenceManager probe
  */
 router.get(
   '/',
@@ -33,6 +46,13 @@ router.get(
   })
 );
 
+// FIX: HEAD /health — NetworkIntelligenceManager previously used HEAD but only GET existed,
+// causing 404/405 responses that triggered false OFFLINE state on WiFi connections.
+router.head('/', (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  res.status(200).end();
+});
+
 // Optional: Add a simple ping endpoint for quick health checks
 router.get(
   '/ping',
@@ -40,5 +60,7 @@ router.get(
     res.json({ ok: true, route: "health", timestamp: new Date().toISOString() });
   })
 );
+
+router.head('/ping', (req, res) => res.status(200).end());
 
 module.exports = router;
