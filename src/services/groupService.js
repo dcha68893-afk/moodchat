@@ -63,6 +63,7 @@ const formatGroup = (g, extraFields = {}) => {
         rules       : d.rules       || '',
         location    : d.location    || '',
         createdBy   : d.createdBy,
+        memberCount : d.memberCount || 0,
         chatId      : d.chatId      || null,
         createdAt   : d.createdAt,
         updatedAt   : d.updatedAt,

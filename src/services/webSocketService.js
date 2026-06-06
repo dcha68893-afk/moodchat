@@ -175,6 +175,25 @@ class WebSocketService {
                 console.log(`[WSService] socket disconnected uid=${userId} sid=${socket.id} reason=${reason}`);
             });
 
+            // ── TYPING INDICATORS — FIX: were completely missing ──────────────
+            socket.off('typing:start').on('typing:start', ({ chatId } = {}) => {
+                if (!chatId) return;
+                socket.to(`chat:${chatId}`).emit('typing:start', {
+                    chatId,
+                    userId: String(userId),
+                    timestamp: Date.now(),
+                });
+            });
+
+            socket.off('typing:stop').on('typing:stop', ({ chatId } = {}) => {
+                if (!chatId) return;
+                socket.to(`chat:${chatId}`).emit('typing:stop', {
+                    chatId,
+                    userId: String(userId),
+                    timestamp: Date.now(),
+                });
+            });
+
             // SETTINGS: relay cross-device settings changes
             socket.off('settings:update').on('settings:update', (payload) => {
                 try {
@@ -291,6 +310,14 @@ class WebSocketService {
         if (!this.onlineUsers.has(uid)) this.onlineUsers.set(uid, new Set());
         this.onlineUsers.get(uid).add(socketId);
 
+        // FIX: broadcast user:online to all connected users so contacts update presence indicator
+        try {
+            const io = this.getIO();
+            if (io) {
+                io.emit('user:online', { userId: uid, timestamp: Date.now() });
+            }
+        } catch(_) {}
+
         if (socketOrSocketId && typeof socketOrSocketId.join === 'function') {
             const joinRooms = () => {
                 // BUG 3 FIX: Join all four room name variants to survive integer/string
@@ -339,7 +366,16 @@ class WebSocketService {
         const set = this.onlineUsers.get(uid);
         if (set) {
             if (socketId) set.delete(socketId);
-            if (!socketId || set.size === 0) this.onlineUsers.delete(uid);
+            if (!socketId || set.size === 0) {
+                this.onlineUsers.delete(uid);
+                // FIX: broadcast user:offline only when last socket disconnects
+                try {
+                    const io = this.getIO();
+                    if (io) {
+                        io.emit('user:offline', { userId: uid, lastSeen: new Date().toISOString(), timestamp: Date.now() });
+                    }
+                } catch(_) {}
+            }
         }
 
         console.log(`[WSService] removeUser uid=${uid} socket=${socketId}`);

@@ -1571,6 +1571,19 @@ router.post(
                 { updatedAt: new Date() },
                 { where: { id: chatId } }
             );
+
+            // FIX: Emit read receipt to all chat participants so sender's tick turns blue
+            try {
+                const ws = require('../services/webSocketService');
+                const io = ws.getIO ? ws.getIO() : global.__socketIO;
+                if (io) {
+                    io.to(`chat:${chatId}`).emit('message:read', {
+                        chatId,
+                        readerId: userId,
+                        readAt: new Date().toISOString(),
+                    });
+                }
+            } catch(_) {}
             
             res.status(200).json({
                 status: 'success',

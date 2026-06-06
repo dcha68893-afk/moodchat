@@ -331,9 +331,17 @@ class GroupController {
 
             const io = global.__socketIO;
             if (io) {
-                io.to(`group:${groupId}`).emit('group:member:added', { groupId, memberId, addedBy: userId, role, member, timestamp: new Date() });
-                io.to(`group:${groupId}`).emit('group:localSync', { action: 'member_add', groupId, member });
-                io.to(`user:${memberId}`).emit('group:localSync', { action: 'member_add', groupId, member });
+                // FIX: fetch live member count so frontend group card updates immediately
+                let liveCount = 0;
+                try {
+                    const db = require('../models');
+                    const GM = db.GroupMembers || db.models?.GroupMembers;
+                    if (GM) liveCount = await GM.count({ where: { groupId, leftAt: null } });
+                } catch(_) {}
+
+                io.to(`group:${groupId}`).emit('group:member:added', { groupId, memberId, addedBy: userId, role, member, memberCount: liveCount, timestamp: new Date() });
+                io.to(`group:${groupId}`).emit('group:localSync', { action: 'member_add', groupId, member, memberCount: liveCount });
+                io.to(`user:${memberId}`).emit('group:localSync', { action: 'member_add', groupId, member, memberCount: liveCount });
             }
 
             res.status(200).json({

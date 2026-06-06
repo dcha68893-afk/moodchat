@@ -5,6 +5,7 @@ const router = express.Router();
 const { Op } = require('sequelize');
 const multer = require('multer');
 const fs = require('fs').promises;
+const fsSync = require('fs');
 const {
   AuthorizationError,
   NotFoundError,
@@ -16,9 +17,39 @@ const { apiRateLimiter } = require('../middleware/rateLimiter');
 
 const MAX_FILE_SIZE = parseInt(process.env.MAX_FILE_SIZE) || 10 * 1024 * 1024;
 const ALLOWED_FILE_TYPES = (
-  process.env.ALLOWED_FILE_TYPES || 'image/jpeg,image/png,image/gif,application/pdf,text/plain'
+  process.env.ALLOWED_FILE_TYPES || 'image/jpeg,image/png,image/gif,audio/mpeg,audio/ogg,audio/webm,video/mp4,video/webm,application/pdf,text/plain'
 ).split(',');
 const UPLOAD_PATH = process.env.UPLOAD_PATH || 'uploads/messages';
+
+// ── SECURITY FIX: Magic byte validation ─────────────────────────────────────
+// Client-supplied Content-Type can be spoofed. Validate the first 12 bytes
+// of the actual file against known magic numbers before accepting upload.
+const MAGIC_SIGNATURES = {
+  'image/jpeg' : [[0xFF,0xD8,0xFF]],
+  'image/png'  : [[0x89,0x50,0x4E,0x47]],
+  'image/gif'  : [[0x47,0x49,0x46,0x38]],
+  'image/webp' : [null], // RIFF....WEBP — checked by extension
+  'audio/mpeg' : [[0xFF,0xFB],[0xFF,0xF3],[0xFF,0xF2],[0x49,0x44,0x33]],
+  'audio/ogg'  : [[0x4F,0x67,0x67,0x53]],
+  'audio/webm' : [[0x1A,0x45,0xDF,0xA3]],
+  'video/mp4'  : [null], // ftyp box at offset 4 — skip deep check
+  'video/webm' : [[0x1A,0x45,0xDF,0xA3]],
+  'application/pdf': [[0x25,0x50,0x44,0x46]],
+  'text/plain' : [null], // no magic bytes for plain text
+};
+
+function _validateMagicBytes(filePath, declaredMime) {
+  try {
+    const sigs = MAGIC_SIGNATURES[declaredMime];
+    if (!sigs) return false; // mime not in our allow-list at all
+    if (sigs[0] === null) return true; // skip deep check for this type
+    const fd  = fsSync.openSync(filePath, 'r');
+    const buf = Buffer.alloc(12);
+    fsSync.readSync(fd, buf, 0, 12, 0);
+    fsSync.closeSync(fd);
+    return sigs.some(sig => sig.every((byte, i) => buf[i] === byte));
+  } catch(_) { return false; }
+}
 
 const ensureUploadDir = async () => {
   try {
@@ -380,6 +411,9 @@ router.get('/', apiRateLimiter, asyncHandler(async (req, res) => {
           // FIX: expose both "type" and "messageType" so any client field lookup works
           type: m.messageType || m.type || 'text',
           messageType: m.messageType || m.type || 'text',
+          // FIX: expose mediaUrl from metadata so media messages render correctly
+          mediaUrl: m.metadata?.mediaUrl || m.mediaUrl || null,
+          fileUrl:  m.metadata?.mediaUrl || m.fileUrl  || null,
         })),
         pagination: { total, page, limit, pages: Math.ceil(total / limit) },
       },
@@ -774,6 +808,12 @@ router.post('/:chatId/upload', apiRateLimiter, upload.single('file'), asyncHandl
 
     if (!req.file) return res.status(400).json({ success: false, message: 'No file uploaded' });
 
+    // SECURITY FIX: validate actual file magic bytes against declared MIME type
+    if (!_validateMagicBytes(req.file.path, req.file.mimetype)) {
+      await fs.unlink(req.file.path).catch(() => {});
+      return res.status(400).json({ success: false, message: 'File content does not match declared type' });
+    }
+
     const isParticipant = await sequelize.query(
       `SELECT 1 FROM chat_participants WHERE "chatId" = :chatId AND "userId" = :userId LIMIT 1`,
       { replacements: { chatId, userId: req.user.id }, type: sequelize.QueryTypes.SELECT }
@@ -798,6 +838,21 @@ router.post('/:chatId/upload', apiRateLimiter, upload.single('file'), asyncHandl
     );
 
     const messageId = msgResult[0][0].id;
+
+    // FIX: build absolute URL so frontend can render the file cross-origin
+    const baseUrl   = process.env.RENDER_EXTERNAL_URL || process.env.BACKEND_URL || `${req.protocol}://${req.get('host')}`;
+    const subDir    = msgType === 'image' ? 'images' : msgType === 'audio' ? 'audio' : msgType === 'video' ? 'video' : 'files';
+    const relPath   = `/uploads/${subDir}/${req.file.filename}`;
+    const absUrl    = `${baseUrl.replace(/\/+$/, '')}${relPath}`;
+
+    // Store mediaUrl in message metadata so GET messages can return it
+    await sequelize.query(
+      `UPDATE "Messages" SET metadata = jsonb_set(COALESCE(metadata,'{}'), '{mediaUrl}', :url::jsonb),
+                             "lastMessageId" = id
+       WHERE id = :messageId`,
+      { replacements: { messageId, url: JSON.stringify(absUrl) } }
+    ).catch(() => {});
+
     await sequelize.query(
       `UPDATE chats SET "updatedAt" = NOW(), "lastMessageId" = :messageId WHERE id = :chatId`,
       { replacements: { messageId, chatId } }
@@ -807,8 +862,10 @@ router.post('/:chatId/upload', apiRateLimiter, upload.single('file'), asyncHandl
       status: 'success',
       message: 'File uploaded successfully',
       data: {
-        message: { id: messageId, chatId, senderId: req.user.id, content: caption, type: msgType },
-        fileUrl: `/api/messages/${chatId}/files/${messageId}/${req.file.filename}`,
+        message: { id: messageId, chatId, senderId: req.user.id, content: caption, type: msgType, mediaUrl: absUrl },
+        fileUrl: absUrl,
+        url: absUrl,
+        mediaUrl: absUrl,
       },
     });
   } catch (error) {

@@ -83,6 +83,21 @@ class MessageService {
         );
         message.sender = sender || null;
 
+        // FIX: Attach replyTo object so reply indicator renders correctly on all clients
+        if (message.replyToId) {
+            try {
+                const [replyRows] = await sequelize.query(
+                    `SELECT m.id, m.content, m.type, m."senderId",
+                            u.username AS "senderName", u.avatar AS "senderAvatar"
+                     FROM "Messages" m
+                     LEFT JOIN "Users" u ON u.id = m."senderId"
+                     WHERE m.id = :replyToId AND m."isDeleted" = false LIMIT 1`,
+                    { replacements: { replyToId: message.replyToId }, type: sequelize.QueryTypes.SELECT }
+                );
+                message.replyTo = replyRows || null;
+            } catch(_) { message.replyTo = null; }
+        }
+
         // CRITICAL SECURITY: Real-time delivery with error handling
         await this._emitMessageToParticipants(chatId, senderId, message, sequelize);
 
@@ -122,6 +137,8 @@ class MessageService {
                 content:      message.content,
                 type:         message.type,
                 sender:       message.sender,
+                replyToId:    message.replyToId || null,
+                replyTo:      message.replyTo   || null,
                 createdAt:    message.createdAt,
                 sentAt:       message.sentAt,
                 deliveredAt:  new Date().toISOString()
@@ -193,9 +210,22 @@ class MessageService {
             `SELECT m.id,m."chatId",m."senderId",m.content,
                     m.type AS "messageType",m.reactions,m."isEdited",
                     m."editedAt",m."isDeleted",m."sentAt",m."createdAt",m."updatedAt",
-                    jsonb_build_object('id',u.id,'username',u.username,'avatar',u.avatar) AS sender
+                    m."replyToId",
+                    jsonb_build_object('id',u.id,'username',u.username,'avatar',u.avatar) AS sender,
+                    CASE WHEN m."replyToId" IS NOT NULL THEN
+                        jsonb_build_object(
+                            'id', rm.id,
+                            'content', rm.content,
+                            'type', rm.type,
+                            'senderId', rm."senderId",
+                            'senderName', ru.username,
+                            'senderAvatar', ru.avatar
+                        )
+                    ELSE NULL END AS "replyTo"
              FROM "Messages" m
              LEFT JOIN "Users" u ON u.id=m."senderId"
+             LEFT JOIN "Messages" rm ON rm.id=m."replyToId" AND rm."isDeleted"=false
+             LEFT JOIN "Users" ru ON ru.id=rm."senderId"
              WHERE m."chatId"=:chatId AND m."isDeleted"=false
              ORDER BY m."createdAt" DESC LIMIT :limit OFFSET :offset`,
             { replacements:{chatId,limit,offset}, type: sequelize.QueryTypes.SELECT }

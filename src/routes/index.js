@@ -103,7 +103,11 @@ const ROUTE_MAPPING = {
   'files.js': '/api/files',
   'tokens.js': '/api/tokens',
   // FIX B-01: marketplace.routes.js was missing — all marketplace endpoints returned 404
-  'marketplace.routes.js': '/api/marketplace'
+  'marketplace.routes.js': '/api/marketplace',
+  // FIX: smart-groups.js was missing — ALL Group OS tabs returned 404
+  'smart-groups.js': '/api/groups',
+  // FIX: invites.js was missing — group invite links returned 404
+  'invites.js': '/api/invites',
 };
 
 // ===== HELPER FUNCTIONS =====

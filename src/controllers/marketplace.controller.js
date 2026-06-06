@@ -12,6 +12,29 @@
 const { Op } = require('sequelize');
 const crypto = require('crypto');
 const path   = require('path');
+const fs     = require('fs');
+const multer = require('multer');
+
+// ─── Ensure marketplace uploads directory exists ──────────────────────────────
+const MARKETPLACE_UPLOAD_DIR = path.join(process.cwd(), 'uploads', 'marketplace');
+try { fs.mkdirSync(MARKETPLACE_UPLOAD_DIR, { recursive: true }); } catch(_) {}
+
+// ─── Multer storage for marketplace images ────────────────────────────────────
+const _marketplaceStorage = multer.diskStorage({
+    destination: (req, file, cb) => cb(null, MARKETPLACE_UPLOAD_DIR),
+    filename: (req, file, cb) => {
+        const ext = path.extname(file.originalname).toLowerCase() || '.jpg';
+        cb(null, `product-${Date.now()}-${Math.round(Math.random()*1e6)}${ext}`);
+    }
+});
+const _marketplaceUpload = multer({
+    storage: _marketplaceStorage,
+    limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+    fileFilter: (req, file, cb) => {
+        if (/^image\//i.test(file.mimetype)) cb(null, true);
+        else cb(new Error('Only image files are allowed'), false);
+    }
+}).single('image');
 
 // ─── Error helpers ────────────────────────────────────────────────────────────
 let AppError;
@@ -232,12 +255,20 @@ class MarketplaceController {
 
     // ── POST /api/marketplace/products/upload-image ───────────────────────────
     async uploadImage(req, res, next) {
-        try {
-            if (!req.file) return next(new AppError('No file uploaded', 400));
-            // In production: upload to S3/Cloudinary. Here: return local path.
-            const url = `/uploads/marketplace/${req.file.filename}`;
-            return ok(res, { url }, 'Image uploaded', 201);
-        } catch(e) { err(next, e, 'uploadImage'); }
+        // Run multer middleware inline
+        _marketplaceUpload(req, res, async (multerErr) => {
+            try {
+                if (multerErr) return next(new AppError(multerErr.message || 'File upload failed', 400));
+                if (!req.file) return next(new AppError('No file uploaded', 400));
+                // Build absolute URL so the frontend can load the image cross-origin
+                const baseUrl = process.env.RENDER_EXTERNAL_URL ||
+                                process.env.BACKEND_URL ||
+                                `${req.protocol}://${req.get('host')}`;
+                const relativePath = `/uploads/marketplace/${req.file.filename}`;
+                const url = `${baseUrl.replace(/\/+$/, '')}${relativePath}`;
+                return ok(res, { url, relativePath }, 'Image uploaded', 201);
+            } catch(e) { err(next, e, 'uploadImage'); }
+        });
     }
 
     // ── GET /api/marketplace/categories ───────────────────────────────────────
@@ -1009,6 +1040,14 @@ function _reviewerInclude(R) {
 function _formatProduct(row) {
     const r = row.toJSON ? row.toJSON() : { ...row };
     const meta = r.metadata || {};
+    // FIX: convert all image paths to absolute URLs so cross-origin frontend can load them
+    const rawImages = Array.isArray(r.images) ? r.images : [];
+    const base = (process.env.RENDER_EXTERNAL_URL || process.env.BACKEND_URL || '').replace(/\/+$/, '');
+    const images = rawImages.map(u => {
+        if (!u) return '';
+        if (/^https?:\/\//.test(u)) return u;
+        return base ? `${base}${u.startsWith('/') ? '' : '/'}${u}` : u;
+    }).filter(Boolean);
     return {
         id:             r.id,
         seller_id:      r.sellerId || r.seller_id,
@@ -1023,7 +1062,7 @@ function _formatProduct(row) {
         description:    r.description || '',
         category:       r.category,
         type:           r.type,
-        images:         r.images || [],
+        images:         images,
         tags:           r.tags || [],
         price:          parseFloat(r.price) || 0,
         original_price: parseFloat(meta.original_price) || 0,
@@ -1197,12 +1236,38 @@ async function _handleMpesaSuccess(callbackData) {
         const amt   = items.find(i => i.Name === 'Amount')?.Value;
         const checkoutId = callbackData?.CheckoutRequestID;
 
-        // Update order by payment ref or recent pending orders
         if (checkoutId) {
             await O.update(
                 { status:'paid', paidAt: new Date(), paymentRef: ref },
                 { where: { paymentRef: checkoutId } }
             );
+
+            // FIX: find updated order and notify buyer + seller via socket
+            try {
+                const updatedOrders = await O.findAll({ where: { paymentRef: checkoutId }, limit: 5 });
+                const io = global.__socketIO;
+                if (io && updatedOrders.length) {
+                    updatedOrders.forEach(order => {
+                        const payload = {
+                            orderId    : order.id,
+                            status     : 'paid',
+                            paymentRef : ref,
+                            amount     : amt,
+                            paidAt     : order.paidAt,
+                        };
+                        // Notify buyer
+                        if (order.buyerId) {
+                            io.to(`user:${order.buyerId}`).emit('order:status_changed', payload);
+                        }
+                        // Notify seller
+                        if (order.sellerId) {
+                            io.to(`user:${order.sellerId}`).emit('order:status_changed', payload);
+                        }
+                    });
+                }
+            } catch(notifyErr) {
+                logger.warn('[Marketplace] Socket notification after Mpesa failed:', notifyErr.message);
+            }
         }
         logger.info('[Marketplace] M-Pesa payment confirmed, ref:', ref);
     } catch(e) {
