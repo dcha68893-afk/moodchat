@@ -922,3 +922,204 @@ class WebSocketService {
 }
 
 module.exports = new WebSocketService();
+// ── PHASE14 FIX: sync:missed_messages and sync:missed_events handlers ─────────
+// These were completely missing — clients reconnecting after a disconnect
+// had no way to fetch messages they missed while offline.
+// Added to setupConnectionHandler() via monkey-patch to avoid restructuring.
+
+const _originalSetupConnectionHandler = WebSocketService.prototype.setupConnectionHandler;
+WebSocketService.prototype.setupConnectionHandler = function() {
+    // Run original first
+    _originalSetupConnectionHandler.call(this);
+
+    const io = this.getIO();
+    if (!io) return this;
+
+    // Patch: add missed-sync handlers to every new connection
+    io.on('connection', (socket) => {
+        const userId = socket._authenticatedUserId;
+        if (!userId) return;
+
+        // sync:missed_messages — client requests messages it missed since lastSyncAt
+        socket.off('sync:missed_messages').on('sync:missed_messages', async ({ chatIds, since } = {}) => {
+            try {
+                const sequelize = require('../models').sequelize;
+                if (!sequelize || !since) return;
+
+                const sinceDate = new Date(since);
+                if (isNaN(sinceDate.getTime())) return;
+
+                // For each chatId the client knows about, get messages since `since`
+                const chatList = Array.isArray(chatIds) ? chatIds.slice(0, 20) : [];
+
+                if (chatList.length === 0) {
+                    // Get all chats the user participates in
+                    const [chats] = await sequelize.query(
+                        `SELECT DISTINCT "chatId" FROM chat_participants WHERE "userId" = :userId LIMIT 20`,
+                        { replacements: { userId }, type: sequelize.QueryTypes.SELECT }
+                    ).catch(() => [[]]);
+                    chatList.push(...(chats || []).map(c => c.chatId));
+                }
+
+                for (const chatId of chatList) {
+                    try {
+                        const messages = await sequelize.query(
+                            `SELECT m.*, u.username AS "senderUsername", u.avatar AS "senderAvatar"
+                             FROM "Messages" m
+                             LEFT JOIN "Users" u ON u.id = m."senderId"
+                             WHERE m."chatId" = :chatId
+                               AND m."createdAt" > :since
+                               AND m."isDeleted" = false
+                             ORDER BY m."createdAt" ASC
+                             LIMIT 50`,
+                            { replacements: { chatId, since: sinceDate }, type: sequelize.QueryTypes.SELECT }
+                        ).catch(() => []);
+
+                        if (messages && messages.length > 0) {
+                            socket.emit('sync:missed_messages_result', { chatId, messages, since });
+                        }
+                    } catch (_) {}
+                }
+
+                socket.emit('sync:missed_messages_done', { chatIds: chatList, since });
+            } catch (err) {
+                console.warn('[WSService] sync:missed_messages error:', err.message);
+            }
+        });
+
+        // sync:missed_events — client requests friend/group/status events since lastSyncAt
+        socket.off('sync:missed_events').on('sync:missed_events', async ({ since, types } = {}) => {
+            try {
+                const sinceDate = new Date(since);
+                if (isNaN(sinceDate.getTime())) return;
+
+                const payload = { since, events: [] };
+
+                // Emit pending friend requests
+                try {
+                    const sequelize = require('../models').sequelize;
+                    const friends = await sequelize.query(
+                        `SELECT f.id, f."requesterId", f."recipientId", f.status, f."createdAt",
+                                u.username AS "requesterUsername", u.avatar AS "requesterAvatar"
+                         FROM "Friends" f
+                         LEFT JOIN "Users" u ON u.id = f."requesterId"
+                         WHERE f."recipientId" = :userId
+                           AND f.status = 'pending'
+                           AND f."createdAt" > :since
+                         LIMIT 20`,
+                        { replacements: { userId, since: sinceDate }, type: sequelize.QueryTypes.SELECT }
+                    ).catch(() => []);
+
+                    if (friends && friends.length > 0) {
+                        friends.forEach(f => {
+                            socket.emit('friend:request', {
+                                requestId: f.id,
+                                senderId: f.requesterId,
+                                senderUsername: f.requesterUsername,
+                                senderAvatar: f.requesterAvatar,
+                                createdAt: f.createdAt
+                            });
+                        });
+                        payload.events.push({ type: 'friend_requests', count: friends.length });
+                    }
+                } catch (_) {}
+
+                socket.emit('sync:missed_events_done', payload);
+            } catch (err) {
+                console.warn('[WSService] sync:missed_events error:', err.message);
+            }
+        });
+
+        // online:check — client asks if specific users are online
+        socket.off('online:check').on('online:check', ({ userIds } = {}) => {
+            try {
+                if (!Array.isArray(userIds)) return;
+                const result = {};
+                userIds.slice(0, 50).forEach(uid => {
+                    const intUid = parseInt(uid, 10);
+                    result[uid] = this.isUserOnline ? this.isUserOnline(intUid) :
+                        (this.onlineUsers && this.onlineUsers.has(intUid));
+                });
+                socket.emit('online:status', result);
+            } catch (_) {}
+        });
+    });
+
+    return this;
+};
+
+// ── PHASE14 FIX: mark_as_read + group:join socket handlers ───────────────────
+
+const _originalSetupConnectionHandler2 = WebSocketService.prototype.setupConnectionHandler;
+WebSocketService.prototype.setupConnectionHandler = function() {
+    _originalSetupConnectionHandler2.call(this);
+    const io = this.getIO();
+    if (!io) return this;
+
+    io.on('connection', (socket) => {
+        const userId = socket._authenticatedUserId;
+        if (!userId) return;
+
+        // mark_as_read — real-time read receipt broadcast
+        socket.off('mark_as_read').on('mark_as_read', async ({ chatId, messageIds } = {}) => {
+            try {
+                if (!chatId) return;
+                const sequelize = require('../models').sequelize;
+
+                // Persist read receipts
+                if (Array.isArray(messageIds) && messageIds.length > 0) {
+                    await sequelize.query(
+                        `INSERT INTO "ReadReceipts" ("messageId","userId","readAt","createdAt","updatedAt")
+                         SELECT unnest(ARRAY[:messageIds]::int[]), :userId, NOW(), NOW(), NOW()
+                         ON CONFLICT ("messageId","userId") DO NOTHING`,
+                        { replacements: { messageIds: messageIds.map(Number), userId }, type: sequelize.QueryTypes.INSERT }
+                    ).catch(() => {});
+                }
+
+                // Broadcast to chat room so sender sees read tick
+                socket.to(`chat:${chatId}`).emit('message:read', {
+                    chatId,
+                    readerId: userId,
+                    messageIds: messageIds || [],
+                    readAt: new Date().toISOString()
+                });
+            } catch (err) {
+                console.warn('[WSService] mark_as_read error:', err.message);
+            }
+        });
+
+        // group:join — client requests to join a group's socket room after creation
+        socket.off('group:join').on('group:join', async ({ groupId } = {}) => {
+            try {
+                if (!groupId) return;
+                // Verify membership before joining room
+                const sequelize = require('../models').sequelize;
+                const [member] = await sequelize.query(
+                    `SELECT 1 FROM "GroupMembers" WHERE "groupId"=:groupId AND "userId"=:userId AND "leftAt" IS NULL LIMIT 1`,
+                    { replacements: { groupId, userId }, type: sequelize.QueryTypes.SELECT }
+                ).catch(() => [null]);
+
+                if (member) {
+                    socket.join(`group:${groupId}`);
+                    socket.join(`group_${groupId}`);
+                    socket.emit('group:joined', { groupId, success: true });
+                    console.log(`[WSService] uid=${userId} joined group:${groupId}`);
+                }
+            } catch (err) {
+                console.warn('[WSService] group:join error:', err.message);
+            }
+        });
+
+        // message:delivered — client acknowledges delivery
+        socket.off('message:delivered').on('message:delivered', ({ chatId, messageId } = {}) => {
+            if (!chatId || !messageId) return;
+            socket.to(`chat:${chatId}`).emit('message:delivered', {
+                chatId, messageId,
+                deliveredTo: userId,
+                deliveredAt: new Date().toISOString()
+            });
+        });
+    });
+
+    return this;
+};
