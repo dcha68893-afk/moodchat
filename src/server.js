@@ -3965,46 +3965,7 @@ class Application {
             const mainRouter = require('./routes/index');
 
             // Server health endpoint (public) - moved to avoid conflict with user status routes
-            this.app.get('/api/health', (req, res) => {
-                logger.logPublicRouteAccess(req.path, req.method);
-                systemState.incrementMetric('publicRouteAccess');
-                const isReady = systemState.isServerReady();
-                const overallState = systemState.state.overall;
-                
-                return res.json({
-                    success: true,
-                    server: config.get('APP_NAME'),
-                    status: overallState.toLowerCase(),
-                    ready: isReady,
-                    timestamp: new Date().toISOString(),
-                    environment: config.get('NODE_ENV'),
-                    version: config.get('API_VERSION'),
-                    auth: {
-                        mode: 'PROTECTED_ROUTES_ONLY',
-                        description: 'Public routes accessible without JWT'
-                    },
-                    websocket: {
-                        enabled: config.get('FEATURE_WEBSOCKETS'),
-                        state: this.websocket?.state || 'DISABLED'
-                    },
-                    cors: {
-                        allowedOrigins: corsManager.getAllowedOrigins().slice(0, 5),
-                        total: corsManager.getAllowedOrigins().length
-                    },
-                    degradedServices: {
-                        redis: this.redis && !systemState.isConnectionHealthy('redis'),
-                        websocket: !systemState.isConnectionHealthy('websocket')
-                    },
-                    metrics: systemState.state.metrics,
-                    cache: loginCache.getStats(),
-                    optimizations: {
-                        uvThreadpoolSize: parseInt(process.env.UV_THREADPOOL_SIZE, 10) || 16,
-                        connectionPool: config.getDatabasePoolConfig(),
-                        queryTimeout: config.get('QUERY_TIMEOUT_MS'),
-                        compressionEnabled: config.get('COMPRESSION_ENABLED')
-                    }
-                });
-            });
+            // NOTE: /api/health is registered in setupHealthEndpoints() below — no duplicate here.
             
             // PHASE10: Transport runtime diagnostics dashboard
             this.app.get('/api/transport', (req, res) => {
@@ -4883,6 +4844,9 @@ class Application {
                             console.log(`[Socket.IO] ✅ Auth accepted for userId=${userId}`);
 
                             // Attach for downstream handlers
+                            // FIX-CRITICAL: webSocketService.setupConnectionHandler reads
+                            // socket._authenticatedUserId — must set it here in the middleware.
+                            socket._authenticatedUserId   = userId;
                             socket.data.userId            = userId;
                             socket.handshake.auth.userId  = userId;
                             next();

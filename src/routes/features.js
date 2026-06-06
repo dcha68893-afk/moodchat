@@ -17,7 +17,7 @@ router.get(
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
-      const userId = req.user.userId;
+      const userId = req.user.userId || req.user.id;
 
       const [features, userPreferences] = await Promise.all([
         FeatureFlag.findAll({
@@ -80,7 +80,7 @@ router.post(
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
-      const userId = req.user.userId;
+      const userId = req.user.userId || req.user.id;
       const { featureId } = req.params;
       const { enabled, settings } = req.body;
 
@@ -161,7 +161,7 @@ router.get(
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
-      const userId = req.user.userId;
+      const userId = req.user.userId || req.user.id;
 
       const preferences = await UserFeaturePreference.findAll({
         where: { userId },
@@ -203,7 +203,7 @@ router.get(
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
-      const userId = req.user.userId;
+      const userId = req.user.userId || req.user.id;
       const { featureName } = req.params;
 
       const feature = await FeatureFlag.findOne({
@@ -262,7 +262,7 @@ router.put(
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
-      const userId = req.user.userId;
+      const userId = req.user.userId || req.user.id;
       const { featureName } = req.params;
       const { settings, enabled } = req.body;
 
@@ -404,7 +404,7 @@ router.post(
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
-      const userId = req.user.userId;
+      const userId = req.user.userId || req.user.id;
       const { themeId } = req.body;
 
       const availableThemes = ['light', 'dark', 'blue', 'purple', 'green', 'midnight'];
@@ -523,7 +523,7 @@ router.post(
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
-      const userId = req.user.userId;
+      const userId = req.user.userId || req.user.id;
       const { languageCode } = req.body;
 
       const availableLanguages = ['en', 'es', 'fr', 'de', 'ar', 'zh', 'ja', 'ru'];
@@ -642,7 +642,7 @@ router.get(
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
-      const userId = req.user.userId;
+      const userId = req.user.userId || req.user.id;
 
       const user = await User.findByPk(userId);
       const userPlan = user.plan || 'free';
@@ -736,7 +736,7 @@ router.get(
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
-      const userId = req.user.userId;
+      const userId = req.user.userId || req.user.id;
 
       const user = await User.findByPk(userId);
       const isBetaTester = user.isBetaTester || false;
@@ -845,7 +845,7 @@ router.post(
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
-      const userId = req.user.userId;
+      const userId = req.user.userId || req.user.id;
       const { featureIds, reason } = req.body;
 
       if (!featureIds || !Array.isArray(featureIds) || featureIds.length === 0) {
@@ -893,7 +893,7 @@ router.post(
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
-      const userId = req.user.userId;
+      const userId = req.user.userId || req.user.id;
       const { confirmation } = req.body;
 
       if (!confirmation || confirmation !== 'RESET ALL SETTINGS') {

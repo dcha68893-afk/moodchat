@@ -122,7 +122,7 @@ const MODEL_WHITELIST = [
   'SharedMood', 'Notification', 'Friend', 'Calls', 'Groups', 'Media', 'Mood',
   'Status', 'StatusView', 'StatusReaction', 'StatusReply', 'Category', 'Template', 'Notes', 'File', 'Features',
   // ── Marketplace models ──────────────────────────────────────────────────────
-  'Tool', 'Order', 'Review',
+  'Tool', 'Order', 'Review', 'Cart', 'Coupon',
   // ── Group OS models — CRITICAL FIX: were missing, causing all Group OS tabs
   //    to return 503 "Service unavailable" because _m() always returned null ──
   'GroupTask', 'GroupTaskAssignment',
@@ -133,6 +133,7 @@ const MODEL_WHITELIST = [
   'GroupFinance',
   'GroupAISummary',
   'GroupActivityLog',
+  'GroupAnalytics',
 ];
 
 // CRITICAL: Patterns that indicate NON-MODEL files
