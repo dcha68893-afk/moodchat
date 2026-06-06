@@ -1120,4 +1120,37 @@ router.post('/:callId/leave', apiRateLimiter, asyncHandler(async (req, res) => {
   }
 }));
 
+// ── GET /api/calls/ice-config — Return STUN/TURN server credentials ──────────
+// Called by calls-core.js after initiating/accepting a call (event: turn:config).
+// If TURN_SECRET is not set, returns free STUN servers only.
+router.get('/ice-config', asyncHandler(async (req, res) => {
+  const userId  = req.user?.id || req.user?.userId;
+  const TURN_URL    = process.env.TURN_URL    || '';
+  const TURN_SECRET = process.env.TURN_SECRET || '';
+
+  const iceServers = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun.cloudflare.com:3478' },
+  ];
+
+  // Add authenticated TURN credentials if configured
+  if (TURN_URL && TURN_SECRET) {
+    try {
+      const crypto = require('crypto');
+      const ttl  = 86400; // 24-hour credential TTL
+      const time = Math.floor(Date.now() / 1000) + ttl;
+      const username = `${time}:user_${userId || 'anon'}`;
+      const credential = crypto
+        .createHmac('sha1', TURN_SECRET)
+        .update(username)
+        .digest('base64');
+      iceServers.push({ urls: `turn:${TURN_URL}`, username, credential });
+      iceServers.push({ urls: `turns:${TURN_URL}?transport=tcp`, username, credential });
+    } catch (_e) { /* TURN credential generation failed — fall back to STUN only */ }
+  }
+
+  return res.json({ success: true, iceServers, ttl: 86400 });
+}));
+
 module.exports = router;

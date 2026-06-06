@@ -321,6 +321,60 @@ router.post('/mark-read/batch', apiRateLimiter, asyncHandler(async (req, res) =>
 }));
 
 // ============================================================================
+// POST /api/messages/mark-delivered/batch - Mark messages as delivered
+// Called by messages-core.js ackMessageDelivered() when a message is received
+// ============================================================================
+router.post('/mark-delivered/batch', apiRateLimiter, asyncHandler(async (req, res) => {
+  try {
+    const userId = req.user?.id || req.user?.userId;
+    if (!userId) return res.status(401).json({ success: false, message: 'Unauthorized' });
+
+    const { chatId, messageIds } = req.body;
+    if (!chatId || !Array.isArray(messageIds) || messageIds.length === 0) {
+      return res.status(400).json({ success: false, message: 'chatId and messageIds[] required' });
+    }
+
+    const safeIds = messageIds.filter(id => id && (typeof id === 'number' || typeof id === 'string'));
+    if (safeIds.length === 0) {
+      return res.status(400).json({ success: false, message: 'No valid messageIds provided' });
+    }
+
+    const sequelize = require('../models').sequelize;
+    await sequelize.query(
+      `UPDATE "Messages"
+         SET "deliveredAt" = NOW(), "updatedAt" = NOW()
+       WHERE id IN (:ids)
+         AND "chatId" = :chatId
+         AND "deliveredAt" IS NULL`,
+      { replacements: { ids: safeIds, chatId: parseInt(chatId, 10) }, type: sequelize.QueryTypes.UPDATE }
+    );
+
+    // Broadcast delivery receipt to sender via WebSocket
+    try {
+      const wsService = require('../services/webSocketService');
+      const io = wsService.getIO ? wsService.getIO() : (global.__socketIO || global.io);
+      if (io) {
+        const msgRows = await sequelize.query(
+          `SELECT "senderId", id FROM "Messages" WHERE id IN (:ids)`,
+          { replacements: { ids: safeIds }, type: sequelize.QueryTypes.SELECT }
+        );
+        const senderIds = [...new Set(msgRows.map(r => r.senderId))];
+        for (const senderId of senderIds) {
+          wsService.sendToUser
+            ? wsService.sendToUser(senderId, 'message:delivered', { messageIds: safeIds, chatId, deliveredBy: userId, deliveredAt: new Date().toISOString() })
+            : io.to(`user:${senderId}`).emit('message:delivered', { messageIds: safeIds, chatId, deliveredBy: userId });
+        }
+      }
+    } catch (_e) { /* non-fatal */ }
+
+    return res.status(200).json({ success: true, message: 'Delivery receipts recorded', count: safeIds.length });
+  } catch (error) {
+    console.error('[messages] mark-delivered/batch error:', error.message);
+    res.status(500).json({ success: false, message: 'Failed to mark messages as delivered' });
+  }
+}));
+
+// ============================================================================
 // GET /api/messages - Fetch messages by ?chatId= query parameter
 // THIS IS THE PRIMARY ROUTE the frontend uses:
 //   GET /api/messages?chatId=2&limit=50
@@ -1158,8 +1212,9 @@ router.get('/bulk/history/:batchId', apiRateLimiter, asyncHandler(async (req, re
 
 // ============================================================================
 // PATCH /api/messages/:messageId - Edit a message
+// PUT alias: frontend (messages-core.js editMessage) calls PUT, not PATCH
 // ============================================================================
-router.patch('/:messageId', apiRateLimiter, asyncHandler(async (req, res) => {
+const _editMessageHandler = asyncHandler(async (req, res) => {
   try {
     const messageId = safeInt(req.params.messageId);
     if (!messageId) return res.status(400).json({ success: false, message: 'Invalid messageId' });
@@ -1215,7 +1270,9 @@ router.patch('/:messageId', apiRateLimiter, asyncHandler(async (req, res) => {
     console.error('Error editing message:', error);
     res.status(500).json({ status: 'error', message: 'Failed to edit message' });
   }
-}));
+});
+router.patch('/:messageId', apiRateLimiter, _editMessageHandler);
+router.put('/:messageId',   apiRateLimiter, _editMessageHandler); // PUT alias for frontend
 
 // ============================================================================
 // DELETE /api/messages/:messageId - Delete a message

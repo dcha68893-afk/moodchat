@@ -18,7 +18,8 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: false,
       },
       userId: {
-        type: DataTypes.UUID,
+        // FIX: Was UUID but Users.id is INTEGER — must match for FK constraint and queries
+        type: DataTypes.INTEGER,
         allowNull: false,
         field: 'user_id',
         comment: 'Owner of this cart (one active cart per user)',

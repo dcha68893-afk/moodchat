@@ -672,6 +672,27 @@ async function addMissingColumns() {
       } catch (indexError) {
         console.log(`[Migration] ⚠️ Could not add indexes: ${indexError.message}`);
       }
+
+      // PERFORMANCE FIX: Add critical missing indexes for the most common queries
+      // (chatId, isDeleted) covers the GET /messages query which runs on every chat open
+      // chat_participants(userId) covers getUserChats which runs on every page load
+      // GroupMembers(groupId) covers member count queries
+      try {
+        await sequelize.query(`
+          CREATE INDEX IF NOT EXISTS idx_messages_chat_deleted  ON "Messages"("chatId", "isDeleted");
+          CREATE INDEX IF NOT EXISTS idx_messages_chat_created  ON "Messages"("chatId", "createdAt" DESC);
+          CREATE INDEX IF NOT EXISTS idx_chat_participants_user  ON chat_participants("userId");
+          CREATE INDEX IF NOT EXISTS idx_chat_participants_chat  ON chat_participants("chatId");
+          CREATE INDEX IF NOT EXISTS idx_group_members_group     ON "GroupMembers"("groupId");
+          CREATE INDEX IF NOT EXISTS idx_group_members_user      ON "GroupMembers"("userId");
+          CREATE INDEX IF NOT EXISTS idx_status_creator          ON "Statuses"("userId", "expiresAt");
+          CREATE INDEX IF NOT EXISTS idx_status_views_status     ON "StatusViews"("statusId");
+          CREATE INDEX IF NOT EXISTS idx_notifications_user      ON "Notifications"("userId", "isRead");
+        `);
+        console.log(`[Migration] ✅ Added critical performance indexes`);
+      } catch (indexError) {
+        console.log(`[Migration] ⚠️ Could not add performance indexes: ${indexError.message}`);
+      }
     }
     
     if (tables.includes('Tokens')) {

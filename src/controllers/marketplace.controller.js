@@ -995,6 +995,80 @@ class MarketplaceController {
         } catch(e) { err(next, e, 'adminGetStats'); }
     }
 
+    // ── Admin: Approve product ─────────────────────────────────────────────
+    async adminApproveProduct(req, res, next) {
+        try {
+            if (req.user?.role !== 'admin') return next(new AppError('Admin only', 403));
+            const T = Model.Tool;
+            if (!T) return ok(res, {}, 'Product approved (model unavailable)');
+            const product = await T.findByPk(req.params.id);
+            if (!product) return res.status(404).json({ success: false, message: 'Product not found' });
+            await product.update({
+                status: 'active',
+                approval_status: 'approved',
+                approvalStatus: 'approved',
+                approvedAt: new Date(),
+                approved_at: new Date(),
+            });
+            // Notify seller via WebSocket if possible
+            try {
+                const io = global.__socketIO || global.io;
+                if (io && product.userId) {
+                    io.to(`user:${product.userId}`).emit('product:approved', { productId: product.id, title: product.title });
+                }
+            } catch(_) {}
+            return ok(res, product, 'Product approved');
+        } catch(e) { err(next, e, 'adminApproveProduct'); }
+    }
+
+    // ── Admin: Reject product ──────────────────────────────────────────────
+    async adminRejectProduct(req, res, next) {
+        try {
+            if (req.user?.role !== 'admin') return next(new AppError('Admin only', 403));
+            const T = Model.Tool;
+            if (!T) return ok(res, {}, 'Product rejected (model unavailable)');
+            const product = await T.findByPk(req.params.id);
+            if (!product) return res.status(404).json({ success: false, message: 'Product not found' });
+            const { reason } = req.body || {};
+            await product.update({
+                status: 'rejected',
+                approval_status: 'rejected',
+                approvalStatus: 'rejected',
+                rejectionReason: reason || 'Does not meet marketplace standards',
+                rejection_reason: reason || 'Does not meet marketplace standards',
+            });
+            try {
+                const io = global.__socketIO || global.io;
+                if (io && product.userId) {
+                    io.to(`user:${product.userId}`).emit('product:rejected', { productId: product.id, title: product.title, reason });
+                }
+            } catch(_) {}
+            return ok(res, product, 'Product rejected');
+        } catch(e) { err(next, e, 'adminRejectProduct'); }
+    }
+
+    // ── Admin: Get pending products ────────────────────────────────────────
+    async adminGetPendingProducts(req, res, next) {
+        try {
+            if (req.user?.role !== 'admin') return next(new AppError('Admin only', 403));
+            const T = Model.Tool;
+            if (!T) return ok(res, [], 'No products (model unavailable)');
+            const { Op: _Op } = require('sequelize');
+            const pending = await T.findAll({
+                where: {
+                    [_Op.or]: [
+                        { status: 'pending_review' },
+                        { approvalStatus: 'pending' },
+                        { approval_status: 'pending' },
+                    ]
+                },
+                order: [['createdAt', 'ASC']],
+                limit: parseInt(req.query.limit) || 50,
+            });
+            return ok(res, pending, `${pending.length} pending products`);
+        } catch(e) { err(next, e, 'adminGetPendingProducts'); }
+    }
+
 } // end class MarketplaceController
 
 // ══════════════════════════════════════════════════════════════════════════════

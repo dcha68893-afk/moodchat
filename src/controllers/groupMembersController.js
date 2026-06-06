@@ -99,20 +99,23 @@ class GroupMembersController {
         try {
             const { groupId } = req.params;
             const userId = req.user.id;
-            const { memberId, role = 'member', sendNotification = true } = req.body;
-            if (!groupId) throw new AppError('Group ID is required', 400);
-            if (!memberId) throw new AppError('Member ID is required', 400);
+            const { memberId: _rawMemberId, role = 'member', sendNotification = true } = req.body;
+            // FIX: Coerce to integers — frontend may send strings
+            const parsedGroupId = parseInt(groupId, 10);
+            const memberId = parseInt(_rawMemberId, 10);
+            if (!parsedGroupId || isNaN(parsedGroupId)) throw new AppError('Group ID is required', 400);
+            if (!memberId || isNaN(memberId)) throw new AppError('Member ID is required', 400);
 
-            const member = await groupMembersService.addMemberToGroup(groupId, userId, memberId, role, sendNotification);
+            const member = await groupMembersService.addMemberToGroup(parsedGroupId, userId, memberId, role, sendNotification);
 
             // FIX: Emit socket event AND include _localSync in HTTP response
             if (req.io) {
-                req.io.to(`group:${groupId}`).emit('group:member:added', {
-                    groupId, memberId, addedBy: userId, role, member,
+                req.io.to(`group:${parsedGroupId}`).emit('group:member:added', {
+                    groupId: parsedGroupId, memberId, addedBy: userId, role, member,
                     timestamp: new Date(),
                 });
                 req.io.to(`user:${memberId}`).emit('group:localSync', {
-                    action: 'member_add', groupId, member,
+                    action: 'member_add', groupId: parsedGroupId, member,
                 });
             }
 

@@ -8,31 +8,9 @@ const config = require('./config');
 const routes = require('./routes');
 const errorHandler = require('./middleware/errorHandler');
 const logger = require('./utils/logger');
-const mongoose = require('mongoose');
+// NOTE: DB is PostgreSQL via Sequelize — initialized in server.js, not app.js
 
 const app = express();
-
-// Database connection
-const connectDB = async () => {
-  try {
-    if (config.database && config.database.url) {
-      await mongoose.connect(config.database.url, {
-        useNewUrlParser: true,
-        useUnifiedTopology: true,
-      });
-      logger.info('MongoDB connected successfully');
-    } else {
-      logger.warn('Database URL not configured. Running without database connection.');
-    }
-  } catch (error) {
-    logger.error('MongoDB connection error:', error.message);
-    // Don't crash the app on DB connection failure
-    // Allow the app to run in read-only mode or with fallback
-  }
-};
-
-// Initialize database connection
-connectDB();
 
 // Security middleware
 app.use(helmet({
@@ -162,9 +140,15 @@ app.get('/health', async (req, res) => {
       uptime: process.uptime(),
     };
 
-    // Check database connection if configured
+    // Check database connection if configured (uses Sequelize/PostgreSQL)
     if (config.database && config.database.url) {
-      healthCheck.database = mongoose.connection.readyState === 1 ? 'connected' : 'disconnected';
+      try {
+        const db = require('./models');
+        await db.sequelize.authenticate();
+        healthCheck.database = 'connected';
+      } catch (_dbErr) {
+        healthCheck.database = 'disconnected';
+      }
     }
 
     const statusCode = healthCheck.database === 'disconnected' ? 503 : 200;

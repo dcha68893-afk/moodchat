@@ -80,6 +80,10 @@ if (ctrl) {
     router.delete('/admin/products/:id', ctrl.adminRemoveProduct.bind(ctrl));
     router.post('/admin/ban/:sellerId',  ctrl.adminBanSeller.bind(ctrl));
     router.get('/admin/stats',           ctrl.adminGetStats.bind(ctrl));
+    // Admin product approval (required for seller dashboard approval flow)
+    router.post('/admin/products/:id/approve', ctrl.adminApproveProduct ? ctrl.adminApproveProduct.bind(ctrl) : ctrl.adminRemoveProduct.bind(ctrl));
+    router.post('/admin/products/:id/reject',  ctrl.adminRejectProduct  ? ctrl.adminRejectProduct.bind(ctrl)  : ctrl.adminRemoveProduct.bind(ctrl));
+    router.get('/admin/products/pending',      ctrl.adminGetPendingProducts ? ctrl.adminGetPendingProducts.bind(ctrl) : ctrl.getProducts.bind(ctrl));
 }
 
 module.exports = router;

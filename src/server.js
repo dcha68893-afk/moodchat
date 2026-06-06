@@ -5648,6 +5648,40 @@ async function main() {
     }
 })();
 
+// ── STATUS EXPIRY CLEANUP CRON ───────────────────────────────────────────────
+// Runs every 15 minutes to soft-delete statuses whose expiresAt has passed.
+// Uses setInterval (no external cron dependency) and never crashes the server.
+(function _startStatusExpiryCron() {
+    const INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
+    async function _cleanExpiredStatuses() {
+        try {
+            const db = require('./models');
+            const Status = db.Status;
+            if (!Status || !db.sequelize) return;
+            const { Op } = require('sequelize');
+            const [affected] = await db.sequelize.query(
+                `UPDATE "Statuses"
+                    SET "isActive" = false, "updatedAt" = NOW()
+                  WHERE "expiresAt" IS NOT NULL
+                    AND "expiresAt" < NOW()
+                    AND "isActive" = true`,
+                { type: db.sequelize.QueryTypes.UPDATE }
+            );
+            if (affected > 0) {
+                console.log(`[StatusCron] ✅ Expired ${affected} status(es)`);
+            }
+        } catch (e) {
+            // Never crash server - log and continue
+            console.warn('[StatusCron] Cleanup error (non-fatal):', e.message);
+        }
+    }
+    // Run once on startup, then every 15 minutes
+    setTimeout(_cleanExpiredStatuses, 10000);
+    const _cronTimer = setInterval(_cleanExpiredStatuses, INTERVAL_MS);
+    if (_cronTimer.unref) _cronTimer.unref(); // Don't block process exit
+    console.log('⏰ Status expiry cron started (15-minute interval)');
+})();
+
 // Export for testing and programmatic use
 module.exports = {
     Application,
