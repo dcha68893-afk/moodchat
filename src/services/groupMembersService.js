@@ -735,12 +735,19 @@ class GroupMembersService {
                 where,
                 include: [
                     { model: Groups, as: 'userGroup', attributes: ['id','name','avatar','description'], required: false },
-                    { model: Users,  as: 'inviter',   attributes: ['id','username','avatar'],           foreignKey: 'inviterId', required: false },
+                    { model: Users,  as: 'inviter',   attributes: ['id','username','avatar','displayName','firstName'],           foreignKey: 'inviterId', required: false },
                 ],
                 order: [['createdAt', 'DESC']],
                 limit: 100,
             }));
-            return { invitations: rows, total: rows.length };
+            // FIX-GROUP-INVITE: Normalize the serialized alias so frontend gets both
+            // 'userGroup' (Sequelize alias) AND 'group' (what old frontend code reads).
+            const normalized = rows.map(inv => {
+                const plain = inv.toJSON ? inv.toJSON() : { ...inv };
+                if (plain.userGroup && !plain.group) plain.group = plain.userGroup;
+                return plain;
+            });
+            return { invitations: normalized, total: normalized.length };
         } catch (e) {
             console.error('[GroupMembersService] getUserInvitations error:', e.message);
             return { invitations: [], total: 0 };

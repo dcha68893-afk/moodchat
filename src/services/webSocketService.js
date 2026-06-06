@@ -1123,3 +1123,135 @@ WebSocketService.prototype.setupConnectionHandler = function() {
 
     return this;
 };
+// ── PHASE14 FIX P0: WebRTC socket-level signaling relay ───────────────────────
+// ROOT CAUSE: All WebRTC signals (offer, answer, ICE) were relayed via HTTP POST
+// /:callId/signal. This adds 200-800ms per ICE candidate — enough to fail
+// connection establishment behind symmetric NAT (Render/cloud environments).
+// FIX: Add direct socket handlers so ICE candidates travel via WebSocket (~20ms).
+// Backend simply relays to the target user's socket room — no DB write needed.
+
+const _originalSetupConnectionHandlerWRTC = WebSocketService.prototype.setupConnectionHandler;
+WebSocketService.prototype.setupConnectionHandler = function() {
+    _originalSetupConnectionHandlerWRTC.call(this);
+    const io = this.getIO();
+    if (!io) return this;
+
+    io.on('connection', (socket) => {
+        const userId = socket._authenticatedUserId;
+        if (!userId) return;
+
+        // webrtc:signal — relay offer/answer/ICE directly via socket (low latency)
+        socket.off('webrtc:signal').on('webrtc:signal', (payload = {}) => {
+            try {
+                const { targetUserId, callId, type, sdp, candidate } = payload;
+                if (!targetUserId) return;
+                const relayPayload = {
+                    callId,
+                    fromUserId: userId,
+                    type,
+                    sdp:       sdp       || undefined,
+                    candidate: candidate || undefined,
+                    timestamp: Date.now()
+                };
+                const targets = [
+                    `user:${targetUserId}`,
+                    `user_${targetUserId}`,
+                    `user:${String(targetUserId)}`,
+                    `user_${String(targetUserId)}`
+                ];
+                targets.forEach(room => {
+                    try { io.to(room).emit('webrtc:signal', relayPayload); } catch (_) {}
+                });
+            } catch (err) {
+                console.warn('[WSService] webrtc:signal relay error:', err.message);
+            }
+        });
+
+        // webrtc_signal — underscore alias (calls-core.js also emits this form)
+        socket.off('webrtc_signal').on('webrtc_signal', (payload = {}) => {
+            try {
+                const { targetUserId, callId, type, sdp, candidate } = payload;
+                if (!targetUserId) return;
+                const relayPayload = {
+                    callId,
+                    fromUserId: userId,
+                    type,
+                    sdp:       sdp       || undefined,
+                    candidate: candidate || undefined,
+                    timestamp: Date.now()
+                };
+                const targets = [
+                    `user:${targetUserId}`,
+                    `user_${targetUserId}`,
+                    `user:${String(targetUserId)}`,
+                    `user_${String(targetUserId)}`
+                ];
+                targets.forEach(room => {
+                    try { io.to(room).emit('webrtc:signal', relayPayload);
+                          io.to(room).emit('webrtc_signal', relayPayload); } catch (_) {}
+                });
+            } catch (err) {
+                console.warn('[WSService] webrtc_signal relay error:', err.message);
+            }
+        });
+
+        // call:heartbeat — keep call alive signal, relay to other participant
+        socket.off('call:heartbeat').on('call:heartbeat', ({ callId, targetUserId } = {}) => {
+            if (!callId || !targetUserId) return;
+            try {
+                io.to(`user:${targetUserId}`).emit('call:heartbeat', { callId, fromUserId: userId, ts: Date.now() });
+                io.to(`user_${targetUserId}`).emit('call:heartbeat', { callId, fromUserId: userId, ts: Date.now() });
+            } catch (_) {}
+        });
+    });
+
+    return this;
+};
+
+// ── PHASE14 FIX P0: socket message:send handler ───────────────────────────────
+// ROOT CAUSE: Frontend HybridTransportRuntime can emit 'message:send' via socket
+// in LAN/degraded-internet mode. Backend had no handler — messages silently dropped.
+// FIX: Add socket handler that persists via messageService and broadcasts to chat.
+
+const _originalSetupCH_MsgSend = WebSocketService.prototype.setupConnectionHandler;
+WebSocketService.prototype.setupConnectionHandler = function() {
+    _originalSetupCH_MsgSend.call(this);
+    const io = this.getIO();
+    if (!io) return this;
+
+    io.on('connection', (socket) => {
+        const userId = socket._authenticatedUserId;
+        if (!userId) return;
+
+        socket.off('message:send').on('message:send', async (payload = {}) => {
+            try {
+                const { chatId, content, type = 'text', replyToId, localId } = payload;
+                if (!chatId || !content) {
+                    socket.emit('message:send:error', { localId, error: 'chatId and content are required' });
+                    return;
+                }
+                const messageService = require('./messageService');
+                const msg = await messageService.createMessage({
+                    chatId: parseInt(chatId, 10),
+                    senderId: userId,
+                    content: String(content).trim().substring(0, 5000),
+                    type,
+                    replyToId: replyToId ? parseInt(replyToId, 10) : null
+                });
+                // Ack to sender with server-assigned ID
+                socket.emit('message:send:ack', {
+                    localId,
+                    messageId: msg.id,
+                    chatId,
+                    sentAt: msg.sentAt || msg.createdAt
+                });
+            } catch (err) {
+                const { localId } = payload || {};
+                console.warn('[WSService] message:send socket error:', err.message);
+                socket.emit('message:send:error', { localId, error: err.message });
+            }
+        });
+    });
+
+    return this;
+};

@@ -635,9 +635,14 @@ class GroupController {
 
             const io = global.__socketIO;
             if (io && inviteeId) {
-                io.to(`user:${inviteeId}`).emit('group:invitation:received', {
+                const invitePayload = {
                     groupId, invitationId: invitation?.id, invitedBy: userId, role, message, timestamp: new Date(),
-                });
+                };
+                // PHASE14 FIX: emit to all room variants — user:N (int), user:N (string), user_N
+                io.to(`user:${inviteeId}`).emit('group:invitation:received', invitePayload);
+                io.to(`user_${inviteeId}`).emit('group:invitation:received', invitePayload);
+                io.to(`user:${String(inviteeId)}`).emit('group:invitation:received', invitePayload);
+                io.to(`user_${String(inviteeId)}`).emit('group:invitation:received', invitePayload);
             }
 
             res.status(201).json({ success: true, message: 'Invitation sent successfully', data: { invitation } });

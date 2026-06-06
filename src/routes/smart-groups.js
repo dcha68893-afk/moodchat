@@ -5,6 +5,21 @@
 const express = require('express');
 const router  = express.Router({ mergeParams: true });
 
+// PHASE14 FIX: inject req.io so route handlers can emit socket events
+router.use((req, _res, next) => {
+    if (!req.io) req.io = global.__socketIO || null;
+    next();
+});
+
+// Helper: broadcast to group room via socket
+function _emitToGroup(io, groupId, event, payload) {
+    if (!io || !groupId) return;
+    try {
+        io.to(`group:${groupId}`).emit(event, payload);
+        io.to(`group_${groupId}`).emit(event, payload);
+    } catch (_) {}
+}
+
 // ── SAFE auth middleware ──────────────────────────────────────────────────
 function auth(req, res, next) {
     // Try multiple auth middleware paths used in this project
@@ -75,20 +90,20 @@ router.put('/:groupId/modules', auth, _handler((svc,req) => svc.ModuleService.se
 
 // ── TASKS ─────────────────────────────────────────────────────────────────
 router.get('/:groupId/tasks',              auth, _handler((svc,req) => svc.TaskService.list(gid(req), uid(req), req.query)));
-router.post('/:groupId/tasks',             auth, wrap(async(req,res) => { const svc=_svc(); if(!svc) return res.status(503).json({success:false,message:'Service unavailable'}); const r=await svc.TaskService.create(gid(req),uid(req),req.body); res.status(201).json({success:true,data:r}); }));
+router.post('/:groupId/tasks',             auth, wrap(async(req,res) => { const svc=_svc(); if(!svc) return res.status(503).json({success:false,message:'Service unavailable'}); const r=await svc.TaskService.create(gid(req),uid(req),req.body); _emitToGroup(req.io, gid(req), 'group:task:created', { groupId: gid(req), task: r, createdBy: uid(req) }); res.status(201).json({success:true,data:r}); }));
 router.put('/:groupId/tasks/:taskId',      auth, _handler((svc,req) => svc.TaskService.update(gid(req), uid(req), req.params.taskId, req.body)));
 router.delete('/:groupId/tasks/:taskId',   auth, _handler((svc,req) => svc.TaskService.delete(gid(req), uid(req), req.params.taskId)));
 
 // ── EVENTS ────────────────────────────────────────────────────────────────
 router.get('/:groupId/smart-events',                  auth, _handler((svc,req) => svc.EventService.list(gid(req), uid(req), req.query)));
-router.post('/:groupId/smart-events',                 auth, wrap(async(req,res) => { const svc=_svc(); if(!svc) return res.status(503).json({success:false,message:'Service unavailable'}); const r=await svc.EventService.create(gid(req),uid(req),req.body); res.status(201).json({success:true,data:r}); }));
+router.post('/:groupId/smart-events',                 auth, wrap(async(req,res) => { const svc=_svc(); if(!svc) return res.status(503).json({success:false,message:'Service unavailable'}); const r=await svc.EventService.create(gid(req),uid(req),req.body); _emitToGroup(req.io, gid(req), 'group:event:created', { groupId: gid(req), event: r, createdBy: uid(req) }); res.status(201).json({success:true,data:r}); }));
 router.post('/:groupId/smart-events/:eventId/rsvp',           auth, _handler((svc,req) => svc.EventService.rsvp(gid(req), uid(req), req.params.eventId, req.body.status)));
 router.post('/:groupId/smart-events/:eventId/attendance',     auth, _handler((svc,req) => svc.EventService.markAttendance(gid(req), uid(req), req.params.eventId, req.body.userId, req.body.status, req.body)));
 router.get('/:groupId/smart-events/:eventId/stats',           auth, _handler((svc,req) => svc.EventService.getStats(gid(req), uid(req), req.params.eventId)));
 
 // ── POLLS ─────────────────────────────────────────────────────────────────
 router.get('/:groupId/polls',               auth, _handler((svc,req) => svc.PollService.list(gid(req), uid(req), req.query)));
-router.post('/:groupId/polls',              auth, wrap(async(req,res) => { const svc=_svc(); if(!svc) return res.status(503).json({success:false,message:'Service unavailable'}); const r=await svc.PollService.create(gid(req),uid(req),req.body); res.status(201).json({success:true,data:r}); }));
+router.post('/:groupId/polls',              auth, wrap(async(req,res) => { const svc=_svc(); if(!svc) return res.status(503).json({success:false,message:'Service unavailable'}); const r=await svc.PollService.create(gid(req),uid(req),req.body); _emitToGroup(req.io, gid(req), 'group:poll:created', { groupId: gid(req), poll: r, createdBy: uid(req) }); res.status(201).json({success:true,data:r}); }));
 router.post('/:groupId/polls/:pollId/vote', auth, _handler((svc,req) => svc.PollService.vote(gid(req), uid(req), req.params.pollId, req.body.optionIds)));
 router.post('/:groupId/polls/:pollId/close',auth, _handler((svc,req) => svc.PollService.close(gid(req), uid(req), req.params.pollId)));
 
