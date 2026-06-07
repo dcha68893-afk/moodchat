@@ -247,54 +247,17 @@ class CallService {
     if (sdpAnswer) call.sdpAnswer = sdpAnswer;
     await call.save();
 
-    // FIX 7/8: Re-fetch with user associations so callerName/calleeName are available
-    //           These are required by calls-ui.js handleCallAccepted name resolution chain
-    let callWithUsers = call;
-    try {
-      const includes = this._buildIncludes();
-      if (includes.length > 0) {
-        const fetched = await Call.findOne({
-          where: { id: call.id },
-          include: includes,
-        });
-        if (fetched) callWithUsers = fetched;
-      }
-    } catch (fetchErr) {
-      console.warn('[CallService] answerCall: could not re-fetch with users:', fetchErr.message);
-    }
-
-    const callerDisplayName =
-      (callWithUsers.callInitiatorUser && (callWithUsers.callInitiatorUser.displayName || callWithUsers.callInitiatorUser.username)) ||
-      callWithUsers.callerName || 'Caller';
-    const calleeDisplayName =
-      (callWithUsers.callTargetUser && (callWithUsers.callTargetUser.displayName || callWithUsers.callTargetUser.username)) ||
-      callWithUsers.calleeName || 'User';
-    const callerAvatarUrl =
-      (callWithUsers.callInitiatorUser && callWithUsers.callInitiatorUser.avatar) || null;
-    const calleeAvatarUrl =
-      (callWithUsers.callTargetUser && callWithUsers.callTargetUser.avatar) || null;
-
     const eventData = {
-      callId:       call.id,
-      callerId:     call.callerId,
-      receiverId:   call.receiverId,
-      callType:     call.type,
-      type:         call.type,
+      callId:     call.id,
+      callerId:   call.callerId,
+      receiverId: call.receiverId,
+      callType:   call.type,
+      type:       call.type,
       participants: call.participants || [],
-      answeredBy:   call.answeredBy || [],
-      status:       'in-progress',
-      startedAt:    call.startedAt,
-      timestamp:    Date.now(),
-      // FIX 7: Always include caller/callee names at top-level for frontend name resolution
-      callerName:   callerDisplayName,
-      calleeName:   calleeDisplayName,
-      receiverName: calleeDisplayName,
-      userName:     calleeDisplayName,      // generic fallback used by older UI code
-      callerAvatar: callerAvatarUrl,
-      calleeAvatar: calleeAvatarUrl,
-      // Structured user objects for rich UI
-      callerInfo:   callWithUsers.callInitiatorUser || null,
-      calleeInfo:   callWithUsers.callTargetUser    || null,
+      answeredBy: call.answeredBy || [],
+      status:     'in-progress',
+      startedAt:  call.startedAt,
+      timestamp:  Date.now(),
     };
     await emitToAll(call.participants, 'call_accepted', eventData);   // matches calls-core.js CALL_ACCEPTED
     await emitToAll(call.participants, 'call_answered', eventData);
