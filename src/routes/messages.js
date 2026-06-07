@@ -679,15 +679,27 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
           allParticipantIds.map(uid => wsService.sendToUser(uid, 'message:new', populatedMessage))
         );
 
+        // FIX Bug #1 & #4: Fetch chat type so group broadcasts work correctly.
+        // Previously `chat` and `safeChatId` were never defined in this POST scope,
+        // causing a ReferenceError that crashed the entire realtime delivery block.
+        let _chatType = null;
+        try {
+          const _chatRows = await sequelize.query(
+            `SELECT type FROM chats WHERE id = :chatId LIMIT 1`,
+            { replacements: { chatId }, type: sequelize.QueryTypes.SELECT }
+          );
+          _chatType = _chatRows?.[0]?.type || null;
+        } catch (_) {}
+
         // FIX-AUDIT-2: Also emit group:message for group chats so group.html receives it
-        if (chat && (chat.type === 'group' || chat.isGroup)) {
+        if (_chatType === 'group') {
           try {
-            const groupPayload = { ...populatedMessage, groupId: safeChatId, chatId: safeChatId };
-            const io = wsService.getIO?.() || wsService.io;
-            if (io) {
-              io.to(`group:${safeChatId}`).emit('group:message', groupPayload);
-              io.to(`group_${safeChatId}`).emit('group:message', groupPayload);
-              io.to(`chat:${safeChatId}`).emit('new_group_message', groupPayload);
+            const groupPayload = { ...populatedMessage, groupId: chatId, chatId };
+            const _io = wsService.getIO?.() || wsService.io;
+            if (_io) {
+              _io.to(`group:${chatId}`).emit('group:message', groupPayload);
+              _io.to(`group_${chatId}`).emit('group:message', groupPayload);
+              _io.to(`chat:${chatId}`).emit('new_group_message', groupPayload);
             }
           } catch(_) {}
         }
