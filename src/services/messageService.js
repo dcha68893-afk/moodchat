@@ -163,30 +163,30 @@ class MessageService {
             // Get Socket.IO instance directly for reliable delivery
             const io = ws.getIO();
             if (io) {
-                // Use Socket.IO for real-time delivery to all participants
+                // FIX Bug 5: Emit ONLY to user rooms (not chat room) to prevent duplicate delivery.
+                // Previously: user rooms + chat:X room → receiver got message:new 2-4 times.
+                // The dedup set in messages-core prevented double renders but caused console noise.
+                // Now: single canonical delivery per user via user rooms only.
+                // Add a unique broadcastId so messages-core dedup still works as a safety net.
+                const _broadcastId = `msg_${payload.id || payload.messageId || Date.now()}_${chatId}`;
+                const payloadWithId = { ...payload, _broadcastId };
                 for (const { userId } of participants) {
                     // CRITICAL: skip blocked users
                     if (blockedUserIds.has(String(userId))) continue;
-                    // FIX: emit 'message:new' to ALL 4 room name variants (int + string × colon + underscore)
-                    // so delivery succeeds regardless of how the client joined their user room.
+                    // Skip sender — they already see optimistic message in their own UI
+                    if (String(userId) === String(senderId)) continue;
+                    // Emit to user room variants to maximise delivery regardless of join style
                     const strUid = String(userId);
-                    io.to(`user:${userId}`).emit('message:new', payload);
-                    io.to(`user_${userId}`).emit('message:new', payload);
-                    io.to(`user:${strUid}`).emit('message:new', payload);
-                    io.to(`user_${strUid}`).emit('message:new', payload);
+                    io.to(`user:${userId}`).emit('message:new', payloadWithId);
+                    io.to(`user_${strUid}`).emit('message:new', payloadWithId);
                 }
-                // Also broadcast to chat room (both naming variants) — but exclude sender
-                // FIX: Use except to avoid sender seeing their own message:new again
-                io.to(`chat:${chatId}`).except([`user:${senderId}`, `user_${senderId}`]).emit('message:new', payload);
-                io.to(`chat_${chatId}`).except([`user:${senderId}`, `user_${senderId}`]).emit('message:new', payload);
-                // FIX Bug7: one summary log instead of per-recipient spam
-                console.log(`[MessageService] ✅ Real-time delivery: chatId=${chatId}, recipients=${participants.length}`);
-                console.log(`[MessageService] 📤 Emitting to rooms:`, participants.map(p => [`user:${p.userId}`, `user_${p.userId}`]).flat());
-                console.log(`[MessageService] 📤 Message payload:`, { id: payload.id, chatId: payload.chatId, senderId: payload.senderId, content: payload.content?.substring(0, 50) });
+                // FIX Bug 5: Do NOT emit to chat:X / chat_X rooms — that would duplicate all above
+                console.log(`[MessageService] ✅ Real-time delivery: chatId=${chatId}, recipients=${participants.length - 1} (sender excluded)`);
             } else {
                 // Fallback to raw WebSocket service
                 // FIX: only emit 'message:new' (canonical) — sendToUser already targets all 4 room variants
                 for (const { userId } of participants) {
+                    if (String(userId) === String(senderId)) continue; // skip sender
                     await ws.sendToUser(userId, 'message:new', payload);
                 }
                 console.log(`[MessageService] ⚠️ Fallback WS delivery: chatId=${chatId}, recipients=${participants.length}`);

@@ -64,7 +64,31 @@ async function safeIsUserOnline(userId) {
   return true; // final fallback: let the call proceed
 }
 
-// ── checkAuth helper ──────────────────────────────────────────────────────────
+// ── Bug 4 FIX: Resolve callerName reliably — JWT may not carry username ────────
+// JWT middleware sets req.user.username from the token payload, but if the token
+// was issued before a username change, or the username field was absent at sign-up,
+// it will be null/undefined → callerName shows as "Unknown".
+// This helper fetches the authoritative username from the DB as a fallback.
+const _callerNameCache = new Map(); // short-lived in-process cache (avoids N+1 per call)
+async function resolveCallerName(userId, reqUser) {
+  // Fast path: JWT already has a non-empty username
+  const jwtName = (reqUser && (reqUser.username || reqUser.displayName || reqUser.name)) || null;
+  if (jwtName && jwtName !== 'Unknown') return jwtName;
+  // Cache hit
+  if (_callerNameCache.has(userId)) return _callerNameCache.get(userId);
+  // DB lookup
+  try {
+    const caller = await User.findByPk(parseInt(userId, 10), { attributes: ['id', 'username', 'displayName'] });
+    const name = (caller && (caller.username || caller.displayName)) || 'Unknown';
+    _callerNameCache.set(userId, name);
+    setTimeout(() => _callerNameCache.delete(userId), 60000); // expire after 1 min
+    return name;
+  } catch (_) {
+    return jwtName || 'Unknown';
+  }
+}
+
+
 const checkAuth = (req, res) => {
   if (!req.user || (!req.user.userId && !req.user.id)) {
     res.status(401).json({ status: 'error', message: 'Authentication required' });
@@ -233,10 +257,11 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
     const call = await callService.initiateCall(userId, targetId, callType, null);
 
     // Always notify — if they are online, they'll get it; if not, it'll be a missed call
+    const _callerDisplayName = await resolveCallerName(userId, req.user);
     const _callIncomingPayload = {
       callId:       call.id,
       callerId:     userId,
-      callerName:   (call.callerInfo && call.callerInfo.username) || req.user.username || 'Unknown',
+      callerName:   _callerDisplayName,
       callerAvatar: (call.callerInfo && call.callerInfo.avatar)   || req.user.avatar   || null,
       callType,
       timestamp:    Date.now(),
@@ -299,7 +324,7 @@ router.post('/initiate', apiRateLimiter, asyncHandler(async (req, res) => {
         await notifyUser(req.io, id, 'call_incoming', {
           callId:       call.id,
           callerId:     userId,
-          callerName:   req.user.username || 'Unknown',
+          callerName:   req.user.username || req.user.displayName || 'Unknown', // Bug4: JWT fallback
           callerAvatar: req.user.avatar   || null,
           isGroupCall:  true,
           callType,
@@ -319,7 +344,7 @@ router.post('/initiate', apiRateLimiter, asyncHandler(async (req, res) => {
     await notifyUser(req.io, targetId, 'call_incoming', {
       callId:       call.id,
       callerId:     userId,
-      callerName:   (call.callerInfo && call.callerInfo.username) || req.user.username || 'Unknown',
+      callerName:   (call.callerInfo && call.callerInfo.username) || req.user.username || req.user.displayName || 'Unknown', // Bug4: resolved
       callerAvatar: (call.callerInfo && call.callerInfo.avatar)   || req.user.avatar   || null,
       callType,
       timestamp:    Date.now(),
