@@ -44,4 +44,39 @@ router.get('/dnd/status', apiRateLimiter, userStatusController.getDoNotDisturbSt
 // WebSocket endpoint for real-time status updates
 router.post('/ws/status', apiRateLimiter, userStatusController.handleStatusWebSocket);
 
+// PHASE15 FIX: Live socket-presence check — queries the in-process WebSocketService
+// socket map so the response reflects the ACTUAL live connection state, not just
+// what's stored in the DB. Supports single userId param or bulk { userIds: [...] } body.
+router.get('/presence/:userId', apiRateLimiter, async (req, res) => {
+    try {
+        let wsService = null;
+        try { wsService = require('../services/webSocketService'); } catch(_) {}
+        const uid = parseInt(req.params.userId, 10);
+        const online = wsService ? await wsService.isUserOnline(uid).catch(() => false) : false;
+        res.json({ success: true, userId: uid, online, timestamp: Date.now() });
+    } catch (err) {
+        res.json({ success: false, userId: req.params.userId, online: false, error: err.message });
+    }
+});
+
+router.post('/presence/bulk', apiRateLimiter, async (req, res) => {
+    try {
+        let wsService = null;
+        try { wsService = require('../services/webSocketService'); } catch(_) {}
+        const { userIds } = req.body || {};
+        if (!Array.isArray(userIds) || userIds.length === 0) {
+            return res.json({ success: true, presence: {}, timestamp: Date.now() });
+        }
+        const limited = userIds.slice(0, 100);
+        const results = {};
+        for (const uid of limited) {
+            const uidInt = parseInt(uid, 10);
+            results[uid] = wsService ? await wsService.isUserOnline(uidInt).catch(() => false) : false;
+        }
+        res.json({ success: true, presence: results, timestamp: Date.now() });
+    } catch (err) {
+        res.json({ success: false, presence: {}, error: err.message });
+    }
+});
+
 module.exports = router;

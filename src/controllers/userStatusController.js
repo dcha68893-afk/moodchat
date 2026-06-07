@@ -2,6 +2,48 @@ const userStatusService = require('../services/userStatusService');
 const { AppError } = require('../middleware/errorHandler');
 const logger = require('../utils/logger');
 
+// PHASE15 FIX: Lazy-require WebSocketService to get real-time socket presence
+// This ensures isOnline reflects the LIVE socket connection, not just what's in the DB.
+// Without this, a user who just connected still shows as "offline" until the DB is updated.
+let _wsService = null;
+function getWS() {
+  if (!_wsService) {
+    try { _wsService = require('../services/webSocketService'); } catch(_) {}
+  }
+  return _wsService;
+}
+
+/**
+ * PHASE15 FIX: enrichWithSocketPresence
+ * Overrides isOnline/status on a userStatus object (or array of them)
+ * with the authoritative live socket-map truth from WebSocketService.
+ * Falls back gracefully when the socket service is unavailable.
+ */
+async function enrichWithSocketPresence(userStatusOrArray) {
+  const ws = getWS();
+  if (!ws || typeof ws.isUserOnline !== 'function') return userStatusOrArray;
+
+  const enrichOne = async (us) => {
+    if (!us || !us.userId) return us;
+    try {
+      const reallyOnline = await ws.isUserOnline(us.userId);
+      // Only upgrade to online — never hide a user who explicitly set "invisible"
+      if (us.status === 'invisible') return us;
+      // Sync isOnline with socket reality; update status string if mismatch
+      us.isOnline = reallyOnline;
+      if (reallyOnline && us.status === 'offline') us.status = 'online';
+      if (!reallyOnline && us.status === 'online') us.status = 'offline';
+    } catch (_) {}
+    return us;
+  };
+
+  if (Array.isArray(userStatusOrArray)) {
+    return Promise.all(userStatusOrArray.map(enrichOne));
+  }
+  return enrichOne(userStatusOrArray);
+}
+
+
 class UserStatusController {
   /**
    * Update user status
@@ -78,7 +120,10 @@ class UserStatusController {
       }
 
       // Check if user has permission to view this status
-      const userStatus = await userStatusService.getStatus(userId, currentUserId);
+      let userStatus = await userStatusService.getStatus(userId, currentUserId);
+
+      // PHASE15 FIX: Override DB isOnline with live socket truth
+      userStatus = await enrichWithSocketPresence(userStatus);
 
       res.status(200).json({
         success: true,
@@ -122,7 +167,10 @@ class UserStatusController {
         throw new AppError('Maximum 100 users allowed per request', 400);
       }
 
-      const statuses = await userStatusService.getBulkStatus(userIds, currentUserId);
+      let statuses = await userStatusService.getBulkStatus(userIds, currentUserId);
+
+      // PHASE15 FIX: Enrich every status entry with live socket presence truth
+      statuses = await enrichWithSocketPresence(statuses);
 
       res.status(200).json({
         success: true,

@@ -4863,8 +4863,11 @@ class Application {
                         // is blocked on Render's free tier, then auto-upgrades to WS
                         transports: ['polling', 'websocket'],
                         allowUpgrades: true,
-                        pingTimeout:    90000,
-                        pingInterval:   30000,
+                        // PHASE15 FIX: pingInterval must be < Render's 55s idle-close window.
+                        // 20s interval means a ping goes out every 20s, so the connection
+                        // is never idle long enough for Render to close it.
+                        pingTimeout:    60000,   // was 90000 — reduce so dead sockets are detected faster
+                        pingInterval:   20000,   // was 30000 — must beat Render's 55s idle timeout
                         upgradeTimeout: 30000,
                         connectTimeout: 45000,
                         allowEIO3:      true,

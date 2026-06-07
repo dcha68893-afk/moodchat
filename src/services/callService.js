@@ -45,13 +45,17 @@ function _normalizeCallEvent(event) {
 
 async function emitToAll(participants, event, data) {
   const wsService = ws();
-  const canonicalEvent = _normalizeCallEvent(event);
+  const colonEvent     = _normalizeCallEvent(event);                          // e.g. call:accepted
+  const underscoreEvent = colonEvent.replace(/:/g, '_');                      // e.g. call_accepted
   const resolvedIo = global.__socketIO || (wsService && wsService.getIO && wsService.getIO()) || null;
 
   if (!resolvedIo && !wsService) {
-    console.warn(`[CallService] emitToAll: no delivery channel for event=${canonicalEvent}`);
+    console.warn(`[CallService] emitToAll: no delivery channel for event=${colonEvent}`);
     return false;
   }
+
+  // Build deduplicated set of event names to emit (both colon and underscore forms)
+  const eventNames = [...new Set([colonEvent, underscoreEvent, event])].filter(Boolean);
 
   let delivered = false;
   for (const participant of participants) {
@@ -62,17 +66,21 @@ async function emitToAll(participants, event, data) {
 
     if (resolvedIo) {
       try {
-        resolvedIo.to(`user:${uidInt}`).emit(canonicalEvent, data);
-        resolvedIo.to(`user_${uidInt}`).emit(canonicalEvent, data);
-        resolvedIo.to(`user:${uidStr}`).emit(canonicalEvent, data);
-        resolvedIo.to(`user_${uidStr}`).emit(canonicalEvent, data);
-        console.log(`[CallService] emitToAll: ${canonicalEvent} → uid:${uidInt}`);
+        const rooms = [`user:${uidInt}`, `user_${uidInt}`, `user:${uidStr}`, `user_${uidStr}`];
+        for (const evName of eventNames) {
+          for (const room of rooms) {
+            resolvedIo.to(room).emit(evName, data);
+          }
+        }
+        console.log(`[CallService] emitToAll: [${eventNames.join('|')}] → uid:${uidInt}`);
         delivered = true;
       } catch (e) {
         console.warn(`[CallService] emit error uid=${uidInt}:`, e.message);
       }
     } else if (wsService && typeof wsService.sendToUser === 'function') {
-      try { await wsService.sendToUser(uidInt, canonicalEvent, data); delivered = true; } catch (_) {}
+      for (const evName of eventNames) {
+        try { await wsService.sendToUser(uidInt, evName, data); delivered = true; } catch (_) {}
+      }
     }
   }
   return delivered;
