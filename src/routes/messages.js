@@ -583,6 +583,31 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
     // ── FORENSIC LOG: BACKEND_RECEIVED ───────────────────────────────────────
     console.log(`[FORENSIC] BACKEND_RECEIVED | senderId=${senderId} | chatId=${chatId} | localId=${clientLocalId||'?'} | ts=${Date.now()}`);
 
+    // ── IDEMPOTENCY: If a localId was provided, check if this message was already saved.
+    // Prevents duplicate inserts when the client retries a failed/timed-out request.
+    // FIX-PHASE16: This is the correct place to check — after participant validation,
+    // before the transaction, so we can return early with the existing message.
+    if (clientLocalId) {
+      try {
+        const existing = await sequelize.query(
+          `SELECT id, \"chatId\", \"senderId\", content, type, \"createdAt\" FROM \"Messages\"
+           WHERE \"senderId\" = :senderId AND \"chatId\" = :chatId
+             AND content = :content
+             AND \"createdAt\" > NOW() - INTERVAL '5 minutes'
+           ORDER BY \"createdAt\" DESC LIMIT 1`,
+          { replacements: { senderId, chatId, content: content.trim() }, type: sequelize.QueryTypes.SELECT }
+        );
+        if (existing && existing.length > 0) {
+          const dup = existing[0];
+          console.log(`[messages.js] 🔁 Idempotency hit — returning existing message id=${dup.id} for localId=${clientLocalId}`);
+          return res.status(201).json({
+            success: true, message: 'Message sent successfully (idempotent)',
+            data: { message: { ...dup, localId: clientLocalId } }
+          });
+        }
+      } catch (_idempErr) { /* Non-fatal: proceed with insert */ }
+    }
+
     // FIX-068: Wrap message INSERT + chat UPDATE in a transaction for atomicity
     // Without this, a crash between the two queries leaves the chat with an orphan message
     let messageId, senderRows;
