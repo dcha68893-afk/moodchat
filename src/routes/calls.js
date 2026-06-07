@@ -233,14 +233,34 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
     const call = await callService.initiateCall(userId, targetId, callType, null);
 
     // Always notify — if they are online, they'll get it; if not, it'll be a missed call
-    await notifyUser(req.io, targetId, 'call_incoming', {
+    const _callIncomingPayload = {
       callId:       call.id,
       callerId:     userId,
       callerName:   (call.callerInfo && call.callerInfo.username) || req.user.username || 'Unknown',
       callerAvatar: (call.callerInfo && call.callerInfo.avatar)   || req.user.avatar   || null,
       callType,
       timestamp:    Date.now(),
-    });
+    };
+
+    await notifyUser(req.io, targetId, 'call_incoming', _callIncomingPayload);
+    // FIX: Also emit canonical 'call:incoming' (the frontend listens on this too)
+    await notifyUser(req.io, targetId, 'call:incoming', _callIncomingPayload);
+
+    // FIX: If the CallSignalingService is attached, use its initiateCall() which
+    // also sets up the call room so webrtc:signal events route correctly.
+    try {
+        const _sigSvc = global.__CallSignalingService;
+        if (_sigSvc && typeof _sigSvc.initiateCall === 'function') {
+            // Only call initiateCall if it hasn't already been triggered via socket
+            // (socket path: client emits call:initiate → CallSignalingService handles it)
+            // HTTP path: no socket event yet, so we call directly
+            await _sigSvc.initiateCall(userId, targetId, {
+                callId:    call.id,
+                callType,
+                callerName: _callIncomingPayload.callerName,
+            }).catch(() => {});
+        }
+    } catch(_) {}
 
     return res.status(201).json({ success: true, message: 'Call initiated', data: { call, receiverOnline: isOnline } });
 

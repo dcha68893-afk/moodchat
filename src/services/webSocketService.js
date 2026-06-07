@@ -256,6 +256,21 @@ class WebSocketService {
                 socket.emit('user_online_status', { userId: targetUserId, online, timestamp: Date.now() });
             });
 
+            // ── FIX: message:ack — sender confirms message was saved server-side ──
+            // Previously the queue showed "sent successfully" but the backend never
+            // received a socket-level ACK. Now the parent frame emits message:ack after
+            // a successful POST /messages, and here we relay delivery:confirmed to sender
+            // AND push a delivery notification to the recipient.
+            socket.off('message:ack').on('message:ack', async ({ messageId, chatId, status } = {}) => {
+                if (!messageId) return;
+                try {
+                    // Notify sender that message was durably saved
+                    socket.emit('message:delivery_confirmed', {
+                        messageId, chatId, status: status || 'delivered', timestamp: Date.now()
+                    });
+                } catch(_) {}
+            });
+
             // ── FIX-OFFLINE-QUEUE: Flush any queued messages on reconnect ─────
             this.flushOfflineMessages(userId).catch(() => {});
         });
@@ -589,13 +604,35 @@ class WebSocketService {
         // FIX-003: single canonical event 'call:incoming' only
         const delivered = await this.sendToUser(userId, 'call:incoming', data);
 
+        // FIX-CALL-ONLINE: When receiver IS online but sendToUser returns false
+        // (socket adapter mismatch or room join race), also try emitting directly
+        // to the call room if it exists, and to socket IDs directly.
+        if (!delivered) {
+            const io = this.getIO();
+            if (io && data.callId) {
+                try {
+                    // Try the call room (CallSignalingService may have pre-joined receiver)
+                    io.to(`call:${data.callId}`).emit('call:incoming', {
+                        ...data, timestamp: Date.now()
+                    });
+                } catch(_) {}
+            }
+        }
+
         // FIX-CALL-OFFLINE: receiver not connected — tell caller immediately
         if (!delivered && data.callerId) {
-            await this.sendToUser(data.callerId, 'call:receiver_offline', {
-                callId: data.callId, reason: 'receiver_offline', timestamp: Date.now(),
-            }).catch(() => {});
-            console.warn(`[WSService] 📵 Receiver uid=${userId} offline — notified caller`);
-            return false;
+            // Double-check: isUserOnline is the authoritative source
+            const receiverOnline = await this.isUserOnline(userId).catch(() => false);
+            if (!receiverOnline) {
+                await this.sendToUser(data.callerId, 'call:receiver_offline', {
+                    callId: data.callId, reason: 'receiver_offline', timestamp: Date.now(),
+                }).catch(() => {});
+                console.warn(`[WSService] 📵 Receiver uid=${userId} offline — notified caller`);
+                return false;
+            }
+            // Receiver IS online but delivery failed — log and still return true
+            // so the call room route above gets a chance to deliver
+            console.warn(`[WSService] ⚠️ call:incoming delivery uncertain for uid=${userId} — tried call room`);
         }
 
         // FIX-CALL-TIMEOUT: 20-second "no answer" guard

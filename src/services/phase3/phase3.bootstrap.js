@@ -52,6 +52,10 @@ function initPhase3(io, app, options = {}) {
   const callSignaling = new CallSignalingService(io, wsService, { logger });
   callSignaling.attach();
 
+  // FIX: Expose on global so src/routes/calls.js can trigger initiateCall()
+  // for the HTTP-path call creation (when socket call:initiate hasn't fired yet)
+  global.__CallSignalingService = callSignaling;
+
   // Register Express routes for scheduled calls
   if (app) {
     _registerCallRoutes(app, callSignaling, wsService, logger);
