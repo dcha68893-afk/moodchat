@@ -175,9 +175,10 @@ class MessageService {
                     io.to(`user:${strUid}`).emit('message:new', payload);
                     io.to(`user_${strUid}`).emit('message:new', payload);
                 }
-                // Also broadcast to chat room (both naming variants)
-                io.to(`chat:${chatId}`).emit('message:new', payload);
-                io.to(`chat_${chatId}`).emit('message:new', payload);
+                // Also broadcast to chat room (both naming variants) — but exclude sender
+                // FIX: Use except to avoid sender seeing their own message:new again
+                io.to(`chat:${chatId}`).except([`user:${senderId}`, `user_${senderId}`]).emit('message:new', payload);
+                io.to(`chat_${chatId}`).except([`user:${senderId}`, `user_${senderId}`]).emit('message:new', payload);
                 // FIX Bug7: one summary log instead of per-recipient spam
                 console.log(`[MessageService] ✅ Real-time delivery: chatId=${chatId}, recipients=${participants.length}`);
                 console.log(`[MessageService] 📤 Emitting to rooms:`, participants.map(p => [`user:${p.userId}`, `user_${p.userId}`]).flat());

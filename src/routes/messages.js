@@ -670,13 +670,12 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
           .filter(Boolean);
         const recipientIds = allParticipantIds.filter(id => id !== senderId);
 
-        // Emit message:new to every participant's personal user room (both naming conventions)
-        // sendToUser() handles user:<id> room + user_<id> room + individual socket IDs
-        // FIX-010: Single canonical 'message:new' event per participant
+        // Emit message:new to RECIPIENTS ONLY (not sender) — sender already has optimistic message
+        // FIX: Sending message:new to the sender caused double-render and dedup collisions.
         // sendToUser() already emits to all room name variants (user:X, user_X, user:Xstr, user_Xstr)
-        // so we don't need multiple event names — that was causing triple delivery
+        // FIX-010: Single canonical 'message:new' event per recipient
         const deliveryResults = await Promise.allSettled(
-          allParticipantIds.map(uid => wsService.sendToUser(uid, 'message:new', populatedMessage))
+          recipientIds.map(uid => wsService.sendToUser(uid, 'message:new', populatedMessage))
         );
 
         // FIX Bug #1 & #4: Fetch chat type so group broadcasts work correctly.
@@ -714,8 +713,11 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
         // Also broadcast to the chat:<id> room — catches any socket that joined
         // via _joinUserChatRooms but isn't tracked in onlineUsers yet
         // FIX-010: Single event name for broadcastToChat
+        // FIX: Use except(senderSocketId) pattern — sender should NOT receive message:new
+        // via the room broadcast either (they have the optimistic message already).
         if (typeof wsService.broadcastToChat === 'function') {
-          wsService.broadcastToChat(chatId, 'message:new', populatedMessage);
+          // broadcastToChat with recipientIds only (excludes senderId)
+          wsService.broadcastToChat(chatId, 'message:new', populatedMessage, recipientIds);
         }
 
         // FIX-010: Single canonical 'message:sent' event — sendToUser() covers all room variants
@@ -1090,8 +1092,9 @@ router.post('/bulk', apiRateLimiter, asyncHandler(async (req, res) => {
           const recipientIds = allParticipantIds.filter(id => id !== senderId);
 
           // FIX-010: Single canonical 'message:new' event — sendToUser() covers all room variants
+          // FIX: Only deliver to recipients, not sender (sender has optimistic message already)
           await Promise.allSettled(
-            allParticipantIds.map(uid => wsService.sendToUser(uid, 'message:new', populatedMessage))
+            recipientIds.map(uid => wsService.sendToUser(uid, 'message:new', populatedMessage))
           );
           if (typeof wsService.broadcastToChat === 'function') {
             wsService.broadcastToChat(chatId, 'message:new', populatedMessage);

@@ -37,7 +37,14 @@ class TransportHealth {
   mark(t, success, latency = 0) {
     const h = this._map[t]; if (!h) return;
     if (success) { h.ok = true; h.failures = 0; h.latency = latency; }
-    else { h.failures++; if (h.failures >= 3) h.ok = false; }
+    else {
+      // FIX BUG #2: INTERNET transport is NEVER marked unavailable from individual delivery
+      // attempts. Empty rooms = user offline, not transport failure. Only LAN/MESH can fail.
+      if (t !== TRANSPORT.INTERNET) {
+        h.failures++;
+        if (h.failures >= 3) h.ok = false;
+      }
+    }
     h.lastCheck = Date.now();
   }
   available(t)  { return this._map[t]?.ok ?? false; }
@@ -162,19 +169,28 @@ class HybridTransportRuntime extends EventEmitter {
    */
   async deliver(userId, event, data, options = {}) {
     const uid = String(userId);
-    const preferred = options.transport || this.health.best();
 
-    // Try each transport in priority order until one succeeds
-    for (const t of [preferred, ...PRIORITY.filter(x => x !== preferred)]) {
+    // FIX BUG #3: Always try INTERNET first regardless of preferred transport.
+    // INTERNET transport emits to socket rooms — if user is online they get it.
+    // If rooms are empty (user offline), _sendViaInternet returns false but that
+    // is NOT a transport failure; fall through to LAN/MESH then offline queue.
+    const preferred = options.transport;
+    const orderedTransports = preferred && preferred !== TRANSPORT.INTERNET
+      ? [TRANSPORT.INTERNET, preferred, ...PRIORITY.filter(x => x !== TRANSPORT.INTERNET && x !== preferred)]
+      : PRIORITY;
+
+    for (const t of orderedTransports) {
       if (!this.health.available(t)) continue;
       const ok = await this._sendVia(t, uid, event, data, options);
       if (ok) {
-        this.health.mark(t, true);
+        // Only mark non-INTERNET transports as succeeded (INTERNET health is static)
+        if (t !== TRANSPORT.INTERNET) this.health.mark(t, true);
         this._stats.delivered++;
         this.emit('delivered', { transport: t, userId: uid, event });
         return { ok: true, transport: t };
       }
-      this.health.mark(t, false);
+      // FIX BUG #2: Don't mark INTERNET as failed — mark only LAN/MESH
+      if (t !== TRANSPORT.INTERNET) this.health.mark(t, false);
     }
 
     // All transports failed — enqueue offline
@@ -236,9 +252,21 @@ class HybridTransportRuntime extends EventEmitter {
   _sendViaInternet(uid, event, data) {
     try {
       if (!this.io) return false;
-      const rooms = [`user:${uid}`, `user_${uid}`, `user:${String(Number(uid))}`, uid];
+      // FIX BUG #1: Removed bare `uid` room (e.g. "2") — that targets Socket.IO's
+      // per-socket ID room, NOT the user's presence room. Standardized to 4 canonical
+      // variants that registerUser() always joins.
+      const strUid = String(uid);
+      const numUid = String(Number(uid)); // normalize to numeric string if applicable
+      const rooms = [
+        `user:${strUid}`,
+        `user_${strUid}`,
+        `user:${numUid}`,
+        `user_${numUid}`,
+      ];
+      // Deduplicate (strUid === numUid for numeric user IDs)
+      const uniqueRooms = [...new Set(rooms)];
       let sent = false;
-      for (const room of rooms) {
+      for (const room of uniqueRooms) {
         try { this.io.to(room).emit(event, data); sent = true; } catch (_) {}
       }
       return sent;
