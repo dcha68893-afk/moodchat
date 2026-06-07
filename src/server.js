@@ -4900,6 +4900,15 @@ class Application {
                             logger:     console,
                         });
                         logger.success('MoodChat Phase 1 — Foundation Layer ✅', 'PHASE1');
+
+                    // ── PHASE 15: Message & Call delivery hardening ───────────
+                    try {
+                        const { installMessageDeliveryPatch } = require('./services/phase15/MessageDeliveryPatch');
+                        installMessageDeliveryPatch(this.io, this.app);
+                        logger.success('MoodChat Phase 15 — Delivery Patch ✅', 'PHASE15');
+                    } catch (err) {
+                        console.warn('[Phase15] Init failed (non-fatal):', err.message);
+                    }
                     } catch (err) {
                         console.warn('[Phase1] Init failed (non-fatal):', err.message);
                         global.__phase1 = {};

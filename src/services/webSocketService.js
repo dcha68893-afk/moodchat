@@ -1245,8 +1245,6 @@ class WebSocketService {
         if (!userId || !socket || typeof socket.join !== 'function') return;
 
         // ── CRITICAL: Join personal user rooms FIRST (sync, no DB needed) ────
-        // sendToUser() emits to user:ID and user_ID rooms.
-        // Without joining these rooms, the receiver NEVER gets messages or calls.
         const uid    = parseInt(userId, 10);
         const strUid = String(uid);
         socket.join(`user:${uid}`);
@@ -1260,11 +1258,22 @@ class WebSocketService {
             const sequelize = db.sequelize || db;
             if (!sequelize || typeof sequelize.query !== 'function') return;
 
-            // Join all private chat rooms
-            const chatRows = await sequelize.query(
+            // FIX-PHASE15: Try both casing variants of chat_participants table.
+            // Sequelize defines it as 'chat_participants' (lowercase) but some
+            // Postgres deployments preserve case or have a different migration.
+            let chatRows = [];
+            const chatQueries = [
                 'SELECT "chatId" FROM chat_participants WHERE "userId" = :userId',
-                { replacements: { userId }, type: sequelize.QueryTypes.SELECT }
-            );
+                'SELECT "chatId" FROM "ChatParticipants" WHERE "userId" = :userId',
+            ];
+            for (const q of chatQueries) {
+                try {
+                    chatRows = await sequelize.query(q,
+                        { replacements: { userId }, type: sequelize.QueryTypes.SELECT });
+                    if (chatRows && chatRows.length >= 0) break; // found the right table
+                } catch (_) { chatRows = []; }
+            }
+
             for (const { chatId } of (chatRows || [])) {
                 if (chatId) {
                     socket.join(`chat:${chatId}`);
@@ -1272,23 +1281,22 @@ class WebSocketService {
                 }
             }
 
-            // CRITICAL FIX: Also join group rooms from GroupMembers table
-            // Groups use a separate table — without this, group messages never reach members
+            // Join group rooms
             let groupRows = [];
             try {
                 groupRows = await sequelize.query(
                     'SELECT "groupId" FROM "GroupMembers" WHERE "userId" = :userId AND status != \'left\' AND status != \'banned\'',
                     { replacements: { userId }, type: sequelize.QueryTypes.SELECT }
                 );
-            } catch (gErr) {
-                // Try without status filter if column doesn't exist
+            } catch (_) {
                 try {
                     groupRows = await sequelize.query(
                         'SELECT "groupId" FROM "GroupMembers" WHERE "userId" = :userId',
                         { replacements: { userId }, type: sequelize.QueryTypes.SELECT }
                     );
-                } catch (_) {}
+                } catch (__) {}
             }
+
             for (const { groupId } of (groupRows || [])) {
                 if (groupId) {
                     socket.join(`group:${groupId}`);

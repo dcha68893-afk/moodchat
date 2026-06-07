@@ -50,7 +50,13 @@ class MessageService {
         const [participant] = await sequelize.query(
             `SELECT 1 FROM chat_participants WHERE "chatId"=:chatId AND "userId"=:senderId LIMIT 1`,
             { replacements: { chatId, senderId }, type: sequelize.QueryTypes.SELECT }
-        );
+        ).catch(async () => {
+            // FIX-PHASE15: fallback to quoted table name in case of case-sensitivity
+            return sequelize.query(
+                `SELECT 1 FROM "ChatParticipants" WHERE "chatId"=:chatId AND "userId"=:senderId LIMIT 1`,
+                { replacements: { chatId, senderId }, type: sequelize.QueryTypes.SELECT }
+            ).catch(() => []);
+        });
         if (!participant) throw new ValidationError('Sender is not a participant in this chat');
 
         // CRITICAL SECURITY: Use parameterized query to prevent SQL injection
@@ -121,6 +127,12 @@ class MessageService {
             const participants = await sequelize.query(
                 `SELECT DISTINCT "userId" FROM chat_participants WHERE "chatId"=:chatId AND "userId" != :senderId`,
                 { replacements: { chatId, senderId }, type: sequelize.QueryTypes.SELECT }
+            ).catch(async () => {
+                return sequelize.query(
+                    `SELECT DISTINCT "userId" FROM "ChatParticipants" WHERE "chatId"=:chatId AND "userId" != :senderId`,
+                    { replacements: { chatId, senderId }, type: sequelize.QueryTypes.SELECT }
+                ).catch(() => []);
+            }
             );
             
             if (!participants || participants.length === 0) {

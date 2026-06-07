@@ -784,6 +784,26 @@ class CallService {
     if (obj.callInitiatorUser) obj.otherParticipants.push({ ...obj.callInitiatorUser, displayName: obj.callInitiatorUser.username });
     if (obj.callTargetUser)    obj.otherParticipants.push({ ...obj.callTargetUser,    displayName: obj.callTargetUser.username    });
 
+    // FIX-PHASE15: Always populate top-level callerName / callerAvatar so the
+    // receiver's calls-ui.js can display the real name regardless of which code
+    // path triggered the emit. Without these fields the UI falls back to "user 1".
+    if (!obj.callerName && obj.callInitiatorUser) {
+      const u = obj.callInitiatorUser;
+      const first = u.firstName || '';
+      const last  = u.lastName  || '';
+      obj.callerName   = (first + (last ? ' ' + last : '')).trim() || u.username || null;
+      obj.callerAvatar = u.avatar || null;
+    }
+    if (!obj.calleeName && obj.callTargetUser) {
+      const u = obj.callTargetUser;
+      const first = u.firstName || '';
+      const last  = u.lastName  || '';
+      obj.calleeName   = (first + (last ? ' ' + last : '')).trim() || u.username || null;
+      obj.calleeAvatar = u.avatar || null;
+    }
+    // Alias callType for frontends that check callType instead of type
+    if (!obj.callType && obj.type) obj.callType = obj.type;
+
     return obj;
   }
 }

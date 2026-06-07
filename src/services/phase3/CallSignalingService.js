@@ -305,10 +305,34 @@ class CallSignalingService extends EventEmitter {
           return;
         }
 
+        // FIX-PHASE15: Resolve callerName from DB when frontend doesn't supply it.
+        // This is the root cause of "user 1" appearing on the receiver's screen —
+        // the frontend sometimes omits callerName in the socket event, so we
+        // always look it up from the DB to guarantee the real name is sent.
+        let resolvedCallerName = data.callerName || null;
+        if (!resolvedCallerName) {
+          try {
+            const db = require('../../models');
+            const UserModel = db.Users || db.User;
+            if (UserModel) {
+              const callerUser = await UserModel.findByPk(parseInt(userId, 10), {
+                attributes: ['id', 'username', 'firstName', 'lastName', 'avatar'],
+              });
+              if (callerUser) {
+                const first = callerUser.firstName || '';
+                const last  = callerUser.lastName  || '';
+                resolvedCallerName = (first + (last ? ' ' + last : '')).trim() || callerUser.username || `User ${userId}`;
+              }
+            }
+          } catch (lookupErr) {
+            console.warn('[CallSignaling] callerName DB lookup failed:', lookupErr.message);
+          }
+        }
+
         const callId = await this.initiateCall(userId, targetUserId, {
           callId:     existingId,
           callType:   callType || 'audio',
-          callerName: data.callerName,
+          callerName: resolvedCallerName,
         });
 
         socket.emit('call:initiated_ack', { callId, success: true });
