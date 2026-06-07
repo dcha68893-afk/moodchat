@@ -822,11 +822,29 @@ class WebSocketService {
             try { io.to(sid).emit(event, payload); delivered = true; } catch (_) {}
         }
 
-        // FIX-OFFLINE-QUEUE: If not delivered and it's a message event, enqueue for retry
+        // FIX-OFFLINE-QUEUE: If not delivered, retry once after 1.5s before enqueuing.
+        // Previously this enqueued immediately, which meant messages sent during a
+        // 1-3s socket reconnect cycle (which returns delivered=false even when the
+        // user is online) would sit in the offline queue instead of being sent.
+        // The 1.5s retry window covers the normal Socket.IO reconnect cycle.
         if (!delivered) {
             const _queueableEvents = ['new_message', 'message:new', 'message_received', 'chat:message'];
             if (_queueableEvents.includes(event)) {
-                this.enqueueOfflineMessage(uid, event, data);
+                // First, verify the user is truly offline before queueing
+                const isActuallyOnline = await this.isUserOnline(uid).catch(() => false);
+                if (isActuallyOnline) {
+                    // User is online — retry delivery after 1.5s (socket reconnect window)
+                    setTimeout(async () => {
+                        const retried = await this.sendToUser(uid, event, data).catch(() => false);
+                        if (!retried) {
+                            console.warn(`[WSService] Retry failed for uid=${uid} event=${event} — enqueuing offline`);
+                            this.enqueueOfflineMessage(uid, event, data);
+                        }
+                    }, 1500);
+                } else {
+                    // Confirmed offline — enqueue now for delivery on reconnect
+                    this.enqueueOfflineMessage(uid, event, data);
+                }
             }
         }
 
@@ -865,9 +883,20 @@ class WebSocketService {
                 console.warn(`[WSService] 📵 Receiver uid=${userId} offline — notified caller`);
                 return false;
             }
-            // Receiver IS online but delivery failed — log and still return true
-            // so the call room route above gets a chance to deliver
-            console.warn(`[WSService] ⚠️ call:incoming delivery uncertain for uid=${userId} — tried call room`);
+            // Receiver IS online but delivery failed — retry after 1s (reconnect race)
+            console.warn(`[WSService] ⚠️ call:incoming failed for online uid=${userId} — retrying in 1s`);
+            setTimeout(async () => {
+                const retried = await this.sendToUser(userId, 'call:incoming', data).catch(() => false);
+                if (retried) {
+                    console.log(`[WSService] ✅ call:incoming retry delivered to uid=${userId}`);
+                } else {
+                    // Last-resort: call room
+                    const io2 = this.getIO();
+                    if (io2 && data.callId) {
+                        try { io2.to(`call:${data.callId}`).emit('call:incoming', { ...data, timestamp: Date.now() }); } catch(_) {}
+                    }
+                }
+            }, 1000);
         }
 
         // FIX-CALL-TIMEOUT: 20-second "no answer" guard
