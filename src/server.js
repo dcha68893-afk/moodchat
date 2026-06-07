@@ -19,13 +19,7 @@ dotenv.config({ path: process.env.ENV_PATH || DEFAULT_ENV_PATH });
 process.env.UV_THREADPOOL_SIZE = process.env.UV_THREADPOOL_SIZE || '16';
 console.log(`⚡ UV_THREADPOOL_SIZE set to: ${process.env.UV_THREADPOOL_SIZE}`);
 
-// Add debug to verify .env loaded
-console.log('=== ENVIRONMENT LOAD DEBUG ===');
-console.log('Current directory:', __dirname);
-console.log('JWT_SECRET loaded:', process.env.JWT_SECRET ? 'YES (length: ' + process.env.JWT_SECRET.length + ')' : 'NO');
-console.log('NODE_ENV:', process.env.NODE_ENV);
-console.log('PORT:', process.env.PORT);
-console.log('===============================');
+// Environment loaded - JWT and DB validation handled by ConfigurationManager
 
 // ========== BOOTSTRAP & ENVIRONMENT ==========
 const jwt = require('jsonwebtoken');
@@ -80,20 +74,8 @@ const ENV = {
 
 ENV.load();
 
-// At the VERY TOP of server.js - before ANY other code
-console.log('=== ENVIRONMENT DEBUG ===');
-console.log('NODE_ENV:', process.env.NODE_ENV);
-console.log('JWT_SECRET from process.env:', process.env.JWT_SECRET ? 'SET (length: ' + process.env.JWT_SECRET.length + ')' : 'NOT SET');
-console.log('JWT_ACCESS_SECRET from process.env:', process.env.JWT_ACCESS_SECRET ? 'SET' : 'NOT SET');
-console.log('UV_THREADPOOL_SIZE:', process.env.UV_THREADPOOL_SIZE);
-console.log('==========================');
-
+// Single dotenv load — ConfigurationManager validates secrets at startup
 dotenv.config({ path: process.env.ENV_PATH || DEFAULT_ENV_PATH, override: false });
-
-console.log('=== AFTER dotenv.config() ===');
-console.log('JWT_SECRET after dotenv:', process.env.JWT_SECRET ? 'SET (length: ' + process.env.JWT_SECRET.length + ')' : 'NOT SET');
-console.log('JWT_ACCESS_SECRET after dotenv:', process.env.JWT_ACCESS_SECRET ? 'SET' : 'NOT SET');
-console.log('==========================');
 
 // ========== DYNAMIC CORS CONFIGURATION ==========
 class DynamicCorsManager {
@@ -2075,16 +2057,8 @@ if (!normalizedOrigins.includes(frontendUrl)) {
 
 const config = new ConfigurationManager();
 
-// ========== JWT SECRET DEBUG - AFTER CONFIG INITIALIZATION ==========
-console.log('\n=== JWT SECRET VERIFICATION ===');
-console.log('config.get(JWT_SECRET):', config.get('JWT_SECRET') ? config.get('JWT_SECRET').substring(0, 10) + '...' : 'MISSING');
-console.log('process.env.JWT_SECRET:', process.env.JWT_SECRET ? process.env.JWT_SECRET.substring(0, 10) + '...' : 'MISSING');
-console.log('process.env.JWT_ACCESS_SECRET:', process.env.JWT_ACCESS_SECRET ? process.env.JWT_ACCESS_SECRET.substring(0, 10) + '...' : 'MISSING');
-
 const tokenService = require('./services/tokenService');
 const websocketDeliveryService = require('./services/webSocketService');
-console.log('tokenService.accessSecret:', tokenService.accessSecret ? tokenService.accessSecret.substring(0, 10) + '...' : 'MISSING');
-console.log('================================\n');
 
 // ========== DATABASE SERVICE WITH OPTIMIZED POOL ==========
 class DatabaseService {

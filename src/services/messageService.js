@@ -167,21 +167,26 @@ class MessageService {
                 for (const { userId } of participants) {
                     // CRITICAL: skip blocked users
                     if (blockedUserIds.has(String(userId))) continue;
-                    // Send to user's Socket.IO room
+                    // FIX: emit 'message:new' to ALL 4 room name variants (int + string × colon + underscore)
+                    // so delivery succeeds regardless of how the client joined their user room.
+                    const strUid = String(userId);
                     io.to(`user:${userId}`).emit('message:new', payload);
-                    io.to(`user_${userId}`).emit('new_message', payload);
+                    io.to(`user_${userId}`).emit('message:new', payload);
+                    io.to(`user:${strUid}`).emit('message:new', payload);
+                    io.to(`user_${strUid}`).emit('message:new', payload);
                 }
-                // Also broadcast to chat room
+                // Also broadcast to chat room (both naming variants)
                 io.to(`chat:${chatId}`).emit('message:new', payload);
+                io.to(`chat_${chatId}`).emit('message:new', payload);
                 // FIX Bug7: one summary log instead of per-recipient spam
                 console.log(`[MessageService] ✅ Real-time delivery: chatId=${chatId}, recipients=${participants.length}`);
                 console.log(`[MessageService] 📤 Emitting to rooms:`, participants.map(p => [`user:${p.userId}`, `user_${p.userId}`]).flat());
                 console.log(`[MessageService] 📤 Message payload:`, { id: payload.id, chatId: payload.chatId, senderId: payload.senderId, content: payload.content?.substring(0, 50) });
             } else {
                 // Fallback to raw WebSocket service
+                // FIX: only emit 'message:new' (canonical) — sendToUser already targets all 4 room variants
                 for (const { userId } of participants) {
                     await ws.sendToUser(userId, 'message:new', payload);
-                    await ws.sendToUser(userId, 'new_message', payload);
                 }
                 console.log(`[MessageService] ⚠️ Fallback WS delivery: chatId=${chatId}, recipients=${participants.length}`);
             }

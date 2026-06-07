@@ -273,6 +273,241 @@ class WebSocketService {
 
             // ── FIX-OFFLINE-QUEUE: Flush any queued messages on reconnect ─────
             this.flushOfflineMessages(userId).catch(() => {});
+
+            // ── PHASE14 FIX: sync:missed_messages ────────────────────────────
+            socket.off('sync:missed_messages').on('sync:missed_messages', async ({ chatIds, since } = {}) => {
+                try {
+                    const sequelize = require('../models').sequelize;
+                    if (!sequelize || !since) return;
+                    const sinceDate = new Date(since);
+                    if (isNaN(sinceDate.getTime())) return;
+                    const chatList = Array.isArray(chatIds) ? chatIds.slice(0, 20) : [];
+                    if (chatList.length === 0) {
+                        const chats = await sequelize.query(
+                            `SELECT DISTINCT "chatId" FROM chat_participants WHERE "userId" = :userId LIMIT 20`,
+                            { replacements: { userId }, type: sequelize.QueryTypes.SELECT }
+                        ).catch(() => []);
+                        chatList.push(...(chats || []).map(c => c.chatId));
+                    }
+                    for (const chatId of chatList) {
+                        try {
+                            const messages = await sequelize.query(
+                                `SELECT m.*, u.username AS "senderUsername", u.avatar AS "senderAvatar"
+                                 FROM "Messages" m
+                                 LEFT JOIN "Users" u ON u.id = m."senderId"
+                                 WHERE m."chatId" = :chatId AND m."createdAt" > :since AND m."isDeleted" = false
+                                 ORDER BY m."createdAt" ASC LIMIT 50`,
+                                { replacements: { chatId, since: sinceDate }, type: sequelize.QueryTypes.SELECT }
+                            ).catch(() => []);
+                            if (messages && messages.length > 0) {
+                                socket.emit('sync:missed_messages_result', { chatId, messages, since });
+                            }
+                        } catch (_) {}
+                    }
+                    socket.emit('sync:missed_messages_done', { chatIds: chatList, since });
+                } catch (err) {
+                    console.warn('[WSService] sync:missed_messages error:', err.message);
+                }
+            });
+
+            // ── PHASE14 FIX: sync:missed_events ──────────────────────────────
+            socket.off('sync:missed_events').on('sync:missed_events', async ({ since } = {}) => {
+                try {
+                    const sinceDate = new Date(since);
+                    if (isNaN(sinceDate.getTime())) return;
+                    const payload = { since, events: [] };
+                    try {
+                        const sequelize = require('../models').sequelize;
+                        const friends = await sequelize.query(
+                            `SELECT f.id, f."requesterId", f."recipientId", f.status, f."createdAt",
+                                    u.username AS "requesterUsername", u.avatar AS "requesterAvatar"
+                             FROM "Friends" f
+                             LEFT JOIN "Users" u ON u.id = f."requesterId"
+                             WHERE f."recipientId" = :userId AND f.status = 'pending' AND f."createdAt" > :since
+                             LIMIT 20`,
+                            { replacements: { userId, since: sinceDate }, type: sequelize.QueryTypes.SELECT }
+                        ).catch(() => []);
+                        if (friends && friends.length > 0) {
+                            friends.forEach(f => {
+                                socket.emit('friend:request', {
+                                    requestId: f.id, senderId: f.requesterId,
+                                    senderUsername: f.requesterUsername, senderAvatar: f.requesterAvatar,
+                                    createdAt: f.createdAt
+                                });
+                            });
+                            payload.events.push({ type: 'friend_requests', count: friends.length });
+                        }
+                    } catch (_) {}
+                    socket.emit('sync:missed_events_done', payload);
+                } catch (err) {
+                    console.warn('[WSService] sync:missed_events error:', err.message);
+                }
+            });
+
+            // ── PHASE14 FIX: online:check ─────────────────────────────────────
+            socket.off('online:check').on('online:check', ({ userIds } = {}) => {
+                try {
+                    if (!Array.isArray(userIds)) return;
+                    const result = {};
+                    userIds.slice(0, 50).forEach(uid => {
+                        const intUid = parseInt(uid, 10);
+                        result[uid] = this.onlineUsers && this.onlineUsers.has(intUid);
+                    });
+                    socket.emit('online:status', result);
+                } catch (_) {}
+            });
+
+            // ── PHASE14 FIX: mark_as_read ─────────────────────────────────────
+            socket.off('mark_as_read').on('mark_as_read', async ({ chatId, messageIds } = {}) => {
+                try {
+                    if (!chatId) return;
+                    const sequelize = require('../models').sequelize;
+                    if (Array.isArray(messageIds) && messageIds.length > 0) {
+                        await sequelize.query(
+                            `INSERT INTO "ReadReceipts" ("messageId","userId","readAt","createdAt","updatedAt")
+                             SELECT unnest(ARRAY[:messageIds]::int[]), :userId, NOW(), NOW(), NOW()
+                             ON CONFLICT ("messageId","userId") DO NOTHING`,
+                            { replacements: { messageIds: messageIds.map(Number), userId }, type: sequelize.QueryTypes.INSERT }
+                        ).catch(() => {});
+                    }
+                    socket.to(`chat:${chatId}`).emit('message:read', {
+                        chatId, readerId: userId, messageIds: messageIds || [], readAt: new Date().toISOString()
+                    });
+                } catch (err) {
+                    console.warn('[WSService] mark_as_read error:', err.message);
+                }
+            });
+
+            // ── PHASE14 FIX: group:join ───────────────────────────────────────
+            socket.off('group:join').on('group:join', async ({ groupId } = {}) => {
+                try {
+                    if (!groupId) return;
+                    const sequelize = require('../models').sequelize;
+                    const [member] = await sequelize.query(
+                        `SELECT 1 FROM "GroupMembers" WHERE "groupId"=:groupId AND "userId"=:userId AND "leftAt" IS NULL LIMIT 1`,
+                        { replacements: { groupId, userId }, type: sequelize.QueryTypes.SELECT }
+                    ).catch(() => [null]);
+                    if (member) {
+                        socket.join(`group:${groupId}`);
+                        socket.join(`group_${groupId}`);
+                        socket.emit('group:joined', { groupId, success: true });
+                        console.log(`[WSService] uid=${userId} joined group:${groupId}`);
+                    }
+                } catch (err) {
+                    console.warn('[WSService] group:join error:', err.message);
+                }
+            });
+
+            // ── PHASE14 FIX: message:delivered relay ──────────────────────────
+            socket.off('message:delivered').on('message:delivered', ({ chatId, messageId } = {}) => {
+                if (!chatId || !messageId) return;
+                socket.to(`chat:${chatId}`).emit('message:delivered', {
+                    chatId, messageId, deliveredTo: userId, deliveredAt: new Date().toISOString()
+                });
+            });
+
+            // ── PHASE14 FIX P0: WebRTC socket-level signaling relay ───────────
+            socket.off('webrtc:signal').on('webrtc:signal', (payload = {}) => {
+                try {
+                    const { targetUserId: wtTarget, callId: wtCallId, type: wtType, sdp: wtSdp, candidate: wtCand } = payload;
+                    if (!wtTarget) return;
+                    const wtRelay = { callId: wtCallId, fromUserId: userId, type: wtType, sdp: wtSdp || undefined, candidate: wtCand || undefined, timestamp: Date.now() };
+                    const io = this.getIO();
+                    if (!io) return;
+                    [`user:${wtTarget}`,`user_${wtTarget}`,`user:${String(wtTarget)}`,`user_${String(wtTarget)}`].forEach(room => {
+                        try { io.to(room).emit('webrtc:signal', wtRelay); } catch (_) {}
+                    });
+                } catch (err) {
+                    console.warn('[WSService] webrtc:signal relay error:', err.message);
+                }
+            });
+
+            socket.off('webrtc_signal').on('webrtc_signal', (payload = {}) => {
+                try {
+                    const { targetUserId: wsTarget, callId: wsCallId, type: wsType, sdp: wsSdp, candidate: wsCand } = payload;
+                    if (!wsTarget) return;
+                    const wsRelay = { callId: wsCallId, fromUserId: userId, type: wsType, sdp: wsSdp || undefined, candidate: wsCand || undefined, timestamp: Date.now() };
+                    const io = this.getIO();
+                    if (!io) return;
+                    [`user:${wsTarget}`,`user_${wsTarget}`,`user:${String(wsTarget)}`,`user_${String(wsTarget)}`].forEach(room => {
+                        try { io.to(room).emit('webrtc:signal', wsRelay); io.to(room).emit('webrtc_signal', wsRelay); } catch (_) {}
+                    });
+                } catch (err) {
+                    console.warn('[WSService] webrtc_signal relay error:', err.message);
+                }
+            });
+
+            socket.off('call:heartbeat').on('call:heartbeat', ({ callId: hbCallId, targetUserId: hbTarget } = {}) => {
+                if (!hbCallId || !hbTarget) return;
+                const io = this.getIO();
+                if (!io) return;
+                try {
+                    io.to(`user:${hbTarget}`).emit('call:heartbeat', { callId: hbCallId, fromUserId: userId, ts: Date.now() });
+                    io.to(`user_${hbTarget}`).emit('call:heartbeat', { callId: hbCallId, fromUserId: userId, ts: Date.now() });
+                } catch (_) {}
+            });
+
+            // ── PHASE14 FIX: call:webrtc_offer / call:webrtc_answer relay ────
+            // calls-core.js emits these directly via socket but backend had no handler —
+            // offers were silently dropped, permanently breaking WebRTC on cloud deployments.
+            socket.off('call:webrtc_offer').on('call:webrtc_offer', (payload = {}) => {
+                try {
+                    const { callId: coCallId, targetUserId: coTarget, offer: coOffer } = payload;
+                    if (!coTarget) return;
+                    const io = this.getIO();
+                    if (!io) return;
+                    const coRelay = { callId: coCallId, fromUserId: userId, offer: coOffer, type: 'offer', timestamp: Date.now() };
+                    [`user:${coTarget}`,`user_${coTarget}`,`user:${String(coTarget)}`,`user_${String(coTarget)}`].forEach(room => {
+                        try {
+                            io.to(room).emit('call:webrtc_offer', coRelay);
+                            io.to(room).emit('webrtc:signal', { ...coRelay, type: 'offer', sdp: coOffer });
+                        } catch (_) {}
+                    });
+                    console.log(`[WSService] ☁️  call:webrtc_offer relayed callId=${coCallId} from=${userId} to=${coTarget}`);
+                } catch (err) {
+                    console.warn('[WSService] call:webrtc_offer relay error:', err.message);
+                }
+            });
+
+            socket.off('call:webrtc_answer').on('call:webrtc_answer', (payload = {}) => {
+                try {
+                    const { callId: caCallId, targetUserId: caTarget, answer: caAnswer } = payload;
+                    if (!caTarget) return;
+                    const io = this.getIO();
+                    if (!io) return;
+                    const caRelay = { callId: caCallId, fromUserId: userId, answer: caAnswer, type: 'answer', timestamp: Date.now() };
+                    [`user:${caTarget}`,`user_${caTarget}`,`user:${String(caTarget)}`,`user_${String(caTarget)}`].forEach(room => {
+                        try {
+                            io.to(room).emit('call:webrtc_answer', caRelay);
+                            io.to(room).emit('webrtc:signal', { ...caRelay, type: 'answer', sdp: caAnswer });
+                        } catch (_) {}
+                    });
+                } catch (err) {
+                    console.warn('[WSService] call:webrtc_answer relay error:', err.message);
+                }
+            });
+
+            // ── PHASE14 FIX P0: message:send socket handler ───────────────────
+            socket.off('message:send').on('message:send', async (payload = {}) => {
+                try {
+                    const { chatId: msChatId, content: msContent, type: msType = 'text', replyToId: msReplyId, localId: msLocalId } = payload;
+                    if (!msChatId || !msContent) {
+                        socket.emit('message:send:error', { localId: msLocalId, error: 'chatId and content are required' });
+                        return;
+                    }
+                    const messageService = require('./messageService');
+                    const msg = await messageService.createMessage({
+                        chatId: parseInt(msChatId, 10), senderId: userId,
+                        content: String(msContent).trim().substring(0, 5000), type: msType,
+                        replyToId: msReplyId ? parseInt(msReplyId, 10) : null
+                    });
+                    socket.emit('message:send:ack', { localId: msLocalId, messageId: msg.id, chatId: msChatId, sentAt: msg.sentAt || msg.createdAt });
+                } catch (err) {
+                    const { localId: msErrLocalId } = payload || {};
+                    console.warn('[WSService] message:send socket error:', err.message);
+                    socket.emit('message:send:error', { localId: msErrLocalId, error: err.message });
+                }
+            });
         });
 
         console.log('[WSService] Connection handler registered ✅');
@@ -1082,337 +1317,13 @@ class WebSocketService {
     }
 }
 
+// ── NOTE: All PHASE14 handlers (sync, mark_as_read, group:join, webrtc, message:send)
+// have been moved INSIDE the main setupConnectionHandler() in the WebSocketService class.
+// The monkey-patch pattern below was removed because each patch registered a NEW
+// io.on('connection') listener, resulting in 5 duplicate connection handlers firing
+// for every socket connection — causing duplicate DB writes, duplicate event emissions,
+// and the "duplicate listeners" console warnings.
+//
+// All handlers are now in the single io.on('connection') block inside the class.
+
 module.exports = new WebSocketService();
-// ── PHASE14 FIX: sync:missed_messages and sync:missed_events handlers ─────────
-// These were completely missing — clients reconnecting after a disconnect
-// had no way to fetch messages they missed while offline.
-// Added to setupConnectionHandler() via monkey-patch to avoid restructuring.
-
-const _originalSetupConnectionHandler = WebSocketService.prototype.setupConnectionHandler;
-WebSocketService.prototype.setupConnectionHandler = function() {
-    // Run original first
-    _originalSetupConnectionHandler.call(this);
-
-    const io = this.getIO();
-    if (!io) return this;
-
-    // Patch: add missed-sync handlers to every new connection
-    io.on('connection', (socket) => {
-        const userId = socket._authenticatedUserId;
-        if (!userId) return;
-
-        // sync:missed_messages — client requests messages it missed since lastSyncAt
-        socket.off('sync:missed_messages').on('sync:missed_messages', async ({ chatIds, since } = {}) => {
-            try {
-                const sequelize = require('../models').sequelize;
-                if (!sequelize || !since) return;
-
-                const sinceDate = new Date(since);
-                if (isNaN(sinceDate.getTime())) return;
-
-                // For each chatId the client knows about, get messages since `since`
-                const chatList = Array.isArray(chatIds) ? chatIds.slice(0, 20) : [];
-
-                if (chatList.length === 0) {
-                    // Get all chats the user participates in
-                    const [chats] = await sequelize.query(
-                        `SELECT DISTINCT "chatId" FROM chat_participants WHERE "userId" = :userId LIMIT 20`,
-                        { replacements: { userId }, type: sequelize.QueryTypes.SELECT }
-                    ).catch(() => [[]]);
-                    chatList.push(...(chats || []).map(c => c.chatId));
-                }
-
-                for (const chatId of chatList) {
-                    try {
-                        const messages = await sequelize.query(
-                            `SELECT m.*, u.username AS "senderUsername", u.avatar AS "senderAvatar"
-                             FROM "Messages" m
-                             LEFT JOIN "Users" u ON u.id = m."senderId"
-                             WHERE m."chatId" = :chatId
-                               AND m."createdAt" > :since
-                               AND m."isDeleted" = false
-                             ORDER BY m."createdAt" ASC
-                             LIMIT 50`,
-                            { replacements: { chatId, since: sinceDate }, type: sequelize.QueryTypes.SELECT }
-                        ).catch(() => []);
-
-                        if (messages && messages.length > 0) {
-                            socket.emit('sync:missed_messages_result', { chatId, messages, since });
-                        }
-                    } catch (_) {}
-                }
-
-                socket.emit('sync:missed_messages_done', { chatIds: chatList, since });
-            } catch (err) {
-                console.warn('[WSService] sync:missed_messages error:', err.message);
-            }
-        });
-
-        // sync:missed_events — client requests friend/group/status events since lastSyncAt
-        socket.off('sync:missed_events').on('sync:missed_events', async ({ since, types } = {}) => {
-            try {
-                const sinceDate = new Date(since);
-                if (isNaN(sinceDate.getTime())) return;
-
-                const payload = { since, events: [] };
-
-                // Emit pending friend requests
-                try {
-                    const sequelize = require('../models').sequelize;
-                    const friends = await sequelize.query(
-                        `SELECT f.id, f."requesterId", f."recipientId", f.status, f."createdAt",
-                                u.username AS "requesterUsername", u.avatar AS "requesterAvatar"
-                         FROM "Friends" f
-                         LEFT JOIN "Users" u ON u.id = f."requesterId"
-                         WHERE f."recipientId" = :userId
-                           AND f.status = 'pending'
-                           AND f."createdAt" > :since
-                         LIMIT 20`,
-                        { replacements: { userId, since: sinceDate }, type: sequelize.QueryTypes.SELECT }
-                    ).catch(() => []);
-
-                    if (friends && friends.length > 0) {
-                        friends.forEach(f => {
-                            socket.emit('friend:request', {
-                                requestId: f.id,
-                                senderId: f.requesterId,
-                                senderUsername: f.requesterUsername,
-                                senderAvatar: f.requesterAvatar,
-                                createdAt: f.createdAt
-                            });
-                        });
-                        payload.events.push({ type: 'friend_requests', count: friends.length });
-                    }
-                } catch (_) {}
-
-                socket.emit('sync:missed_events_done', payload);
-            } catch (err) {
-                console.warn('[WSService] sync:missed_events error:', err.message);
-            }
-        });
-
-        // online:check — client asks if specific users are online
-        socket.off('online:check').on('online:check', ({ userIds } = {}) => {
-            try {
-                if (!Array.isArray(userIds)) return;
-                const result = {};
-                userIds.slice(0, 50).forEach(uid => {
-                    const intUid = parseInt(uid, 10);
-                    result[uid] = this.isUserOnline ? this.isUserOnline(intUid) :
-                        (this.onlineUsers && this.onlineUsers.has(intUid));
-                });
-                socket.emit('online:status', result);
-            } catch (_) {}
-        });
-    });
-
-    return this;
-};
-
-// ── PHASE14 FIX: mark_as_read + group:join socket handlers ───────────────────
-
-const _originalSetupConnectionHandler2 = WebSocketService.prototype.setupConnectionHandler;
-WebSocketService.prototype.setupConnectionHandler = function() {
-    _originalSetupConnectionHandler2.call(this);
-    const io = this.getIO();
-    if (!io) return this;
-
-    io.on('connection', (socket) => {
-        const userId = socket._authenticatedUserId;
-        if (!userId) return;
-
-        // mark_as_read — real-time read receipt broadcast
-        socket.off('mark_as_read').on('mark_as_read', async ({ chatId, messageIds } = {}) => {
-            try {
-                if (!chatId) return;
-                const sequelize = require('../models').sequelize;
-
-                // Persist read receipts
-                if (Array.isArray(messageIds) && messageIds.length > 0) {
-                    await sequelize.query(
-                        `INSERT INTO "ReadReceipts" ("messageId","userId","readAt","createdAt","updatedAt")
-                         SELECT unnest(ARRAY[:messageIds]::int[]), :userId, NOW(), NOW(), NOW()
-                         ON CONFLICT ("messageId","userId") DO NOTHING`,
-                        { replacements: { messageIds: messageIds.map(Number), userId }, type: sequelize.QueryTypes.INSERT }
-                    ).catch(() => {});
-                }
-
-                // Broadcast to chat room so sender sees read tick
-                socket.to(`chat:${chatId}`).emit('message:read', {
-                    chatId,
-                    readerId: userId,
-                    messageIds: messageIds || [],
-                    readAt: new Date().toISOString()
-                });
-            } catch (err) {
-                console.warn('[WSService] mark_as_read error:', err.message);
-            }
-        });
-
-        // group:join — client requests to join a group's socket room after creation
-        socket.off('group:join').on('group:join', async ({ groupId } = {}) => {
-            try {
-                if (!groupId) return;
-                // Verify membership before joining room
-                const sequelize = require('../models').sequelize;
-                const [member] = await sequelize.query(
-                    `SELECT 1 FROM "GroupMembers" WHERE "groupId"=:groupId AND "userId"=:userId AND "leftAt" IS NULL LIMIT 1`,
-                    { replacements: { groupId, userId }, type: sequelize.QueryTypes.SELECT }
-                ).catch(() => [null]);
-
-                if (member) {
-                    socket.join(`group:${groupId}`);
-                    socket.join(`group_${groupId}`);
-                    socket.emit('group:joined', { groupId, success: true });
-                    console.log(`[WSService] uid=${userId} joined group:${groupId}`);
-                }
-            } catch (err) {
-                console.warn('[WSService] group:join error:', err.message);
-            }
-        });
-
-        // message:delivered — client acknowledges delivery
-        socket.off('message:delivered').on('message:delivered', ({ chatId, messageId } = {}) => {
-            if (!chatId || !messageId) return;
-            socket.to(`chat:${chatId}`).emit('message:delivered', {
-                chatId, messageId,
-                deliveredTo: userId,
-                deliveredAt: new Date().toISOString()
-            });
-        });
-    });
-
-    return this;
-};
-// ── PHASE14 FIX P0: WebRTC socket-level signaling relay ───────────────────────
-// ROOT CAUSE: All WebRTC signals (offer, answer, ICE) were relayed via HTTP POST
-// /:callId/signal. This adds 200-800ms per ICE candidate — enough to fail
-// connection establishment behind symmetric NAT (Render/cloud environments).
-// FIX: Add direct socket handlers so ICE candidates travel via WebSocket (~20ms).
-// Backend simply relays to the target user's socket room — no DB write needed.
-
-const _originalSetupConnectionHandlerWRTC = WebSocketService.prototype.setupConnectionHandler;
-WebSocketService.prototype.setupConnectionHandler = function() {
-    _originalSetupConnectionHandlerWRTC.call(this);
-    const io = this.getIO();
-    if (!io) return this;
-
-    io.on('connection', (socket) => {
-        const userId = socket._authenticatedUserId;
-        if (!userId) return;
-
-        // webrtc:signal — relay offer/answer/ICE directly via socket (low latency)
-        socket.off('webrtc:signal').on('webrtc:signal', (payload = {}) => {
-            try {
-                const { targetUserId, callId, type, sdp, candidate } = payload;
-                if (!targetUserId) return;
-                const relayPayload = {
-                    callId,
-                    fromUserId: userId,
-                    type,
-                    sdp:       sdp       || undefined,
-                    candidate: candidate || undefined,
-                    timestamp: Date.now()
-                };
-                const targets = [
-                    `user:${targetUserId}`,
-                    `user_${targetUserId}`,
-                    `user:${String(targetUserId)}`,
-                    `user_${String(targetUserId)}`
-                ];
-                targets.forEach(room => {
-                    try { io.to(room).emit('webrtc:signal', relayPayload); } catch (_) {}
-                });
-            } catch (err) {
-                console.warn('[WSService] webrtc:signal relay error:', err.message);
-            }
-        });
-
-        // webrtc_signal — underscore alias (calls-core.js also emits this form)
-        socket.off('webrtc_signal').on('webrtc_signal', (payload = {}) => {
-            try {
-                const { targetUserId, callId, type, sdp, candidate } = payload;
-                if (!targetUserId) return;
-                const relayPayload = {
-                    callId,
-                    fromUserId: userId,
-                    type,
-                    sdp:       sdp       || undefined,
-                    candidate: candidate || undefined,
-                    timestamp: Date.now()
-                };
-                const targets = [
-                    `user:${targetUserId}`,
-                    `user_${targetUserId}`,
-                    `user:${String(targetUserId)}`,
-                    `user_${String(targetUserId)}`
-                ];
-                targets.forEach(room => {
-                    try { io.to(room).emit('webrtc:signal', relayPayload);
-                          io.to(room).emit('webrtc_signal', relayPayload); } catch (_) {}
-                });
-            } catch (err) {
-                console.warn('[WSService] webrtc_signal relay error:', err.message);
-            }
-        });
-
-        // call:heartbeat — keep call alive signal, relay to other participant
-        socket.off('call:heartbeat').on('call:heartbeat', ({ callId, targetUserId } = {}) => {
-            if (!callId || !targetUserId) return;
-            try {
-                io.to(`user:${targetUserId}`).emit('call:heartbeat', { callId, fromUserId: userId, ts: Date.now() });
-                io.to(`user_${targetUserId}`).emit('call:heartbeat', { callId, fromUserId: userId, ts: Date.now() });
-            } catch (_) {}
-        });
-    });
-
-    return this;
-};
-
-// ── PHASE14 FIX P0: socket message:send handler ───────────────────────────────
-// ROOT CAUSE: Frontend HybridTransportRuntime can emit 'message:send' via socket
-// in LAN/degraded-internet mode. Backend had no handler — messages silently dropped.
-// FIX: Add socket handler that persists via messageService and broadcasts to chat.
-
-const _originalSetupCH_MsgSend = WebSocketService.prototype.setupConnectionHandler;
-WebSocketService.prototype.setupConnectionHandler = function() {
-    _originalSetupCH_MsgSend.call(this);
-    const io = this.getIO();
-    if (!io) return this;
-
-    io.on('connection', (socket) => {
-        const userId = socket._authenticatedUserId;
-        if (!userId) return;
-
-        socket.off('message:send').on('message:send', async (payload = {}) => {
-            try {
-                const { chatId, content, type = 'text', replyToId, localId } = payload;
-                if (!chatId || !content) {
-                    socket.emit('message:send:error', { localId, error: 'chatId and content are required' });
-                    return;
-                }
-                const messageService = require('./messageService');
-                const msg = await messageService.createMessage({
-                    chatId: parseInt(chatId, 10),
-                    senderId: userId,
-                    content: String(content).trim().substring(0, 5000),
-                    type,
-                    replyToId: replyToId ? parseInt(replyToId, 10) : null
-                });
-                // Ack to sender with server-assigned ID
-                socket.emit('message:send:ack', {
-                    localId,
-                    messageId: msg.id,
-                    chatId,
-                    sentAt: msg.sentAt || msg.createdAt
-                });
-            } catch (err) {
-                const { localId } = payload || {};
-                console.warn('[WSService] message:send socket error:', err.message);
-                socket.emit('message:send:error', { localId, error: err.message });
-            }
-        });
-    });
-
-    return this;
-};
