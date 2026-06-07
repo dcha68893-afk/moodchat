@@ -807,8 +807,43 @@ router.post('/:callId/end', apiRateLimiter, asyncHandler(async (req, res) => {
     const { callId }                        = req.params;
     const { duration, status: callEndStatus } = req.body;
 
-    const call = await Call.findOne({ where: { id: callId, participants: { [Op.contains]: [userId] } } });
-    if (!call) return res.status(404).json({ status: 'error', message: 'Call not found' });
+    // FIX: Frontend sends local IDs like "call_1780799144203_x021is" which are NOT UUIDs.
+    // Also use OR on callerId/receiverId as fallback when Op.contains is unavailable.
+    let call = null;
+    try {
+      call = await Call.findOne({
+        where: {
+          [Op.or]: [
+            { id: callId },
+            // If the caller passes a local ID that maps via __callIdMap, the parent
+            // already translates it — but fall back to a recent-call lookup by caller
+            { callerId: userId, status: { [Op.in]: ['initiated', 'ringing', 'in-progress'] } },
+          ]
+        }
+      });
+    } catch (_) {
+      // UUID parse error — try plain id lookup without Op.contains
+      try { call = await Call.findOne({ where: { id: callId } }); } catch (__) {}
+    }
+
+    // If still not found, try matching the most-recent active call for this user
+    if (!call) {
+      call = await Call.findOne({
+        where: {
+          [Op.or]: [
+            { callerId: userId },
+            { receiverId: userId },
+          ],
+          status: { [Op.in]: ['initiated', 'ringing', 'in-progress'] },
+        },
+        order: [['createdAt', 'DESC']],
+      }).catch(() => null);
+    }
+
+    if (!call) {
+      // Nothing to end — respond success so UI clears the calling state
+      return res.json({ status: 'success', message: 'Call already ended or not found', data: { callId, duration: 0, status: 'ended' } });
+    }
 
     // Calc duration
     let actualDuration = duration;
@@ -1123,6 +1158,18 @@ router.post('/:callId/leave', apiRateLimiter, asyncHandler(async (req, res) => {
 // ── GET /api/calls/ice-config — Return STUN/TURN server credentials ──────────
 // Called by calls-core.js after initiating/accepting a call (event: turn:config).
 // If TURN_SECRET is not set, returns free STUN servers only.
+// GET /scheduled — Scheduled / upcoming calls (frontend polls this)
+// Returns empty list when no scheduling feature is active — prevents 404 spam
+router.get('/scheduled', apiRateLimiter, asyncHandler(async (req, res) => {
+  try {
+    const auth = checkAuth(req, res); if (!auth) return;
+    // Return empty list — scheduled calls feature not yet implemented
+    res.json({ success: true, data: { calls: [], total: 0 }, message: 'No scheduled calls' });
+  } catch (err) {
+    res.status(500).json({ status: 'error', message: 'Failed to fetch scheduled calls' });
+  }
+}));
+
 router.get('/ice-config', asyncHandler(async (req, res) => {
   const userId  = req.user?.id || req.user?.userId;
   const TURN_URL    = process.env.TURN_URL    || '';

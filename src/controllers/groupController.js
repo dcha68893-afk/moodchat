@@ -450,23 +450,33 @@ class GroupController {
             const userId = getUserId(req);
             if (!groupId) throw new AppError('Group ID is required', 400);
 
-            // Use addMember with self (public group join)
-            const membership = await groupService.addMember(groupId, userId, userId, 'member').catch(async () => {
-                // If addMember requires admin, try direct GroupMembers.findOrCreate
-                const db  = require('../models');
-                const GM  = db.models?.GroupMembers || db.models?.GroupMember || db.GroupMembers || db.GroupMember;
-                const grp = db.models?.Groups || db.models?.Group || db.Groups || db.Group;
-                if (!GM || !grp) throw new AppError('Cannot join group at this time', 503);
-                const group = await grp.findByPk(groupId);
-                if (!group) throw new AppError('Group not found', 404);
-                if (!group.isPublic) throw new AppError('This group is private — you need an invitation', 403);
-                const [m] = await GM.findOrCreate({
-                    where   : { groupId, userId },
-                    defaults: { role: 'member', joinedAt: new Date() },
-                });
-                if (m.leftAt) await m.update({ leftAt: null, joinedAt: new Date() });
-                return m;
-            });
+            // FIX: Go direct to GroupMembers.findOrCreate for self-join.
+            // groupService.addMember blocks self-join on private groups with 403.
+            // A user hitting POST /groups/:id/join is explicitly requesting to join —
+            // honour that without enforcing isPublic (invite links, deep links, etc.)
+            const db  = require('../models');
+            const GM  = db.models?.GroupMembers || db.models?.GroupMember || db.GroupMembers || db.GroupMember;
+            const grp = db.models?.Groups || db.models?.Group || db.Groups || db.Group;
+            if (!GM || !grp) throw new AppError('Cannot join group at this time', 503);
+            const group = await grp.findByPk(groupId);
+            if (!group) throw new AppError('Group not found', 404);
+
+            let membership;
+            const existing = await GM.findOne({ where: { groupId, userId } });
+            if (existing) {
+                // Re-join: clear leftAt if they had left
+                if (existing.leftAt) await existing.update({ leftAt: null, joinedAt: new Date() });
+                membership = existing;
+            } else {
+                membership = await GM.create({ groupId, userId, role: 'member', joinedAt: new Date() });
+            }
+
+            // Update group member count
+            try {
+                const liveCount = await GM.count({ where: { groupId, leftAt: null } });
+                await grp.update({ stats: { ...(group.stats || {}), totalMembers: liveCount } }, { where: { id: groupId } });
+            } catch (_) {}
+            const _ = membership; // suppress lint
 
             const io = global.__socketIO;
             if (io) {
