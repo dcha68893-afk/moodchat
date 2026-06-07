@@ -4021,6 +4021,24 @@ class Application {
             this.app.use('/', mainRouter);
             console.log('✅ Mounted main API router');
 
+            // ── FALLBACK: /api/deletions — always available even before Phase10 loads ──
+            // Phase10 registers its own handler via registerRoutes() ~6s after startup.
+            // Until then this prevents 404 spam from the frontend polling loop.
+            this.app.get('/api/deletions', (req, res) => {
+                const hyd = global.__phase10?.hydration;
+                if (hyd && typeof hyd.getDeletionsSince === 'function') {
+                    const since   = parseInt(req.query.since) || 0;
+                    const entries = hyd.getDeletionsSince(since);
+                    return res.json({ ok: true, version: 0, deletions: entries, count: entries.length, since, serverTime: Date.now() });
+                }
+                res.json({ ok: true, version: 0, deletions: [], count: 0, since: parseInt(req.query.since) || 0, serverTime: Date.now() });
+            });
+            this.app.get('/api/deletions/check/:type/:id', (req, res) => {
+                const hyd = global.__phase10?.hydration;
+                const deleted = hyd?.isDeleted ? hyd.isDeleted(req.params.type, req.params.id) : false;
+                res.json({ ok: true, deleted, version: 0 });
+            });
+
             // Routes are automatically mounted by the main router from routes/index.js
             console.log('?? Routes will be mounted by main router from routes/index.js');
 

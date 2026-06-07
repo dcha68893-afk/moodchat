@@ -86,4 +86,33 @@ if (ctrl) {
     router.get('/admin/products/pending',      ctrl.adminGetPendingProducts ? ctrl.adminGetPendingProducts.bind(ctrl) : ctrl.getProducts.bind(ctrl));
 }
 
+// ── FLASH SALES — frontend marketplace-advanced.js polls this ──
+// Returns products flagged as flash sales; if no dedicated method falls back to filtered products
+router.get('/flash-sales', (req, res) => {
+    try {
+        const ctrl = require('../controllers/marketplace.controller');
+        if (ctrl && typeof ctrl.getFlashSales === 'function') {
+            return ctrl.getFlashSales(req, res);
+        }
+        // Fallback: return empty list — prevents 503/404 polling spam
+        res.json({ success: true, data: { flash_sales: [], total: 0 }, message: 'No active flash sales' });
+    } catch (e) {
+        res.json({ success: true, data: { flash_sales: [], total: 0 } });
+    }
+});
+
+// ── RECOMMENDATIONS — frontend marketplace-advanced.js polls this ──
+router.get('/recommendations', (req, res) => {
+    try {
+        const ctrl = require('../controllers/marketplace.controller');
+        if (ctrl && typeof ctrl.getRecommendations === 'function') {
+            return ctrl.getRecommendations(req, res);
+        }
+        // Fallback: return empty list — prevents 503 spam
+        res.json({ success: true, data: { recommendations: [], products: [] }, message: 'No recommendations' });
+    } catch (e) {
+        res.json({ success: true, data: { recommendations: [], products: [] } });
+    }
+});
+
 module.exports = router;
