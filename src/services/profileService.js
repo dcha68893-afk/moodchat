@@ -1,5 +1,9 @@
-const User = require('../models/Users');
+const { Op } = require('sequelize');
+const db = require('../models');
 const { ServerError, ValidationError, NotFoundError, ForbiddenError } = require('../utils/errors');
+
+// Lazy-resolve the model so we get the Sequelize instance, not the factory function
+const getUser = () => db.User || db.models.Users || db.models.User;
 const bcrypt = require('bcryptjs');
 const path = require('path');
 const fs = require('fs');
@@ -15,7 +19,7 @@ class ProfileService {
         throw new ValidationError('User ID is required');
       }
 
-      const user = await User.findByPk(userId, {
+      const user = await getUser().findByPk(userId, {
         attributes: { exclude: ['password'] }
       });
 
@@ -47,7 +51,7 @@ class ProfileService {
         throw new ValidationError('User ID is required');
       }
 
-      const user = await User.findByPk(userId);
+      const user = await getUser().findByPk(userId);
       if (!user) {
         throw new NotFoundError('User not found');
       }
@@ -69,10 +73,10 @@ class ProfileService {
               throw new ValidationError('Username can only contain letters, numbers, and underscores');
             }
             
-            const existingUser = await User.findOne({
+            const existingUser = await getUser().findOne({
               where: { 
                 username: value,
-                id: { $ne: userId }
+                id: { [Op.ne]: userId }
               }
             });
             if (existingUser) {
@@ -86,10 +90,10 @@ class ProfileService {
               throw new ValidationError('Invalid email format');
             }
             
-            const existingUser = await User.findOne({
+            const existingUser = await getUser().findOne({
               where: { 
                 email: value,
-                id: { $ne: userId }
+                id: { [Op.ne]: userId }
               }
             });
             if (existingUser) {
@@ -107,7 +111,7 @@ class ProfileService {
 
       await user.update(updateFields);
 
-      const updatedUser = await User.findByPk(userId, {
+      const updatedUser = await getUser().findByPk(userId, {
         attributes: { exclude: ['password'] }
       });
 
@@ -139,7 +143,7 @@ class ProfileService {
         throw new ValidationError('Profile picture file is required');
       }
 
-      const user = await User.findByPk(userId);
+      const user = await getUser().findByPk(userId);
       if (!user) {
         throw new NotFoundError('User not found');
       }
@@ -186,7 +190,7 @@ class ProfileService {
         throw new ValidationError('Cover photo file is required');
       }
 
-      const user = await User.findByPk(userId);
+      const user = await getUser().findByPk(userId);
       if (!user) {
         throw new NotFoundError('User not found');
       }
@@ -229,7 +233,7 @@ class ProfileService {
         throw new ValidationError('User ID is required');
       }
 
-      const user = await User.findByPk(userId);
+      const user = await getUser().findByPk(userId);
       if (!user) {
         throw new NotFoundError('User not found');
       }
@@ -270,7 +274,7 @@ class ProfileService {
         throw new ValidationError('User ID is required');
       }
 
-      const user = await User.findByPk(userId);
+      const user = await getUser().findByPk(userId);
       if (!user) {
         throw new NotFoundError('User not found');
       }
@@ -321,7 +325,7 @@ class ProfileService {
         throw new ValidationError('Password must be at least 8 characters long');
       }
 
-      const user = await User.findByPk(userId);
+      const user = await getUser().findByPk(userId);
       if (!user) {
         throw new NotFoundError('User not found');
       }
@@ -358,7 +362,7 @@ class ProfileService {
         throw new ValidationError('User ID is required');
       }
 
-      const user = await User.findByPk(userId);
+      const user = await getUser().findByPk(userId);
       if (!user) {
         throw new NotFoundError('User not found');
       }
@@ -403,7 +407,7 @@ class ProfileService {
         throw new ValidationError('User ID is required');
       }
 
-      const user = await User.findByPk(userId);
+      const user = await getUser().findByPk(userId);
       if (!user) {
         throw new NotFoundError('User not found');
       }

@@ -1,16 +1,17 @@
 const config = require('./index');
 
-// FIXED: Validate environment variables
+// FIXED: Validate environment variables — hard-fail only on secret, use defaults for optional fields
 if (!config.jwt || !config.jwt.secret) {
   throw new Error('JWT_SECRET is not configured in environment variables');
 }
 
+// Use defaults for optional issuer/audience — don't crash if missing
 if (!config.jwt.issuer) {
-  throw new Error('JWT_ISSUER is not configured in environment variables');
+  config.jwt.issuer = process.env.JWT_ISSUER || 'moodchat-api';
 }
 
 if (!config.jwt.audience) {
-  throw new Error('JWT_AUDIENCE is not configured in environment variables');
+  config.jwt.audience = process.env.JWT_AUDIENCE || 'moodchat-client';
 }
 
 // Validate expiration times

@@ -1,5 +1,7 @@
-const UserStatus = require('../models/UserStatus');
-const User = require('../models/Users');
+const { Op } = require('sequelize');
+const db = require('../models');
+const getUserStatus = () => db.UserStatus || (db.getUserStatus && db.getUserStatus()) || null;
+const getUser = () => db.User || db.models?.Users || null;
 const { ServerError, ValidationError, NotFoundError, ForbiddenError } = require('../utils/errors');
 const logger = require('../utils/logger');
 
@@ -29,13 +31,13 @@ class UserStatusService {
       }
 
       // Check if user exists
-      const user = await User.findById(userId);
+      const user = await getUser().findByPk(userId);
       if (!user) {
         throw new NotFoundError('User not found');
       }
 
       // Find or create user status
-      let userStatus = await UserStatus.findOne({ userId });
+      let userStatus = await getUserStatus().findOne({ where: { userId } });
       
       if (!userStatus) {
         userStatus = new UserStatus({ userId });
@@ -74,7 +76,7 @@ class UserStatusService {
       await userStatus.save();
 
       // Populate user details
-      await userStatus.populate('userId', 'username avatar displayName email');
+      await userStatus;
 
       return this._formatUserStatus(userStatus);
     } catch (error) {
@@ -103,8 +105,8 @@ class UserStatusService {
 
       // Check if users exist
       const [user, requester] = await Promise.all([
-        User.findById(userId),
-        User.findById(requesterId)
+        getUser().findByPk(userId),
+        getUser().findByPk(requesterId)
       ]);
 
       if (!user || !requester) {
@@ -112,8 +114,7 @@ class UserStatusService {
       }
 
       // Get user status
-      let userStatus = await UserStatus.findOne({ userId })
-        .populate('userId', 'username avatar displayName email');
+      let userStatus = await getUserStatus().findOne({ where: { userId } });
 
       if (!userStatus) {
         // Create default status if not exists
@@ -124,7 +125,7 @@ class UserStatusService {
           lastSeen: new Date()
         });
         await userStatus.save();
-        await userStatus.populate('userId', 'username avatar displayName email');
+        await userStatus;
       }
 
       // Check privacy settings
@@ -174,8 +175,9 @@ class UserStatusService {
       }
 
       // Get all statuses
-      const userStatuses = await UserStatus.find({ userId: { $in: userIds } })
-        .populate('userId', 'username avatar displayName email');
+      const userStatuses = await getUserStatus().findAll({
+        where: { userId: { [Op.in]: userIds } }
+      });
 
       // Create default statuses for users without one
       const statusMap = new Map();
@@ -189,7 +191,7 @@ class UserStatusService {
         
         if (!status) {
           // Create default status
-          const user = await User.findById(userId);
+          const user = await getUser().findByPk(userId);
           if (user) {
             status = new UserStatus({
               userId: user._id,
@@ -259,8 +261,8 @@ class UserStatusService {
       
       if (startDate || endDate) {
         query.timestamp = {};
-        if (startDate) query.timestamp.$gte = startDate;
-        if (endDate) query.timestamp.$lte = endDate;
+        if (startDate) query.timestamp_gte = startDate;
+        if (endDate) query.timestamp_lte = endDate;
       }
       
       if (status) {
@@ -268,325 +270,8 @@ class UserStatusService {
       }
 
       const [history, total] = await Promise.all([
-        UserStatus.historyModel
-          ? UserStatus.historyModel.find(query)
-            .sort({ timestamp: -1 })
-            .skip(skip)
-            .limit(limit)
-          : [],
-        UserStatus.historyModel
-          ? UserStatus.historyModel.countDocuments(query)
-          : 0
-      ]);
-
-      const totalPages = Math.ceil(total / limit);
-
-      return {
-        history: history.map(record => ({
-          status: record.status,
-          customMessage: record.customMessage,
-          timestamp: record.timestamp,
-          deviceInfo: record.deviceInfo
-        })),
-        pagination: {
-          currentPage: page,
-          totalPages,
-          totalRecords: total,
-          hasNext: page < totalPages,
-          hasPrevious: page > 1
-        }
-      };
-    } catch (error) {
-      if (error instanceof ValidationError) {
-        throw error;
-      }
-      logger.error('Error getting status history:', error);
-      throw new ServerError('Failed to get status history');
-    }
-  }
-
-  /**
-   * Set custom status
-   * @param {string} userId - User ID
-   * @param {Object} customStatusData - Custom status data
-   * @returns {Promise<Object>} Updated user status
-   */
-  async setCustomStatus(userId, customStatusData) {
-    try {
-      if (!userId) {
-        throw new ValidationError('User ID is required');
-      }
-
-      const { customMessage, emoji, expiresAt } = customStatusData;
-
-      if (!customMessage) {
-        throw new ValidationError('Custom message is required');
-      }
-
-      if (customMessage.length > 100) {
-        throw new ValidationError('Custom message cannot exceed 100 characters');
-      }
-
-      let userStatus = await UserStatus.findOne({ userId });
-      
-      if (!userStatus) {
-        userStatus = new UserStatus({ userId });
-      }
-
-      userStatus.customMessage = customMessage;
-      userStatus.customMessageSetAt = new Date();
-      
-      if (emoji) {
-        userStatus.emoji = emoji;
-      }
-      
-      if (expiresAt) {
-        userStatus.customMessageExpiresAt = new Date(expiresAt);
-      }
-
-      await userStatus.save();
-      await userStatus.populate('userId', 'username avatar displayName email');
-
-      return this._formatUserStatus(userStatus);
-    } catch (error) {
-      if (error instanceof ValidationError) {
-        throw error;
-      }
-      logger.error('Error setting custom status:', error);
-      throw new ServerError('Failed to set custom status');
-    }
-  }
-
-  /**
-   * Clear custom status
-   * @param {string} userId - User ID
-   * @returns {Promise<Object>} Updated user status
-   */
-  async clearCustomStatus(userId) {
-    try {
-      if (!userId) {
-        throw new ValidationError('User ID is required');
-      }
-
-      const userStatus = await UserStatus.findOne({ userId });
-      
-      if (!userStatus) {
-        throw new NotFoundError('User status not found');
-      }
-
-      userStatus.customMessage = null;
-      userStatus.emoji = null;
-      userStatus.customMessageSetAt = null;
-      userStatus.customMessageExpiresAt = null;
-
-      await userStatus.save();
-      await userStatus.populate('userId', 'username avatar displayName email');
-
-      return this._formatUserStatus(userStatus);
-    } catch (error) {
-      if (
-        error instanceof ValidationError ||
-        error instanceof NotFoundError
-      ) {
-        throw error;
-      }
-      logger.error('Error clearing custom status:', error);
-      throw new ServerError('Failed to clear custom status');
-    }
-  }
-
-  /**
-   * Set auto-reply message
-   * @param {string} userId - User ID
-   * @param {Object} autoReplyData - Auto-reply data
-   * @returns {Promise<Object>} Updated auto-reply settings
-   */
-  async setAutoReply(userId, autoReplyData) {
-    try {
-      if (!userId) {
-        throw new ValidationError('User ID is required');
-      }
-
-      const { message, enabled = true, schedule } = autoReplyData;
-
-      if (enabled && !message) {
-        throw new ValidationError('Auto-reply message is required when enabling');
-      }
-
-      let userStatus = await UserStatus.findOne({ userId });
-      
-      if (!userStatus) {
-        userStatus = new UserStatus({ userId });
-      }
-
-      userStatus.autoReply = {
-        message: enabled ? message : null,
-        enabled,
-        schedule: schedule || {},
-        lastUpdated: new Date()
-      };
-
-      await userStatus.save();
-
-      return {
-        autoReply: userStatus.autoReply,
-        userId
-      };
-    } catch (error) {
-      if (error instanceof ValidationError) {
-        throw error;
-      }
-      logger.error('Error setting auto-reply:', error);
-      throw new ServerError('Failed to set auto-reply');
-    }
-  }
-
-  /**
-   * Get online users count
-   * @returns {Promise<number>} Number of online users
-   */
-  async getOnlineUsersCount() {
-    try {
-      const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
-
-      const count = await UserStatus.countDocuments({
-        isOnline: true,
-        lastSeen: { $gte: fiveMinutesAgo },
-        status: { $ne: 'invisible' }
-      });
-
-      return count;
-    } catch (error) {
-      logger.error('Error getting online users count:', error);
-      throw new ServerError('Failed to get online users count');
-    }
-  }
-
-  /**
-   * Get users by status
-   * @param {string} status - Status to filter by
-   * @param {Object} options - Query options
-   * @returns {Promise<Object>} Users with specified status
-   */
-  async getUsersByStatus(status, options = {}) {
-    try {
-      const validStatuses = ['online', 'away', 'busy', 'offline', 'invisible'];
-      if (!validStatuses.includes(status)) {
-        throw new ValidationError(`Invalid status. Valid values: ${validStatuses.join(', ')}`);
-      }
-
-      const {
-        page = 1,
-        limit = 50,
-        includeInvisible = false
-      } = options;
-
-      const skip = (page - 1) * limit;
-
-      // Build query
-      const query = { status };
-      
-      if (!includeInvisible && status !== 'invisible') {
-        query.status = { $ne: 'invisible' };
-      }
-
-      const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
-      if (status === 'online') {
-        query.lastSeen = { $gte: fiveMinutesAgo };
-        query.isOnline = true;
-      }
-
-      const [userStatuses, total] = await Promise.all([
-        UserStatus.find(query)
-          .populate('userId', 'username avatar displayName email')
-          .sort({ lastSeen: -1 })
-          .skip(skip)
-          .limit(limit),
-        UserStatus.countDocuments(query)
-      ]);
-
-      const totalPages = Math.ceil(total / limit);
-
-      return {
-        users: userStatuses.map(status => this._formatUserStatus(status)),
-        pagination: {
-          currentPage: page,
-          totalPages,
-          totalUsers: total,
-          hasNext: page < totalPages,
-          hasPrevious: page > 1
-        }
-      };
-    } catch (error) {
-      if (error instanceof ValidationError) {
-        throw error;
-      }
-      logger.error('Error getting users by status:', error);
-      throw new ServerError('Failed to get users by status');
-    }
-  }
-
-  /**
-   * Set do not disturb schedule
-   * @param {string} userId - User ID
-   * @param {Object} dndData - Do Not Disturb data
-   * @returns {Promise<Object>} Updated DND settings
-   */
-  async setDoNotDisturbSchedule(userId, dndData) {
-    try {
-      if (!userId) {
-        throw new ValidationError('User ID is required');
-      }
-
-      const { schedule, enabled = true, exceptions } = dndData;
-
-      if (enabled && !schedule) {
-        throw new ValidationError('Schedule is required when enabling Do Not Disturb');
-      }
-
-      let userStatus = await UserStatus.findOne({ userId });
-      
-      if (!userStatus) {
-        userStatus = new UserStatus({ userId });
-      }
-
-      userStatus.doNotDisturb = {
-        enabled,
-        schedule: schedule || {},
-        exceptions: exceptions || [],
-        lastUpdated: new Date()
-      };
-
-      await userStatus.save();
-
-      return userStatus.doNotDisturb;
-    } catch (error) {
-      if (error instanceof ValidationError) {
-        throw error;
-      }
-      logger.error('Error setting Do Not Disturb schedule:', error);
-      throw new ServerError('Failed to set Do Not Disturb schedule');
-    }
-  }
-
-  /**
-   * Get do not disturb status
-   * @param {string} userId - User ID
-   * @returns {Promise<Object>} DND status
-   */
-  async getDoNotDisturbStatus(userId) {
-    try {
-      if (!userId) {
-        throw new ValidationError('User ID is required');
-      }
-
-      const userStatus = await UserStatus.findOne({ userId });
-      
-      if (!userStatus) {
-        return {
-          enabled: false,
-          schedule: {},
-          exceptions: [],
+        [],
+        [],
           lastUpdated: null
         };
       }
@@ -665,7 +350,7 @@ class UserStatusService {
         throw new ValidationError('User ID is required');
       }
 
-      let userStatus = await UserStatus.findOne({ userId });
+      let userStatus = await getUserStatus().findOne({ where: { userId } });
       
       if (!userStatus) {
         userStatus = new UserStatus({ userId });
@@ -680,7 +365,7 @@ class UserStatusService {
       }
 
       await userStatus.save();
-      await userStatus.populate('userId', 'username avatar displayName email');
+      await userStatus;
 
       return this._formatUserStatus(userStatus);
     } catch (error) {

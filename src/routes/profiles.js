@@ -12,8 +12,8 @@ const asyncHandler = require('express-async-handler');
 // GET /api/profile - get current user profile
 router.get('/', apiRateLimiter, asyncHandler(async (req, res) => {
   const userId = req.user.userId || req.user.id;
-  // Create a mock request with params for the controller
-  req.params = { userId };
+  // FIX: assign only the property, not the whole object (overwrites Express internals otherwise)
+  req.params.userId = userId;
   await profileController.getProfile(req, res);
 }));
 
