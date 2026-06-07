@@ -487,6 +487,9 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
     const { receiverId, content, type = 'text', chatId: existingChatId, replyToId, localId: clientLocalId } = req.body;
     const senderId = req.user.id;
 
+    // ── FORENSIC LOG: SEND_START ──────────────────────────────────────────────
+    console.log(`[FORENSIC] SEND_START | senderId=${senderId} | chatId=${existingChatId||'?'} | receiverId=${receiverId||'?'} | localId=${clientLocalId||'?'} | contentLen=${(content||'').length} | ts=${Date.now()}`);
+
     // Validate content
     if (!content || content.trim().length === 0) {
       return res.status(400).json({ success: false, message: 'Message content is required' });
@@ -577,6 +580,9 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
       return res.status(403).json({ success: false, message: 'Access denied to this chat' });
     }
 
+    // ── FORENSIC LOG: BACKEND_RECEIVED ───────────────────────────────────────
+    console.log(`[FORENSIC] BACKEND_RECEIVED | senderId=${senderId} | chatId=${chatId} | localId=${clientLocalId||'?'} | ts=${Date.now()}`);
+
     // FIX-068: Wrap message INSERT + chat UPDATE in a transaction for atomicity
     // Without this, a crash between the two queries leaves the chat with an orphan message
     let messageId, senderRows;
@@ -600,6 +606,9 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
       );
 
       await t.commit();
+
+      // ── FORENSIC LOG: DB_SAVED ──────────────────────────────────────────────
+      console.log(`[FORENSIC] DB_SAVED | messageId=${messageId} | chatId=${chatId} | senderId=${senderId} | ts=${Date.now()}`);
 
       senderRows = await sequelize.query(
         `SELECT id, username, avatar FROM "Users" WHERE id = :senderId`,
@@ -670,6 +679,10 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
           .filter(Boolean);
         const recipientIds = allParticipantIds.filter(id => id !== senderId);
 
+        // ── FORENSIC LOG: TRANSPORT_SELECTED ─────────────────────────────────
+        const _htrAvail = !!global.__HybridTransportRuntime;
+        console.log(`[FORENSIC] TRANSPORT_SELECTED | messageId=${messageId} | transport=${_htrAvail?'HTR+SocketIO':'SocketIO'} | recipients=${recipientIds.join(',')} | ts=${Date.now()}`);
+
         // Emit message:new to RECIPIENTS ONLY (not sender) — sender already has optimistic message
         // FIX: Sending message:new to the sender caused double-render and dedup collisions.
         // sendToUser() already emits to all room name variants (user:X, user_X, user:Xstr, user_Xstr)
@@ -677,6 +690,11 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
         const deliveryResults = await Promise.allSettled(
           recipientIds.map(uid => wsService.sendToUser(uid, 'message:new', populatedMessage))
         );
+
+        // ── FORENSIC LOG: BROADCASTED ─────────────────────────────────────────
+        const _delivered = deliveryResults.filter(r => r.status === 'fulfilled' && r.value === true).length;
+        const _failed    = deliveryResults.length - _delivered;
+        console.log(`[FORENSIC] BROADCASTED | messageId=${messageId} | chatId=${chatId} | recipients=${recipientIds.join(',')} | delivered=${_delivered}/${deliveryResults.length} | failed=${_failed} | ts=${Date.now()}`);
 
         // FIX Bug #1 & #4: Fetch chat type so group broadcasts work correctly.
         // Previously `chat` and `safeChatId` were never defined in this POST scope,
@@ -703,11 +721,9 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
           } catch(_) {}
         }
 
-        // Count successes for diagnostics
-        const delivered = deliveryResults.filter(r => r.status === 'fulfilled' && r.value === true).length;
-        const failed    = deliveryResults.length - delivered;
-        if (failed > 0) {
-          console.warn(`[messages.js] ⚠️ sendToUser: ${delivered}/${deliveryResults.length} delivered, ${failed} failed for chatId=${chatId}`);
+        // Count successes for diagnostics (already logged in FORENSIC:BROADCASTED above)
+        if (_failed > 0) {
+          console.warn(`[messages.js] ⚠️ sendToUser: ${_delivered}/${deliveryResults.length} delivered, ${_failed} failed for chatId=${chatId}`);
         }
 
         // Also broadcast to the chat:<id> room — catches any socket that joined

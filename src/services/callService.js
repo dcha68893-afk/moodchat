@@ -105,6 +105,9 @@ class CallService {
     }
     if (!['audio', 'video'].includes(callType)) throw new Error('Invalid call type');
     
+    // ── FORENSIC LOG: CALL_START ──────────────────────────────────────────────
+    console.log(`[FORENSIC] CALL_START | callerId=${callerId} | calleeId=${calleeId} | type=${callType} | ts=${Date.now()}`);
+    
     // CRITICAL SECURITY: Prevent self-calls
     if (callerId === calleeId) {
       throw new Error('Cannot call yourself');
@@ -195,13 +198,13 @@ class CallService {
 
     const svc = ws();
     if (svc) {
-      // ── PROOF LOG: EMITTING ──────────────────────────────────────────────
-      console.log(`[CallService] 📞 EMITTING call:incoming to receiverId=${calleeId} callerName="${callerDisplayName}"`);
+      // ── FORENSIC LOG: CALL_SIGNAL_SENT ──────────────────────────────────────
+      console.log(`[FORENSIC] CALL_SIGNAL_SENT | callId=${call.id} | callerId=${callerId} | calleeId=${calleeId} | events=[call:incoming,incoming_call,call_incoming] | ts=${Date.now()}`);
       // Primary: all naming variants to callee
       await svc.sendToUser(parseInt(calleeId), 'call:incoming',  callPayload);
       await svc.sendToUser(parseInt(calleeId), 'incoming_call',  callPayload);
       await svc.sendToUser(parseInt(calleeId), 'call_incoming',  callPayload);
-      console.log(`[CallService] ✅ EMITTED to callee ${calleeId}`);
+      console.log(`[FORENSIC] CALL_SIGNAL_SENT complete | calleeId=${calleeId} | ts=${Date.now()}`);
       // Confirmation to caller
       await svc.sendToUser(parseInt(callerId), 'call:initiated', callPayload);
       await svc.sendToUser(parseInt(callerId), 'call_initiated', callPayload);
@@ -245,6 +248,9 @@ class CallService {
     call.status    = 'in-progress';
     call.startedAt = new Date();   // now set — this is actual call start time
     if (sdpAnswer) call.sdpAnswer = sdpAnswer;
+
+    // ── FORENSIC LOG: WEBRTC_CONNECTED ───────────────────────────────────────
+    console.log(`[FORENSIC] WEBRTC_CONNECTED | callId=${callId} | answeredBy=${userId} | sdpAnswer=${sdpAnswer?'present':'none'} | ts=${Date.now()}`);
     await call.save();
 
     // FIX 7/8: Re-fetch with user associations so callerName/calleeName are available

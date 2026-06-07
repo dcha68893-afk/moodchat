@@ -815,6 +815,10 @@ class WebSocketService {
             try { io.to(room).emit(event, payload); delivered = true; } catch (_) {}
         }
 
+        if (delivered) {
+            console.log(`[FORENSIC] RECEIVER_RECEIVED | uid=${uid} | event=${event} | rooms=[${rooms.join(',')}] | ts=${Date.now()}`);
+        }
+
         const socketIds = await this.getSocketIdsForUser(uid);
         for (const sid of socketIds) {
             if (!this._isSocketAliveInAdapter(io, sid)) {

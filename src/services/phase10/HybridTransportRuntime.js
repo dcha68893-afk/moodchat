@@ -269,6 +269,9 @@ class HybridTransportRuntime extends EventEmitter {
       for (const room of uniqueRooms) {
         try { this.io.to(room).emit(event, data); sent = true; } catch (_) {}
       }
+      if (sent) {
+        this.log.log(`[FORENSIC] RECEIVER_RECEIVED | uid=${uid} | event=${event} | via=HTR-Internet | rooms=[${uniqueRooms.join(',')}] | ts=${Date.now()}`);
+      }
       return sent;
     } catch (err) {
       this.log.warn(`[HTR] Internet send failed for uid=${uid}:`, err.message);
