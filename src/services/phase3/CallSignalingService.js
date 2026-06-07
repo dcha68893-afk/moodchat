@@ -316,9 +316,34 @@ class CallSignalingService extends EventEmitter {
         // Join call room
         socket.join(`call:${callId}`);
         this._rooms.addParticipant(callId, userId, socket.id);
+
+        // FIX-CALL-DIRECT: Also make sure target user joins their call room
+        // so webrtc:signal events can be routed without relying on postMessage
+        const targetSockets = await this._wsService.getSocketIdsForUser(targetUserId).catch(() => []);
+        const io = this._io;
+        if (io && targetSockets.length > 0) {
+          for (const sid of targetSockets) {
+            const s = io.sockets.sockets.get(sid);
+            if (s) { s.join(`call:${callId}`); this._rooms.addParticipant(callId, targetUserId, sid); }
+          }
+          console.log(`[CallSignaling] ✅ Target uid=${targetUserId} pre-joined call:${callId}`);
+        }
       } catch (err) {
         this._logger.warn('[CallSignaling] call:initiate error:', err.message);
       }
+    });
+
+    // ── FIX-CALL-DIRECT: webrtc:offer relay via Socket.IO (bypass postMessage) ─
+    socket.off('call:webrtc_offer').on('call:webrtc_offer', async ({ callId, targetUserId: tgt, offer } = {}) => {
+      if (!callId || !tgt || !offer) return;
+      await this._wsService.sendToUser(tgt, 'call:webrtc_offer', {
+        callId, offer, callerId: userId, timestamp: Date.now(),
+      }).catch(() => {});
+      // Also broadcast to call room for redundancy
+      this._io.to(`call:${callId}`).except(socket.id).emit('call:webrtc_offer', {
+        callId, offer, callerId: userId, timestamp: Date.now(),
+      });
+      this._logger.log(`[CallSignaling] 📡 webrtc:offer relayed for call ${callId}`);
     });
 
     // ── Call accept ──────────────────────────────────────────────────────────

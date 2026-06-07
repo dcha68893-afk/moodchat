@@ -1,7 +1,11 @@
 'use strict';
 
+// ── FIX: MaxListenersExceededWarning — raise cap before any listeners attach ──
+const EventEmitter = require('events');
+EventEmitter.defaultMaxListeners = 20;
+
 /**
- * webSocketService.js — FIXED v3.2.0
+ * webSocketService.js — FIXED v3.3.0 (call-ack, delivery-ack, offline-queue)
  *
  * ROOT CAUSE FIXES:
  *  1. verifyToken() no longer calls socket.disconnect(true) — callers handle rejection
@@ -153,22 +157,7 @@ class WebSocketService {
                 }
             });
 
-            socket.off('join_user_room').on('join_user_room', ({ userId: uid } = {}) => {
-                const rid = parseInt(uid, 10);
-                if (rid && rid === userId) {
-                    const strRid = String(rid);
-                    socket.join(`user:${rid}`);
-                    socket.join(`user_${rid}`);
-                    socket.join(`user:${strRid}`);   // BUG 3 FIX: string-coerced variants
-                    socket.join(`user_${strRid}`);
-                    try {
-                        const actualRooms = Array.from(socket.rooms || []);
-                        console.log(`[WSService] uid=${userId} confirmed join user rooms — in rooms: [${actualRooms.join(', ')}]`);
-                    } catch (_) {
-                        console.log(`[WSService] uid=${userId} confirmed join user rooms`);
-                    }
-                }
-            });
+            // join_user_room: moved below with call-room fix (see FIX-CALL-ROOM)
 
             socket.off('disconnect').on('disconnect', (reason) => {
                 this.removeUser(userId, socket);
@@ -215,6 +204,60 @@ class WebSocketService {
                     console.warn('[WSService] settings:update relay error:', e.message);
                 }
             });
+
+            // ── FIX-CALL-ACK: Receiver signals that ring UI is showing ────────
+            socket.off('call:received').on('call:received', async ({ callId, callerId } = {}) => {
+                if (!callId) return;
+                // Clear the 20-second no-answer timer for this call
+                if (this._pendingCallAcks) this._pendingCallAcks.delete(callId);
+                // Confirm to caller that receiver is ringing
+                if (callerId) {
+                    await this.sendToUser(callerId, 'call:receiver_ack', {
+                        callId, receiverId: userId, timestamp: Date.now(),
+                    }).catch(() => {});
+                }
+                console.log(`[WSService] ✅ call:received ack — callId=${callId} uid=${userId}`);
+            });
+
+            // ── FIX-CALL-ROOM: join_user_room — verify both users reachable ──
+            socket.off('join_user_room').on('join_user_room', ({ userId: uid, peerId } = {}) => {
+                const rid    = parseInt(uid, 10);
+                const strRid = String(rid);
+                if (!rid || rid !== userId) return;
+                socket.join(`user:${rid}`);
+                socket.join(`user_${rid}`);
+                socket.join(`user:${strRid}`);
+                socket.join(`user_${strRid}`);
+                const rooms = Array.from(socket.rooms || []);
+                console.log(`[WSService] uid=${userId} rooms: [${rooms.join(', ')}]`);
+                // If peerId is provided (call setup), confirm peer is reachable
+                if (peerId) {
+                    Promise.resolve(this.isUserOnline(peerId)).then(online => {
+                        socket.emit('peer_room_status', { peerId, online, timestamp: Date.now() });
+                        if (!online) console.warn(`[WSService] ⚠️  Peer uid=${peerId} offline — call may fail`);
+                    }).catch(() => {});
+                }
+            });
+
+            // ── FIX-MSG-DELIVERY: Phase-2 ack — receiver confirms message got ─
+            socket.off('message:delivery_ack').on('message:delivery_ack', async ({ messageId, chatId, senderId } = {}) => {
+                if (!messageId || !senderId) return;
+                this.clearMessageDeliveryTimeout(messageId);
+                await this.sendToUser(senderId, 'message:delivered', {
+                    messageId, chatId, deliveredTo: userId, timestamp: Date.now(),
+                }).catch(() => {});
+                console.log(`[WSService] 📨 Delivered mid=${messageId} to uid=${userId}`);
+            });
+
+            // ── FIX-ONLINE-STATUS: Let sender check if receiver is online ─────
+            socket.off('check_user_online').on('check_user_online', async ({ targetUserId } = {}) => {
+                if (!targetUserId) return;
+                const online = await this.isUserOnline(targetUserId).catch(() => false);
+                socket.emit('user_online_status', { userId: targetUserId, online, timestamp: Date.now() });
+            });
+
+            // ── FIX-OFFLINE-QUEUE: Flush any queued messages on reconnect ─────
+            this.flushOfflineMessages(userId).catch(() => {});
         });
 
         console.log('[WSService] Connection handler registered ✅');
@@ -529,6 +572,14 @@ class WebSocketService {
             try { io.to(sid).emit(event, payload); delivered = true; } catch (_) {}
         }
 
+        // FIX-OFFLINE-QUEUE: If not delivered and it's a message event, enqueue for retry
+        if (!delivered) {
+            const _queueableEvents = ['new_message', 'message:new', 'message_received', 'chat:message'];
+            if (_queueableEvents.includes(event)) {
+                this.enqueueOfflineMessage(uid, event, data);
+            }
+        }
+
         return delivered;
     }
 
@@ -536,9 +587,35 @@ class WebSocketService {
 
     async notifyCallInitiated(userId, data = {}) {
         // FIX-003: single canonical event 'call:incoming' only
-        // The previous dual-emit ('call:incoming' + 'incoming_call') caused phones to ring twice
-        // and black screens on call end. Frontend listens for 'call:incoming' (colon-style).
-        await this.sendToUser(userId, 'call:incoming', data);
+        const delivered = await this.sendToUser(userId, 'call:incoming', data);
+
+        // FIX-CALL-OFFLINE: receiver not connected — tell caller immediately
+        if (!delivered && data.callerId) {
+            await this.sendToUser(data.callerId, 'call:receiver_offline', {
+                callId: data.callId, reason: 'receiver_offline', timestamp: Date.now(),
+            }).catch(() => {});
+            console.warn(`[WSService] 📵 Receiver uid=${userId} offline — notified caller`);
+            return false;
+        }
+
+        // FIX-CALL-TIMEOUT: 20-second "no answer" guard
+        // notifyCallReceived() (called when receiver's UI shows the ring) clears this.
+        const callId   = data.callId;
+        const callerId = data.callerId;
+        if (callId && callerId) {
+            if (!this._pendingCallAcks) this._pendingCallAcks = new Set();
+            this._pendingCallAcks.add(callId);
+            setTimeout(async () => {
+                if (this._pendingCallAcks && this._pendingCallAcks.has(callId)) {
+                    this._pendingCallAcks.delete(callId);
+                    await this.sendToUser(callerId, 'call:no_answer', {
+                        callId, reason: 'user_didnt_answer', timestamp: Date.now(),
+                    }).catch(() => {});
+                    console.log(`[WSService] 📵 Call ${callId} — no answer after 20s`);
+                }
+            }, 20_000);
+        }
+
         return true;
     }
 
@@ -566,6 +643,53 @@ class WebSocketService {
             timestamp: new Date().toISOString()
         };
         return this.sendToUser(userId, 'settings_updated', payload);
+    }
+
+    // ── FIX-MSG-DELIVERY: Two-phase delivery timeout (10 s) ──────────────────
+    /**
+     * Call this right after emitting 'new_message' to the receiver.
+     * Cleared when receiver's socket fires 'message:delivery_ack'.
+     */
+    scheduleMessageDeliveryTimeout(messageId, chatId, senderId) {
+        if (!this._msgTimeouts) this._msgTimeouts = new Map();
+        const key = `msg:${messageId}`;
+        if (this._msgTimeouts.has(key)) return;
+        const t = setTimeout(async () => {
+            this._msgTimeouts.delete(key);
+            await this.sendToUser(senderId, 'message:delivery_failed', {
+                messageId, chatId, reason: 'delivery_timeout', timestamp: Date.now(),
+            }).catch(() => {});
+            console.warn(`[WSService] ⚠️  Message ${messageId} undelivered after 10s — sender notified`);
+        }, 10_000);
+        this._msgTimeouts.set(key, t);
+    }
+
+    clearMessageDeliveryTimeout(messageId) {
+        if (!this._msgTimeouts) return;
+        const t = this._msgTimeouts.get(`msg:${messageId}`);
+        if (t) { clearTimeout(t); this._msgTimeouts.delete(`msg:${messageId}`); }
+    }
+
+    // ── FIX-OFFLINE-QUEUE: Store messages for offline users; flush on reconnect ─
+    enqueueOfflineMessage(targetUserId, event, payload) {
+        if (!this._offlineQueue) this._offlineQueue = new Map();
+        const uid = String(targetUserId);
+        if (!this._offlineQueue.has(uid)) this._offlineQueue.set(uid, []);
+        const q = this._offlineQueue.get(uid);
+        if (q.length < 200) q.push({ event, payload, queuedAt: Date.now() });
+        console.log(`[WSService] 📦 Queued offline msg for uid=${uid} (total: ${q.length})`);
+    }
+
+    async flushOfflineMessages(userId) {
+        if (!this._offlineQueue) return;
+        const uid = String(userId);
+        const queue = this._offlineQueue.get(uid);
+        if (!queue || queue.length === 0) return;
+        this._offlineQueue.delete(uid);
+        console.log(`[WSService] 🚀 Flushing ${queue.length} queued msgs to uid=${uid}`);
+        for (const item of queue) {
+            await this.sendToUser(userId, item.event, item.payload).catch(() => {});
+        }
     }
 
     async notifyMoodShared(userId, payload = {})  { return this.sendToUser(userId, 'mood:shared', payload); }

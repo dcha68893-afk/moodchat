@@ -679,27 +679,15 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
           allParticipantIds.map(uid => wsService.sendToUser(uid, 'message:new', populatedMessage))
         );
 
-        // FIX: Fetch chat type so we can emit group:message for group chats
-        // `chat` was undefined in this scope — now fetched inline
-        let _chatType = null;
-        try {
-          const _chatRow = await sequelize.query(
-            `SELECT type FROM chats WHERE id = :chatId LIMIT 1`,
-            { replacements: { chatId }, type: sequelize.QueryTypes.SELECT }
-          );
-          _chatType = _chatRow?.[0]?.type || null;
-        } catch(_) {}
-
-        // Emit group:message for group chats so group.html receives it
-        const _safeChatId = chatId;
-        if (_chatType === 'group') {
+        // FIX-AUDIT-2: Also emit group:message for group chats so group.html receives it
+        if (chat && (chat.type === 'group' || chat.isGroup)) {
           try {
-            const groupPayload = { ...populatedMessage, groupId: _safeChatId, chatId: _safeChatId };
-            const _io = wsService.getIO?.() || wsService.io;
-            if (_io) {
-              _io.to(`group:${_safeChatId}`).emit('group:message', groupPayload);
-              _io.to(`group_${_safeChatId}`).emit('group:message', groupPayload);
-              _io.to(`chat:${_safeChatId}`).emit('new_group_message', groupPayload);
+            const groupPayload = { ...populatedMessage, groupId: safeChatId, chatId: safeChatId };
+            const io = wsService.getIO?.() || wsService.io;
+            if (io) {
+              io.to(`group:${safeChatId}`).emit('group:message', groupPayload);
+              io.to(`group_${safeChatId}`).emit('group:message', groupPayload);
+              io.to(`chat:${safeChatId}`).emit('new_group_message', groupPayload);
             }
           } catch(_) {}
         }
@@ -728,15 +716,24 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
           createdAt: populatedMessage.createdAt
         });
 
+        // FIX-MSG-DELIVERY Phase 1: tell sender server received it (immediate)
+        await wsService.sendToUser(senderId, 'message:received_by_server', {
+          messageId, chatId, timestamp: Date.now()
+        }).catch(() => {});
+
+        // FIX-MSG-DELIVERY: schedule 10s delivery timeout per recipient
+        for (const rid of recipientIds) {
+          if (typeof wsService.scheduleMessageDeliveryTimeout === 'function') {
+            wsService.scheduleMessageDeliveryTimeout(messageId, chatId, senderId);
+          }
+        }
+
         // Tell sender when at least one recipient was targeted
+        // NOTE: message:delivered is now sent by the TWO-PHASE ACK system:
+        //   receiver emits 'message:delivery_ack' → server emits 'message:delivered' to sender.
+        // The old eager emit here is removed to prevent false "delivered" status.
         if (recipientIds.length > 0) {
-          // FIX-010: Single canonical 'message:delivered' — no dual emit needed
-          await wsService.sendToUser(senderId, 'message:delivered', {
-            messageId,
-            chatId,
-            deliveredTo: recipientIds,
-            deliveredAt: new Date().toISOString()
-          });
+          console.log(`[messages.js] 📨 Delivery tracking started for messageId=${messageId} recipients=${recipientIds.join(',')}`);
         }
 
         console.log(
