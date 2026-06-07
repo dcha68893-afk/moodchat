@@ -4863,8 +4863,8 @@ class Application {
                         // is blocked on Render's free tier, then auto-upgrades to WS
                         transports: ['polling', 'websocket'],
                         allowUpgrades: true,
-                        pingTimeout:    60000,
-                        pingInterval:   25000,
+                        pingTimeout:    90000,
+                        pingInterval:   30000,
                         upgradeTimeout: 30000,
                         connectTimeout: 45000,
                         allowEIO3:      true,
