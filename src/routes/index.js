@@ -528,6 +528,19 @@ router.get('/api/cors-info', (req, res) => {
   });
 });
 
+
+// ===== FIX: /api/deletions — early stub, Phase10 populates once ready =====
+// Added to prevent 404 storm on Render cold-start. CacheFoundationLayer.js
+// polls this endpoint. Without this stub every request during Phase10 init
+// returned 404, spamming logs and triggering the circuit-breaker prematurely.
+router.get('/api/deletions', (req, res) => {
+  const phase10 = req.app.locals.phase10Registry;
+  const deletions = (phase10 && typeof phase10.getDeletions === 'function')
+    ? phase10.getDeletions()
+    : [];
+  res.status(200).json({ ok: true, deletions });
+});
+
 // ===== 404 HANDLER FOR UNKNOWN ROUTES =====
 router.use('*', (req, res) => {
   const availableRoutes = [
