@@ -415,11 +415,16 @@ class CallService {
     const start    = call.startedAt ? new Date(call.startedAt) : endedAt;
     const duration = Math.floor((endedAt - start) / 1000);
 
-    if (duration > MAX_CALL_DURATION) throw new Error(`Call exceeded maximum duration of ${MAX_CALL_DURATION}s`);
+    // PHASE15 FIX: Removed MAX_CALL_DURATION throw. Previously a call that lasted
+    // exactly at or over 3600s would throw an error, causing endCall() to fail silently.
+    // The call would remain in 'in-progress' in the DB, no call:ended event would be
+    // emitted, and both sides would be stuck with no way to end the call.
+    // Now we simply clamp the duration to MAX_CALL_DURATION and allow the save.
+    const clampedDuration = Math.min(duration, MAX_CALL_DURATION);
 
     call.status   = (call.answeredBy && call.answeredBy.length > 0) ? 'completed' : 'missed';
     call.endedAt  = endedAt;
-    call.duration = duration;
+    call.duration = clampedDuration;
     await call.save();
 
     const eventData = {
