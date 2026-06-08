@@ -46,15 +46,19 @@ class MessageService {
         if (!validTypes.includes(type)) throw new ValidationError(`Invalid message type: ${type}`);
         if (type === 'text' && sanitizedContent.length > 5000) throw new ValidationError('Message too long (max 5000 chars)');
 
-        // CRITICAL SECURITY: Verify sender is a participant with proper authorization
+        // CRITICAL SECURITY: Verify sender is a participant with proper authorization.
+        // FIX-PHASE16: Cast both IDs to integers — PostgreSQL strict integer comparison
+        // will treat string '2' as not equal to integer 2, causing false auth rejections.
+        const chatIdInt2   = parseInt(chatId,   10);
+        const senderIdInt2 = parseInt(senderId, 10);
         const [participant] = await sequelize.query(
             `SELECT 1 FROM chat_participants WHERE "chatId"=:chatId AND "userId"=:senderId LIMIT 1`,
-            { replacements: { chatId, senderId }, type: sequelize.QueryTypes.SELECT }
+            { replacements: { chatId: chatIdInt2, senderId: senderIdInt2 }, type: sequelize.QueryTypes.SELECT }
         ).catch(async () => {
-            // FIX-PHASE15: fallback to quoted table name in case of case-sensitivity
+            // FIX-PHASE16: fallback to quoted table name in case of case-sensitivity
             return sequelize.query(
                 `SELECT 1 FROM "ChatParticipants" WHERE "chatId"=:chatId AND "userId"=:senderId LIMIT 1`,
-                { replacements: { chatId, senderId }, type: sequelize.QueryTypes.SELECT }
+                { replacements: { chatId: chatIdInt2, senderId: senderIdInt2 }, type: sequelize.QueryTypes.SELECT }
             ).catch(() => []);
         });
         if (!participant) throw new ValidationError('Sender is not a participant in this chat');
@@ -122,18 +126,26 @@ class MessageService {
             return;
         }
 
+        // FIX-PHASE16: Force integer coercion on both IDs before every query.
+        // PostgreSQL's integer != comparison is strict — passing '2' where the
+        // column is INTEGER causes the comparison to return true (string ≠ int),
+        // so the sender is never excluded and participants list may be wrong.
+        const chatIdInt   = parseInt(chatId,   10);
+        const senderIdInt = parseInt(senderId, 10);
+
         try {
-            // CRITICAL SECURITY: Get all participant userIds for this chat
+            // CRITICAL SECURITY: Get all participant userIds for this chat.
+            // FIX-PHASE16: Use explicit CAST to guarantee type safety across drivers.
             const participants = await sequelize.query(
-                `SELECT DISTINCT "userId" FROM chat_participants WHERE "chatId"=:chatId AND "userId" != :senderId`,
-                { replacements: { chatId, senderId }, type: sequelize.QueryTypes.SELECT }
+                `SELECT DISTINCT "userId" FROM chat_participants WHERE "chatId" = :chatId AND "userId" != :senderId`,
+                { replacements: { chatId: chatIdInt, senderId: senderIdInt }, type: sequelize.QueryTypes.SELECT }
             ).catch(async () => {
+                // Fallback: quoted table name for case-sensitive Postgres schemas
                 return sequelize.query(
-                    `SELECT DISTINCT "userId" FROM "ChatParticipants" WHERE "chatId"=:chatId AND "userId" != :senderId`,
-                    { replacements: { chatId, senderId }, type: sequelize.QueryTypes.SELECT }
+                    `SELECT DISTINCT "userId" FROM "ChatParticipants" WHERE "chatId" = :chatId AND "userId" != :senderId`,
+                    { replacements: { chatId: chatIdInt, senderId: senderIdInt }, type: sequelize.QueryTypes.SELECT }
                 ).catch(() => []);
-            }
-            );
+            });
             
             if (!participants || participants.length === 0) {
                 console.warn(`[MessageService] ⚠️ No other participants found for chat ${chatId}`);

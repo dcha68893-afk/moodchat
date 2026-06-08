@@ -129,11 +129,27 @@ class CallController {
       if (Array.isArray(calleeIds) && calleeIds.length > 1) {
         const call = await callService.initiateGroupCall(callerId, calleeIds.map(Number), type, chatId ? parseInt(chatId, 10) : null);
 
+        // FIX-PHASE16: Look up real caller name for group calls too
+        let groupCallerName = req.user.username || `User ${callerId}`;
+        try {
+          const gcRows = await db.sequelize.query(
+            `SELECT u.username, u."firstName", u."lastName", p."displayName", p."fullName"
+             FROM "Users" u LEFT JOIN "Profiles" p ON p."userId" = u.id
+             WHERE u.id = :callerId LIMIT 1`,
+            { replacements: { callerId }, type: db.sequelize.QueryTypes.SELECT }
+          ).catch(() => []);
+          if (gcRows && gcRows[0]) {
+            const r = gcRows[0];
+            groupCallerName = (r.fullName || r.displayName ||
+              ((r.firstName || '') + (r.lastName ? ' ' + r.lastName : '')).trim()) || r.username || groupCallerName;
+          }
+        } catch (_) {}
+
         for (const id of calleeIds) {
           await wsNotifyCallInitiated(id, {
             callId:       call.id,
             callerId,
-            callerName:   req.user.username || 'Unknown',
+            callerName:   groupCallerName,
             callerAvatar: req.user.avatar   || null,
             isGroupCall:  true,
             callType:     type,
@@ -158,10 +174,33 @@ class CallController {
 
       const call = await callService.initiateCall(callerId, parseInt(calleeId, 10), type, chatId ? parseInt(chatId, 10) : null);
 
-      // ── FIX: Build callerDisplayName from firstName/lastName if available ──
-      const callerDisplayName = (req.user.firstName
-        ? `${req.user.firstName}${req.user.lastName ? ' ' + req.user.lastName : ''}`.trim()
-        : null) || (call.callerInfo && call.callerInfo.username) || req.user.username || 'Unknown';
+      // ── FIX-PHASE16: Fetch caller's real display name from the database.
+      // The JWT only contains userId, email, username (no firstName/lastName).
+      // Previously the code tried req.user.firstName which is always undefined,
+      // so callerName fell back to req.user.username or 'Unknown'.
+      // Now we JOIN Users + Profiles to get the richest possible name.
+      let callerDisplayName = req.user.username || null;
+      try {
+        const rows = await db.sequelize.query(
+          `SELECT u.username, u."firstName", u."lastName",
+                  p."displayName", p."fullName"
+           FROM "Users" u
+           LEFT JOIN "Profiles" p ON p."userId" = u.id
+           WHERE u.id = :callerId LIMIT 1`,
+          { replacements: { callerId }, type: db.sequelize.QueryTypes.SELECT }
+        ).catch(() => []);
+        if (rows && rows[0]) {
+          const r = rows[0];
+          const fullName = (r.fullName || r.displayName ||
+            ((r.firstName || '') + (r.lastName ? ' ' + r.lastName : '')).trim()) || r.username;
+          if (fullName) callerDisplayName = fullName;
+        }
+      } catch (_) { /* non-fatal — fall back to username */ }
+
+      callerDisplayName = callerDisplayName
+        || (call.callerInfo && (call.callerInfo.displayName || call.callerInfo.username))
+        || req.user.username
+        || `User ${callerId}`;
 
       console.log(`[callController] 📞 CALLING wsNotifyCallInitiated → receiverId=${calleeId} callerName="${callerDisplayName}"`);
       await wsNotifyCallInitiated(parseInt(calleeId, 10), {

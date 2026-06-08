@@ -236,16 +236,24 @@ class GroupService {
                 attributes: ['id','name','description','avatar','isPublic','purpose','maxMembers','tags','rules','location','createdBy','chatId','createdAt','updatedAt','isVerified','settings','stats'],
             }));
             if (!group) throw new Error('Group not found');
+            // FIX-PHASE16: Always look up membership so role/isAdmin/isCreator are returned.
+            // Previously the return value lacked role data, causing loadUniqueFeaturesPanels
+            // to hide all tools panels for members who opened a group from Discover.
+            let membership = null;
             const isMember = GroupMembers
-                ? !!(await GroupMembers.findOne({ where: { groupId, userId, leftAt: null } }))
+                ? !!(membership = await GroupMembers.findOne({ where: { groupId, userId, leftAt: null } }))
                 : false;
             if (!group.isPublic && !isMember) throw new Error('You do not have permission to view this group');
             const memberCount = GroupMembers
                 ? await GroupMembers.count({ where: { groupId, leftAt: null } })
                 : 0;
+            const role = membership ? (membership.role || 'member') : 'member';
             return formatGroup(group, {
                 memberCount,
-                stats: { ...(group.stats || {}), totalMembers: memberCount }
+                stats: { ...(group.stats || {}), totalMembers: memberCount },
+                role,
+                isAdmin   : ['owner', 'admin'].includes(role),
+                isCreator : role === 'owner' || String(group.createdBy) === String(userId),
             });
         } catch (e) {
             console.error('[GroupService] ❌ getGroupById failed:', e.message);
