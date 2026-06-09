@@ -205,3 +205,20 @@ module.exports = {
   chatLimiter,
   dynamicLimiter
 };
+// P1 FIX: Payment endpoint rate limiter — was missing entirely.
+// Prevents brute-force payment attempts and STK Push spam.
+const paymentLimiter = rateLimit({
+  store: redisStore,
+  windowMs: 60 * 1000,  // 1 minute window
+  max: 5,               // max 5 payment attempts per minute per IP
+  message: {
+    success: false,
+    message: 'Too many payment requests. Please wait a moment and try again.',
+    timestamp: new Date().toISOString()
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `${req.ip}:payment`,
+});
+
+module.exports.paymentLimiter = paymentLimiter;

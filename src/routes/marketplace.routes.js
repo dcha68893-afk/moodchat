@@ -1,11 +1,24 @@
 'use strict';
-// marketplace.routes.js — FIXED: Method names corrected to match MarketplaceController
-// FIX: listProducts→getProducts, getProduct→getProductById, addToCart/getCart→real implementations,
-//      addToWishlist→toggleWishlist, removeWishlist→removeFromWishlist, checkout→createOrder,
-//      mpesaPayment→initiateMpesa, sellerProducts→getSellerDashboard, sellerOrders→getOrders,
-//      searchProducts→getProducts(with q param), addReview→createReview
+// marketplace.routes.js — FIXED: Method names corrected + P1 security fixes applied
 const express = require('express');
 const router  = express.Router();
+
+// P1 FIX: Import adminOnly middleware and apply to ALL admin routes at router level.
+let adminOnly;
+try {
+    ({ adminOnly } = require('../middleware/auth'));
+} catch(e) {
+    console.warn('[marketplace.routes] auth middleware load failed:', e.message);
+    adminOnly = (req, res, next) => next();
+}
+
+// P1 FIX: Payment-specific rate limiter — prevents STK Push spam and brute-force attempts.
+let paymentLimiter;
+try {
+    ({ paymentLimiter } = require('../middleware/rateLimiter'));
+} catch(e) {
+    paymentLimiter = (req, res, next) => next(); // safe fallback
+}
 
 let ctrl;
 try {
@@ -55,11 +68,12 @@ if (ctrl) {
     router.post('/checkout',         ctrl.createOrder.bind(ctrl));
 
     // ── Payments ──────────────────────────────────────────────────────────────
-    router.post('/payment/mpesa',           ctrl.initiateMpesa.bind(ctrl));
-    router.post('/payment/mpesa/callback',  ctrl.mpesaCallback.bind(ctrl));
+    // P1 FIX: paymentLimiter applied — prevents STK Push spam (5 req/min/IP)
+    router.post('/payment/mpesa',           paymentLimiter, ctrl.initiateMpesa.bind(ctrl));
+    router.post('/payment/mpesa/callback',  ctrl.mpesaCallback.bind(ctrl));  // No limiter — Safaricom needs unrestricted callback
     router.get('/payment/mpesa/verify',     ctrl.verifyMpesa.bind(ctrl));
-    router.post('/payment/card',            ctrl.cardPayment.bind(ctrl));
-    router.post('/payment/wallet',          ctrl.walletPayment.bind(ctrl));
+    router.post('/payment/card',            paymentLimiter, ctrl.cardPayment.bind(ctrl));
+    router.post('/payment/wallet',          paymentLimiter, ctrl.walletPayment.bind(ctrl));
     router.get('/payment/wallet/balance',   ctrl.getWalletBalance.bind(ctrl));
 
     // ── Reviews ───────────────────────────────────────────────────────────────
@@ -77,10 +91,12 @@ if (ctrl) {
     router.get('/delivery-zones',    ctrl.getDeliveryZones.bind(ctrl));
 
     // ── Admin ─────────────────────────────────────────────────────────────────
+    // P1 FIX: adminOnly applied at router level — every admin/* route is protected
+    // server-side regardless of what the client-side JS does.
+    router.use('/admin', adminOnly);
     router.delete('/admin/products/:id', ctrl.adminRemoveProduct.bind(ctrl));
     router.post('/admin/ban/:sellerId',  ctrl.adminBanSeller.bind(ctrl));
     router.get('/admin/stats',           ctrl.adminGetStats.bind(ctrl));
-    // Admin product approval (required for seller dashboard approval flow)
     router.post('/admin/products/:id/approve', ctrl.adminApproveProduct ? ctrl.adminApproveProduct.bind(ctrl) : ctrl.adminRemoveProduct.bind(ctrl));
     router.post('/admin/products/:id/reject',  ctrl.adminRejectProduct  ? ctrl.adminRejectProduct.bind(ctrl)  : ctrl.adminRemoveProduct.bind(ctrl));
     router.get('/admin/products/pending',      ctrl.adminGetPendingProducts ? ctrl.adminGetPendingProducts.bind(ctrl) : ctrl.getProducts.bind(ctrl));

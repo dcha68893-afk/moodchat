@@ -1,5 +1,16 @@
 // models/index.js - COMPLETE AUTO-MIGRATION WITH TABLE CREATION
-// Version: 3.0.0 - Creates missing tables and columns automatically
+// Version: 3.0.0 - Creates m
+
+      // P2 FIX: Add PostgreSQL full-text search vector to tools table.
+      // This enables fast GIN-indexed search via plainto_tsquery vs slow iLike sequential scans.
+      await sequelize.query(`
+        ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "search_vector" tsvector;
+        UPDATE "tools" SET "search_vector" = to_tsvector('english',
+          coalesce(title,'') || ' ' || coalesce(description,'') || ' ' || coalesce(category,'')
+        ) WHERE "search_vector" IS NULL;
+        CREATE INDEX IF NOT EXISTS idx_tools_fts ON "tools" USING GIN ("search_vector");
+      `).catch(e => console.warn('[Migration] FTS index (non-fatal):', e.message));
+      console.log('[Migration] ✅ Full-text search vector column ensured');issing tables and columns automatically
 const { Sequelize, Op } = require('sequelize');
 const fs = require('fs');
 const path = require('path');
@@ -989,6 +1000,50 @@ async function runFullMigration() {
         CREATE INDEX IF NOT EXISTS idx_reviews_seller  ON "marketplace_reviews" ("seller_id");
       `);
       console.log('[Migration] ✅ Marketplace tables (tools, marketplace_orders, marketplace_reviews) ensured');
+
+      // P1 FIX: Add approval_status, flash_sale columns to tools table (safe ALTER IF NOT EXISTS)
+      await sequelize.query(`
+        ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "approval_status"
+          VARCHAR(20) NOT NULL DEFAULT 'pending_review';
+        ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "approval_note" TEXT;
+        ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "approved_at" TIMESTAMPTZ;
+        ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "approved_by" UUID;
+        ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "is_flash_sale" BOOLEAN NOT NULL DEFAULT false;
+        ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "flash_sale_price" DECIMAL(10,2);
+        ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "flash_sale_end" TIMESTAMPTZ;
+        CREATE INDEX IF NOT EXISTS idx_tools_approval_status ON "tools" ("approval_status");
+        CREATE INDEX IF NOT EXISTS idx_tools_flash_sale ON "tools" ("is_flash_sale", "available");
+      `).catch(e => console.warn('[Migration] tools ALTER (non-fatal):', e.message));
+
+      // P1 FIX: Unique index on marketplace_carts(user_id) — prevents duplicate carts per user.
+      await sequelize.query(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_carts_user_id_unique ON "marketplace_carts" ("user_id");
+      `).catch(e => console.warn('[Migration] carts index (non-fatal):', e.message));
+
+      // P1 FIX: Create coupons table — model was whitelisted but table was never created.
+      await sequelize.query(`
+        CREATE TABLE IF NOT EXISTS "coupons" (
+          "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          "code" VARCHAR(50) NOT NULL UNIQUE,
+          "discount_type" VARCHAR(20) NOT NULL DEFAULT 'percentage'
+            CHECK ("discount_type" IN ('percentage','fixed')),
+          "discount_value" DECIMAL(10,2) NOT NULL DEFAULT 0,
+          "min_order_value" DECIMAL(10,2) DEFAULT 0,
+          "max_uses" INTEGER DEFAULT NULL,
+          "used_count" INTEGER NOT NULL DEFAULT 0,
+          "valid_from" TIMESTAMPTZ DEFAULT NOW(),
+          "valid_until" TIMESTAMPTZ,
+          "is_active" BOOLEAN NOT NULL DEFAULT true,
+          "created_by" UUID,
+          "metadata" JSONB DEFAULT '{}',
+          "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_coupons_code ON "coupons" ("code");
+        CREATE INDEX IF NOT EXISTS idx_coupons_active ON "coupons" ("is_active", "valid_until");
+      `).catch(e => console.warn('[Migration] coupons table (non-fatal):', e.message));
+
+      console.log('[Migration] \u2705 Approval gate, flash sale, coupon, and cart-unique tables ensured');
     } catch (mpErr) {
       console.error('[Migration] ⚠️ Marketplace table creation error (non-fatal):', mpErr.message);
     }

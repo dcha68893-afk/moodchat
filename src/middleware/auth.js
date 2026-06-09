@@ -277,11 +277,33 @@ const socketAuthenticate = async (socket, next) => {
     }
 };
 
+// ── Admin-only route guard ────────────────────────────────────────────────────
+// P1 FIX: Apply at the router level for all /admin/* routes so every future
+// endpoint is protected without relying on per-controller role checks.
+const adminOnly = (req, res, next) => {
+    if (!req.user) {
+        return res.status(401).json({
+            success: false,
+            message: 'Authentication required.',
+            errorCode: 'UNAUTHENTICATED'
+        });
+    }
+    if (req.user.role !== 'admin') {
+        return res.status(403).json({
+            success: false,
+            message: 'Admin access required.',
+            errorCode: 'ADMIN_REQUIRED'
+        });
+    }
+    next();
+};
+
 module.exports = {
     authenticateToken,
     authenticate,
     optionalAuthenticateToken,
     authorize,
+    adminOnly,
     socketAuthenticate,
     extractToken,
     isPublicPath,

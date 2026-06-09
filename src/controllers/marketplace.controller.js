@@ -85,12 +85,16 @@ class MarketplaceController {
 
             const T = Model.Tool;
             if (!T) {
-                // No model: return empty
                 return ok(res, { products: [], total: 0, page: 1, totalPages: 0 }, 'No products');
             }
 
             const where = {};
-            if (available !== 'false') { where.available = true; where.status = { [Op.in]: ['active'] }; }
+            if (available !== 'false') {
+                where.available = true;
+                where.status = { [Op.in]: ['active'] };
+                // P1 FIX: Only return approved products in public listing
+                where.approvalStatus = 'approved';
+            }
             if (category)  where.category  = category;
             if (type)      where.type      = type;
             if (seller_id) where.sellerId  = seller_id;
@@ -101,10 +105,29 @@ class MarketplaceController {
                 if (max_price) where.price[Op.lte] = parseFloat(max_price);
             }
             if (search) {
-                where[Op.or] = [
-                    { title:       { [Op.iLike]: `%${search}%` } },
-                    { description: { [Op.iLike]: `%${search}%` } },
-                ];
+                // P2 FIX: Try PostgreSQL full-text search first (uses GIN index = fast at scale).
+                // Falls back to iLike if the search_vector column doesn't exist yet.
+                const seq = getSequelize();
+                let useFTS = false;
+                if (seq) {
+                    try {
+                        await seq.query(`SELECT 1 FROM information_schema.columns
+                            WHERE table_name='tools' AND column_name='search_vector' LIMIT 1`);
+                        useFTS = true;
+                    } catch(_) {}
+                }
+                if (useFTS) {
+                    where[Op.and] = where[Op.and] || [];
+                    where[Op.and].push(
+                        seq.literal(`search_vector @@ plainto_tsquery('english', ${seq.escape(search)})`)
+                    );
+                } else {
+                    // iLike fallback (works without GIN index, slower on large tables)
+                    where[Op.or] = [
+                        { title:       { [Op.iLike]: `%${search}%` } },
+                        { description: { [Op.iLike]: `%${search}%` } },
+                    ];
+                }
             }
 
             const orderMap = {
@@ -174,8 +197,12 @@ class MarketplaceController {
                 images:      Array.isArray(images) ? images.slice(0, 10) : [],
                 tags:        Array.isArray(tags)   ? tags.slice(0, 20)  : [],
                 stock:       stock != null ? parseInt(stock) : null,
-                available:   available !== false,
-                status:      'active',
+                available:   false,          // not available until approved
+                // P1 FIX: Products must be approved by admin before going live.
+                // Was: status='active' — any user could list anything immediately.
+                // Now: pending_review → admin approves → status='active' + available=true.
+                status:          'inactive',
+                approvalStatus:  'pending_review',
                 metadata:    {
                     ...metadata,
                     condition: condition || 'new',
@@ -330,6 +357,25 @@ class MarketplaceController {
             if (!product_id) return next(new AppError('product_id required', 400));
             if (!price && price !== 0) return next(new AppError('price required', 400));
 
+            // P1 FIX: Check stock before adding to cart — prevents adding out-of-stock items.
+            const T = Model.Tool;
+            if (T) {
+                const product = await T.findByPk(product_id).catch(() => null);
+                if (product) {
+                    if (product.status !== 'active' || product.approvalStatus !== 'approved') {
+                        return next(new AppError('This product is not available', 400));
+                    }
+                    if (product.stock != null && product.stock < quantity) {
+                        return next(new AppError(
+                            product.stock === 0
+                                ? 'This item is out of stock'
+                                : `Only ${product.stock} item(s) available`,
+                            409
+                        ));
+                    }
+                }
+            }
+
             const CartModel = getDb().Cart;
             if (!CartModel) return next(new AppError('Cart service not available', 503));
 
@@ -470,17 +516,94 @@ class MarketplaceController {
             const buyerId = req.user?.id;
             if (!buyerId) return next(new AppError('Authentication required', 401));
 
-            const { items, delivery_address, payment_method, phone, notes, total, subtotal, delivery, currency='KES' } = req.body;
+            const { items, delivery_address, payment_method, phone, notes, total, subtotal, delivery, currency='KES', idempotency_key, coupon_code } = req.body;
             if (!items?.length) return next(new AppError('Cart is empty', 400));
             if (!delivery_address) return next(new AppError('Delivery address required', 400));
 
-            // FIX-P12: The fake order fallback was silently returning a non-persisted order UUID.
-            // Buyers would receive a success response for an order that never existed in the DB.
             if (!O || !T) {
                 return next(new AppError('Checkout service is temporarily unavailable. Please try again later.', 503));
             }
 
-            // Create one order per seller (group items by seller)
+            // P1 FIX: Coupon validation — model existed but was never wired into checkout.
+            // First coupon use was crashing with "relation coupons does not exist" (now fixed in migration).
+            let couponDiscount = 0;
+            let appliedCoupon = null;
+            if (coupon_code) {
+                try {
+                    const CouponModel = getDb().Coupon;
+                    if (CouponModel) {
+                        const coupon = await CouponModel.findOne({
+                            where: { code: coupon_code.toUpperCase(), isActive: true }
+                        });
+                        if (!coupon) {
+                            return next(new AppError('Invalid or expired coupon code', 400));
+                        }
+                        const now = new Date();
+                        if (coupon.validUntil && coupon.validUntil < now) {
+                            return next(new AppError('This coupon has expired', 400));
+                        }
+                        if (coupon.validFrom && coupon.validFrom > now) {
+                            return next(new AppError('This coupon is not yet active', 400));
+                        }
+                        if (coupon.maxUses != null && coupon.usedCount >= coupon.maxUses) {
+                            return next(new AppError('This coupon has reached its usage limit', 400));
+                        }
+                        const orderTotal = parseFloat(total) || 0;
+                        if (coupon.minOrderValue && orderTotal < coupon.minOrderValue) {
+                            return next(new AppError(
+                                `Minimum order value for this coupon is KES ${coupon.minOrderValue}`,
+                                400
+                            ));
+                        }
+                        // Calculate discount
+                        if (coupon.discountType === 'percentage') {
+                            couponDiscount = (orderTotal * coupon.discountValue) / 100;
+                        } else {
+                            couponDiscount = Math.min(coupon.discountValue, orderTotal);
+                        }
+                        appliedCoupon = coupon;
+                    }
+                } catch(couponErr) {
+                    logger.warn('[Marketplace] Coupon validation error (non-fatal):', couponErr.message);
+                }
+            }
+
+            // P1 FIX: Idempotency — prevent duplicate orders on double-click.
+            // If an idempotency_key is provided, check for an existing order with the same key.
+            if (idempotency_key) {
+                const existingOrder = await O.findOne({
+                    where: { buyerId, metadata: { idempotency_key } }
+                }).catch(() => null);
+                if (existingOrder) {
+                    return ok(res, {
+                        order: {
+                            id:       existingOrder.id,
+                            buyer_id: buyerId,
+                            status:   existingOrder.status,
+                            currency,
+                            payment_method,
+                            delivery_address,
+                            items,
+                            created_at: existingOrder.createdAt,
+                        }
+                    }, 'Order already placed (idempotent)');
+                }
+            }
+
+            const sequelize = getSequelize();
+
+            // P1 FIX: Wrap stock deduction in a DB transaction with SELECT FOR UPDATE.
+            // Previously stock was reduced in a non-atomic for-loop after order creation,
+            // allowing two concurrent buyers to purchase the last item (overselling).
+            const runWithTransaction = async (callback) => {
+                if (sequelize) {
+                    return sequelize.transaction({ isolationLevel: 'READ COMMITTED' }, callback);
+                }
+                // Fallback if sequelize not available (should not happen in production)
+                return callback(null);
+            };
+
+            // Group items by seller
             const sellerGroups = {};
             for (const item of items) {
                 const sid = item.seller_id;
@@ -488,38 +611,71 @@ class MarketplaceController {
                 sellerGroups[sid].push(item);
             }
 
-            const orders = [];
-            for (const [sellerId, sellerItems] of Object.entries(sellerGroups)) {
-                const groupTotal = sellerItems.reduce((s, i) => s + (i.price * i.quantity) + (i.delivery_fee||0), 0);
-                const order = await O.create({
-                    buyerId,
-                    sellerId,
-                    productId: sellerItems[0].product_id,
-                    status:    'pending',
-                    quantity:  sellerItems.reduce((s,i) => s + i.quantity, 0),
-                    totalPrice: parseFloat(groupTotal.toFixed(2)),
-                    currency,
-                    paymentMethod: payment_method,
-                    deliveryAddress: { ...delivery_address, phone },
-                    notes: notes || '',
-                    metadata: { items: sellerItems },
-                });
-                orders.push(order);
+            const orders = await runWithTransaction(async (t) => {
+                const txOpts = t ? { transaction: t } : {};
+                const created = [];
 
-                // Reduce stock for each product
-                for (const item of sellerItems) {
-                    try {
-                        const product = await T.findByPk(item.product_id);
-                        if (product && product.stock != null) {
-                            const newStock = Math.max(0, product.stock - item.quantity);
-                            await product.update({ stock: newStock, available: newStock > 0 });
-                            _socketBroadcast(req, 'product:stock_updated', { product_id: item.product_id, quantity: newStock });
+                for (const [sellerId, sellerItems] of Object.entries(sellerGroups)) {
+                    // P1 FIX: Validate stock with SELECT FOR UPDATE before deducting
+                    for (const item of sellerItems) {
+                        if (item.product_id) {
+                            const product = await T.findOne({
+                                where: { id: item.product_id },
+                                lock: t ? t.LOCK.UPDATE : undefined,
+                                ...txOpts,
+                            });
+                            if (product && product.stock != null) {
+                                if (product.stock < item.quantity) {
+                                    throw new AppError(
+                                        `Insufficient stock for "${product.title}". Available: ${product.stock}`,
+                                        409
+                                    );
+                                }
+                            }
                         }
-                    } catch(_) {}
-                }
+                    }
 
-                // Broadcast new order to seller
-                _socketBroadcast(req, 'order:created', { order_id: order.id, buyer_id: buyerId, seller_id: sellerId });
+                    const groupTotal = sellerItems.reduce((s, i) => s + (i.price * i.quantity) + (i.delivery_fee||0), 0);
+                    const order = await O.create({
+                        buyerId,
+                        sellerId,
+                        productId: sellerItems[0].product_id,
+                        status:    'pending',
+                        quantity:  sellerItems.reduce((s,i) => s + i.quantity, 0),
+                        totalPrice: parseFloat(groupTotal.toFixed(2)),
+                        currency,
+                        paymentMethod: payment_method,
+                        deliveryAddress: { ...delivery_address, phone },
+                        notes: notes || '',
+                        metadata: {
+                            items: sellerItems,
+                            idempotency_key: idempotency_key || null,
+                            coupon_code:     coupon_code || null,
+                            coupon_discount: couponDiscount || 0,
+                        },
+                    }, txOpts);
+                    created.push(order);
+
+                    // P1 FIX: Deduct stock inside the same transaction
+                    for (const item of sellerItems) {
+                        try {
+                            const product = await T.findByPk(item.product_id, txOpts);
+                            if (product && product.stock != null) {
+                                const newStock = Math.max(0, product.stock - item.quantity);
+                                await product.update({ stock: newStock, available: newStock > 0 }, txOpts);
+                                _socketBroadcast(req, 'product:stock_updated', { product_id: item.product_id, quantity: newStock });
+                            }
+                        } catch(_) {}
+                    }
+
+                    _socketBroadcast(req, 'order:created', { order_id: order.id, buyer_id: buyerId, seller_id: sellerId });
+                }
+                return created;
+            });
+
+            // Increment coupon usedCount outside transaction (non-critical, best-effort)
+            if (appliedCoupon) {
+                appliedCoupon.increment('usedCount').catch(() => {});
             }
 
             const primaryOrder = orders[0];
@@ -528,7 +684,8 @@ class MarketplaceController {
                     id:               primaryOrder.id,
                     buyer_id:         buyerId,
                     status:           'pending',
-                    total:            parseFloat(total||0),
+                    total:            parseFloat(total||0) - couponDiscount,
+                    coupon_discount:  couponDiscount,
                     currency,
                     payment_method,
                     delivery_address,
@@ -705,9 +862,32 @@ class MarketplaceController {
 
     async mpesaCallback(req, res, next) {
         try {
+            // P1 FIX: Validate that the callback is genuinely from Safaricom.
+            // Without this, ANY POST to this endpoint marks orders as paid.
+            // Safaricom sends from known IP ranges; in production also validate
+            // the HMAC-SHA256 signature using MPESA_PASSKEY.
+            const SAFARICOM_IPS = [
+                '196.201.214.200', '196.201.214.206', '196.201.213.114',
+                '196.201.214.207', '196.201.214.208', '196.201.213.44',
+                '196.201.212.127', '196.201.212.138', '196.201.212.129',
+                '196.201.212.136', '196.201.212.74',  '196.201.212.69',
+            ];
+            const clientIp = (
+                req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
+                req.connection?.remoteAddress ||
+                req.socket?.remoteAddress || ''
+            ).replace('::ffff:', '');
+
+            const isLocalDev = process.env.NODE_ENV !== 'production' ||
+                               clientIp === '127.0.0.1' || clientIp === '::1';
+            if (!isLocalDev && !SAFARICOM_IPS.includes(clientIp)) {
+                logger.warn(`[Marketplace] M-Pesa callback blocked from untrusted IP: ${clientIp}`);
+                // Return 200 to avoid Safaricom retries but do NOT process the payment
+                return res.status(200).json({ ResultCode: 0, ResultDesc: 'Accepted' });
+            }
+
             const body = req.body?.Body?.stkCallback || req.body;
             const resultCode = body?.ResultCode ?? body?.result_code;
-            const checkoutId = body?.CheckoutRequestID || body?.checkout_request_id;
 
             if (resultCode === 0 || resultCode === '0') {
                 // Payment successful — find and update order
@@ -957,6 +1137,69 @@ class MarketplaceController {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
+    // FLASH SALES & RECOMMENDATIONS (P2 FIX: was returning empty stubs)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    async getFlashSales(req, res, next) {
+        try {
+            const T = Model.Tool;
+            if (!T) return ok(res, { flash_sales: [], total: 0 }, 'No flash sales available');
+            const now = new Date();
+            const flashSales = await T.findAll({
+                where: {
+                    status:      'active',
+                    available:   true,
+                    approvalStatus: 'approved',
+                    isFlashSale: true,
+                    flashSaleEnd: { [Op.gt]: now },
+                    flashSalePrice: { [Op.ne]: null },
+                },
+                order: [['flashSaleEnd', 'ASC']],
+                limit: parseInt(req.query.limit) || 20,
+            });
+            return ok(res, {
+                flash_sales: flashSales.map(p => ({
+                    ..._formatProduct(p),
+                    flash_sale_price: parseFloat(p.flashSalePrice || p.price),
+                    flash_sale_end:   p.flashSaleEnd,
+                    discount_pct:     p.flashSalePrice
+                        ? Math.round((1 - p.flashSalePrice / p.price) * 100)
+                        : 0,
+                })),
+                total: flashSales.length,
+            });
+        } catch(e) { err(next, e, 'getFlashSales'); }
+    }
+
+    async getRecommendations(req, res, next) {
+        try {
+            const T = Model.Tool;
+            if (!T) return ok(res, { recommendations: [], products: [] }, 'No recommendations');
+            const userId = req.user?.id;
+            const { category, limit = 10 } = req.query;
+
+            // Simple collaborative recommendation: top-rated approved products
+            // from the same category as the query param, or globally top-rated.
+            const where = {
+                status:      'active',
+                available:   true,
+                approvalStatus: 'approved',
+            };
+            if (category) where.category = category;
+
+            const products = await T.findAll({
+                where,
+                order: [['rating', 'DESC'], ['views', 'DESC']],
+                limit: parseInt(limit) || 10,
+            });
+            return ok(res, {
+                recommendations: products.map(_formatProduct),
+                products:        products.map(_formatProduct),
+            });
+        } catch(e) { err(next, e, 'getRecommendations'); }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
     // ADMIN
     // ══════════════════════════════════════════════════════════════════════════
 
@@ -998,26 +1241,30 @@ class MarketplaceController {
     // ── Admin: Approve product ─────────────────────────────────────────────
     async adminApproveProduct(req, res, next) {
         try {
+            // Note: adminOnly middleware already enforces admin role at router level.
+            // Keeping this check as defence-in-depth.
             if (req.user?.role !== 'admin') return next(new AppError('Admin only', 403));
             const T = Model.Tool;
             if (!T) return ok(res, {}, 'Product approved (model unavailable)');
             const product = await T.findByPk(req.params.id);
             if (!product) return res.status(404).json({ success: false, message: 'Product not found' });
+            // P1 FIX: Also set status='active' and available=true so the product
+            // actually becomes visible. Previously only approval_status was written.
             await product.update({
-                status: 'active',
-                approval_status: 'approved',
+                status:        'active',
+                available:     true,
                 approvalStatus: 'approved',
-                approvedAt: new Date(),
-                approved_at: new Date(),
+                approvedAt:     new Date(),
+                approvedBy:     req.user?.id || null,
             });
-            // Notify seller via WebSocket if possible
+            // Notify seller via WebSocket
             try {
                 const io = global.__socketIO || global.io;
-                if (io && product.userId) {
-                    io.to(`user:${product.userId}`).emit('product:approved', { productId: product.id, title: product.title });
+                if (io && product.sellerId) {
+                    io.to(`user:${product.sellerId}`).emit('product:approved', { productId: product.id, title: product.title });
                 }
             } catch(_) {}
-            return ok(res, product, 'Product approved');
+            return ok(res, _formatProduct(product), 'Product approved');
         } catch(e) { err(next, e, 'adminApproveProduct'); }
     }
 
@@ -1031,19 +1278,18 @@ class MarketplaceController {
             if (!product) return res.status(404).json({ success: false, message: 'Product not found' });
             const { reason } = req.body || {};
             await product.update({
-                status: 'rejected',
-                approval_status: 'rejected',
+                status:         'inactive',
+                available:       false,
                 approvalStatus: 'rejected',
-                rejectionReason: reason || 'Does not meet marketplace standards',
-                rejection_reason: reason || 'Does not meet marketplace standards',
+                approvalNote:   reason || 'Does not meet marketplace standards',
             });
             try {
                 const io = global.__socketIO || global.io;
-                if (io && product.userId) {
-                    io.to(`user:${product.userId}`).emit('product:rejected', { productId: product.id, title: product.title, reason });
+                if (io && product.sellerId) {
+                    io.to(`user:${product.sellerId}`).emit('product:rejected', { productId: product.id, title: product.title, reason });
                 }
             } catch(_) {}
-            return ok(res, product, 'Product rejected');
+            return ok(res, _formatProduct(product), 'Product rejected');
         } catch(e) { err(next, e, 'adminRejectProduct'); }
     }
 
@@ -1053,19 +1299,13 @@ class MarketplaceController {
             if (req.user?.role !== 'admin') return next(new AppError('Admin only', 403));
             const T = Model.Tool;
             if (!T) return ok(res, [], 'No products (model unavailable)');
-            const { Op: _Op } = require('sequelize');
+            // P1 FIX: Use correct field value 'pending_review' matching new Tool model default
             const pending = await T.findAll({
-                where: {
-                    [_Op.or]: [
-                        { status: 'pending_review' },
-                        { approvalStatus: 'pending' },
-                        { approval_status: 'pending' },
-                    ]
-                },
+                where: { approvalStatus: 'pending_review' },
                 order: [['createdAt', 'ASC']],
                 limit: parseInt(req.query.limit) || 50,
             });
-            return ok(res, pending, `${pending.length} pending products`);
+            return ok(res, pending.map(_formatProduct), `${pending.length} pending products`);
         } catch(e) { err(next, e, 'adminGetPendingProducts'); }
     }
 

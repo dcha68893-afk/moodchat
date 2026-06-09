@@ -152,6 +152,46 @@ module.exports = (sequelize, DataTypes) => {
         defaultValue: 'active',
         allowNull: false,
       },
+      // ─── P1 FIX: Product approval gate ───────────────────────────────────
+      // Products now default to 'pending_review'. Admin must approve before
+      // status becomes 'active'. Fixes: any user listing illegal products live.
+      approvalStatus: {
+        type: DataTypes.ENUM('pending_review', 'approved', 'rejected'),
+        defaultValue: 'pending_review',
+        allowNull: false,
+        field: 'approval_status',
+      },
+      approvalNote: {
+        type: DataTypes.TEXT,
+        allowNull: true,
+        field: 'approval_note',
+      },
+      approvedAt: {
+        type: DataTypes.DATE,
+        allowNull: true,
+        field: 'approved_at',
+      },
+      approvedBy: {
+        type: DataTypes.UUID,
+        allowNull: true,
+        field: 'approved_by',
+      },
+      // ─── P2 FIX: Flash sale backend fields ───────────────────────────────
+      isFlashSale: {
+        type: DataTypes.BOOLEAN,
+        defaultValue: false,
+        field: 'is_flash_sale',
+      },
+      flashSalePrice: {
+        type: DataTypes.DECIMAL(10, 2),
+        allowNull: true,
+        field: 'flash_sale_price',
+      },
+      flashSaleEnd: {
+        type: DataTypes.DATE,
+        allowNull: true,
+        field: 'flash_sale_end',
+      },
       currency: {
         type: DataTypes.STRING(10),
         defaultValue: 'USD',
@@ -181,6 +221,10 @@ module.exports = (sequelize, DataTypes) => {
         { fields: ['is_spotlight'] },
         { fields: ['is_featured'] },
         { fields: ['available'] },
+        // P1 FIX: index for admin pending queue
+        { fields: ['approval_status'] },
+        // P2 FIX: index for flash sale queries
+        { fields: ['is_flash_sale', 'available'] },
       ],
     }
   );
