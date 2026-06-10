@@ -509,6 +509,52 @@ class WebSocketService {
                 }
             });
 
+            // ── Live Caption relay ────────────────────────────────────────────────
+            socket.off('call:caption').on('call:caption', async (payload = {}) => {
+                try {
+                    const { callId: capCallId, text, ts } = payload;
+                    if (!capCallId || !text) return;
+                    const Call = this._db && (this._db.Calls || this._db.Call);
+                    if (!Call) return;
+                    const callRecord = await Call.findOne({ where: { id: capCallId } }).catch(() => null);
+                    if (!callRecord) return;
+                    const isParticipant = (callRecord.participants || []).includes(userId) ||
+                                         callRecord.callerId === userId || callRecord.receiverId === userId;
+                    if (!isParticipant) return;
+                    const User = this._db && (this._db.Users || this._db.User);
+                    let senderName = `User ${userId}`;
+                    if (User) {
+                        const u = await User.findByPk(userId, { attributes: ['username'] }).catch(() => null);
+                        if (u) senderName = u.username;
+                    }
+                    const out = { callId: capCallId, text: String(text).substring(0, 500), senderId: userId, senderName, ts: ts || Date.now() };
+                    for (const pid of (callRecord.participants || []).filter(p => p !== userId)) {
+                        await this.sendToUser(pid, 'call:caption', out);
+                        // Dispatch to frontend via custom event name for SR announcements
+                        await this.sendToUser(pid, 'kyn:socket:call:caption', out);
+                    }
+                } catch (err) { console.warn('[WSService] call:caption relay error:', err.message); }
+            });
+
+            // ── Waiting room knock ─────────────────────────────────────────────────
+            socket.off('call:waiting_room_knock').on('call:waiting_room_knock', async (payload = {}) => {
+                try {
+                    const { callId: wrCallId } = payload;
+                    if (!wrCallId) return;
+                    const Call = this._db && (this._db.Calls || this._db.Call);
+                    if (!Call) return;
+                    const callRecord = await Call.findOne({ where: { id: wrCallId } }).catch(() => null);
+                    if (!callRecord) return;
+                    const User = this._db && (this._db.Users || this._db.User);
+                    let uInfo = { userId, username: `User ${userId}` };
+                    if (User) {
+                        const u = await User.findByPk(userId, { attributes: ['id', 'username', 'avatar'] }).catch(() => null);
+                        if (u) uInfo = { userId, username: u.username, avatar: u.avatar };
+                    }
+                    await this.sendToUser(callRecord.callerId, 'call:waiting_room_join', { callId: wrCallId, participant: uInfo, timestamp: Date.now() });
+                } catch (err) { console.warn('[WSService] waiting_room_knock error:', err.message); }
+            });
+
             // ── In-call poll relay ────────────────────────────────────────────────
             socket.off('call:poll_event').on('call:poll_event', async (payload = {}) => {
                 try {

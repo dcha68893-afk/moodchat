@@ -1597,4 +1597,364 @@ router.get('/ice-config', asyncHandler(async (req, res) => {
   return res.json({ success: true, iceServers, ttl: 86400 });
 }));
 
+// ─────────────────────────────────────────────────────────────────────────────
+// RECORDING ENDPOINTS
+// POST /:callId/recording/start  — Initiate recording with consent
+// POST /:callId/recording/stop   — Stop recording
+// GET  /:callId/recording/status — Check recording state
+// ─────────────────────────────────────────────────────────────────────────────
+
+// POST /:callId/recording/start
+router.post('/:callId/recording/start', apiRateLimiter, asyncHandler(async (req, res) => {
+  try {
+    const auth = checkAuth(req, res); if (!auth) return;
+    const { userId } = auth;
+    if (!checkModels(res)) return;
+    const { callId } = req.params;
+
+    const call = await Call.findOne({
+      where: { id: callId, [Op.or]: [{ callerId: userId }, { participants: { [Op.contains]: [userId] } }] },
+    });
+    if (!call) return res.status(404).json({ success: false, message: 'Call not found' });
+    if (call.callerId !== userId) return res.status(403).json({ success: false, message: 'Only the call initiator can start recording' });
+    if (call.recordingStatus === 'recording') return res.status(409).json({ success: false, message: 'Recording already active' });
+
+    await call.update({ recordingStatus: 'recording', metadata: { ...(call.metadata || {}), recordingStartedAt: Date.now(), recordingStartedBy: userId } });
+
+    // Notify ALL participants of recording start (GDPR/consent requirement)
+    const consentPayload = {
+      callId,
+      recordingStartedBy: userId,
+      message: 'This call is now being recorded.',
+      timestamp: Date.now(),
+    };
+    for (const pid of (call.participants || [])) {
+      await notifyUser(req.io, pid, 'call:recording_started', consentPayload);
+      await notifyUser(req.io, pid, 'call_recording_started', consentPayload);
+    }
+
+    res.json({ success: true, message: 'Recording started. All participants have been notified.', data: { callId, recordingStatus: 'recording' } });
+  } catch (err) {
+    console.error('[POST recording/start]', err.message);
+    res.status(500).json({ success: false, message: 'Failed to start recording' });
+  }
+}));
+
+// POST /:callId/recording/stop
+router.post('/:callId/recording/stop', apiRateLimiter, asyncHandler(async (req, res) => {
+  try {
+    const auth = checkAuth(req, res); if (!auth) return;
+    const { userId } = auth;
+    if (!checkModels(res)) return;
+    const { callId } = req.params;
+    const { recordingUrl } = req.body;
+
+    const call = await Call.findOne({
+      where: { id: callId, [Op.or]: [{ callerId: userId }, { participants: { [Op.contains]: [userId] } }] },
+    });
+    if (!call) return res.status(404).json({ success: false, message: 'Call not found' });
+
+    const updateData = { recordingStatus: 'stopped' };
+    if (recordingUrl) updateData.recordingUrl = recordingUrl;
+    updateData.metadata = { ...(call.metadata || {}), recordingStoppedAt: Date.now(), recordingStoppedBy: userId };
+    await call.update(updateData);
+
+    const stopPayload = { callId, message: 'Recording has stopped.', recordingUrl: recordingUrl || null, timestamp: Date.now() };
+    for (const pid of (call.participants || [])) {
+      await notifyUser(req.io, pid, 'call:recording_stopped', stopPayload);
+      await notifyUser(req.io, pid, 'call_recording_stopped', stopPayload);
+    }
+
+    res.json({ success: true, message: 'Recording stopped', data: { callId, recordingStatus: 'stopped', recordingUrl: recordingUrl || null } });
+  } catch (err) {
+    console.error('[POST recording/stop]', err.message);
+    res.status(500).json({ success: false, message: 'Failed to stop recording' });
+  }
+}));
+
+// GET /:callId/recording/status
+router.get('/:callId/recording/status', apiRateLimiter, asyncHandler(async (req, res) => {
+  try {
+    const auth = checkAuth(req, res); if (!auth) return;
+    if (!checkModels(res)) return;
+    const { callId } = req.params;
+    const { userId } = auth;
+
+    const call = await Call.findOne({
+      where: { id: callId, [Op.or]: [{ callerId: userId }, { receiverId: userId }, { participants: { [Op.contains]: [userId] } }] },
+      attributes: ['id', 'recordingStatus', 'recordingUrl', 'metadata'],
+    });
+    if (!call) return res.status(404).json({ success: false, message: 'Call not found' });
+
+    res.json({ success: true, data: { callId, recordingStatus: call.recordingStatus, recordingUrl: call.recordingUrl || null } });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to get recording status' });
+  }
+}));
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WAITING ROOM ENDPOINTS
+// POST /:callId/waiting-room/admit   — Host admits a participant
+// POST /:callId/waiting-room/reject  — Host rejects a waiting participant
+// GET  /:callId/waiting-room         — List participants waiting
+// ─────────────────────────────────────────────────────────────────────────────
+
+// GET /:callId/waiting-room
+router.get('/:callId/waiting-room', apiRateLimiter, asyncHandler(async (req, res) => {
+  try {
+    const auth = checkAuth(req, res); if (!auth) return;
+    if (!checkModels(res)) return;
+    const { callId } = req.params;
+    const { userId } = auth;
+
+    const call = await Call.findOne({ where: { id: callId, callerId: userId } });
+    if (!call) return res.status(403).json({ success: false, message: 'Only the host can view the waiting room' });
+
+    const waiting = (call.metadata && call.metadata.waitingRoom) || [];
+    res.json({ success: true, data: { callId, waitingRoom: waiting, count: waiting.length } });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to get waiting room' });
+  }
+}));
+
+// POST /:callId/waiting-room/join  — Participant requests to join
+router.post('/:callId/waiting-room/join', apiRateLimiter, asyncHandler(async (req, res) => {
+  try {
+    const auth = checkAuth(req, res); if (!auth) return;
+    const { userId } = auth;
+    if (!checkModels(res)) return;
+    const { callId } = req.params;
+
+    const call = await Call.findByPk(callId);
+    if (!call) return res.status(404).json({ success: false, message: 'Call not found' });
+
+    const user = await User.findByPk(userId, { attributes: ['id', 'username', 'avatar'] });
+    const entry = { userId, username: user?.username || `User ${userId}`, avatar: user?.avatar || null, requestedAt: Date.now() };
+
+    const meta = call.metadata || {};
+    const wr = meta.waitingRoom || [];
+    if (!wr.find(w => w.userId === userId)) wr.push(entry);
+    await call.update({ metadata: { ...meta, waitingRoom: wr } });
+
+    // Notify host
+    await notifyUser(req.io, call.callerId, 'call:waiting_room_join', { callId, participant: entry });
+
+    res.json({ success: true, message: 'Waiting for host to admit you', data: { callId, status: 'waiting' } });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to join waiting room' });
+  }
+}));
+
+// POST /:callId/waiting-room/admit
+router.post('/:callId/waiting-room/admit', apiRateLimiter, asyncHandler(async (req, res) => {
+  try {
+    const auth = checkAuth(req, res); if (!auth) return;
+    const { userId } = auth;
+    if (!checkModels(res)) return;
+    const { callId } = req.params;
+    const { participantId } = req.body;
+    if (!participantId) return res.status(400).json({ success: false, message: 'participantId required' });
+
+    const call = await Call.findOne({ where: { id: callId, callerId: userId } });
+    if (!call) return res.status(403).json({ success: false, message: 'Only the host can admit participants' });
+
+    const meta = call.metadata || {};
+    const wr = (meta.waitingRoom || []).filter(w => w.userId !== participantId);
+    const participants = call.participants || [];
+    if (!participants.includes(participantId)) participants.push(participantId);
+    await call.update({ metadata: { ...meta, waitingRoom: wr }, participants });
+
+    await notifyUser(req.io, participantId, 'call:admitted', { callId, admittedBy: userId, timestamp: Date.now() });
+    res.json({ success: true, message: 'Participant admitted', data: { callId, participantId } });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to admit participant' });
+  }
+}));
+
+// POST /:callId/waiting-room/reject
+router.post('/:callId/waiting-room/reject', apiRateLimiter, asyncHandler(async (req, res) => {
+  try {
+    const auth = checkAuth(req, res); if (!auth) return;
+    const { userId } = auth;
+    if (!checkModels(res)) return;
+    const { callId } = req.params;
+    const { participantId } = req.body;
+    if (!participantId) return res.status(400).json({ success: false, message: 'participantId required' });
+
+    const call = await Call.findOne({ where: { id: callId, callerId: userId } });
+    if (!call) return res.status(403).json({ success: false, message: 'Only the host can reject participants' });
+
+    const meta = call.metadata || {};
+    const wr = (meta.waitingRoom || []).filter(w => w.userId !== participantId);
+    await call.update({ metadata: { ...meta, waitingRoom: wr } });
+
+    await notifyUser(req.io, participantId, 'call:rejected_from_waiting_room', { callId, rejectedBy: userId, timestamp: Date.now() });
+    res.json({ success: true, message: 'Participant rejected from waiting room' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to reject participant' });
+  }
+}));
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BREAKOUT ROOMS
+// POST /:callId/breakout/create  — Host creates breakout rooms
+// POST /:callId/breakout/assign  — Assign participants to rooms
+// POST /:callId/breakout/end     — End all breakout rooms
+// GET  /:callId/breakout         — List breakout rooms
+// ─────────────────────────────────────────────────────────────────────────────
+
+router.post('/:callId/breakout/create', apiRateLimiter, asyncHandler(async (req, res) => {
+  try {
+    const auth = checkAuth(req, res); if (!auth) return;
+    const { userId } = auth;
+    if (!checkModels(res)) return;
+    const { callId } = req.params;
+    const { rooms } = req.body; // [{ name, participants[] }]
+    if (!Array.isArray(rooms) || !rooms.length) return res.status(400).json({ success: false, message: 'rooms array required' });
+
+    const call = await Call.findOne({ where: { id: callId, callerId: userId } });
+    if (!call) return res.status(403).json({ success: false, message: 'Only the host can create breakout rooms' });
+
+    const breakoutRooms = rooms.map((r, i) => ({
+      id: `breakout_${callId}_${i}_${Date.now()}`,
+      name: r.name || `Breakout Room ${i + 1}`,
+      participants: r.participants || [],
+      createdAt: Date.now(),
+      active: true,
+    }));
+
+    const meta = call.metadata || {};
+    await call.update({ metadata: { ...meta, breakoutRooms } });
+
+    // Notify each participant which room they're in
+    for (const room of breakoutRooms) {
+      for (const pid of room.participants) {
+        await notifyUser(req.io, pid, 'call:breakout_assigned', {
+          callId, roomId: room.id, roomName: room.name,
+          participants: room.participants, timestamp: Date.now(),
+        });
+      }
+    }
+
+    // Broadcast to all that breakout rooms started
+    for (const pid of (call.participants || [])) {
+      await notifyUser(req.io, pid, 'call:breakout_started', { callId, rooms: breakoutRooms, timestamp: Date.now() });
+    }
+
+    res.status(201).json({ success: true, message: 'Breakout rooms created', data: { callId, breakoutRooms } });
+  } catch (err) {
+    console.error('[POST breakout/create]', err.message);
+    res.status(500).json({ success: false, message: 'Failed to create breakout rooms' });
+  }
+}));
+
+router.get('/:callId/breakout', apiRateLimiter, asyncHandler(async (req, res) => {
+  try {
+    const auth = checkAuth(req, res); if (!auth) return;
+    if (!checkModels(res)) return;
+    const { callId } = req.params;
+    const { userId } = auth;
+
+    const call = await Call.findOne({
+      where: { id: callId, [Op.or]: [{ callerId: userId }, { participants: { [Op.contains]: [userId] } }] },
+      attributes: ['id', 'metadata'],
+    });
+    if (!call) return res.status(404).json({ success: false, message: 'Call not found' });
+
+    const rooms = (call.metadata && call.metadata.breakoutRooms) || [];
+    res.json({ success: true, data: { callId, breakoutRooms: rooms } });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to get breakout rooms' });
+  }
+}));
+
+router.post('/:callId/breakout/end', apiRateLimiter, asyncHandler(async (req, res) => {
+  try {
+    const auth = checkAuth(req, res); if (!auth) return;
+    const { userId } = auth;
+    if (!checkModels(res)) return;
+    const { callId } = req.params;
+
+    const call = await Call.findOne({ where: { id: callId, callerId: userId } });
+    if (!call) return res.status(403).json({ success: false, message: 'Only the host can end breakout rooms' });
+
+    const meta = call.metadata || {};
+    const rooms = (meta.breakoutRooms || []).map(r => ({ ...r, active: false }));
+    await call.update({ metadata: { ...meta, breakoutRooms: rooms } });
+
+    for (const pid of (call.participants || [])) {
+      await notifyUser(req.io, pid, 'call:breakout_ended', { callId, timestamp: Date.now() });
+    }
+
+    res.json({ success: true, message: 'All breakout rooms ended' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to end breakout rooms' });
+  }
+}));
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ADMIN / ANALYTICS ENDPOINTS
+// GET /admin/stats   — Aggregate call quality + volume analytics
+// GET /admin/active  — All currently active calls
+// ─────────────────────────────────────────────────────────────────────────────
+
+router.get('/admin/stats', apiRateLimiter, asyncHandler(async (req, res) => {
+  try {
+    const auth = checkAuth(req, res); if (!auth) return;
+    if (!checkModels(res)) return;
+
+    const { from, to } = req.query;
+    const where = {};
+    if (from || to) {
+      where.createdAt = {};
+      if (from) where.createdAt[Op.gte] = new Date(from);
+      if (to)   where.createdAt[Op.lte] = new Date(to);
+    }
+
+    const [total, completed, missed, failed, avgDuration, avgQuality] = await Promise.all([
+      Call.count({ where }),
+      Call.count({ where: { ...where, status: 'completed' } }),
+      Call.count({ where: { ...where, status: 'missed' } }),
+      Call.count({ where: { ...where, status: 'failed' } }),
+      Call.findOne({ where: { ...where, status: 'completed', duration: { [Op.gt]: 0 } }, attributes: [[fn('AVG', col('duration')), 'avg']], raw: true }).then(r => r && r.avg ? Math.round(parseFloat(r.avg)) : 0).catch(() => 0),
+      Call.findOne({ where: { ...where, qualityScore: { [Op.not]: null } }, attributes: [[fn('AVG', col('qualityScore')), 'avg']], raw: true }).then(r => r && r.avg ? parseFloat(parseFloat(r.avg).toFixed(2)) : null).catch(() => null),
+    ]);
+
+    res.json({
+      success: true,
+      data: {
+        period: { from: from || null, to: to || null },
+        totals: { total, completed, missed, failed, other: total - completed - missed - failed },
+        completionRate: total ? Math.round((completed / total) * 100) : 0,
+        avgDurationSeconds: avgDuration,
+        avgQualityScore: avgQuality,
+      },
+    });
+  } catch (err) {
+    console.error('[GET /admin/stats]', err.message);
+    res.status(500).json({ success: false, message: 'Failed to get analytics' });
+  }
+}));
+
+router.get('/admin/active', apiRateLimiter, asyncHandler(async (req, res) => {
+  try {
+    const auth = checkAuth(req, res); if (!auth) return;
+    if (!checkModels(res)) return;
+
+    const activeCalls = await Call.findAll({
+      where: { status: { [Op.in]: ['ringing', 'in-progress'] } },
+      attributes: ['id', 'callerId', 'receiverId', 'type', 'status', 'startedAt', 'participants', 'isGroupCall', 'qualityScore'],
+      order: [['startedAt', 'DESC']],
+      limit: 100,
+    });
+
+    res.json({ success: true, data: { activeCalls, count: activeCalls.length, timestamp: Date.now() } });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to get active calls' });
+  }
+}));
+
+// Live caption relay via WebSocket — backend relays caption events to participants
+// (registered in webSocketService, surfaced here for docs)
+
 module.exports = router;

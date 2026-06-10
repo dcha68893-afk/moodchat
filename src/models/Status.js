@@ -172,6 +172,29 @@ module.exports = (sequelize, DataTypes) => {
         defaultValue: {},
         allowNull: false,
       },
+      // P2 FIX: isPinned as first-class column (not JSONB flag) for indexed queries
+      isPinned: {
+        type: DataTypes.BOOLEAN,
+        defaultValue: false,
+        allowNull: false,
+      },
+      // P2 FIX: isHighlight first-class flag
+      isHighlight: {
+        type: DataTypes.BOOLEAN,
+        defaultValue: false,
+        allowNull: false,
+      },
+      // P2 FIX: altText for accessibility on image/video statuses
+      altText: {
+        type: DataTypes.STRING(500),
+        allowNull: true,
+      },
+      // P3 FIX: musicTrack for audio overlay feature
+      musicTrack: {
+        type: DataTypes.JSONB,
+        allowNull: true,
+        defaultValue: null,
+      },
       createdAt: {
         type: DataTypes.DATE,
         allowNull: false,

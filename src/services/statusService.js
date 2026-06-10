@@ -751,19 +751,22 @@ async function pinStatus(statusId, userId) {
         const status = await Status.findOne({ where: { id: statusId, userId } });
         if (!status) throw notFound('Status not found or you do not own it');
 
-        const meta = status.metadata || {};
-        if (meta.pinned) throw conflict('Status is already pinned');
+        if (status.isPinned) throw conflict('Status is already pinned');
 
-        // Enforce per-user pin limit
+        // Enforce per-user pin limit using the new isPinned column (O(1) indexed query)
         const pinnedCount = await Status.count({
-            where: { userId, isActive: true, metadata: { pinned: true } },
-        }).catch(() => 0); // If JSONB query not supported, skip count
+            where: { userId, isActive: true, isPinned: true },
+        }).catch(() => 0);
 
         if (pinnedCount >= MAX_PINS) {
             throw badRequest(`Maximum of ${MAX_PINS} pinned statuses allowed`);
         }
 
-        await status.update({ metadata: { ...meta, pinned: true, pinnedAt: new Date().toISOString() } });
+        const meta = status.metadata || {};
+        await status.update({
+            isPinned: true,
+            metadata: { ...meta, pinnedAt: new Date().toISOString() },
+        });
         return status;
     } catch (e) { rethrow(e, 'Failed to pin status'); }
 }
@@ -779,11 +782,11 @@ async function unpinStatus(statusId, userId) {
         const status = await Status.findOne({ where: { id: statusId, userId } });
         if (!status) throw notFound('Status not found or you do not own it');
 
-        const meta = status.metadata || {};
-        if (!meta.pinned) throw notFound('Status is not pinned');
+        if (!status.isPinned) throw notFound('Status is not pinned');
 
-        const { pinned, pinnedAt, ...restMeta } = meta; // eslint-disable-line no-unused-vars
-        await status.update({ metadata: restMeta });
+        const meta = status.metadata || {};
+        const { pinnedAt, ...restMeta } = meta; // eslint-disable-line no-unused-vars
+        await status.update({ isPinned: false, metadata: restMeta });
     } catch (e) { rethrow(e, 'Failed to unpin status'); }
 }
 

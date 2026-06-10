@@ -80,6 +80,9 @@ const formatStatus = (s) => {
         longitude: d.longitude,
         isActive: d.isActive,
         isPublic: d.isPublic,
+        isPinned: d.isPinned || false,
+        isHighlight: d.isHighlight || false,
+        altText: d.altText || null,
         privacy: normalizePrivacy(d.privacy, d.isPublic),
         expiresAt: d.expiresAt,
         viewCount: d.viewCount || 0,
@@ -95,7 +98,7 @@ const formatStatus = (s) => {
 
 const getUserId = (req) => req.user?.userId || req.user?.id || null;
 
-const VALID_TYPES = ['text', 'image', 'video', 'audio', 'mood', 'location'];
+const VALID_TYPES = ['text', 'image', 'video', 'audio', 'mood', 'location', 'poll', 'question'];
 const VALID_MOODS = ['happy', 'sad', 'angry', 'excited', 'calm', 'anxious', 'tired', 'energetic',
     'focused', 'relaxed', 'nostalgic', 'romantic', 'lonely', 'confused', 'proud',
     'grateful', 'hopeful', 'bored', 'sick', 'neutral'];
@@ -408,7 +411,8 @@ router.get('/', apiRateLimiter, asyncHandler(async (req, res) => {
         const r = await Status.findAndCountAll({
             where,
             include: userInclude(),
-            order: [['createdAt', 'DESC']],
+            // P2 FIX: pinned statuses first, then by recency
+            order: [['isPinned', 'DESC'], ['createdAt', 'DESC']],
             limit: Math.min(+limit, 100),
             offset: +offset,
         }).catch(() => ({ rows: [], count: 0 }));
@@ -633,12 +637,61 @@ router.get('/:statusId/likes', apiRateLimiter, asyncHandler(async (req, res) => 
 // PROTECTED ROUTES (require authentication token - applied INDIVIDUALLY)
 // ============================================================================
 
+// ── Multer upload for status media (image / video / audio) ─────────────────
+let multer;
+try { multer = require('multer'); } catch(_) { multer = null; }
+
+const statusMediaStorage = multer ? multer.diskStorage({
+    destination: (req, file, cb) => {
+        const dir = process.env.UPLOAD_DIR || './uploads';
+        const sub = file.mimetype.startsWith('image/') ? 'images' :
+                    file.mimetype.startsWith('video/') ? 'videos' : 'audio';
+        const nodePath = require('path');
+        const fs = require('fs');
+        const dest = nodePath.join(dir, sub);
+        fs.mkdirSync(dest, { recursive: true });
+        cb(null, dest);
+    },
+    filename: (req, file, cb) => {
+        const suffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+        const ext = file.originalname.split('.').pop();
+        cb(null, 'status-' + suffix + '.' + ext);
+    },
+}) : null;
+
+const ALLOWED_STATUS_MIMES = new Set([
+    'image/jpeg','image/jpg','image/png','image/gif','image/webp',
+    'video/mp4','video/webm','video/quicktime',
+    'audio/mpeg','audio/mp3','audio/ogg','audio/wav','audio/webm','audio/aac',
+]);
+
+const statusUpload = multer ? multer({
+    storage: statusMediaStorage,
+    limits: { fileSize: parseInt(process.env.MAX_FILE_SIZE, 10) || 52428800 },
+    fileFilter: (req, file, cb) => {
+        if (ALLOWED_STATUS_MIMES.has(file.mimetype)) cb(null, true);
+        else cb(Object.assign(new Error('File type not allowed: ' + file.mimetype), { status: 415 }), false);
+    },
+}) : null;
+
+function resolveUploadedFileUrl(req, file) {
+    if (!file) return null;
+    if (file.location) return file.location; // S3/Cloudinary
+    return req.protocol + '://' + req.get('host') + '/' + file.path.replace(/\\/g, '/');
+}
+
 // ── Create status (PROTECTED)
 router.post(
     '/',
     authenticateToken,
+    ...(statusUpload ? [
+        (req, res, next) => statusUpload.single('media')(req, res, (err) => {
+            if (err) return res.status(err.status || 400).json({ success: false, message: err.message });
+            next();
+        }),
+    ] : []),
     [
-        body('content').optional().isLength({ max: 500 }).withMessage('Content too long'),
+        body('content').optional().isLength({ max: 2000 }).withMessage('Content too long'),
         body('type').optional().isIn(VALID_TYPES).withMessage('Invalid type'),
         body('moodType').optional().isIn(VALID_MOODS).withMessage('Invalid mood'),
         body('mediaUrl').optional().isURL().withMessage('Invalid media URL'),
@@ -664,10 +717,28 @@ router.post(
             caption, mediaType, fontFamily, textColor, actionButtons,
         } = req.body;
 
+        // P1 FIX: resolve uploaded file → mediaUrl (multipart upload support)
+        const uploadedFileUrl = req.file ? resolveUploadedFileUrl(req, req.file) : null;
+        const resolvedMediaUrl = uploadedFileUrl || mediaUrl || null;
+        const resolvedType = type || (req.file
+            ? (req.file.mimetype.startsWith('image/') ? 'image'
+               : req.file.mimetype.startsWith('video/') ? 'video' : 'audio')
+            : 'text');
+
         const finalContent = content || text || '';
-        if (!finalContent && type !== 'mood' && type !== 'location' && !mediaUrl) {
-            return res.status(400).json({ success: false, message: 'Content is required' });
+        if (!finalContent && resolvedType !== 'mood' && resolvedType !== 'location' && !resolvedMediaUrl) {
+            return res.status(400).json({ success: false, message: 'Content or media is required' });
         }
+
+        // P1 FIX: poll/question type handling
+        const pollOptions = resolvedType === 'poll' && req.body.pollOptions
+            ? (typeof req.body.pollOptions === 'string' ? JSON.parse(req.body.pollOptions) : req.body.pollOptions)
+                .slice(0, 4).map((opt, i) => ({ id: i + 1, text: String(opt).trim(), votes: 0 }))
+            : null;
+        if (resolvedType === 'poll' && (!pollOptions || pollOptions.length < 2)) {
+            return res.status(400).json({ success: false, message: 'Poll requires 2–4 options' });
+        }
+        const questionText = resolvedType === 'question' ? (req.body.questionText || finalContent) : null;
 
         if (!Status) {
             return res.status(503).json({
@@ -689,9 +760,9 @@ router.post(
         const statusData = {
             userId,
             content: finalContent,
-            type: type || 'text',
+            type: resolvedType,
             moodType: moodType || null,
-            mediaUrl: mediaUrl || null,
+            mediaUrl: resolvedMediaUrl,
             location: location || null,
             latitude: latitude || null,
             longitude: longitude || null,
@@ -705,6 +776,13 @@ router.post(
                 ...(fontFamily ? { fontFamily: String(fontFamily).trim() } : {}),
                 ...(textColor ? { textColor: String(textColor).trim() } : {}),
                 ...(Array.isArray(actionButtons) ? { actionButtons } : {}),
+                ...(pollOptions ? { pollOptions } : {}),
+                ...(questionText ? { questionText, answers: [] } : {}),
+                ...(req.body.mentions ? { mentions: req.body.mentions } : {}),
+                ...(req.body.altText ? { altText: String(req.body.altText).trim() } : {}),
+                ...(req.body.linkUrl ? { linkUrl: String(req.body.linkUrl).trim(), linkLabel: String(req.body.linkLabel || 'Visit').trim() } : {}),
+                ...(req.body.countdown ? { countdown: { targetDate: req.body.countdown, label: req.body.countdownLabel || '' } } : {}),
+                ...(req.body.hashtags ? { hashtags: (Array.isArray(req.body.hashtags) ? req.body.hashtags : [req.body.hashtags]).map(h => h.replace(/^#/, '')) } : {}),
                 allowReplies: allowReplies !== false,
                 allowedUserIds: allowList,
                 selectedFriendIds: allowList,
@@ -720,7 +798,7 @@ router.post(
         }).catch(() => null) : null;
         if (user) created.dataValues.statusUser = user;
 
-        if (false && req.io) {
+        if (req.io) {
             // FIX Bug C: was req.io.emit() = global broadcast to ALL sockets.
             // FIX Bug D: payload was missing the full `status` object so receivers
             //            couldn't render the card without a second fetch.
@@ -820,13 +898,28 @@ router.get('/friends', authenticateToken, apiRateLimiter, asyncHandler(async (re
     //   2. The list is never completely empty for a user with no friends yet
     const visibleUserIds = [...new Set([userId, ...friendIds])];
 
-    const where = { userId: { [Op.in]: visibleUserIds }, ...activeWhere() };
+    // P1 FIX: Filter muted users server-side using user_status_mutes table
+    let mutedUserIds = [];
+    try {
+        const { sequelize: seq } = db || {};
+        if (seq) {
+            const mutedRows = await seq.query(
+                `SELECT muted_user_id FROM user_status_mutes WHERE user_id = :userId`,
+                { replacements: { userId }, type: 'SELECT' }
+            ).catch(() => []);
+            mutedUserIds = mutedRows.map(r => r.muted_user_id);
+        }
+    } catch (_) {}
+
+    const filteredUserIds = visibleUserIds.filter(id => !mutedUserIds.includes(id));
+
+    const where = { userId: { [Op.in]: filteredUserIds }, ...activeWhere() };
     let rows = [], total = 0;
     if (Status) {
         const r = await Status.findAndCountAll({
             where,
             include: userInclude(),
-            order: [['createdAt', 'DESC']],
+            order: [['isPinned', 'DESC'], ['createdAt', 'DESC']],
             limit: Math.min(+limit, 100),
             offset: +offset,
         }).catch(() => ({ rows: [], count: 0 }));
@@ -1700,5 +1793,329 @@ router.post('/:statusId/reply', authenticateToken, [
         }
     });
 }));
+
+// ═══════════════════════════════════════════════════════════════════
+// P1 FIX: Server-persisted mute/unmute for status users
+// ═══════════════════════════════════════════════════════════════════
+router.post('/mute/:userId', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+    const viewerId = getUserId(req);
+    const targetId = parseInt(req.params.userId, 10);
+    if (!viewerId || !targetId) return res.status(400).json({ success: false, message: 'Invalid user' });
+
+    // Store in user_settings JSONB via Settings model or fallback to metadata on a ghost record
+    const { sequelize: seq } = db || {};
+    if (seq) {
+        await seq.query(
+            `INSERT INTO user_status_mutes (user_id, muted_user_id, created_at)
+             VALUES (:viewerId, :targetId, NOW())
+             ON CONFLICT (user_id, muted_user_id) DO NOTHING`,
+            { replacements: { viewerId, targetId } }
+        ).catch(async () => {
+            // Table may not exist — create it on first use
+            await seq.query(`CREATE TABLE IF NOT EXISTS user_status_mutes (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                muted_user_id INTEGER NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                UNIQUE(user_id, muted_user_id)
+            )`).catch(() => {});
+            await seq.query(
+                `INSERT INTO user_status_mutes (user_id, muted_user_id, created_at)
+                 VALUES (:viewerId, :targetId, NOW()) ON CONFLICT DO NOTHING`,
+                { replacements: { viewerId, targetId } }
+            ).catch(() => {});
+        });
+    }
+    res.json({ success: true, message: 'User muted from statuses' });
+}));
+
+router.delete('/mute/:userId', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+    const viewerId = getUserId(req);
+    const targetId = parseInt(req.params.userId, 10);
+    const { sequelize: seq } = db || {};
+    if (seq) {
+        await seq.query(
+            `DELETE FROM user_status_mutes WHERE user_id = :viewerId AND muted_user_id = :targetId`,
+            { replacements: { viewerId, targetId } }
+        ).catch(() => {});
+    }
+    res.json({ success: true, message: 'User unmuted from statuses' });
+}));
+
+router.get('/muted', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+    const viewerId = getUserId(req);
+    const { sequelize: seq } = db || {};
+    let mutedIds = [];
+    if (seq) {
+        const rows = await seq.query(
+            `SELECT muted_user_id FROM user_status_mutes WHERE user_id = :viewerId`,
+            { replacements: { viewerId }, type: 'SELECT' }
+        ).catch(() => []);
+        mutedIds = rows.map(r => r.muted_user_id);
+    }
+    res.json({ success: true, data: { mutedUserIds: mutedIds } });
+}));
+
+// ═══════════════════════════════════════════════════════════════════
+// P2: Named Highlight Albums (create / list / add / remove)
+// ═══════════════════════════════════════════════════════════════════
+router.post('/highlights/albums', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+    const userId = getUserId(req);
+    const { name, coverImage } = req.body;
+    if (!name) return res.status(400).json({ success: false, message: 'Album name is required' });
+    const { sequelize: seq } = db || {};
+    if (!seq) return res.status(503).json({ success: false, message: 'DB unavailable' });
+
+    await seq.query(`CREATE TABLE IF NOT EXISTS status_highlight_albums (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        name VARCHAR(100) NOT NULL,
+        cover_image VARCHAR(500),
+        status_ids INTEGER[] DEFAULT '{}',
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+    )`).catch(() => {});
+
+    const [rows] = await seq.query(
+        `INSERT INTO status_highlight_albums (user_id, name, cover_image, created_at, updated_at)
+         VALUES (:userId, :name, :coverImage, NOW(), NOW()) RETURNING *`,
+        { replacements: { userId, name: name.trim(), coverImage: coverImage || null } }
+    ).catch(() => [[null]]);
+    res.status(201).json({ success: true, data: { album: rows ? rows[0] : null } });
+}));
+
+router.get('/highlights/albums', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+    const userId = getUserId(req);
+    const { sequelize: seq } = db || {};
+    if (!seq) return res.json({ success: true, data: { albums: [] } });
+    const rows = await seq.query(
+        `SELECT * FROM status_highlight_albums WHERE user_id = :userId ORDER BY created_at DESC`,
+        { replacements: { userId }, type: 'SELECT' }
+    ).catch(() => []);
+    res.json({ success: true, data: { albums: rows } });
+}));
+
+router.post('/highlights/albums/:albumId/add', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+    const userId = getUserId(req);
+    const albumId = parseInt(req.params.albumId, 10);
+    const { statusId } = req.body;
+    if (!statusId) return res.status(400).json({ success: false, message: 'statusId required' });
+    const { sequelize: seq } = db || {};
+    if (!seq) return res.status(503).json({ success: false, message: 'DB unavailable' });
+
+    await seq.query(
+        `UPDATE status_highlight_albums SET status_ids = array_append(status_ids, :statusId), updated_at = NOW()
+         WHERE id = :albumId AND user_id = :userId`,
+        { replacements: { albumId, userId, statusId: parseInt(statusId, 10) } }
+    ).catch(() => {});
+    res.json({ success: true, message: 'Status added to album' });
+}));
+
+router.delete('/highlights/albums/:albumId', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+    const userId = getUserId(req);
+    const albumId = parseInt(req.params.albumId, 10);
+    const { sequelize: seq } = db || {};
+    if (seq) await seq.query(
+        `DELETE FROM status_highlight_albums WHERE id = :albumId AND user_id = :userId`,
+        { replacements: { albumId, userId } }
+    ).catch(() => {});
+    res.json({ success: true, message: 'Album deleted' });
+}));
+
+// ═══════════════════════════════════════════════════════════════════
+// P2: Share / Report / Pin / Unpin routes (missing from router)
+// ═══════════════════════════════════════════════════════════════════
+router.post('/:statusId/share', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+    const userId = getUserId(req);
+    const statusId = parseInt(req.params.statusId, 10);
+    const { caption, privacy } = req.body;
+    if (!statusId || !userId) return res.status(400).json({ success: false, message: 'Invalid request' });
+    const { shareStatus } = require('../services/statusService');
+    const shared = await shareStatus(statusId, userId, caption, privacy);
+    res.status(201).json({ success: true, data: { status: formatStatus(shared) }, message: 'Status shared' });
+}));
+
+router.post('/:statusId/report', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+    const userId = getUserId(req);
+    const statusId = parseInt(req.params.statusId, 10);
+    const { reason, description } = req.body;
+    if (!reason) return res.status(400).json({ success: false, message: 'reason is required' });
+    const { reportStatus } = require('../services/statusService');
+    const result = await reportStatus(statusId, userId, reason, description);
+    res.json({ success: true, data: result, message: 'Status reported' });
+}));
+
+router.post('/:statusId/pin', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+    const userId = getUserId(req);
+    const statusId = parseInt(req.params.statusId, 10);
+    const { pinStatus } = require('../services/statusService');
+    const result = await pinStatus(statusId, userId);
+    res.json({ success: true, data: result, message: 'Status pinned' });
+}));
+
+router.delete('/:statusId/pin', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+    const userId = getUserId(req);
+    const statusId = parseInt(req.params.statusId, 10);
+    const { unpinStatus } = require('../services/statusService');
+    const result = await unpinStatus(statusId, userId);
+    res.json({ success: true, data: result, message: 'Status unpinned' });
+}));
+
+// ═══════════════════════════════════════════════════════════════════
+// P2: Poll vote endpoint
+// ═══════════════════════════════════════════════════════════════════
+router.post('/:statusId/poll/vote', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+    const userId = getUserId(req);
+    const statusId = parseInt(req.params.statusId, 10);
+    const { optionId } = req.body;
+    if (!optionId) return res.status(400).json({ success: false, message: 'optionId is required' });
+
+    if (!Status) return res.status(503).json({ success: false, message: 'Status unavailable' });
+    const status = await Status.findOne({ where: { id: statusId, isActive: true } });
+    if (!status) return res.status(404).json({ success: false, message: 'Status not found' });
+    if (status.type !== 'poll') return res.status(400).json({ success: false, message: 'Not a poll status' });
+
+    const meta = status.metadata || {};
+    const options = meta.pollOptions || [];
+    const opt = options.find(o => o.id == optionId);
+    if (!opt) return res.status(404).json({ success: false, message: 'Option not found' });
+
+    // Prevent double-voting (track in metadata.pollVoters)
+    const voters = meta.pollVoters || {};
+    if (voters[userId]) {
+        // Switch vote
+        const prevOpt = options.find(o => o.id == voters[userId]);
+        if (prevOpt) prevOpt.votes = Math.max(0, (prevOpt.votes || 0) - 1);
+    }
+    opt.votes = (opt.votes || 0) + 1;
+    voters[userId] = optionId;
+
+    await status.update({ metadata: { ...meta, pollOptions: options, pollVoters: voters } });
+    await emitStatusEvent(req, 'status:poll_update', status, { pollOptions: options });
+
+    res.json({ success: true, data: { pollOptions: options, yourVote: optionId } });
+}));
+
+// ═══════════════════════════════════════════════════════════════════
+// P2: Question sticker answer endpoint
+// ═══════════════════════════════════════════════════════════════════
+router.post('/:statusId/question/answer', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+    const userId = getUserId(req);
+    const statusId = parseInt(req.params.statusId, 10);
+    const { text } = req.body;
+    if (!text || !text.trim()) return res.status(400).json({ success: false, message: 'Answer text is required' });
+
+    if (!Status) return res.status(503).json({ success: false, message: 'Status unavailable' });
+    const status = await Status.findOne({ where: { id: statusId, isActive: true } });
+    if (!status) return res.status(404).json({ success: false, message: 'Status not found' });
+    if (status.type !== 'question') return res.status(400).json({ success: false, message: 'Not a question status' });
+
+    const meta = status.metadata || {};
+    const answers = meta.answers || [];
+    if (answers.some(a => a.userId === userId)) {
+        return res.status(409).json({ success: false, message: 'Already answered' });
+    }
+    answers.push({ userId, text: text.trim(), answeredAt: new Date().toISOString() });
+    await status.update({ metadata: { ...meta, answers } });
+
+    // Notify creator
+    await emitStatusEvent(req, 'status:question_answer', status, { answer: { userId, text: text.trim() } });
+
+    res.status(201).json({ success: true, data: { answersCount: answers.length } });
+}));
+
+// ═══════════════════════════════════════════════════════════════════
+// P2: Save / Bookmark status
+// ═══════════════════════════════════════════════════════════════════
+router.post('/:statusId/bookmark', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+    const userId = getUserId(req);
+    const statusId = parseInt(req.params.statusId, 10);
+    const { sequelize: seq } = db || {};
+    if (!seq) return res.status(503).json({ success: false, message: 'DB unavailable' });
+
+    await seq.query(`CREATE TABLE IF NOT EXISTS status_bookmarks (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        status_id INTEGER NOT NULL,
+        saved_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE(user_id, status_id)
+    )`).catch(() => {});
+
+    await seq.query(
+        `INSERT INTO status_bookmarks (user_id, status_id, saved_at) VALUES (:userId, :statusId, NOW()) ON CONFLICT DO NOTHING`,
+        { replacements: { userId, statusId } }
+    ).catch(() => {});
+    res.json({ success: true, message: 'Status bookmarked' });
+}));
+
+router.delete('/:statusId/bookmark', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+    const userId = getUserId(req);
+    const statusId = parseInt(req.params.statusId, 10);
+    const { sequelize: seq } = db || {};
+    if (seq) await seq.query(
+        `DELETE FROM status_bookmarks WHERE user_id = :userId AND status_id = :statusId`,
+        { replacements: { userId, statusId } }
+    ).catch(() => {});
+    res.json({ success: true, message: 'Bookmark removed' });
+}));
+
+router.get('/bookmarks', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+    const userId = getUserId(req);
+    const { sequelize: seq } = db || {};
+    if (!seq) return res.json({ success: true, data: { statuses: [] } });
+
+    const rows = await seq.query(
+        `SELECT sb.status_id, sb.saved_at FROM status_bookmarks sb WHERE sb.user_id = :userId ORDER BY sb.saved_at DESC LIMIT 50`,
+        { replacements: { userId }, type: 'SELECT' }
+    ).catch(() => []);
+    const statusIds = rows.map(r => r.status_id);
+    let statuses = [];
+    if (Status && statusIds.length) {
+        statuses = await Status.findAll({ where: { id: statusIds, isActive: true } }).catch(() => []);
+    }
+    res.json({ success: true, data: { statuses: statuses.map(formatStatus) } });
+}));
+
+// ═══════════════════════════════════════════════════════════════════
+// P2: Action button click tracking
+// ═══════════════════════════════════════════════════════════════════
+router.post('/:statusId/action-click', optionalAuthenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+    const userId = getUserId(req) || 0;
+    const statusId = parseInt(req.params.statusId, 10);
+    const { buttonIndex, buttonLabel } = req.body;
+
+    if (!Status) return res.json({ success: true });
+    const status = await Status.findOne({ where: { id: statusId } });
+    if (!status) return res.json({ success: true });
+
+    const meta = status.metadata || {};
+    const clicks = meta.actionClicks || [];
+    clicks.push({ userId, buttonIndex, buttonLabel, clickedAt: new Date().toISOString() });
+    await status.update({ metadata: { ...meta, actionClicks: clicks } }).catch(() => {});
+    res.json({ success: true, data: { totalClicks: clicks.length } });
+}));
+
+// ═══════════════════════════════════════════════════════════════════
+// P2: Hashtag feed
+// ═══════════════════════════════════════════════════════════════════
+router.get('/hashtag/:tag', apiRateLimiter, asyncHandler(async (req, res) => {
+    const tag = req.params.tag.replace(/^#/, '').toLowerCase();
+    const { Op } = require('sequelize');
+    const now = new Date();
+    const statuses = Status ? await Status.findAll({
+        where: {
+            isActive: true,
+            isPublic: true,
+            expiresAt: { [Op.gt]: now },
+        },
+        order: [['createdAt', 'DESC']],
+        limit: 50,
+    }).then(all => all.filter(s => {
+        const meta = s.metadata || {};
+        return (meta.hashtags || []).map(h => h.toLowerCase()).includes(tag);
+    })).catch(() => []) : [];
+    res.json({ success: true, data: { tag, statuses: statuses.map(formatStatus) } });
+}));
+
 
 module.exports = router;
