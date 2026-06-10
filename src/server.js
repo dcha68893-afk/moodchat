@@ -5650,6 +5650,18 @@ async function main() {
     console.log('⏰ Status expiry cron started (15-minute interval)');
 })();
 
+// ── Scheduled Message Worker ─────────────────────────────────────────────────
+// Delivers due scheduled messages + cleans expired (disappearing) messages.
+// Started with a 5s delay so DB init finishes first.
+setTimeout(() => {
+  try {
+    const scheduledWorker = require('./services/scheduledMessageWorker');
+    scheduledWorker.start();
+  } catch (e) {
+    console.error('⚠️ scheduledMessageWorker failed to start (non-fatal):', e.message);
+  }
+}, 5000);
+
 // Export for testing and programmatic use
 module.exports = {
     Application,

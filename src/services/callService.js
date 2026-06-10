@@ -207,10 +207,10 @@ class CallService {
     const svc = ws();
     if (svc) {
       // ── FORENSIC LOG: CALL_SIGNAL_SENT ──────────────────────────────────────
-      console.log(`[FORENSIC] CALL_SIGNAL_SENT | callId=${call.id} | callerId=${callerId} | calleeId=${calleeId} | events=[call:incoming,incoming_call,call_incoming] | ts=${Date.now()}`);
-      // Primary: all naming variants to callee
+      console.log(`[FORENSIC] CALL_SIGNAL_SENT | callId=${call.id} | callerId=${callerId} | calleeId=${calleeId} | ts=${Date.now()}`);
+      // FIX: emit only 2 events — canonical colon-style (primary) + one legacy underscore (backward compat)
+      // Triple-emit was causing double-ring and black screen on 2nd call.
       await svc.sendToUser(parseInt(calleeId), 'call:incoming',  callPayload);
-      await svc.sendToUser(parseInt(calleeId), 'incoming_call',  callPayload);
       await svc.sendToUser(parseInt(calleeId), 'call_incoming',  callPayload);
       console.log(`[FORENSIC] CALL_SIGNAL_SENT complete | calleeId=${calleeId} | ts=${Date.now()}`);
       // Confirmation to caller

@@ -1,16 +1,5 @@
 // models/index.js - COMPLETE AUTO-MIGRATION WITH TABLE CREATION
-// Version: 3.0.0 - Creates m
-
-      // P2 FIX: Add PostgreSQL full-text search vector to tools table.
-      // This enables fast GIN-indexed search via plainto_tsquery vs slow iLike sequential scans.
-      await sequelize.query(`
-        ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "search_vector" tsvector;
-        UPDATE "tools" SET "search_vector" = to_tsvector('english',
-          coalesce(title,'') || ' ' || coalesce(description,'') || ' ' || coalesce(category,'')
-        ) WHERE "search_vector" IS NULL;
-        CREATE INDEX IF NOT EXISTS idx_tools_fts ON "tools" USING GIN ("search_vector");
-      `).catch(e => console.warn('[Migration] FTS index (non-fatal):', e.message));
-      console.log('[Migration] ✅ Full-text search vector column ensured');issing tables and columns automatically
+// Version: 3.0.0 - Creates missing tables and columns automatically
 const { Sequelize, Op } = require('sequelize');
 const fs = require('fs');
 const path = require('path');
@@ -134,6 +123,7 @@ const MODEL_WHITELIST = [
   'Status', 'StatusView', 'StatusReaction', 'StatusReply', 'Category', 'Template', 'Notes', 'File', 'Features',
   // ── Marketplace models ──────────────────────────────────────────────────────
   'Tool', 'Order', 'Review', 'Cart', 'Coupon',
+  'Wallet', 'WalletTransaction', 'Refund', 'Payout', 'SellerProfile', 'AuditLog',
   // ── Group OS models — CRITICAL FIX: were missing, causing all Group OS tabs
   //    to return 503 "Service unavailable" because _m() always returned null ──
   'GroupTask', 'GroupTaskAssignment',
@@ -1001,49 +991,190 @@ async function runFullMigration() {
       `);
       console.log('[Migration] ✅ Marketplace tables (tools, marketplace_orders, marketplace_reviews) ensured');
 
-      // P1 FIX: Add approval_status, flash_sale columns to tools table (safe ALTER IF NOT EXISTS)
+      // ── P1/P2 FIX: Add missing marketplace columns to tools table ────────
       await sequelize.query(`
-        ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "approval_status"
-          VARCHAR(20) NOT NULL DEFAULT 'pending_review';
-        ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "approval_note" TEXT;
+        ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "approval_status" VARCHAR(20) NOT NULL DEFAULT 'pending_review';
         ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "approved_at" TIMESTAMPTZ;
-        ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "approved_by" UUID;
+        ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "rejection_reason" TEXT;
         ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "is_flash_sale" BOOLEAN NOT NULL DEFAULT false;
         ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "flash_sale_price" DECIMAL(10,2);
         ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "flash_sale_end" TIMESTAMPTZ;
-        CREATE INDEX IF NOT EXISTS idx_tools_approval_status ON "tools" ("approval_status");
+        ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "brand" VARCHAR(100);
+        ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "condition" VARCHAR(20) DEFAULT 'new';
+        ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "sku" VARCHAR(100);
+        CREATE INDEX IF NOT EXISTS idx_tools_approval ON "tools" ("approval_status");
         CREATE INDEX IF NOT EXISTS idx_tools_flash_sale ON "tools" ("is_flash_sale", "available");
-      `).catch(e => console.warn('[Migration] tools ALTER (non-fatal):', e.message));
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_carts_user_unique ON "marketplace_carts" ("user_id");
+      `).catch(e => console.log('[Migration] ⚠️ tools column patch (non-fatal):', e.message));
 
-      // P1 FIX: Unique index on marketplace_carts(user_id) — prevents duplicate carts per user.
+      // ── P2 FIX: Full-text search index on tools ───────────────────────────
       await sequelize.query(`
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_carts_user_id_unique ON "marketplace_carts" ("user_id");
-      `).catch(e => console.warn('[Migration] carts index (non-fatal):', e.message));
+        ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "search_vector" tsvector;
+        CREATE INDEX IF NOT EXISTS idx_tools_search_vector ON "tools" USING GIN("search_vector");
+        UPDATE "tools" SET "search_vector" = to_tsvector('english', coalesce("title",'') || ' ' || coalesce("description",''))
+        WHERE "search_vector" IS NULL;
+      `).catch(e => console.log('[Migration] ⚠️ search_vector (non-fatal):', e.message));
 
-      // P1 FIX: Create coupons table — model was whitelisted but table was never created.
+      // ── P1 FIX: Wallet tables ─────────────────────────────────────────────
       await sequelize.query(`
-        CREATE TABLE IF NOT EXISTS "coupons" (
+        CREATE TABLE IF NOT EXISTS "wallets" (
           "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-          "code" VARCHAR(50) NOT NULL UNIQUE,
-          "discount_type" VARCHAR(20) NOT NULL DEFAULT 'percentage'
-            CHECK ("discount_type" IN ('percentage','fixed')),
-          "discount_value" DECIMAL(10,2) NOT NULL DEFAULT 0,
-          "min_order_value" DECIMAL(10,2) DEFAULT 0,
-          "max_uses" INTEGER DEFAULT NULL,
-          "used_count" INTEGER NOT NULL DEFAULT 0,
-          "valid_from" TIMESTAMPTZ DEFAULT NOW(),
-          "valid_until" TIMESTAMPTZ,
-          "is_active" BOOLEAN NOT NULL DEFAULT true,
-          "created_by" UUID,
+          "user_id" UUID NOT NULL UNIQUE,
+          "balance" DECIMAL(15,2) NOT NULL DEFAULT 0 CHECK ("balance" >= 0),
+          "currency" VARCHAR(10) NOT NULL DEFAULT 'KES',
+          "is_frozen" BOOLEAN NOT NULL DEFAULT false,
           "metadata" JSONB DEFAULT '{}',
           "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
-        CREATE INDEX IF NOT EXISTS idx_coupons_code ON "coupons" ("code");
-        CREATE INDEX IF NOT EXISTS idx_coupons_active ON "coupons" ("is_active", "valid_until");
-      `).catch(e => console.warn('[Migration] coupons table (non-fatal):', e.message));
+        CREATE INDEX IF NOT EXISTS idx_wallets_user ON "wallets" ("user_id");
 
-      console.log('[Migration] \u2705 Approval gate, flash sale, coupon, and cart-unique tables ensured');
+        CREATE TABLE IF NOT EXISTS "wallet_transactions" (
+          "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          "wallet_id" UUID NOT NULL,
+          "user_id" UUID NOT NULL,
+          "type" VARCHAR(10) NOT NULL CHECK ("type" IN ('credit','debit')),
+          "amount" DECIMAL(15,2) NOT NULL CHECK ("amount" > 0),
+          "currency" VARCHAR(10) DEFAULT 'KES',
+          "balance_after" DECIMAL(15,2),
+          "order_id" UUID,
+          "reference" VARCHAR(255),
+          "description" TEXT,
+          "metadata" JSONB DEFAULT '{}',
+          "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_wallet_tx_wallet ON "wallet_transactions" ("wallet_id");
+        CREATE INDEX IF NOT EXISTS idx_wallet_tx_user ON "wallet_transactions" ("user_id");
+      `).catch(e => console.log('[Migration] ⚠️ wallets (non-fatal):', e.message));
+
+      // ── P1 FIX: Refund table ──────────────────────────────────────────────
+      await sequelize.query(`
+        CREATE TABLE IF NOT EXISTS "refunds" (
+          "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          "order_id" UUID NOT NULL,
+          "buyer_id" UUID NOT NULL,
+          "seller_id" UUID NOT NULL,
+          "amount" DECIMAL(10,2) NOT NULL,
+          "currency" VARCHAR(10) DEFAULT 'KES',
+          "reason" TEXT,
+          "status" VARCHAR(20) NOT NULL DEFAULT 'pending'
+            CHECK ("status" IN ('pending','approved','rejected','processed')),
+          "rejection_reason" TEXT,
+          "approved_by" UUID,
+          "approved_at" TIMESTAMPTZ,
+          "rejected_at" TIMESTAMPTZ,
+          "processed_at" TIMESTAMPTZ,
+          "metadata" JSONB DEFAULT '{}',
+          "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_refunds_order_unique ON "refunds" ("order_id");
+        CREATE INDEX IF NOT EXISTS idx_refunds_buyer ON "refunds" ("buyer_id");
+        CREATE INDEX IF NOT EXISTS idx_refunds_status ON "refunds" ("status");
+      `).catch(e => console.log('[Migration] ⚠️ refunds (non-fatal):', e.message));
+
+      // ── P1 FIX: Payout / settlement table ────────────────────────────────
+      await sequelize.query(`
+        CREATE TABLE IF NOT EXISTS "payouts" (
+          "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          "seller_id" UUID NOT NULL,
+          "amount" DECIMAL(10,2) NOT NULL CHECK ("amount" > 0),
+          "currency" VARCHAR(10) DEFAULT 'KES',
+          "method" VARCHAR(30) DEFAULT 'mpesa',
+          "phone" VARCHAR(30),
+          "bank_account" VARCHAR(100),
+          "status" VARCHAR(20) NOT NULL DEFAULT 'pending'
+            CHECK ("status" IN ('pending','processing','paid','failed','cancelled')),
+          "reference" VARCHAR(255),
+          "requested_at" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          "paid_at" TIMESTAMPTZ,
+          "disbursed_by" UUID,
+          "notes" TEXT,
+          "metadata" JSONB DEFAULT '{}',
+          "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_payouts_seller ON "payouts" ("seller_id");
+        CREATE INDEX IF NOT EXISTS idx_payouts_status ON "payouts" ("status");
+      `).catch(e => console.log('[Migration] ⚠️ payouts (non-fatal):', e.message));
+
+      // ── P2 FIX: Seller profile / KYC table ───────────────────────────────
+      await sequelize.query(`
+        CREATE TABLE IF NOT EXISTS "seller_profiles" (
+          "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          "user_id" UUID NOT NULL UNIQUE,
+          "business_name" VARCHAR(255) NOT NULL,
+          "id_number" VARCHAR(50),
+          "id_type" VARCHAR(30) DEFAULT 'national_id',
+          "phone" VARCHAR(30),
+          "bank_name" VARCHAR(100),
+          "bank_account" VARCHAR(100),
+          "bank_branch" VARCHAR(100),
+          "kyc_status" VARCHAR(20) NOT NULL DEFAULT 'pending_review'
+            CHECK ("kyc_status" IN ('pending_review','approved','rejected','incomplete')),
+          "verified" BOOLEAN NOT NULL DEFAULT false,
+          "verified_at" TIMESTAMPTZ,
+          "verified_by" UUID,
+          "rejection_reason" TEXT,
+          "rejected_at" TIMESTAMPTZ,
+          "submitted_at" TIMESTAMPTZ DEFAULT NOW(),
+          "metadata" JSONB DEFAULT '{}',
+          "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_seller_profiles_user ON "seller_profiles" ("user_id");
+        CREATE INDEX IF NOT EXISTS idx_seller_profiles_kyc ON "seller_profiles" ("kyc_status");
+      `).catch(e => console.log('[Migration] ⚠️ seller_profiles (non-fatal):', e.message));
+
+      // ── P2 FIX: Coupons table (model existed but no DDL) ─────────────────
+      await sequelize.query(`
+        CREATE TABLE IF NOT EXISTS "coupons" (
+          "id" SERIAL PRIMARY KEY,
+          "code" VARCHAR(32) NOT NULL UNIQUE,
+          "type" VARCHAR(20) NOT NULL DEFAULT 'percent'
+            CHECK ("type" IN ('percent','fixed','free_shipping','cashback')),
+          "value" DECIMAL(10,2) NOT NULL DEFAULT 0,
+          "min_order_amt" DECIMAL(10,2) DEFAULT 0,
+          "max_discount" DECIMAL(10,2),
+          "usage_limit" INTEGER DEFAULT 9999,
+          "usage_count" INTEGER DEFAULT 0,
+          "per_user_limit" INTEGER DEFAULT 1,
+          "starts_at" TIMESTAMPTZ,
+          "expires_at" TIMESTAMPTZ,
+          "is_active" BOOLEAN NOT NULL DEFAULT true,
+          "is_public" BOOLEAN NOT NULL DEFAULT true,
+          "user_id" UUID,
+          "seller_id" UUID,
+          "category_slug" VARCHAR(64),
+          "description" VARCHAR(255),
+          "metadata" JSONB DEFAULT '{}',
+          "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_coupons_code ON "coupons" ("code");
+        CREATE INDEX IF NOT EXISTS idx_coupons_active ON "coupons" ("is_active", "expires_at");
+      `).catch(e => console.log('[Migration] ⚠️ coupons (non-fatal):', e.message));
+
+      // ── P2 FIX: Audit log table ───────────────────────────────────────────
+      await sequelize.query(`
+        CREATE TABLE IF NOT EXISTS "audit_logs" (
+          "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          "user_id" UUID,
+          "action" VARCHAR(100) NOT NULL,
+          "resource_type" VARCHAR(50),
+          "resource_id" VARCHAR(255),
+          "details" JSONB DEFAULT '{}',
+          "ip_address" VARCHAR(50),
+          "user_agent" TEXT,
+          "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_audit_logs_user ON "audit_logs" ("user_id");
+        CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON "audit_logs" ("action");
+        CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON "audit_logs" ("createdAt" DESC);
+      `).catch(e => console.log('[Migration] ⚠️ audit_logs (non-fatal):', e.message));
+
+      console.log('[Migration] ✅ All P1/P2 marketplace tables and columns ensured');
     } catch (mpErr) {
       console.error('[Migration] ⚠️ Marketplace table creation error (non-fatal):', mpErr.message);
     }

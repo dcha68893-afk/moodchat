@@ -148,35 +148,28 @@ module.exports = (sequelize, DataTypes) => {
         validate: { min: 0 },
       },
       status: {
-        type: DataTypes.ENUM('active', 'inactive', 'sold', 'deleted'),
-        defaultValue: 'active',
+        type: DataTypes.ENUM('active', 'inactive', 'sold', 'deleted', 'pending_review', 'rejected'),
+        defaultValue: 'pending_review',
         allowNull: false,
       },
-      // ─── P1 FIX: Product approval gate ───────────────────────────────────
-      // Products now default to 'pending_review'. Admin must approve before
-      // status becomes 'active'. Fixes: any user listing illegal products live.
+      // ─── P1 FIX: Product approval gate ────────────────────────────────
       approvalStatus: {
         type: DataTypes.ENUM('pending_review', 'approved', 'rejected'),
         defaultValue: 'pending_review',
         allowNull: false,
         field: 'approval_status',
       },
-      approvalNote: {
-        type: DataTypes.TEXT,
-        allowNull: true,
-        field: 'approval_note',
-      },
       approvedAt: {
         type: DataTypes.DATE,
         allowNull: true,
         field: 'approved_at',
       },
-      approvedBy: {
-        type: DataTypes.UUID,
+      rejectionReason: {
+        type: DataTypes.TEXT,
         allowNull: true,
-        field: 'approved_by',
+        field: 'rejection_reason',
       },
-      // ─── P2 FIX: Flash sale backend fields ───────────────────────────────
+      // ─── P2 FIX: Flash sale backend fields ────────────────────────────
       isFlashSale: {
         type: DataTypes.BOOLEAN,
         defaultValue: false,
@@ -192,14 +185,29 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: true,
         field: 'flash_sale_end',
       },
+      // ─── P2 FIX: Proper currency default for Kenya market ─────────────
       currency: {
         type: DataTypes.STRING(10),
-        defaultValue: 'USD',
+        defaultValue: 'KES',
       },
       stock: {
         type: DataTypes.INTEGER,
         allowNull: true,
         validate: { min: 0 },
+      },
+      // ─── P2 FIX: Idempotency / duplicate detection ────────────────────
+      condition: {
+        type: DataTypes.ENUM('new', 'like_new', 'good', 'fair', 'poor'),
+        defaultValue: 'new',
+        allowNull: true,
+      },
+      brand: {
+        type: DataTypes.STRING(100),
+        allowNull: true,
+      },
+      sku: {
+        type: DataTypes.STRING(100),
+        allowNull: true,
       },
       metadata: {
         type: DataTypes.JSONB,
@@ -217,14 +225,12 @@ module.exports = (sequelize, DataTypes) => {
         { fields: ['category'] },
         { fields: ['type'] },
         { fields: ['status'] },
+        { fields: ['approval_status'] },
         { fields: ['is_premium'] },
         { fields: ['is_spotlight'] },
         { fields: ['is_featured'] },
-        { fields: ['available'] },
-        // P1 FIX: index for admin pending queue
-        { fields: ['approval_status'] },
-        // P2 FIX: index for flash sale queries
         { fields: ['is_flash_sale', 'available'] },
+        { fields: ['available'] },
       ],
     }
   );

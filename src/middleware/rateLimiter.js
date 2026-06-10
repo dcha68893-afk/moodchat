@@ -140,6 +140,32 @@ const chatLimiter = rateLimit({
   }
 });
 
+// Rate limiter for call initiation — per CALLER:CALLEE pair (anti-harassment)
+// Max 5 call attempts to the same target per 60 seconds
+const callInitiationLimiter = rateLimit({
+  store: redisStore,
+  windowMs: 60 * 1000, // 1 minute
+  max: 5, // max 5 call attempts to same target per minute
+  message: {
+    success: false,
+    message: 'Too many call attempts to this user. Please wait before trying again.',
+    timestamp: new Date().toISOString()
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+  skipFailedRequests: false,
+  keyGenerator: (req) => {
+    const callerId = req.user && req.user.id ? req.user.id : req.ip;
+    const calleeId = req.body && (req.body.calleeId || req.body.userId ||
+      (Array.isArray(req.body.participantIds) && req.body.participantIds.length === 1
+        ? req.body.participantIds[0] : 'group'));
+    return `call-target:${callerId}:${calleeId}`;
+  },
+  handler: (req, res, next, options) => {
+    res.status(429).json(options.message);
+  }
+});
+
 // Dynamic rate limiter based on user role
 const dynamicLimiter = (options = {}) => {
   return rateLimit({
@@ -203,22 +229,6 @@ module.exports = {
   passwordResetLimiter,
   uploadLimiter,
   chatLimiter,
+  callInitiationLimiter,
   dynamicLimiter
 };
-// P1 FIX: Payment endpoint rate limiter — was missing entirely.
-// Prevents brute-force payment attempts and STK Push spam.
-const paymentLimiter = rateLimit({
-  store: redisStore,
-  windowMs: 60 * 1000,  // 1 minute window
-  max: 5,               // max 5 payment attempts per minute per IP
-  message: {
-    success: false,
-    message: 'Too many payment requests. Please wait a moment and try again.',
-    timestamp: new Date().toISOString()
-  },
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: (req) => `${req.ip}:payment`,
-});
-
-module.exports.paymentLimiter = paymentLimiter;

@@ -133,6 +133,43 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.STRING(200),
         allowNull: true,
       },
+      // ── Quality & Network Metrics ─────────────────────────────────────────
+      qualityScore: {
+        type: DataTypes.FLOAT,
+        allowNull: true,
+        comment: 'Average call quality score 0-5 (MOS-like)',
+      },
+      networkStats: {
+        type: DataTypes.JSONB,
+        defaultValue: {},
+        allowNull: false,
+        comment: 'RTT, packet loss, jitter, bitrate snapshots',
+      },
+      postCallRating: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+        comment: 'User-submitted post-call rating 1-5',
+      },
+      postCallFeedback: {
+        type: DataTypes.TEXT,
+        allowNull: true,
+        comment: 'Optional user feedback text after call',
+      },
+      recordingStatus: {
+        type: DataTypes.ENUM('none', 'recording', 'stopped', 'uploaded', 'failed'),
+        defaultValue: 'none',
+        allowNull: false,
+      },
+      scheduledAt: {
+        type: DataTypes.DATE,
+        allowNull: true,
+        comment: 'When this call is scheduled to start (null = instant call)',
+      },
+      scheduledTitle: {
+        type: DataTypes.STRING(200),
+        allowNull: true,
+        comment: 'Optional title for scheduled calls',
+      },
       createdAt: {
         type: DataTypes.DATE,
         allowNull: false,
@@ -404,6 +441,15 @@ module.exports = (sequelize, DataTypes) => {
 
           // ── Error reason ──────────────────────────────────────────────────
           { name: 'errorReason', sql: 'VARCHAR(200)' },
+
+          // ── Quality & Network Metrics (added audit fix) ───────────────────
+          { name: 'qualityScore',     sql: 'FLOAT' },
+          { name: 'networkStats',     sql: "JSONB NOT NULL DEFAULT '{}'" },
+          { name: 'postCallRating',   sql: 'INTEGER' },
+          { name: 'postCallFeedback', sql: 'TEXT' },
+          { name: 'recordingStatus',  sql: "VARCHAR(20) NOT NULL DEFAULT 'none'" },
+          { name: 'scheduledAt',      sql: 'TIMESTAMPTZ' },
+          { name: 'scheduledTitle',   sql: 'VARCHAR(200)' },
         ];
 
         for (const col of colsToAdd) {

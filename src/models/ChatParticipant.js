@@ -26,6 +26,21 @@ module.exports = (sequelize, DataTypes) => {
         defaultValue: false,
         allowNull: false,
       },
+      mutedUntil: {
+        type: DataTypes.DATE,
+        allowNull: true,
+        comment: 'NULL = muted indefinitely when isMuted=true. Set timestamp for timed mute.',
+      },
+      isPinned: {
+        type: DataTypes.BOOLEAN,
+        defaultValue: false,
+        allowNull: false,
+        comment: 'Server-synced chat pinning — replaces localStorage kyn_pinned_chats_v1',
+      },
+      pinnedAt: {
+        type: DataTypes.DATE,
+        allowNull: true,
+      },
       joinedAt: {
         type: DataTypes.DATE,
         defaultValue: DataTypes.NOW,

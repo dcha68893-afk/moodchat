@@ -15,11 +15,63 @@ const { apiRateLimiter } = require('../middleware/rateLimiter');
 
 // All routes are protected by parent auth middleware in index.js
 
-const MAX_FILE_SIZE = parseInt(process.env.MAX_FILE_SIZE) || 10 * 1024 * 1024;
+const MAX_FILE_SIZE = parseInt(process.env.MAX_FILE_SIZE) || 100 * 1024 * 1024; // raised to 100MB
 const ALLOWED_FILE_TYPES = (
-  process.env.ALLOWED_FILE_TYPES || 'image/jpeg,image/png,image/gif,audio/mpeg,audio/ogg,audio/webm,video/mp4,video/webm,application/pdf,text/plain'
+  process.env.ALLOWED_FILE_TYPES ||
+  'image/jpeg,image/png,image/gif,image/webp,audio/mpeg,audio/ogg,audio/webm,video/mp4,video/webm,application/pdf,text/plain,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document'
 ).split(',');
 const UPLOAD_PATH = process.env.UPLOAD_PATH || 'uploads/messages';
+
+// ── Storage: S3 (preferred) → local disk (fallback) ─────────────────────────
+// Set AWS_S3_BUCKET + AWS credentials in env to enable persistent S3 storage.
+// Cloudinary: set CLOUDINARY_URL and CLOUDINARY_UPLOAD_PRESET for Cloudinary.
+// Without either, files land on local disk (fine for dev; Render erases on deploy).
+let _storageBackend = 'disk';
+let storage;
+
+try {
+  if (process.env.AWS_S3_BUCKET && process.env.AWS_ACCESS_KEY_ID) {
+    const multerS3 = require('multer-s3');
+    const { S3Client } = require('@aws-sdk/client-s3');
+    const s3Client = new S3Client({
+      region: process.env.AWS_REGION || 'us-east-1',
+      credentials: {
+        accessKeyId:     process.env.AWS_ACCESS_KEY_ID,
+        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+      },
+    });
+    storage = multerS3({
+      s3: s3Client,
+      bucket: process.env.AWS_S3_BUCKET,
+      acl: 'public-read',
+      contentType: multerS3.AUTO_CONTENT_TYPE,
+      key: (req, file, cb) => {
+        const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
+        cb(null, `messages/${uniqueSuffix}${path.extname(file.originalname)}`);
+      },
+    });
+    _storageBackend = 's3';
+    console.log('✅ Media storage: AWS S3 (persistent CDN)');
+  } else {
+    throw new Error('S3 not configured');
+  }
+} catch (_) {
+  // Fall back to disk
+  const ensureUploadDirSync = () => {
+    try { fsSync.mkdirSync(UPLOAD_PATH, { recursive: true }); } catch (_e) { /* already exists */ }
+  };
+  ensureUploadDirSync();
+  storage = multer.diskStorage({
+    destination: (req, file, cb) => cb(null, UPLOAD_PATH),
+    filename: (req, file, cb) => {
+      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+      cb(null, `${uniqueSuffix}${path.extname(file.originalname)}`);
+    },
+  });
+  if (_storageBackend !== 's3') {
+    console.warn('⚠️  Media storage: local disk (ephemeral on Render). Set AWS_S3_BUCKET for persistent storage.');
+  }
+}
 
 // ── SECURITY FIX: Magic byte validation ─────────────────────────────────────
 // Client-supplied Content-Type can be spoofed. Validate the first 12 bytes
@@ -50,23 +102,6 @@ function _validateMagicBytes(filePath, declaredMime) {
     return sigs.some(sig => sig.every((byte, i) => buf[i] === byte));
   } catch(_) { return false; }
 }
-
-const ensureUploadDir = async () => {
-  try {
-    await fs.mkdir(UPLOAD_PATH, { recursive: true });
-  } catch (error) {
-    console.error('Failed to create upload directory:', error);
-  }
-};
-ensureUploadDir();
-
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, UPLOAD_PATH),
-  filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
-    cb(null, `${uniqueSuffix}${path.extname(file.originalname)}`);
-  },
-});
 
 const fileFilter = (req, file, cb) => {
   if (ALLOWED_FILE_TYPES.includes(file.mimetype)) {
@@ -484,7 +519,7 @@ router.get('/', apiRateLimiter, asyncHandler(async (req, res) => {
 // ============================================================================
 router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
   try {
-    const { receiverId, content, type = 'text', chatId: existingChatId, replyToId, localId: clientLocalId } = req.body;
+    const { receiverId, content, type = 'text', chatId: existingChatId, replyToId, localId: clientLocalId, linkPreview } = req.body;
     const senderId = req.user.id;
 
     // ── FORENSIC LOG: SEND_START ──────────────────────────────────────────────
@@ -612,13 +647,26 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
     // Without this, a crash between the two queries leaves the chat with an orphan message
     let messageId, senderRows;
     const t = await sequelize.transaction();
+    
+    // Build initial metadata including linkPreview + disappearing timer from chat settings
+    const msgMetadata = {};
+    if (linkPreview && typeof linkPreview === 'object' && linkPreview.title) {
+      msgMetadata.linkPreview = {
+        title:       linkPreview.title,
+        description: linkPreview.description || null,
+        imageUrl:    linkPreview.imageUrl     || null,
+        siteName:    linkPreview.siteName     || null,
+        url:         linkPreview.url          || null,
+      };
+    }
+    
     try {
       const msgResult = await sequelize.query(
-        `INSERT INTO "Messages" ("chatId","senderId",content,type,reactions,"replyToId","sentAt","deliveredAt","createdAt","updatedAt")
-         VALUES (:chatId,:senderId,:content,:type,'{}',:replyToId,NOW(),NOW(),NOW(),NOW())
+        `INSERT INTO "Messages" ("chatId","senderId",content,type,reactions,"replyToId",metadata,"sentAt","deliveredAt","createdAt","updatedAt")
+         VALUES (:chatId,:senderId,:content,:type,'{}',:replyToId,:metadata,NOW(),NOW(),NOW(),NOW())
          RETURNING id,"chatId","senderId",content,type,"replyToId","createdAt"`,
         {
-          replacements: { chatId, senderId, content: content.trim(), type: messageType, replyToId: safeReplyToId },
+          replacements: { chatId, senderId, content: content.trim(), type: messageType, replyToId: safeReplyToId, metadata: JSON.stringify(msgMetadata) },
           type: sequelize.QueryTypes.INSERT,
           transaction: t,
         }
@@ -957,11 +1005,15 @@ router.post('/:chatId/upload', apiRateLimiter, upload.single('file'), asyncHandl
 
     const messageId = msgResult[0][0].id;
 
-    // FIX: build absolute URL so frontend can render the file cross-origin
-    const baseUrl   = process.env.RENDER_EXTERNAL_URL || process.env.BACKEND_URL || `${req.protocol}://${req.get('host')}`;
-    const subDir    = msgType === 'image' ? 'images' : msgType === 'audio' ? 'audio' : msgType === 'video' ? 'video' : 'files';
-    const relPath   = `/uploads/${subDir}/${req.file.filename}`;
-    const absUrl    = `${baseUrl.replace(/\/+$/, '')}${relPath}`;
+    // Build absolute URL — S3 returns req.file.location; disk uses relative path
+    let absUrl;
+    if (_storageBackend === 's3' && req.file && req.file.location) {
+      absUrl = req.file.location;
+    } else {
+      const baseUrl = process.env.RENDER_EXTERNAL_URL || process.env.BACKEND_URL || `${req.protocol}://${req.get('host')}`;
+      const subDir  = msgType === 'image' ? 'images' : msgType === 'audio' ? 'audio' : msgType === 'video' ? 'video' : 'files';
+      absUrl = `${baseUrl.replace(/\/+$/, '')}/uploads/${subDir}/${req.file.filename}`;
+    }
 
     // Store mediaUrl in message metadata so GET messages can return it
     await sequelize.query(

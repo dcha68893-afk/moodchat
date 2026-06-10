@@ -126,7 +126,8 @@ Thumbs.db
 backups_final_*/
 *.backup
 
-# SECURITY: Never commit secrets
-.env
-.env.*
+# P1 SECURITY FIX: Never commit secrets
+.env*
 !.env.example
+*.key
+*.pem

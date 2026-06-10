@@ -83,6 +83,7 @@ const ROUTE_MAPPING = {
   'friends.js': '/api/friends',
   'chats.js': '/api/chats',
   'messages.js': '/api/messages',
+  'messagingFeatures.js': '/api/messaging',
   'status.js': '/api/status',
   'notifications.js': '/api/notifications',
   'settings.js': '/api/settings',

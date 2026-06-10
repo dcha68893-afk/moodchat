@@ -24,10 +24,63 @@ const User          = db.Users  || db.User;
 const Chat          = db.Chats  || db.Chat;
 const Call          = db.Calls  || db.Call;
 
-const { apiRateLimiter } = require('../middleware/rateLimiter');
+const { apiRateLimiter, callInitiationLimiter } = require('../middleware/rateLimiter');
 
 const Sequelize         = require('sequelize');
 const { Op, fn, col, literal } = Sequelize;
+
+// ── Ring Timeout Manager ───────────────────────────────────────────────────────
+// Auto-marks unanswered calls as 'missed' after RING_TIMEOUT_MS.
+// Prevents zombie 'ringing' records from accumulating in the DB and cleans up
+// the caller's UI when the callee never responds.
+const RING_TIMEOUT_MS = parseInt(process.env.RING_TIMEOUT_MS, 10) || 45000; // default 45s
+const _ringTimers = new Map(); // callId → timer handle
+
+function scheduleRingTimeout(callId, participantIds, ioGetter) {
+  if (_ringTimers.has(String(callId))) return; // already scheduled
+  const timer = setTimeout(async () => {
+    _ringTimers.delete(String(callId));
+    try {
+      const call = await Call.findOne({
+        where: { id: callId, status: { [Op.in]: ['ringing', 'initiated'] } },
+      });
+      if (!call) return; // Already answered/declined
+      call.status  = 'missed';
+      call.endedAt = new Date();
+      await call.save();
+
+      const io = typeof ioGetter === 'function' ? ioGetter() : null;
+      const svc = getWsService && getWsService();
+      const payload = { callId, status: 'missed', timestamp: Date.now() };
+      const pids = participantIds || call.participants || [];
+      for (const pid of pids) {
+        if (svc) {
+          try { await svc.sendToUser(pid, 'call:missed',    payload); } catch (_) {}
+          try { await svc.sendToUser(pid, 'call_missed',    payload); } catch (_) {}
+          try { await svc.sendToUser(pid, 'call:cancelled', payload); } catch (_) {}
+        }
+        if (io) {
+          try { io.to(`user:${pid}`).emit('call:missed',    payload); } catch (_) {}
+          try { io.to(`user:${pid}`).emit('call_missed',    payload); } catch (_) {}
+        }
+      }
+      console.log(`[RingTimeout] callId=${callId} auto-missed after ${RING_TIMEOUT_MS}ms`);
+    } catch (err) {
+      console.error('[RingTimeout] error:', err.message);
+    }
+  }, RING_TIMEOUT_MS);
+
+  _ringTimers.set(String(callId), timer);
+}
+
+function cancelRingTimeout(callId) {
+  const timer = _ringTimers.get(String(callId));
+  if (timer) {
+    clearTimeout(timer);
+    _ringTimers.delete(String(callId));
+  }
+}
+
 
 const CALL_HISTORY_RETENTION_DAYS = parseInt(process.env.CALL_HISTORY_RETENTION_DAYS) || 365;
 const MAX_CALL_DURATION           = parseInt(process.env.MAX_CALL_DURATION)            || 14400;
@@ -208,7 +261,7 @@ router.post('/missed/read', apiRateLimiter, asyncHandler(async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // POST / — primary call-initiation endpoint used by calls-core.js CALL_INITIATE
 // ─────────────────────────────────────────────────────────────────────────────
-router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
+router.post('/', apiRateLimiter, callInitiationLimiter, asyncHandler(async (req, res) => {
   try {
     const auth = checkAuth(req, res); if (!auth) return;
     const { userId } = auth;
@@ -254,6 +307,22 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
     const isOnline = await safeIsUserOnline(targetId);
     console.log(`[POST /calls] safeIsUserOnline(${targetId}) = ${isOnline} (hint only — call proceeds regardless)`);
 
+    // ── Busy signal: check if the target is already in an active call ────────
+    let isBusy = false;
+    try {
+      const activeCall = await Call.findOne({
+        where: {
+          status: { [Op.in]: ['ringing', 'in-progress'] },
+          [Op.or]: [
+            { callerId: targetId },
+            { receiverId: targetId },
+            { participants: { [Op.contains]: [targetId] } },
+          ],
+        },
+      });
+      isBusy = !!activeCall;
+    } catch (_) {}
+
     const call = await callService.initiateCall(userId, targetId, callType, null);
 
     // Always notify — if they are online, they'll get it; if not, it'll be a missed call
@@ -264,8 +333,26 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
       callerName:   _callerDisplayName,
       callerAvatar: (call.callerInfo && call.callerInfo.avatar)   || req.user.avatar   || null,
       callType,
+      isBusy,
       timestamp:    Date.now(),
     };
+
+    // If target is busy, notify the CALLER immediately with a busy signal
+    // (the call record is still created so it appears in history as missed)
+    if (isBusy) {
+      await notifyUser(req.io, userId, 'call:busy', {
+        callId:   call.id,
+        calleeId: targetId,
+        message:  'User is currently in another call',
+        timestamp: Date.now(),
+      });
+      await notifyUser(req.io, userId, 'call_busy', {
+        callId:   call.id,
+        calleeId: targetId,
+        message:  'User is currently in another call',
+        timestamp: Date.now(),
+      });
+    }
 
     await notifyUser(req.io, targetId, 'call_incoming', _callIncomingPayload);
     // FIX: Also emit canonical 'call:incoming' (the frontend listens on this too)
@@ -287,6 +374,9 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
         }
     } catch(_) {}
 
+    // Schedule auto-miss if no answer within RING_TIMEOUT_MS
+    scheduleRingTimeout(call.id, call.participants || [userId, targetId], () => req.io);
+
     return res.status(201).json({ success: true, message: 'Call initiated', data: { call, receiverOnline: isOnline } });
 
   } catch (err) {
@@ -298,7 +388,7 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /initiate — ALIAS for / endpoint (frontend compatibility)
 // ─────────────────────────────────────────────────────────────────────────────
-router.post('/initiate', apiRateLimiter, asyncHandler(async (req, res) => {
+router.post('/initiate', apiRateLimiter, callInitiationLimiter, asyncHandler(async (req, res) => {
   try {
     const auth = checkAuth(req, res); if (!auth) return;
     const { userId } = auth;
@@ -341,14 +431,19 @@ router.post('/initiate', apiRateLimiter, asyncHandler(async (req, res) => {
 
     const call = await callService.initiateCall(userId, targetId, callType, null);
 
-    await notifyUser(req.io, targetId, 'call_incoming', {
+    const _callerDisplayName = await resolveCallerName(userId, req.user);
+    const _initPayload = {
       callId:       call.id,
       callerId:     userId,
-      callerName:   (call.callerInfo && call.callerInfo.username) || req.user.username || req.user.displayName || 'Unknown', // Bug4: resolved
-      callerAvatar: (call.callerInfo && call.callerInfo.avatar)   || req.user.avatar   || null,
+      callerName:   _callerDisplayName,
+      callerAvatar: (call.callerInfo && call.callerInfo.avatar) || req.user.avatar || null,
       callType,
       timestamp:    Date.now(),
-    });
+    };
+
+    // Emit BOTH naming conventions — calls-core.js uses call:incoming, legacy uses call_incoming
+    await notifyUser(req.io, targetId, 'call_incoming', _initPayload);
+    await notifyUser(req.io, targetId, 'call:incoming', _initPayload);
 
     return res.status(201).json({ success: true, message: 'Call initiated', data: { call, receiverOnline: isOnline } });
 
@@ -438,7 +533,20 @@ router.get('/history', apiRateLimiter, asyncHandler(async (req, res) => {
       }, 0);
     } catch (_) {}
 
-    res.json({ status: 'success', data: { calls: enriched, statistics: stats, pagination: { total: count, page: parseInt(page, 10), limit: parsedLimit, pages: Math.ceil(count / parsedLimit) } } });
+    const paginationMeta = {
+      total: count,
+      page:  parseInt(page, 10),
+      limit: parsedLimit,
+      pages: Math.ceil(count / parsedLimit),
+    };
+
+    // Standard pagination headers (used by frontend infinite-scroll and admin panels)
+    res.setHeader('X-Total-Count',  count);
+    res.setHeader('X-Page',         parseInt(page, 10));
+    res.setHeader('X-Per-Page',     parsedLimit);
+    res.setHeader('X-Total-Pages',  paginationMeta.pages);
+
+    res.json({ status: 'success', data: { calls: enriched, statistics: stats, pagination: paginationMeta } });
   } catch (err) {
     console.error('[GET /history]', err.message, err.stack);
     res.status(500).json({ status: 'error', message: 'Failed to fetch call history' });
@@ -529,6 +637,47 @@ router.get('/export', apiRateLimiter, asyncHandler(async (req, res) => {
   }
 }));
 
+// POST /:callId/rate — Submit post-call quality rating
+router.post('/:callId/rate', apiRateLimiter, asyncHandler(async (req, res) => {
+  try {
+    const auth = checkAuth(req, res); if (!auth) return;
+    const { userId } = auth;
+    if (!checkModels(res)) return;
+
+    const { callId } = req.params;
+    const { rating, feedback } = req.body;
+
+    if (!rating || typeof rating !== 'number' || rating < 1 || rating > 5) {
+      return res.status(400).json({ success: false, message: 'rating must be a number between 1 and 5' });
+    }
+
+    const call = await Call.findOne({
+      where: {
+        id: callId,
+        [Op.or]: [
+          { callerId: userId },
+          { receiverId: userId },
+          { participants: { [Op.contains]: [userId] } },
+        ],
+      },
+    });
+
+    if (!call) {
+      return res.status(404).json({ success: false, message: 'Call not found' });
+    }
+
+    await call.update({
+      postCallRating:   Math.round(rating),
+      postCallFeedback: feedback || null,
+    });
+
+    res.json({ success: true, message: 'Rating submitted', data: { callId, rating, feedback } });
+  } catch (err) {
+    console.error('[POST /:callId/rate]', err.message);
+    res.status(500).json({ success: false, message: 'Failed to submit rating' });
+  }
+}));
+
 // DELETE /history
 router.delete('/history', apiRateLimiter, asyncHandler(async (req, res) => {
   try {
@@ -563,7 +712,7 @@ router.delete('/history', apiRateLimiter, asyncHandler(async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /start  (alternate initiation from chat.html / direct call)
 // ─────────────────────────────────────────────────────────────────────────────
-router.post('/start', apiRateLimiter, asyncHandler(async (req, res) => {
+router.post('/start', apiRateLimiter, callInitiationLimiter, asyncHandler(async (req, res) => {
   try {
     const auth = checkAuth(req, res); if (!auth) return;
     const { userId } = auth;
@@ -756,30 +905,42 @@ router.post('/:callId/answer', apiRateLimiter, asyncHandler(async (req, res) => 
       if (sdpAnswer) call.sdpAnswer = sdpAnswer;
       await call.save();
     }
+    // Cancel ring timeout now that call is answered
+    cancelRingTimeout(callId);
 
-    const user = await User.findByPk(userId, { attributes: ['id', 'username', 'avatar'] });
+    const user = await User.findByPk(userId, { attributes: ['id', 'username', 'avatar'] }).catch(() => null);
+    const answererInfo = user
+      ? { id: user.id, username: user.username, avatar: user.avatar }
+      : { id: userId, username: req.user.username || `User ${userId}` };
 
+    // Notify all participants of acceptance (group or 1-on-1)
     if (call.isGroupCall || (call.participants || []).length > 2) {
       for (const pid of (call.participants || [])) {
-        await notifyUser(req.io, pid, 'call_participant_joined', {
+        await notifyUser(req.io, pid, 'call:participant_joined', {
           callId: call.id,
           userId,
-          userName: user ? user.username : (req.user.username || req.user.displayName || `User ${userId}`),
-          userAvatar: user ? user.avatar : (req.user.avatar || null),
-          callType: call.type,
-          timestamp: new Date()
+          userName:   answererInfo.username,
+          userAvatar: answererInfo.avatar || null,
+          callType:   call.type,
+          timestamp:  new Date(),
         });
       }
     }
 
+    const acceptPayload = {
+      callId:     call.id,
+      answeredBy: answererInfo,
+      status:     call.status,
+      startedAt:  call.startedAt,
+      timestamp:  new Date(),
+    };
+
     for (const pid of (call.participants || [])) {
-      await notifyUser(req.io, pid, 'call_accepted', {
-        callId:     call.id,
-        answeredBy: user ? { id: user.id, username: user.username, avatar: user.avatar } : { id: userId },
-        status:     call.status,
-        startedAt:  call.startedAt,
-        timestamp:  new Date(),
-      });
+      // Canonical colon-style (new frontend)
+      await notifyUser(req.io, pid, 'call:accepted',  acceptPayload);
+      await notifyUser(req.io, pid, 'call:answered',  acceptPayload);
+      // Legacy underscore-style (old listeners)
+      await notifyUser(req.io, pid, 'call_accepted',  acceptPayload);
     }
 
     res.json({ status: 'success', message: 'Call answered', data: { call: { id: call.id, status: call.status, callId: call.id } } });
@@ -805,6 +966,8 @@ router.post('/:callId/reject', apiRateLimiter, asyncHandler(async (req, res) => 
     if (!call) return res.status(404).json({ status: 'error', message: 'Call not found or already ended' });
 
     await updateArrayField(call, 'declinedBy', userId, 'add');
+    // Cancel ring timeout since call is being declined
+    cancelRingTimeout(callId);
 
     if (call.callerId === userId) {
       call.status  = 'cancelled';
@@ -818,20 +981,25 @@ router.post('/:callId/reject', apiRateLimiter, asyncHandler(async (req, res) => 
     }
     await call.save();
 
-    const user = await User.findByPk(userId, { attributes: ['id', 'username'] });
+    const user = await User.findByPk(userId, { attributes: ['id', 'username'] }).catch(() => null);
+    const declinePayload = {
+      callId:     call.id,
+      rejectedBy: user ? { id: user.id, username: user.username } : { id: userId },
+      reason,
+      status:     call.status,
+      timestamp:  new Date(),
+    };
+
     for (const pid of (call.participants || [])) {
-      await notifyUser(req.io, pid, 'call_rejected', {
-        callId:     call.id,
-        rejectedBy: user ? { id: user.id, username: user.username } : { id: userId },
-        reason,
-        status:     call.status,
-        timestamp:  new Date(),
-      });
+      await notifyUser(req.io, pid, 'call:declined',  declinePayload);
+      await notifyUser(req.io, pid, 'call_rejected',  declinePayload);
     }
-    // Also fire call_cancelled so UI incoming modal dismisses
-    if (call.status === 'cancelled') {
+
+    if (call.status === 'cancelled' || call.status === 'missed') {
+      const cancelPayload = { callId: call.id, status: call.status, timestamp: new Date() };
       for (const pid of (call.participants || [])) {
-        await notifyUser(req.io, pid, 'call_cancelled', { callId: call.id, status: 'cancelled', timestamp: new Date() });
+        await notifyUser(req.io, pid, 'call:cancelled', cancelPayload);
+        await notifyUser(req.io, pid, 'call_cancelled', cancelPayload);
       }
     }
 
@@ -921,8 +1089,10 @@ router.post('/:callId/end', apiRateLimiter, asyncHandler(async (req, res) => {
     };
 
     for (const pid of (call.participants || [])) {
-      await notifyUser(req.io, pid, 'call_ended',       eventData);
-      await notifyUser(req.io, pid, 'call_force_ended', { ...eventData, forceEnd: true });
+      // Canonical event (frontend's primary listener)
+      await notifyUser(req.io, pid, 'call:ended',  eventData);
+      // Legacy event for backward compat with older listeners
+      await notifyUser(req.io, pid, 'call_ended',  eventData);
     }
 
     res.json({ status: 'success', message: 'Call ended', data: { callId: call.id, duration: actualDuration, status: finalStatus } });
@@ -972,6 +1142,99 @@ router.post('/:callId/signal', apiRateLimiter, asyncHandler(async (req, res) => 
   } catch (err) {
     console.error('[POST /:callId/signal]', err.message);
     res.status(500).json({ status: 'error', message: 'Failed to relay signal' });
+  }
+}));
+
+// GET /:callId/signal — Retrieve stored SDP offer/answer and ICE candidates for late-join
+// Fixes: "SDP stored but never served back" audit issue — peer can now poll this if they
+// missed the Socket.IO signal event (e.g. cold-start, brief disconnect).
+router.get('/:callId/signal', apiRateLimiter, asyncHandler(async (req, res) => {
+  try {
+    const auth = checkAuth(req, res); if (!auth) return;
+    const { userId } = auth;
+    if (!checkModels(res)) return;
+
+    const { callId } = req.params;
+    const call = await Call.findOne({
+      where: {
+        id: callId,
+        [Op.or]: [
+          { callerId: userId },
+          { receiverId: userId },
+          { participants: { [Op.contains]: [userId] } },
+        ],
+      },
+      attributes: ['id', 'sdpOffer', 'sdpAnswer', 'iceCandidates', 'callerId', 'status'],
+    });
+
+    if (!call) return res.status(404).json({ status: 'error', message: 'Call not found' });
+
+    res.json({
+      status:   'success',
+      data: {
+        callId,
+        sdpOffer:      call.sdpOffer  || null,
+        sdpAnswer:     call.sdpAnswer || null,
+        iceCandidates: call.iceCandidates || [],
+        callerId:      call.callerId,
+        callStatus:    call.status,
+      },
+    });
+  } catch (err) {
+    console.error('[GET /:callId/signal]', err.message);
+    res.status(500).json({ status: 'error', message: 'Failed to retrieve signal data' });
+  }
+}));
+
+// POST /:callId/stats — Store real-time network quality metrics
+router.post('/:callId/stats', apiRateLimiter, asyncHandler(async (req, res) => {
+  try {
+    const auth = checkAuth(req, res); if (!auth) return;
+    const { userId } = auth;
+    if (!checkModels(res)) return;
+
+    const { callId } = req.params;
+    const { rtt, packetLoss, jitter, bitrate, qualityLevel, timestamp } = req.body;
+
+    const call = await Call.findOne({
+      where: {
+        id: callId,
+        [Op.or]: [
+          { callerId: userId },
+          { receiverId: userId },
+          { participants: { [Op.contains]: [userId] } },
+        ],
+      },
+    });
+
+    if (!call) {
+      return res.status(404).json({ success: false, message: 'Call not found' });
+    }
+
+    // Merge stats snapshot into networkStats JSONB
+    const existingStats = call.networkStats || {};
+    const snapshots = existingStats.snapshots || [];
+    snapshots.push({ userId, rtt, packetLoss, jitter, bitrate, qualityLevel, ts: timestamp || Date.now() });
+    // Keep only last 20 snapshots to cap JSONB size
+    if (snapshots.length > 20) snapshots.splice(0, snapshots.length - 20);
+
+    // Compute running quality score (0-5) from packetLoss + rtt
+    let score = 5;
+    if (packetLoss > 0.05) score -= 1;
+    if (packetLoss > 0.10) score -= 1;
+    if (rtt > 150) score -= 0.5;
+    if (rtt > 300) score -= 1;
+    score = Math.max(1, Math.min(5, score));
+
+    await call.update({
+      networkStats: { ...existingStats, snapshots, lastUpdated: Date.now() },
+      qualityScore: score,
+    });
+
+    res.json({ success: true, message: 'Stats recorded', data: { qualityScore: score } });
+  } catch (err) {
+    console.error('[POST /:callId/stats]', err.message);
+    res.status(500).json({ success: false, message: 'Failed to store stats' });
   }
 }));
 
@@ -1178,8 +1441,9 @@ router.post('/:callId/leave', apiRateLimiter, asyncHandler(async (req, res) => {
       call.endedAt = new Date();
       if (call.startedAt) call.duration = Math.max(0, Math.floor((Date.now() - new Date(call.startedAt).getTime()) / 1000));
       for (const pid of (call.participants || [])) {
-        await notifyUser(req.io, pid, 'call_ended',       { callId: call.id, status: 'completed', timestamp: new Date() });
-        await notifyUser(req.io, pid, 'call_force_ended', { callId: call.id, status: 'completed', forceEnd: true, timestamp: new Date() });
+        const _endedPayload = { callId: call.id, status: 'completed', timestamp: new Date() };
+        await notifyUser(req.io, pid, 'call:ended', _endedPayload);
+        await notifyUser(req.io, pid, 'call_ended', _endedPayload);
       }
     } else {
       for (const pid of (call.participants || [])) {
@@ -1203,15 +1467,103 @@ router.post('/:callId/leave', apiRateLimiter, asyncHandler(async (req, res) => {
 // ── GET /api/calls/ice-config — Return STUN/TURN server credentials ──────────
 // Called by calls-core.js after initiating/accepting a call (event: turn:config).
 // If TURN_SECRET is not set, returns free STUN servers only.
-// GET /scheduled — Scheduled / upcoming calls (frontend polls this)
-// Returns empty list when no scheduling feature is active — prevents 404 spam
+// GET /scheduled — List upcoming scheduled calls for the current user
 router.get('/scheduled', apiRateLimiter, asyncHandler(async (req, res) => {
   try {
     const auth = checkAuth(req, res); if (!auth) return;
-    // Return empty list — scheduled calls feature not yet implemented
-    res.json({ success: true, data: { calls: [], total: 0 }, message: 'No scheduled calls' });
+    const { userId } = auth;
+    if (!checkModels(res)) return;
+
+    const now = new Date();
+    const calls = await Call.findAll({
+      where: {
+        scheduledAt: { [Op.gte]: now },
+        status: 'initiated',
+        [Op.or]: [
+          { callerId: userId },
+          { participants: { [Op.contains]: [userId] } },
+        ],
+      },
+      order: [['scheduledAt', 'ASC']],
+      limit: 50,
+    });
+
+    // Enrich with caller info
+    const enriched = await Promise.all(calls.map(async (c) => {
+      let callerInfo = null;
+      try {
+        const u = await User.findByPk(c.callerId, { attributes: ['id', 'username', 'avatar'] });
+        callerInfo = u ? u.toJSON() : null;
+      } catch (_) {}
+      return { ...c.toJSON(), callerInfo };
+    }));
+
+    res.json({ success: true, data: { calls: enriched, total: enriched.length } });
   } catch (err) {
-    res.status(500).json({ status: 'error', message: 'Failed to fetch scheduled calls' });
+    console.error('[GET /scheduled]', err.message);
+    res.status(500).json({ success: false, message: 'Failed to fetch scheduled calls' });
+  }
+}));
+
+// POST /schedule — Create a scheduled call
+router.post('/schedule', apiRateLimiter, asyncHandler(async (req, res) => {
+  try {
+    const auth = checkAuth(req, res); if (!auth) return;
+    const { userId } = auth;
+    if (!checkModels(res)) return;
+
+    const { participantIds, callType = 'audio', scheduledAt, title } = req.body;
+    if (!scheduledAt) {
+      return res.status(400).json({ success: false, message: 'scheduledAt is required' });
+    }
+    const scheduledTime = new Date(scheduledAt);
+    if (isNaN(scheduledTime.getTime()) || scheduledTime <= new Date()) {
+      return res.status(400).json({ success: false, message: 'scheduledAt must be a future date' });
+    }
+    if (!Array.isArray(participantIds) || participantIds.length === 0) {
+      return res.status(400).json({ success: false, message: 'participantIds is required' });
+    }
+
+    const allParticipants = [userId, ...participantIds.map(Number).filter(id => id !== userId)];
+    const isGroup = allParticipants.length > 2;
+
+    const call = await Call.create({
+      callerId:      userId,
+      receiverId:    !isGroup ? allParticipants.find(id => id !== userId) : null,
+      type:          callType === 'voice' ? 'audio' : callType,
+      status:        'initiated',
+      isGroupCall:   isGroup,
+      participants:  allParticipants,
+      answeredBy:    [],
+      declinedBy:    [],
+      readBy:        [],
+      scheduledAt:   scheduledTime,
+      scheduledTitle: title || null,
+      metadata:      { scheduledBy: userId, scheduledAt: scheduledTime.toISOString() },
+    });
+
+    // Notify participants of scheduled call
+    const callerName = await resolveCallerName(userId, req.user);
+    const payload = {
+      callId:        call.id,
+      callerId:      userId,
+      callerName,
+      callType,
+      isGroupCall:   isGroup,
+      scheduledAt:   scheduledTime.toISOString(),
+      title:         title || null,
+      timestamp:     Date.now(),
+    };
+    await Promise.allSettled(
+      allParticipants
+        .filter(id => id !== userId)
+        .map(pid => notifyUser(req.io, pid, 'call:scheduled', payload))
+    );
+
+    res.status(201).json({ success: true, message: 'Call scheduled', data: { call: call.toJSON() } });
+  } catch (err) {
+    console.error('[POST /schedule]', err.message);
+    res.status(500).json({ success: false, message: 'Failed to schedule call' });
   }
 }));
 

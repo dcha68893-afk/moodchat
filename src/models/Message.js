@@ -99,6 +99,29 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.DATE,
         allowNull: true,
       },
+      expiresAt: {
+        type: DataTypes.DATE,
+        allowNull: true,
+        comment: 'Disappearing message expiry timestamp. NULL = no expiry.',
+      },
+      disappearingTimer: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+        comment: 'Timer in seconds: 86400=24h, 604800=7d, 2592000=30d, 7776000=90d',
+      },
+      isPinned: {
+        type: DataTypes.BOOLEAN,
+        defaultValue: false,
+        allowNull: false,
+      },
+      pinnedAt: {
+        type: DataTypes.DATE,
+        allowNull: true,
+      },
+      pinnedBy: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+      },
       createdAt: {
         type: DataTypes.DATE,
         allowNull: false,

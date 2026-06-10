@@ -508,6 +508,78 @@ class WebSocketService {
                     socket.emit('message:send:error', { localId: msErrLocalId, error: err.message });
                 }
             });
+
+            // ── In-call poll relay ────────────────────────────────────────────────
+            socket.off('call:poll_event').on('call:poll_event', async (payload = {}) => {
+                try {
+                    const { callId: pollCallId, action, poll, vote, pollId } = payload;
+                    if (!pollCallId || !action) return;
+
+                    const Call = this._db && (this._db.Calls || this._db.Call);
+                    if (!Call) return;
+
+                    const callRecord = await Call.findOne({ where: { id: pollCallId } }).catch(() => null);
+                    if (!callRecord) return;
+
+                    const participants = callRecord.participants || [];
+                    const isParticipant = participants.includes(userId) ||
+                                         callRecord.callerId === userId ||
+                                         callRecord.receiverId === userId;
+                    if (!isParticipant) return;
+
+                    const outPayload = { callId: pollCallId, action, poll, vote, pollId, senderId: userId, timestamp: Date.now() };
+                    for (const pid of participants.filter(p => p !== userId)) {
+                        await this.sendToUser(pid, 'call:poll_event', outPayload);
+                    }
+                } catch (err) {
+                    console.warn('[WSService] call:poll_event relay error:', err.message);
+                }
+            });
+
+            // ── In-call chat relay — persists messages across ICE restarts ───────
+            // Frontend dual-paths chat: data channel (fast) + socket (persistent).
+            // This handler relays the message to all OTHER call participants so
+            // the in-call chat is not lost when data channels are recreated.
+            socket.off('call:chat_message').on('call:chat_message', async (payload = {}) => {
+                try {
+                    const { callId: chatCallId, message: chatMsg, timestamp: chatTs } = payload;
+                    if (!chatCallId || !chatMsg) return;
+
+                    // Verify sender is a participant
+                    const Call = this._db && (this._db.Calls || this._db.Call);
+                    if (!Call) return;
+
+                    const callRecord = await Call.findOne({
+                        where: {
+                            id: chatCallId,
+                            status: { $in: ['ringing', 'in-progress'] },
+                        },
+                    }).catch(() => null);
+
+                    if (!callRecord) return;
+
+                    const participants = callRecord.participants || [];
+                    const isParticipant = participants.includes(userId) ||
+                                         callRecord.callerId === userId ||
+                                         callRecord.receiverId === userId;
+                    if (!isParticipant) return;
+
+                    const outPayload = {
+                        callId:    chatCallId,
+                        message:   String(chatMsg).substring(0, 2000),
+                        senderId:  userId,
+                        timestamp: chatTs || Date.now(),
+                    };
+
+                    // Relay to all other participants
+                    const otherParticipants = participants.filter(pid => pid !== userId);
+                    for (const pid of otherParticipants) {
+                        await this.sendToUser(pid, 'call:chat_message', outPayload);
+                    }
+                } catch (err) {
+                    console.warn('[WSService] call:chat_message relay error:', err.message);
+                }
+            });
         });
 
         console.log('[WSService] Connection handler registered ✅');
