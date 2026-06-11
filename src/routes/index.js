@@ -17,31 +17,32 @@ const ROUTES_DIR = path.join(__dirname);
 const IGNORED_FILES = new Set(['index.js', '.DS_Store', 'Thumbs.db']);
 
 // ===== PUBLIC PATHS (No authentication required) =====
+// NOTE: app.js mounts this router at /api, so paths here must NOT include /api prefix
 const PUBLIC_PATHS = [
-  '/api/auth/login',
-  '/api/auth/register',
-  '/api/auth/refresh',
-  '/api/auth/forgot-password',
-  '/api/auth/reset-password',
-  '/api/auth/validate-token',
-  '/api/auth/verify-email',
-  '/api/auth/resend-verification',
-  '/api/auth/2fa/challenge',
-  '/api/health',
-  '/api/status',
-  '/api/status/health',
-  '/api/status/public',
-  '/api/status/trending',
-  '/api/status/search',
-  '/api/status/mood/:moodType',
-  '/api/status/:statusId',
-  '/api/status/:statusId/comments',
-  '/api/status/:statusId/likes',
-  '/api/status/view',
-  '/api/status/:statusId/view',
-  '/api/info',
-  '/api/cors-info',
-  '/api/public',
+  '/auth/login',
+  '/auth/register',
+  '/auth/refresh',
+  '/auth/forgot-password',
+  '/auth/reset-password',
+  '/auth/validate-token',
+  '/auth/verify-email',
+  '/auth/resend-verification',
+  '/auth/2fa/challenge',
+  '/health',
+  '/status',
+  '/status/health',
+  '/status/public',
+  '/status/trending',
+  '/status/search',
+  '/status/mood/:moodType',
+  '/status/:statusId',
+  '/status/:statusId/comments',
+  '/status/:statusId/likes',
+  '/status/view',
+  '/status/:statusId/view',
+  '/info',
+  '/cors-info',
+  '/public',
   '/test',
   '/ping',
   '/'
@@ -77,47 +78,48 @@ const PUBLIC_PATHS = [
 //    DELETE /api/status/:statusId/comment/:commentId
 
 // ===== CUSTOM ROUTE MAPPING =====
+// NOTE: No /api prefix — app.js already mounts this router at /api
 const ROUTE_MAPPING = {
-  'auth.js': '/api/auth',
-  'users.js': '/api/users',
-  'profiles.js': '/api/profile',
-  'group.js': '/api/groups',
-  'groupMembers.js': '/api/group-members',
-  'friends.js': '/api/friends',
-  'chats.js': '/api/chats',
-  'messages.js': '/api/messages',
-  'messagingFeatures.js': '/api/messaging',
-  'encryption.js': '/api/encryption',
-  'push.js': '/api/push',
-  'twoFactor.js': '/api/2fa',
-  'devices.js': '/api/devices',
-  'status.js': '/api/status',
-  'notifications.js': '/api/notifications',
-  'settings.js': '/api/settings',
-  'search.js': '/api/search',
-  'moods.js': '/api/moods',
-  'notes.js': '/api/notes',
-  'media.js': '/api/media',
-  'calls.js': '/api/calls',
-  'readReceipt.js': '/api/read-receipts',
-  'sharedMood.js': '/api/shared-moods',
-  'tools.js': '/api/tools',
-  'typingIndicator.js': '/api/typing-indicators',
-  'userStatus.js': '/api/user-status',
-  'chatsParticipant.js': '/api/chats-participant',
-  'features.js': '/api/features',
-  'templates.js': '/api/templates',
-  'categories.js': '/api/categories',
-  'files.js': '/api/files',
-  'tokens.js': '/api/tokens',
+  'auth.js': '/auth',
+  'users.js': '/users',
+  'profiles.js': '/profile',
+  'group.js': '/groups',
+  'groupMembers.js': '/group-members',
+  'friends.js': '/friends',
+  'chats.js': '/chats',
+  'messages.js': '/messages',
+  'messagingFeatures.js': '/messaging',
+  'encryption.js': '/encryption',
+  'push.js': '/push',
+  'twoFactor.js': '/2fa',
+  'devices.js': '/devices',
+  'status.js': '/status',
+  'notifications.js': '/notifications',
+  'settings.js': '/settings',
+  'search.js': '/search',
+  'moods.js': '/moods',
+  'notes.js': '/notes',
+  'media.js': '/media',
+  'calls.js': '/calls',
+  'readReceipt.js': '/read-receipts',
+  'sharedMood.js': '/shared-moods',
+  'tools.js': '/tools',
+  'typingIndicator.js': '/typing-indicators',
+  'userStatus.js': '/user-status',
+  'chatsParticipant.js': '/chats-participant',
+  'features.js': '/features',
+  'templates.js': '/templates',
+  'categories.js': '/categories',
+  'files.js': '/files',
+  'tokens.js': '/tokens',
   // FIX B-01: marketplace.routes.js was missing — all marketplace endpoints returned 404
-  'marketplace.routes.js': '/api/marketplace',
+  'marketplace.routes.js': '/marketplace',
   // PHASE14 FIX: payments.js — frontend calls /api/payments/* (mpesa, card, wallet)
-  'payments.js': '/api/payments',
+  'payments.js': '/payments',
   // FIX: smart-groups.js was missing — ALL Group OS tabs returned 404
-  'smart-groups.js': '/api/groups',
+  'smart-groups.js': '/groups',
   // FIX: invites.js was missing — group invite links returned 404
-  'invites.js': '/api/invites',
+  'invites.js': '/invites',
 };
 
 // ===== HELPER FUNCTIONS =====
@@ -136,42 +138,42 @@ function deriveMountPath(filename) {
   
   // Special mappings for plural forms
   const specialMappings = {
-    'groupMembers': '/api/group-members',
-    'profiles': '/api/profile',
-    'chatsParticipant': '/api/chats-participant',
-    'typingIndicator': '/api/typing-indicators',
-    'userStatus': '/api/user-status',
-    'readReceipt': '/api/read-receipts',
-    'sharedMood': '/api/shared-moods'
+    'groupMembers': '/group-members',
+    'profiles': '/profile',
+    'chatsParticipant': '/chats-participant',
+    'typingIndicator': '/typing-indicators',
+    'userStatus': '/user-status',
+    'readReceipt': '/read-receipts',
+    'sharedMood': '/shared-moods'
   };
   
   if (specialMappings[baseName]) return specialMappings[baseName];
-  if (baseName.includes('-')) return `/api/${baseName}`;
+  if (baseName.includes('-')) return `/${baseName}`;
   
   const kebabCase = baseName.replace(/([a-z])([A-Z])/g, '$1-$2').toLowerCase();
   
   const pluralMap = {
-    'group': '/api/groups',
-    'friend': '/api/friends',
-    'chat': '/api/chats',
-    'message': '/api/messages',
-    'notification': '/api/notifications',
-    'setting': '/api/settings',
-    'mood': '/api/moods',
-    'note': '/api/notes',
-    'media': '/api/media',
-    'call': '/api/calls',
-    'status': '/api/status',
-    'user': '/api/users',
-    'profile': '/api/profile',
-    'token': '/api/tokens',
-    'file': '/api/files',
-    'template': '/api/templates',
-    'category': '/api/categories',
-    'feature': '/api/features'
+    'group': '/groups',
+    'friend': '/friends',
+    'chat': '/chats',
+    'message': '/messages',
+    'notification': '/notifications',
+    'setting': '/settings',
+    'mood': '/moods',
+    'note': '/notes',
+    'media': '/media',
+    'call': '/calls',
+    'status': '/status',
+    'user': '/users',
+    'profile': '/profile',
+    'token': '/tokens',
+    'file': '/files',
+    'template': '/templates',
+    'category': '/categories',
+    'feature': '/features'
   };
   
-  return pluralMap[kebabCase] || `/api/${kebabCase}`;
+  return pluralMap[kebabCase] || `/${kebabCase}`;
 }
 
 function isPublicRoute(mountPath, filename) {
@@ -196,16 +198,16 @@ function isPublicRoute(mountPath, filename) {
   }
   
   // Health and status endpoints are public
-  if (mountPath === '/api/health' || mountPath === '/api/status' || 
-      mountPath === '/api/info' || mountPath === '/api/cors-info' ||
-      mountPath === '/api/public') {
+  if (mountPath === '/health' || mountPath === '/status' || 
+      mountPath === '/info' || mountPath === '/cors-info' ||
+      mountPath === '/public') {
     return true;
   }
   
   // Status route has public endpoints, but protected ones need auth
   // We handle this by mounting the entire status router WITHOUT auth middleware,
   // because the status router itself handles auth internally for protected endpoints
-  if (mountPath === '/api/status') {
+  if (mountPath === '/status') {
     return true; // Mount without auth - status router handles its own auth
   }
   
@@ -386,7 +388,7 @@ console.log('      DELETE /api/status/:statusId/comment/:commentId');
 console.log('='.repeat(80) + '\n');
 
 // ===== STATUS AUTH INFO ENDPOINT =====
-router.get('/api/status/auth-info', (req, res) => {
+router.get('/status/auth-info', (req, res) => {
   res.status(200).json({
     success: true,
     message: 'Status API Authentication Information',
@@ -424,7 +426,7 @@ router.get('/api/status/auth-info', (req, res) => {
 });
 
 // ===== TEST ENDPOINT =====
-router.get('/api/test', (req, res) => {
+router.get('/test', (req, res) => {
   res.status(200).json({
     success: true,
     message: 'API router is working',
@@ -489,7 +491,7 @@ router.get('/health', (req, res) => {
 });
 
 // ===== API INFO =====
-router.get('/api/info', (req, res) => {
+router.get('/info', (req, res) => {
   res.status(200).json({
     success: true,
     name: 'MoodChat API',
@@ -523,7 +525,7 @@ router.get('/api/info', (req, res) => {
 });
 
 // ===== CORS INFO =====
-router.get('/api/cors-info', (req, res) => {
+router.get('/cors-info', (req, res) => {
   const corsManager = req.app.locals.corsManager;
   res.status(200).json({
     success: true,
@@ -541,7 +543,7 @@ router.get('/api/cors-info', (req, res) => {
 // Added to prevent 404 storm on Render cold-start. CacheFoundationLayer.js
 // polls this endpoint. Without this stub every request during Phase10 init
 // returned 404, spamming logs and triggering the circuit-breaker prematurely.
-router.get('/api/deletions', (req, res) => {
+router.get('/deletions', (req, res) => {
   const phase10 = req.app.locals.phase10Registry;
   const deletions = (phase10 && typeof phase10.getDeletions === 'function')
     ? phase10.getDeletions()
