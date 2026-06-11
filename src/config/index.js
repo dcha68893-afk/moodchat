@@ -89,6 +89,16 @@ const config = {
   uploadMaxSize: parseInteger(process.env.UPLOAD_MAX_SIZE, 10 * 1024 * 1024),
   uploadAllowedTypes: process.env.UPLOAD_ALLOWED_TYPES || 'image/jpeg,image/png,image/gif,image/webp,video/mp4,application/pdf',
   mediaBaseUrl: process.env.MEDIA_BASE_URL || '/api/media',
+
+  // CORS allowed origins — reads ALLOWED_ORIGINS (comma-separated list) or FRONTEND_URL from env.
+  // When neither is set, app.js falls back to localhost-only list (dev-safe).
+  // On Render: set ALLOWED_ORIGINS=https://moodfronted.onrender.com in the backend service env vars.
+  get corsOrigin() {
+    const raw = process.env.ALLOWED_ORIGINS || process.env.FRONTEND_URL;
+    if (!raw) return undefined;
+    const origins = raw.split(',').map(o => o.trim()).filter(Boolean);
+    return origins.length === 1 ? origins[0] : origins;
+  },
 };
 
 // Parse DATABASE_URL if present (for Render PostgreSQL)
