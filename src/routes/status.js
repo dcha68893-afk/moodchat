@@ -16,6 +16,9 @@ const asyncHandler = require('express-async-handler');
 const { apiRateLimiter } = require('../middleware/rateLimiter');
 const { authenticateToken, optionalAuthenticateToken } = require('../middleware/auth');
 const { body, validationResult } = require('express-validator');
+// Notification service for mention/like/comment/question-answer notifications
+let notificationService;
+try { notificationService = require('../services/notificationService'); } catch(_) { notificationService = null; }
 const WebSocketService = require('../services/webSocketService');
 const { getAcceptedFriendIds } = require('../services/statusService');
 // FIX: logger needed for friend-targeted socket emit logging
@@ -431,7 +434,7 @@ router.get('/', apiRateLimiter, asyncHandler(async (req, res) => {
 
 // Public alias
 router.get('/public', apiRateLimiter, asyncHandler(async (req, res) => {
-    const { limit = 20, offset = 0 } = req.query;
+    const { limit = 20, offset = 0, ranked } = req.query;
     const where = { isPublic: true, ...activeWhere() };
 
     let rows = [], total = 0;
@@ -439,12 +442,29 @@ router.get('/public', apiRateLimiter, asyncHandler(async (req, res) => {
         const r = await Status.findAndCountAll({
             where,
             include: userInclude(),
-            order: [['createdAt', 'DESC']],
+            // P3 FIX: algorithm ranking when ?ranked=1
+            // Score = viewCount*1 + likeCount*3 + commentCount*5 + shareCount*2
+            // Decay: penalise posts older than 6h (simulated by secondary sort)
+            order: ranked
+                ? [['likeCount', 'DESC'], ['commentCount', 'DESC'], ['viewCount', 'DESC'], ['createdAt', 'DESC']]
+                : [['isPinned', 'DESC'], ['createdAt', 'DESC']],
             limit: Math.min(+limit, 100),
             offset: +offset,
         }).catch(() => ({ rows: [], count: 0 }));
         rows = r.rows;
         total = r.count;
+
+        // P3 FIX: In-memory weighted score + recency decay for ranked feed
+        if (ranked && rows.length > 1) {
+            const now = Date.now();
+            rows = rows.map(s => {
+                const ageMs = now - new Date(s.createdAt).getTime();
+                const ageHours = ageMs / 3600000;
+                const decayFactor = Math.max(0.1, 1 - ageHours / 72); // decay over 72h
+                const score = ((s.viewCount || 0) * 1 + (s.likeCount || 0) * 3 + (s.commentCount || 0) * 5 + (s.shareCount || 0) * 2) * decayFactor;
+                return { _score: score, status: s };
+            }).sort((a, b) => b._score - a._score).map(x => x.status);
+        }
     }
 
     res.json({
@@ -843,7 +863,29 @@ router.post(
             createdAt: created.createdAt,
             expiresAt: created.expiresAt || null,
         });
-        // FIX: status:new already emitted above
+
+        // P2 FIX: Send mention notifications to @mentioned users
+        (async () => {
+            try {
+                const meta = created.metadata || {};
+                const mentions = meta.mentions;
+                if (!mentions || !Array.isArray(mentions) || !notificationService) return;
+                const { Users } = db || {};
+                let posterName = 'Someone';
+                if (Users) {
+                    const poster = await Users.findByPk(userId, { attributes: ['displayName', 'username'] }).catch(() => null);
+                    posterName = poster ? (poster.displayName || poster.username || 'Someone') : 'Someone';
+                }
+                for (const m of mentions) {
+                    const mentionedId = typeof m === 'object' ? (m.userId || m.id) : m;
+                    if (!mentionedId || String(mentionedId) === String(userId)) continue;
+                    notificationService.createFromTemplate(mentionedId, 'status_mention', {
+                        mentionerName: posterName,
+                        statusId: created.id,
+                    }).catch(() => {});
+                }
+            } catch(_) {}
+        })();
 
         res.status(201).json({
             success: true,
@@ -976,13 +1018,67 @@ router.get('/highlights', authenticateToken, apiRateLimiter, asyncHandler(async 
 }));
 
 // ── Drafts (PROTECTED - user's inactive/draft statuses)
+// ── Draft helpers (create-on-demand table) ─────────────────────────────────
+async function ensureDraftTable(seq) {
+    await seq.query(`CREATE TABLE IF NOT EXISTS status_drafts (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        content TEXT,
+        type VARCHAR(30) DEFAULT 'text',
+        media_url VARCHAR(1000),
+        mood_type VARCHAR(50),
+        location VARCHAR(255),
+        latitude DOUBLE PRECISION,
+        longitude DOUBLE PRECISION,
+        is_public BOOLEAN DEFAULT false,
+        privacy VARCHAR(30) DEFAULT 'friends',
+        metadata JSONB DEFAULT '{}',
+        saved_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+    )`).catch(() => {});
+}
+
+// GET /drafts — list from dedicated status_drafts table
 router.get('/drafts', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
     const userId = getUserId(req);
     if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
-    
+
     const { limit = 50, offset = 0 } = req.query;
+    const { sequelize: seq } = db || {};
+
+    // P2 FIX: Use dedicated status_drafts table
+    if (seq) {
+        await ensureDraftTable(seq);
+        const rows = await seq.query(
+            `SELECT * FROM status_drafts WHERE user_id = :userId ORDER BY saved_at DESC LIMIT :limit OFFSET :offset`,
+            { replacements: { userId, limit: Math.min(+limit, 100), offset: +offset }, type: 'SELECT' }
+        ).catch(() => []);
+        const total = await seq.query(
+            `SELECT COUNT(*) AS cnt FROM status_drafts WHERE user_id = :userId`,
+            { replacements: { userId }, type: 'SELECT' }
+        ).then(r => parseInt(r[0]?.cnt || 0, 10)).catch(() => 0);
+
+        const formatted = rows.map(d => ({
+            id: d.id,
+            userId: d.user_id,
+            content: d.content,
+            type: d.type,
+            mediaUrl: d.media_url,
+            moodType: d.mood_type,
+            location: d.location,
+            latitude: d.latitude,
+            longitude: d.longitude,
+            isPublic: d.is_public,
+            privacy: d.privacy,
+            metadata: d.metadata || {},
+            savedAt: d.saved_at,
+            isDraft: true,
+        }));
+        return res.json({ success: true, data: { drafts: formatted, total, pagination: { limit: +limit, offset: +offset, total, hasMore: +offset + rows.length < total } } });
+    }
+
+    // Fallback: old isActive=false query
     let rows = [], total = 0;
-    
     if (Status) {
         const r = await Status.findAndCountAll({
             where: { userId, isActive: false },
@@ -991,18 +1087,115 @@ router.get('/drafts', authenticateToken, apiRateLimiter, asyncHandler(async (req
             limit: Math.min(+limit, 100),
             offset: +offset,
         }).catch(() => ({ rows: [], count: 0 }));
-        rows = r.rows;
-        total = r.count;
+        rows = r.rows; total = r.count;
     }
-    
-    res.json({ 
-        success: true, 
-        data: { 
-            statuses: rows.map(formatStatus), 
-            total, 
-            pagination: { limit: +limit, offset: +offset, total, hasMore: +offset + rows.length < total } 
-        } 
+    res.json({ success: true, data: { drafts: rows.map(formatStatus), total, pagination: { limit: +limit, offset: +offset, total, hasMore: +offset + rows.length < total } } });
+}));
+
+// POST /drafts — save to dedicated drafts table
+router.post('/drafts', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+    const userId = getUserId(req);
+    if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
+
+    const { content, type, mediaUrl, moodType, location, latitude, longitude, isPublic, privacy, metadata } = req.body;
+    const { sequelize: seq } = db || {};
+    if (!seq) return res.status(503).json({ success: false, message: 'DB unavailable' });
+
+    await ensureDraftTable(seq);
+    const [rows] = await seq.query(
+        `INSERT INTO status_drafts (user_id, content, type, media_url, mood_type, location, latitude, longitude, is_public, privacy, metadata, saved_at, updated_at)
+         VALUES (:userId, :content, :type, :mediaUrl, :moodType, :location, :latitude, :longitude, :isPublic, :privacy, :metadata, NOW(), NOW()) RETURNING *`,
+        { replacements: {
+            userId,
+            content: content || '',
+            type: type || 'text',
+            mediaUrl: mediaUrl || null,
+            moodType: moodType || null,
+            location: location || null,
+            latitude: latitude || null,
+            longitude: longitude || null,
+            isPublic: isPublic || false,
+            privacy: privacy || 'friends',
+            metadata: JSON.stringify(metadata || {}),
+        }}
+    ).catch(() => [[null]]);
+
+    res.status(201).json({ success: true, data: { draft: rows ? rows[0] : null }, message: 'Draft saved' });
+}));
+
+// PUT /drafts/:draftId — update draft
+router.put('/drafts/:draftId', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+    const userId = getUserId(req);
+    const draftId = parseInt(req.params.draftId, 10);
+    const { content, type, mediaUrl, moodType, metadata } = req.body;
+    const { sequelize: seq } = db || {};
+    if (!seq) return res.status(503).json({ success: false, message: 'DB unavailable' });
+
+    await ensureDraftTable(seq);
+    await seq.query(
+        `UPDATE status_drafts SET content = COALESCE(:content, content), type = COALESCE(:type, type),
+         media_url = COALESCE(:mediaUrl, media_url), mood_type = COALESCE(:moodType, mood_type),
+         metadata = COALESCE(:metadata, metadata), updated_at = NOW()
+         WHERE id = :draftId AND user_id = :userId`,
+        { replacements: { draftId, userId, content: content || null, type: type || null, mediaUrl: mediaUrl || null, moodType: moodType || null, metadata: metadata ? JSON.stringify(metadata) : null } }
+    ).catch(() => {});
+
+    res.json({ success: true, message: 'Draft updated' });
+}));
+
+// DELETE /drafts/:draftId — delete draft
+router.delete('/drafts/:draftId', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+    const userId = getUserId(req);
+    const draftId = parseInt(req.params.draftId, 10);
+    const { sequelize: seq } = db || {};
+    if (seq) {
+        await ensureDraftTable(seq);
+        await seq.query(`DELETE FROM status_drafts WHERE id = :draftId AND user_id = :userId`, { replacements: { draftId, userId } }).catch(() => {});
+    }
+    res.json({ success: true, message: 'Draft deleted' });
+}));
+
+// POST /drafts/:draftId/publish — move draft to live status
+router.post('/drafts/:draftId/publish', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+    const userId = getUserId(req);
+    const draftId = parseInt(req.params.draftId, 10);
+    const { sequelize: seq } = db || {};
+    if (!seq) return res.status(503).json({ success: false, message: 'DB unavailable' });
+
+    await ensureDraftTable(seq);
+    const drafts = await seq.query(
+        `SELECT * FROM status_drafts WHERE id = :draftId AND user_id = :userId`,
+        { replacements: { draftId, userId }, type: 'SELECT' }
+    ).catch(() => []);
+
+    if (!drafts || !drafts.length) return res.status(404).json({ success: false, message: 'Draft not found' });
+    const d = drafts[0];
+    const meta = typeof d.metadata === 'string' ? JSON.parse(d.metadata) : (d.metadata || {});
+
+    if (!Status) return res.status(503).json({ success: false, message: 'Status model unavailable' });
+    const created = await Status.create({
+        userId,
+        content: d.content || '',
+        type: d.type || 'text',
+        mediaUrl: d.media_url || null,
+        moodType: d.mood_type || null,
+        location: d.location || null,
+        latitude: d.latitude || null,
+        longitude: d.longitude || null,
+        isPublic: d.is_public || false,
+        privacy: d.privacy || 'friends',
+        isActive: true,
+        metadata: meta,
+        expiresAt: new Date(Date.now() + 86400 * 1000),
     });
+
+    // Delete draft after publish
+    await seq.query(`DELETE FROM status_drafts WHERE id = :draftId`, { replacements: { draftId } }).catch(() => {});
+
+    // Emit status:new
+    await emitStatusEvent(req, 'status:new', created, { type: created.type }).catch(() => {});
+
+    res.status(201).json({ success: true, data: { status: formatStatus(created) }, message: 'Draft published' });
 }));
 
 // ── Scheduled statuses (PROTECTED - create/get scheduled statuses)
@@ -1403,6 +1596,21 @@ router.post('/:statusId/like', authenticateToken, apiRateLimiter, asyncHandler(a
     }
 
     if (req.io) req.io.emit('status:liked', { statusId, userId, timestamp: new Date() });
+
+    // P2 FIX: like notification to status owner (async, non-blocking)
+    if (!alreadyLiked && notificationService && String(status.userId) !== String(userId)) {
+        (async () => {
+            try {
+                const { Users } = db || {};
+                const liker = Users ? await Users.findByPk(userId, { attributes: ['displayName','username'] }).catch(()=>null) : null;
+                const likerName = liker ? (liker.displayName || liker.username || 'Someone') : 'Someone';
+                notificationService.createFromTemplate(status.userId, 'status_like', {
+                    likerName, statusId: +statusId,
+                }).catch(() => {});
+            } catch(_) {}
+        })();
+    }
+
     res.json({
         success: true,
         data: { liked: !alreadyLiked, likeCount: status.likeCount },
@@ -1503,6 +1711,19 @@ router.post('/:statusId/comment', authenticateToken, [
     const userObj = User ? await User.findByPk(userId, { attributes: ['id', 'username', 'avatar', 'firstName', 'lastName'] }).catch(() => null) : null;
 
     if (req.io) req.io.emit('status:commented', { statusId, commentId: comment.id, userId, timestamp: new Date() });
+
+    // P2 FIX: comment notification to status owner (async, non-blocking)
+    if (notificationService && String(status.userId) !== String(userId)) {
+        (async () => {
+            try {
+                const commenterName = userObj ? (userObj.displayName || userObj.username || 'Someone') : 'Someone';
+                notificationService.createFromTemplate(status.userId, 'status_comment', {
+                    commenterName, statusId: +statusId,
+                }).catch(() => {});
+            } catch(_) {}
+        })();
+    }
+
     res.status(201).json({
         success: true,
         data: { comment: { ...(comment.toJSON?.() || comment), user: userObj ? formatUser(userObj) : null } },
@@ -2018,8 +2239,22 @@ router.post('/:statusId/question/answer', authenticateToken, apiRateLimiter, asy
     answers.push({ userId, text: text.trim(), answeredAt: new Date().toISOString() });
     await status.update({ metadata: { ...meta, answers } });
 
-    // Notify creator
+    // Notify creator + emit realtime event
     await emitStatusEvent(req, 'status:question_answer', status, { answer: { userId, text: text.trim() } });
+
+    // P2 FIX: push notification to status owner
+    if (notificationService && String(status.userId) !== String(userId)) {
+        (async () => {
+            try {
+                const { Users } = db || {};
+                const answerer = Users ? await Users.findByPk(userId, { attributes: ['displayName','username'] }).catch(()=>null) : null;
+                const answererName = answerer ? (answerer.displayName || answerer.username || 'Someone') : 'Someone';
+                notificationService.createFromTemplate(status.userId, 'status_question_answer', {
+                    answererName, statusId: +statusId,
+                }).catch(() => {});
+            } catch(_) {}
+        })();
+    }
 
     res.status(201).json({ success: true, data: { answersCount: answers.length } });
 }));
@@ -2115,6 +2350,217 @@ router.get('/hashtag/:tag', apiRateLimiter, asyncHandler(async (req, res) => {
         return (meta.hashtags || []).map(h => h.toLowerCase()).includes(tag);
     })).catch(() => []) : [];
     res.json({ success: true, data: { tag, statuses: statuses.map(formatStatus) } });
+}));
+
+
+// ═══════════════════════════════════════════════════════════════════
+// P3 FIX: Story Templates — pre-designed status layouts
+// ═══════════════════════════════════════════════════════════════════
+const STATUS_TEMPLATES = [
+    { id: 'birthday',       name: 'Birthday',      background: 'linear-gradient(135deg,#f9c74f,#f8961e)', textColor: '#fff', fontFamily: 'Pacifico, cursive',    icon: '🎂', tags: ['celebration'] },
+    { id: 'announcement',   name: 'Announcement',  background: 'linear-gradient(135deg,#4cc9f0,#4361ee)', textColor: '#fff', fontFamily: 'Poppins, sans-serif',  icon: '📢', tags: ['news'] },
+    { id: 'quote',          name: 'Quote',         background: 'linear-gradient(135deg,#2d3436,#636e72)', textColor: '#fff', fontFamily: 'Merriweather,serif',   icon: '💬', tags: ['inspiration'] },
+    { id: 'motivation',     name: 'Motivation',    background: 'linear-gradient(135deg,#00b4d8,#023e8a)', textColor: '#fff', fontFamily: 'Poppins, sans-serif',  icon: '💪', tags: ['motivation'] },
+    { id: 'love',           name: 'Love',          background: 'linear-gradient(135deg,#ff6b6b,#c9184a)', textColor: '#fff', fontFamily: 'Pacifico, cursive',    icon: '❤️', tags: ['romance'] },
+    { id: 'nature',         name: 'Nature',        background: 'linear-gradient(135deg,#52b788,#1b4332)', textColor: '#fff', fontFamily: 'Lato, sans-serif',     icon: '🌿', tags: ['nature'] },
+    { id: 'celebration',    name: 'Celebration',   background: 'linear-gradient(135deg,#ffd60a,#e76f51)', textColor: '#222', fontFamily: 'Poppins, sans-serif',  icon: '🎉', tags: ['celebration'] },
+    { id: 'minimal',        name: 'Minimal',       background: '#ffffff',                                  textColor: '#222', fontFamily: 'Inter, sans-serif',    icon: '◻️', tags: ['clean'] },
+    { id: 'dark',           name: 'Dark Mode',     background: '#1a1a2e',                                  textColor: '#e0e0e0', fontFamily: 'Inter, sans-serif',  icon: '🌙', tags: ['dark'] },
+    { id: 'gradient_purple',name: 'Purple Dream',  background: 'linear-gradient(135deg,#7b2d8b,#e040fb)', textColor: '#fff', fontFamily: 'Quicksand, sans-serif', icon: '💜', tags: ['mood'] },
+    { id: 'gradient_ocean', name: 'Ocean',         background: 'linear-gradient(135deg,#00b4d8,#0077b6)', textColor: '#fff', fontFamily: 'Raleway, sans-serif',   icon: '🌊', tags: ['nature'] },
+    { id: 'gradient_sunset',name: 'Sunset',        background: 'linear-gradient(135deg,#ff9a3c,#ff6392)', textColor: '#fff', fontFamily: 'Poppins, sans-serif',   icon: '🌅', tags: ['mood'] },
+];
+
+router.get('/templates', apiRateLimiter, (req, res) => {
+    const { tag } = req.query;
+    const templates = tag ? STATUS_TEMPLATES.filter(t => t.tags.includes(tag)) : STATUS_TEMPLATES;
+    res.json({ success: true, data: { templates } });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// P3 FIX: Countdown sticker — GET live countdown for a status
+// ═══════════════════════════════════════════════════════════════════
+router.get('/:statusId/countdown', optionalAuthenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+    const statusId = parseInt(req.params.statusId, 10);
+    if (!Status) return res.status(503).json({ success: false, message: 'Service unavailable' });
+
+    const status = await Status.findOne({ where: { id: statusId, isActive: true } }).catch(() => null);
+    if (!status) return res.status(404).json({ success: false, message: 'Status not found' });
+
+    const meta = status.metadata || {};
+    if (!meta.countdown || !meta.countdown.targetDate) {
+        return res.status(400).json({ success: false, message: 'This status has no countdown sticker' });
+    }
+
+    const targetDate = new Date(meta.countdown.targetDate);
+    const now = new Date();
+    const msLeft = targetDate - now;
+
+    if (msLeft <= 0) {
+        return res.json({ success: true, data: { finished: true, label: meta.countdown.label || '', msLeft: 0, formatted: { days: 0, hours: 0, minutes: 0, seconds: 0 } } });
+    }
+
+    const totalSeconds = Math.floor(msLeft / 1000);
+    const days    = Math.floor(totalSeconds / 86400);
+    const hours   = Math.floor((totalSeconds % 86400) / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+
+    res.json({ success: true, data: {
+        finished: false,
+        label: meta.countdown.label || '',
+        targetDate: targetDate.toISOString(),
+        msLeft,
+        formatted: { days, hours, minutes, seconds },
+    }});
+}));
+
+// ═══════════════════════════════════════════════════════════════════
+// P3 FIX: Profile-visit tracking from story views
+// ═══════════════════════════════════════════════════════════════════
+router.get('/:statusId/viewers/profiles', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+    const userId = getUserId(req);
+    const statusId = parseInt(req.params.statusId, 10);
+    if (!Status) return res.status(503).json({ success: false, message: 'Service unavailable' });
+
+    const status = await Status.findOne({ where: { id: statusId, userId } }).catch(() => null);
+    if (!status) return res.status(404).json({ success: false, message: 'Status not found or not yours' });
+
+    const viewers = StatusView ? await StatusView.findAll({
+        where: { statusId },
+        attributes: ['userId', 'viewedAt'],
+        include: [{ model: User, as: 'viewer', attributes: ['id', 'username', 'displayName', 'avatar'], required: false }],
+        order: [['viewedAt', 'DESC']],
+        limit: 100,
+    }).catch(() => []) : [];
+
+    res.json({ success: true, data: {
+        viewers: viewers.map(v => ({
+            userId: v.userId,
+            viewedAt: v.viewedAt,
+            user: v.viewer ? formatUser(v.viewer) : { id: v.userId },
+        })),
+        totalViews: viewers.length,
+    }});
+}));
+
+
+// ═══════════════════════════════════════════════════════════════════
+// P3 FIX: Per-status analytics endpoint
+// ═══════════════════════════════════════════════════════════════════
+router.get('/stats/:statusId', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+    const userId   = getUserId(req);
+    const statusId = parseInt(req.params.statusId, 10);
+    if (!Status) return res.status(503).json({ success: false, message: 'Service unavailable' });
+
+    const status = await Status.findOne({ where: { id: statusId, userId } }).catch(() => null);
+    if (!status) return res.status(404).json({ success: false, message: 'Status not found or not yours' });
+
+    // Viewer breakdown (top 20 viewers)
+    const viewers = StatusView ? await StatusView.findAll({
+        where: { statusId },
+        attributes: ['userId', 'viewedAt'],
+        order: [['viewedAt', 'DESC']],
+        limit: 20,
+    }).catch(() => []) : [];
+
+    // Comment count breakdown
+    const commentCount = StatusComment ? await StatusComment.count({ where: { statusId, isDeleted: false } }).catch(() => 0) : 0;
+
+    const meta = status.metadata || {};
+    const pollOptions  = meta.pollOptions  || null;
+    const pollVoters   = meta.pollVoters   || {};
+    const answers      = meta.answers      || [];
+    const actionClicks = meta.actionClicks || [];
+
+    // Engagement rate: (likes + comments + shares) / views
+    const views    = status.viewCount    || 0;
+    const likes    = status.likeCount    || 0;
+    const shares   = status.shareCount   || 0;
+    const engRate  = views > 0 ? (((likes + commentCount + shares) / views) * 100).toFixed(1) : '0.0';
+
+    res.json({ success: true, data: {
+        statusId,
+        type: status.type,
+        content: status.content,
+        createdAt: status.createdAt,
+        expiresAt: status.expiresAt,
+        isPinned: status.isPinned,
+        metrics: {
+            views, likes, shares,
+            comments: commentCount,
+            engagementRate: `${engRate}%`,
+        },
+        viewers: viewers.map(v => ({ userId: v.userId, viewedAt: v.viewedAt })),
+        pollStats: pollOptions ? {
+            options: pollOptions,
+            totalVotes: pollOptions.reduce((s, o) => s + (o.votes || 0), 0),
+            voterCount: Object.keys(pollVoters).length,
+        } : null,
+        questionStats: status.type === 'question' ? {
+            questionText: meta.questionText,
+            answersCount: answers.length,
+            answers: answers.slice(0, 10), // first 10 answers
+        } : null,
+        actionClickStats: actionClicks.length ? {
+            totalClicks: actionClicks.length,
+            byButton: actionClicks.reduce((acc, c) => {
+                const key = c.buttonLabel || `Button ${c.buttonIndex}`;
+                acc[key] = (acc[key] || 0) + 1;
+                return acc;
+            }, {}),
+        } : null,
+    }});
+}));
+
+// ═══════════════════════════════════════════════════════════════════
+// P3 FIX: Creator analytics dashboard — aggregated top-performers
+// ═══════════════════════════════════════════════════════════════════
+router.get('/analytics/dashboard', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+    const userId = getUserId(req);
+    const { period = '7d' } = req.query;
+    const periodMs = { '1d': 86400000, '7d': 604800000, '30d': 2592000000 };
+    const startDate = new Date(Date.now() - (periodMs[period] || periodMs['7d']));
+    if (!Status) return res.status(503).json({ success: false, message: 'Service unavailable' });
+
+    // All statuses in period
+    const statuses = await Status.findAll({
+        where: { userId, createdAt: { [Op.gte]: startDate } },
+        attributes: ['id', 'type', 'content', 'viewCount', 'likeCount', 'shareCount', 'commentCount', 'createdAt', 'isPinned'],
+        order: [['viewCount', 'DESC']],
+        limit: 100,
+    }).catch(() => []);
+
+    const totals = statuses.reduce((acc, s) => {
+        acc.views    += (s.viewCount    || 0);
+        acc.likes    += (s.likeCount    || 0);
+        acc.shares   += (s.shareCount   || 0);
+        acc.comments += (s.commentCount || 0);
+        return acc;
+    }, { views: 0, likes: 0, shares: 0, comments: 0 });
+
+    const typeBreakdown = statuses.reduce((acc, s) => {
+        acc[s.type] = (acc[s.type] || 0) + 1;
+        return acc;
+    }, {});
+
+    const topByViews    = statuses.slice(0, 5).map(s => ({ id: s.id, content: s.content, views: s.viewCount || 0 }));
+    const topByLikes    = [...statuses].sort((a, b) => (b.likeCount || 0) - (a.likeCount || 0)).slice(0, 5).map(s => ({ id: s.id, content: s.content, likes: s.likeCount || 0 }));
+    const engRate       = totals.views > 0 ? (((totals.likes + totals.comments + totals.shares) / totals.views) * 100).toFixed(1) : '0.0';
+
+    res.json({ success: true, data: {
+        period,
+        totalStatuses: statuses.length,
+        totals: { ...totals, engagementRate: `${engRate}%` },
+        typeBreakdown,
+        topByViews,
+        topByLikes,
+        bestPostingTimes: statuses.reduce((acc, s) => {
+            const hour = new Date(s.createdAt).getHours();
+            acc[hour] = (acc[hour] || 0) + (s.viewCount || 0);
+            return acc;
+        }, {}),
+    }});
 }));
 
 

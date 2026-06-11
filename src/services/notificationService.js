@@ -310,6 +310,11 @@ class NotificationService {
       call_incoming: 'calls',
       call_missed: 'calls',
       mood_shared: 'mentions',
+      status_mention: 'mentions',
+      status_like: 'reactions',
+      status_comment: 'mentions',
+      status_question_answer: 'mentions',
+      on_this_day: 'mentions',
     };
 
     return typeMap[template] || 'other';
@@ -396,6 +401,51 @@ class NotificationService {
         data: data,
         priority: 'low',
         actionUrl: `/moods/shared/${data.moodId}`,
+      },
+      // P2 FIX: Status mention notification
+      status_mention: {
+        type: 'status_mention',
+        title: 'You were mentioned',
+        body: `${data.mentionerName} mentioned you in their status`,
+        data: data,
+        priority: 'high',
+        actionUrl: `/status?view=${data.statusId}`,
+      },
+      // P2 FIX: Status like notification
+      status_like: {
+        type: 'status_like',
+        title: 'Status Liked',
+        body: `${data.likerName} liked your status`,
+        data: data,
+        priority: 'low',
+        actionUrl: `/status?view=${data.statusId}`,
+      },
+      // P2 FIX: Status comment notification
+      status_comment: {
+        type: 'status_comment',
+        title: 'New Comment',
+        body: `${data.commenterName} commented on your status`,
+        data: data,
+        priority: 'medium',
+        actionUrl: `/status?view=${data.statusId}`,
+      },
+      // P2 FIX: Status question answer notification
+      status_question_answer: {
+        type: 'status_question_answer',
+        title: 'New Answer',
+        body: `${data.answererName} answered your question sticker`,
+        data: data,
+        priority: 'medium',
+        actionUrl: `/status?view=${data.statusId}`,
+      },
+      // P3 FIX: On This Day memory notification
+      on_this_day: {
+        type: 'on_this_day',
+        title: 'Memory from ${data.yearsAgo} year${data.yearsAgo > 1 ? "s" : ""} ago',
+        body: `You posted a status on this day in ${data.year}`,
+        data: data,
+        priority: 'low',
+        actionUrl: `/status?view=${data.statusId}`,
       },
     };
 
