@@ -284,6 +284,30 @@ class TokenService {
     return { valid: true, source: 'memory', affectedRows: 1 };
   }
 
+  // ─────────────────────────────────────────────────────────────────────────
+  // P2 FIX (Forensic Audit): "Add new-device login notification"
+  // Checks whether this user has a prior, non-revoked refresh token issued
+  // from the same User-Agent. Used by /auth/login to decide whether to send
+  // a "new device" security alert email. This is a heuristic (UA string
+  // match) — not a strong device fingerprint — but matches the audit's
+  // suggested approach without requiring new infrastructure.
+  // ─────────────────────────────────────────────────────────────────────────
+  async hasKnownDevice(userId, userAgent) {
+    if (!userAgent) return true; // can't compare — don't alert on missing UA
+    const TokenModel = this.getTokenModel();
+    if (!TokenModel) return true; // fail open — don't block/alert if DB unavailable
+
+    try {
+      const existing = await TokenModel.findOne({
+        where: { userId, tokenType: 'refresh', userAgent }
+      });
+      return !!existing;
+    } catch (error) {
+      console.warn('[TokenService] hasKnownDevice check failed:', error.message);
+      return true; // fail open
+    }
+  }
+
   async listUserRefreshSessions(userId) {
     const TokenModel = this.getTokenModel();
     if (!TokenModel) return [];

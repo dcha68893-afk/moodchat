@@ -131,3 +131,7 @@ backups_final_*/
 !.env.example
 *.key
 *.pem
+
+# Forensic Audit cleanup: never commit backup/patch files (expose old impl details)
+*.bak
+*.patch

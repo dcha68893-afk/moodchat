@@ -1,4 +1,5 @@
 ﻿const tokenService = require('../services/tokenService');
+const { isAccessTokenBlacklisted } = require('../services/tokenBlacklistService');
 
 // ── Public paths that skip HTTP auth ─────────────────────────────────────────
 // IMPORTANT: Do NOT include '/' unless you want ALL routes public.
@@ -12,6 +13,9 @@ const PUBLIC_PATHS = [
     '/api/auth/forgot-password',
     '/api/auth/reset-password',
     '/api/auth/validate-token',
+    '/api/auth/verify-email',
+    '/api/auth/resend-verification',
+    '/api/auth/2fa/challenge',
     '/ws-test.html'
 ];
 
@@ -58,7 +62,7 @@ const extractToken = (req) => {
 };
 
 // ── HTTP Auth middleware ──────────────────────────────────────────────────────
-const authenticateToken = (req, res, next) => {
+const authenticateToken = async (req, res, next) => {
     if (isPublicPath(req)) {
         return next();
     }
@@ -73,6 +77,16 @@ const authenticateToken = (req, res, next) => {
                 success: false,
                 message: 'Authorization required',
                 errorCode: 'MISSING_AUTH_HEADER'
+            });
+        }
+
+        // P1 FIX (Forensic Audit): reject access tokens blacklisted at logout,
+        // even if the JWT signature/expiry are still otherwise valid.
+        if (await isAccessTokenBlacklisted(token)) {
+            return res.status(401).json({
+                success: false,
+                message: 'Token has been revoked',
+                errorCode: 'TOKEN_REVOKED'
             });
         }
 
@@ -121,13 +135,17 @@ const authenticateToken = (req, res, next) => {
 
 const authenticate = authenticateToken;
 
-const optionalAuthenticateToken = (req, _res, next) => {
+const optionalAuthenticateToken = async (req, _res, next) => {
     try {
         const token = tokenService.extractTokenFromRequest
             ? tokenService.extractTokenFromRequest(req)
             : extractToken(req);
 
         if (!token) {
+            return next();
+        }
+
+        if (await isAccessTokenBlacklisted(token)) {
             return next();
         }
 
@@ -241,6 +259,11 @@ const socketAuthenticate = async (socket, next) => {
         if (!token || token.trim() === '') {
             // FIX: next(error) — NOT socket.disconnect()
             return next(new Error('Authentication error: No token provided'));
+        }
+
+        // P1 FIX (Forensic Audit): reject blacklisted (logged-out) access tokens
+        if (await isAccessTokenBlacklisted(token)) {
+            return next(new Error('Token has been revoked'));
         }
 
         const verification = tokenService.verifyAccessToken(token);

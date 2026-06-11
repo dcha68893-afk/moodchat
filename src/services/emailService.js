@@ -153,6 +153,58 @@ async function kycRejected(to, { reason }) {
     return send(to, 'Seller Verification — Action Required', _wrap('Verification Incomplete ❌', body));
 }
 
+// ── Security alert emails (P1/P2 Forensic Audit) ─────────────────────────────
+async function loginAttemptsAlert(to, { identifier, ip, attempts }) {
+    const body = `
+        <p>We detected <strong>${attempts}</strong> failed login attempts on your MoodChat account.</p>
+        <p><strong>Account:</strong> ${identifier}</p>
+        <p><strong>IP Address:</strong> ${ip}</p>
+        <p>If this wasn't you, we recommend changing your password as soon as possible.
+        Your account has been temporarily locked for 15 minutes as a precaution.</p>
+        <p>If this was you, you can simply wait and try again shortly.</p>`;
+    return send(to, 'Security Alert: Multiple Failed Login Attempts', _wrap('Security Alert ⚠️', body));
+}
+
+async function passwordResetEmail(to, { resetToken, resetUrl }) {
+    const link = resetUrl || `${process.env.FRONTEND_URL || ''}/reset-password.html?token=${encodeURIComponent(resetToken)}`;
+    const body = `
+        <p>We received a request to reset your MoodChat account password.</p>
+        <p><a class="btn" href="${link}">Reset Password</a></p>
+        <p>This link will expire in 1 hour. If you did not request this, you can safely ignore this email —
+        your password will remain unchanged.</p>`;
+    return send(to, 'Reset Your MoodChat Password', _wrap('Password Reset Request 🔑', body));
+}
+
+async function verificationEmail(to, { verificationToken, verifyUrl }) {
+    const link = verifyUrl || `${process.env.FRONTEND_URL || ''}/verify-email.html?token=${encodeURIComponent(verificationToken)}`;
+    const body = `
+        <p>Welcome to MoodChat! Please verify your email address to activate your account.</p>
+        <p><a class="btn" href="${link}">Verify Email</a></p>
+        <p>This link will expire in 24 hours. If you didn't create a MoodChat account, you can ignore this email.</p>`;
+    return send(to, 'Verify Your MoodChat Email', _wrap('Verify Your Email ✉️', body));
+}
+
+async function passwordChangedAlert(to) {
+    const body = `
+        <p>Your MoodChat account password was just changed.</p>
+        <p>If you made this change, no further action is needed.</p>
+        <p><strong>If you did not change your password</strong>, please contact support immediately —
+        your account may be compromised.</p>`;
+    return send(to, 'Your MoodChat Password Was Changed', _wrap('Password Changed 🔒', body));
+}
+
+async function newDeviceLoginAlert(to, { device, location, ip, time }) {
+    const body = `
+        <p>We noticed a new login to your MoodChat account.</p>
+        <p><strong>Device:</strong> ${device || 'Unknown device'}</p>
+        <p><strong>Location:</strong> ${location || 'Unknown'}</p>
+        <p><strong>IP Address:</strong> ${ip || 'Unknown'}</p>
+        <p><strong>Time:</strong> ${time || new Date().toISOString()}</p>
+        <p>If this was you, no action is needed. If you don't recognize this activity,
+        please change your password immediately and review your active sessions.</p>`;
+    return send(to, 'New Login to Your MoodChat Account', _wrap('New Device Login 📱', body));
+}
+
 module.exports = {
     send,
     orderConfirmed,
@@ -164,4 +216,9 @@ module.exports = {
     payoutDisburse,
     kycApproved,
     kycRejected,
+    loginAttemptsAlert,
+    passwordResetEmail,
+    verificationEmail,
+    passwordChangedAlert,
+    newDeviceLoginAlert,
 };

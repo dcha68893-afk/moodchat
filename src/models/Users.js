@@ -1,6 +1,8 @@
 // --- MODEL: Users.js ---
 // SINGLE SOURCE OF TRUTH FOR USER MODEL
 const bcrypt = require('bcryptjs');
+// P1 FIX (Forensic Audit): consistent SHA-256 pre-hash + bcrypt compare
+const { comparePassword } = require('../utils/passwordUtils');
 
 module.exports = (sequelize, DataTypes) => {
   const Users = sequelize.define(
@@ -145,6 +147,16 @@ module.exports = (sequelize, DataTypes) => {
         defaultValue: false,
         allowNull: false,
       },
+      // P2 FIX (Forensic Audit): Two-Factor Authentication (TOTP) support
+      mfaSecret: {
+        type: DataTypes.STRING,
+        allowNull: true,
+      },
+      mfaEnabled: {
+        type: DataTypes.BOOLEAN,
+        defaultValue: false,
+        allowNull: false,
+      },
       isActive: {
         type: DataTypes.BOOLEAN,
         defaultValue: true,
@@ -276,7 +288,7 @@ module.exports = (sequelize, DataTypes) => {
     
     try {
       console.log(`[MODEL] Validating password for user ${this.id}`);
-      const isValid = await bcrypt.compare(password, this.password);
+      const isValid = await comparePassword(password, this.password);
       console.log(`[MODEL] Password validation result: ${isValid ? '✅ VALID' : '❌ INVALID'}`);
       return isValid;
     } catch (error) {
@@ -290,6 +302,7 @@ module.exports = (sequelize, DataTypes) => {
     delete values.password;
     delete values.resetToken;
     delete values.resetTokenExpiry;
+    delete values.mfaSecret;
     return values;
   };
 

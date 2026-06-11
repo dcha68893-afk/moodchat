@@ -763,6 +763,21 @@ class MarketplaceController {
 
             // M-Pesa STK Push via Safaricom Daraja API
             const result = await _mpesaStkPush({ phone, amount, orderId: order_id, description, callbackUrl: resolvedCallback });
+
+            // P1 FIX (Forensic Audit): persist CheckoutRequestID as paymentRef
+            // immediately so the async mpesaCallback can find this order via
+            // `where: { paymentRef: checkoutId }`. Without this, the callback
+            // handler can never match the order back to the STK push request.
+            if (result?.CheckoutRequestID) {
+                const O = Model.Order;
+                if (O) {
+                    await O.update(
+                        { paymentRef: result.CheckoutRequestID, paymentMethod: 'mpesa' },
+                        { where: { id: order_id } }
+                    );
+                }
+            }
+
             return ok(res, result, 'STK Push sent');
         } catch(e) { err(next, e, 'initiateMpesa'); }
     }
@@ -1978,6 +1993,27 @@ async function _handleMpesaSuccess(callbackData) {
         const checkoutId = callbackData?.CheckoutRequestID;
 
         if (checkoutId) {
+            // P1 FIX (Forensic Audit): verify the M-Pesa-reported amount
+            // matches the order's expected total before marking paid. This
+            // prevents a forged/replayed callback from marking a high-value
+            // order as paid using a tiny (or zero) confirmed amount.
+            const pendingOrders = await O.findAll({ where: { paymentRef: checkoutId } });
+            if (!pendingOrders.length) {
+                logger.warn(`[Marketplace] M-Pesa callback for unknown checkoutId: ${checkoutId}`);
+                return;
+            }
+
+            if (amt !== undefined && amt !== null) {
+                const mismatched = pendingOrders.filter(o => {
+                    const expected = parseFloat(o.totalPrice);
+                    return !Number.isNaN(expected) && Math.abs(expected - parseFloat(amt)) > 0.5;
+                });
+                if (mismatched.length) {
+                    logger.error(`[Marketplace] M-Pesa amount mismatch for checkoutId ${checkoutId}: received ${amt}, expected ${mismatched.map(o => o.totalPrice).join(', ')}`);
+                    return; // do not mark as paid — amount does not match
+                }
+            }
+
             await O.update(
                 { status:'paid', paidAt: new Date(), paymentRef: ref },
                 { where: { paymentRef: checkoutId } }

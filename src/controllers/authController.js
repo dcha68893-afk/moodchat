@@ -4,6 +4,8 @@ const bcrypt = require('bcryptjs');
 const validator = require('validator');
 const { Op } = require('sequelize');
 const tokenService = require('../services/tokenService');
+// P1 FIX (Forensic Audit): bcrypt truncates at 72 bytes — pre-hash with SHA-256 first
+const { hashPassword, comparePassword } = require('../utils/passwordUtils');
 
 // SECURITY FIX #1: Crash fast if secret is absent — never fall through to a hardcoded literal.
 // FIX (Forensic Audit P0): Use JWT_ACCESS_SECRET first to match tokenService.js signing order.
@@ -121,7 +123,7 @@ class AuthController {
       }
 
       // Hash password with bcrypt
-      const hashedPassword = await bcrypt.hash(password, 10);
+      const hashedPassword = await hashPassword(password);
       
       // Create avatar URL
       const avatar = `https://ui-avatars.com/api/?name=${encodeURIComponent(username)}&background=random&color=fff`;
@@ -331,7 +333,7 @@ class AuthController {
       }
 
       // Check password using bcrypt compare
-      const validPassword = await bcrypt.compare(password, user.password);
+      const validPassword = await comparePassword(password, user.password);
       
       if (!validPassword) {
         // Increment failed attempts
@@ -917,7 +919,7 @@ class AuthController {
       }
       
       // Hash new password
-      const hashedPassword = await bcrypt.hash(newPassword, 10);
+      const hashedPassword = await hashPassword(newPassword);
       
       // Update password
       await user.update({
