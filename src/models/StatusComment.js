@@ -27,17 +27,14 @@ module.exports = (sequelize, DataTypes) => {
       { fields: ['parent_comment_id'] },
     ],
   });
+
   StatusComment.associate = (models) => {
     if (models.Status) StatusComment.belongsTo(models.Status, { foreignKey: 'statusId', as: 'status' });
     if (models.Users) StatusComment.belongsTo(models.Users, { foreignKey: 'userId', as: 'author' });
-    // Self-referential for nested comments
+    // Self-referential for nested/threaded replies
     StatusComment.belongsTo(StatusComment, { foreignKey: 'parentCommentId', as: 'parentComment' });
     StatusComment.hasMany(StatusComment, { foreignKey: 'parentCommentId', as: 'replies' });
   };
-  return StatusComment;
-};
 
-    if (models.Users) StatusComment.belongsTo(models.Users, { foreignKey: 'userId', as: 'author' });
-  };
   return StatusComment;
 };

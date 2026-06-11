@@ -4881,6 +4881,7 @@ class Application {
                     this.websocket = WebSocketService;
                     this.websocket.init(this.io);
                     global.__io = this.io; // Phase11: direct io access for fallback delivery
+                    global.__socketIO = this.io; // P1 FIX: used by scheduled status cron and On This Day cron
 
                     // setupConnectionHandler handles room-join & presence only.
                     // verifyToken inside it is now a harmless secondary check —
@@ -5481,6 +5482,127 @@ async function main() {
     console.log('[StatusExpiryCron] ✅ Installed (runs every 5 minutes)');
 })();
 
+// ── P1 FIX: Scheduled Status Auto-Publish Cron ──────────────────────────────
+// Runs every 60 seconds. Finds statuses whose metadata.scheduled=true and
+// metadata.scheduledFor <= now, activates them and emits status:new to friends.
+(function _startScheduledStatusPublisher() {
+    async function _publishScheduledStatuses() {
+        try {
+            let Status, Op;
+            try { ({ Status } = require('./models')); Op = require('sequelize').Op; } catch (_) { return; }
+            if (!Status || !Op) return;
+            const now = new Date();
+
+            const scheduled = await Status.findAll({
+                where: { isActive: false, expiresAt: { [Op.gt]: now } },
+                limit: 50,
+            }).then(all => all.filter(s => {
+                const meta = s.metadata || {};
+                if (!meta.scheduled) return false;
+                if (!meta.scheduledFor) return false;
+                return new Date(meta.scheduledFor) <= now;
+            })).catch(() => []);
+
+            if (!scheduled.length) return;
+
+            const io = global.__socketIO || global.__io;
+            for (const status of scheduled) {
+                try {
+                    const meta = status.metadata || {};
+                    const newMeta = { ...meta, scheduled: false, publishedAt: now.toISOString() };
+                    await Status.update({ isActive: true, metadata: newMeta }, { where: { id: status.id } });
+
+                    if (io) {
+                        const wsPayload = {
+                            statusId:  status.id,
+                            userId:    status.userId,
+                            type:      status.type,
+                            content:   status.content,
+                            mediaUrl:  status.mediaUrl || null,
+                            createdAt: status.createdAt,
+                            expiresAt: status.expiresAt || null,
+                            timestamp: now.toISOString(),
+                        };
+                        io.to(`user:${status.userId}`).emit('status:new', wsPayload);
+                        try {
+                            const { getAcceptedFriendIds } = require('./services/statusService');
+                            const friendIds = await getAcceptedFriendIds(status.userId).catch(() => []);
+                            for (const fid of friendIds) {
+                                io.to(`user:${fid}`).emit('status:new', wsPayload);
+                            }
+                        } catch (_) {}
+                    }
+                } catch (innerErr) {
+                    console.warn('[ScheduledStatusCron] Failed to publish status', status.id, innerErr.message);
+                }
+            }
+            if (scheduled.length > 0) {
+                console.log(`[ScheduledStatusCron] Published ${scheduled.length} scheduled status(es)`);
+            }
+        } catch (err) {
+            console.warn('[ScheduledStatusCron] Error:', err.message);
+        }
+    }
+
+    setTimeout(_publishScheduledStatuses, 35000);
+    setInterval(_publishScheduledStatuses, 60 * 1000);
+    console.log('[ScheduledStatusCron] ✅ Installed (runs every 60 seconds)');
+})();
+
+// ── P3 FIX: On This Day Memories Cron ──────────────────────────────────────
+// Runs daily at midnight. Sends on_this_day notifications for statuses posted
+// on today's calendar day in previous years (1, 2, 3 years ago).
+(function _startOnThisDayCron() {
+    async function _sendOnThisDayNotifications() {
+        try {
+            let Status, notificationService, Op;
+            try {
+                ({ Status } = require('./models'));
+                notificationService = require('./services/notificationService');
+                Op = require('sequelize').Op;
+            } catch (_) { return; }
+            if (!Status || !notificationService) return;
+
+            const now = new Date();
+            const currentMonth = now.getMonth();
+            const currentDay   = now.getDate();
+            const seen = new Set();
+
+            for (let yearsAgo = 1; yearsAgo <= 3; yearsAgo++) {
+                const yearStart = new Date(now.getFullYear() - yearsAgo, currentMonth, currentDay, 0, 0, 0);
+                const yearEnd   = new Date(now.getFullYear() - yearsAgo, currentMonth, currentDay, 23, 59, 59);
+                const statuses = await Status.findAll({
+                    where: { createdAt: { [Op.between]: [yearStart, yearEnd] }, isActive: true },
+                    attributes: ['id', 'userId', 'createdAt'],
+                    limit: 200,
+                }).catch(() => []);
+
+                for (const s of statuses) {
+                    const key = `${s.userId}-${yearsAgo}`;
+                    if (seen.has(key)) continue;
+                    seen.add(key);
+                    notificationService.createFromTemplate(s.userId, 'on_this_day', {
+                        yearsAgo,
+                        year: now.getFullYear() - yearsAgo,
+                        statusId: s.id,
+                    }).catch(() => {});
+                }
+            }
+            if (seen.size > 0) console.log(`[OnThisDayCron] Sent ${seen.size} On This Day notification(s)`);
+        } catch (err) {
+            console.warn('[OnThisDayCron] Error:', err.message);
+        }
+    }
+
+    const now = new Date();
+    const msUntilMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 1, 0) - now;
+    setTimeout(() => {
+        _sendOnThisDayNotifications();
+        setInterval(_sendOnThisDayNotifications, 24 * 60 * 60 * 1000);
+    }, msUntilMidnight);
+    console.log('[OnThisDayCron] ✅ Installed — fires at midnight');
+})();
+
 // ── SMART GROUPS OS ROUTES ──────────────────────────────────────────────────
 // Additive: mounts at /api/groups alongside existing group routes.
 // All routes are prefixed with /:groupId/tasks, /:groupId/polls etc.
@@ -5659,14 +5781,6 @@ setTimeout(() => {
     scheduledWorker.start();
   } catch (e) {
     console.error('⚠️ scheduledMessageWorker failed to start (non-fatal):', e.message);
-  }
-
-  // Initialize VAPID for web push notifications
-  try {
-    const pushSvc = require('./services/pushNotificationService');
-    pushSvc.initVapid();
-  } catch (e) {
-    console.error('⚠️ VAPID init failed (non-fatal):', e.message);
   }
 }, 5000);
 
