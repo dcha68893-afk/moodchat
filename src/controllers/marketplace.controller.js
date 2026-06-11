@@ -15,6 +15,39 @@ const path   = require('path');
 const fs     = require('fs');
 const multer = require('multer');
 
+// ─── Email notifications (graceful — no crash if unconfigured) ────────────────
+let emailService = null;
+try { emailService = require('../services/emailService'); } catch(_) {}
+
+// ─── Audit log helper ─────────────────────────────────────────────────────────
+async function _auditLog(req, action, resourceType, resourceId, details = {}) {
+    try {
+        const db = getDb();
+        const AL = db.AuditLog;
+        if (!AL) return;
+        await AL.create({
+            userId: req.user?.id || null,
+            action,
+            resourceType,
+            resourceId: String(resourceId),
+            details,
+            ipAddress: req.ip || req.connection?.remoteAddress || null,
+            userAgent: req.headers?.['user-agent'] || null,
+        });
+    } catch (_) { /* non-fatal */ }
+}
+
+// ─── Get user email from DB (for notification emails) ────────────────────────
+async function _getUserEmail(userId) {
+    try {
+        const db = getDb();
+        const U = db.Users || db.User;
+        if (!U || !userId) return null;
+        const user = await U.findByPk(userId, { attributes: ['email'] });
+        return user?.email || null;
+    } catch (_) { return null; }
+}
+
 // ─── Ensure marketplace uploads directory exists ──────────────────────────────
 const MARKETPLACE_UPLOAD_DIR = path.join(process.cwd(), 'uploads', 'marketplace');
 try { fs.mkdirSync(MARKETPLACE_UPLOAD_DIR, { recursive: true }); } catch(_) {}
@@ -123,10 +156,27 @@ class MarketplaceController {
                 if (max_price) where.price[Op.lte] = parseFloat(max_price);
             }
             if (search) {
-                where[Op.or] = [
-                    { title:       { [Op.iLike]: `%${search}%` } },
-                    { description: { [Op.iLike]: `%${search}%` } },
-                ];
+                // Use PostgreSQL full-text search if search_vector column exists, fall back to iLike
+                const sq = getSequelize();
+                const searchSafe = search.replace(/[^\w\s]/g, '').trim();
+                if (sq && searchSafe) {
+                    // plainto_tsquery handles multi-word naturally ('red shoes' → red & shoes)
+                    where[Op.or] = [
+                        sq.where(
+                            sq.fn('to_tsvector', 'english',
+                                sq.fn('coalesce', sq.col('title'), '')),
+                            '@@',
+                            sq.fn('plainto_tsquery', 'english', searchSafe)
+                        ),
+                        { title:       { [Op.iLike]: `%${searchSafe}%` } },
+                        { description: { [Op.iLike]: `%${searchSafe}%` } },
+                    ];
+                } else {
+                    where[Op.or] = [
+                        { title:       { [Op.iLike]: `%${search}%` } },
+                        { description: { [Op.iLike]: `%${search}%` } },
+                    ];
+                }
             }
 
             const orderMap = {
@@ -442,10 +492,34 @@ class MarketplaceController {
 
     async getWishlist(req, res, next) {
         try {
-            const T = Model.Tool;
+            const db = getDb();
+            const WL = db.Wishlist;
+            const T  = Model.Tool;
             const userId = req.user?.id;
-            if (!T || !userId) return ok(res, { items: [] });
+            if (!userId) return ok(res, { items: [] });
 
+            // Prefer dedicated Wishlist table; fall back to savedBy array for backward compat
+            if (WL) {
+                const rows = await WL.findAll({
+                    where: { userId },
+                    include: T ? [{ model: T, as: 'product', include: _sellerInclude(T) }] : [],
+                    order: [['createdAt', 'DESC']],
+                    limit: 200,
+                });
+                const items = rows
+                    .filter(r => r.product)
+                    .map(r => ({
+                        wishlist_id: r.id,
+                        product_id:  r.productId,
+                        added_at:    r.createdAt,
+                        price_at_add: r.priceAtAdd,
+                        notify_on_drop: r.notifyOnDrop,
+                        ..._formatProduct(r.product),
+                    }));
+                return ok(res, { items });
+            }
+            // fallback: savedBy array
+            if (!T) return ok(res, { items: [] });
             const products = await T.findAll({
                 where: { savedBy: { [Op.contains]: [userId] }, status: 'active' },
                 include: _sellerInclude(T),
@@ -458,23 +532,50 @@ class MarketplaceController {
 
     async toggleWishlist(req, res, next) {
         try {
-            const T = Model.Tool;
+            const db = getDb();
+            const WL = db.Wishlist;
+            const T  = Model.Tool;
             const userId = req.user?.id;
             const { product_id } = req.body;
-            if (!T || !userId || !product_id) return next(new AppError('Invalid request', 400));
+            if (!userId || !product_id) return next(new AppError('Invalid request', 400));
 
+            // Preferred: dedicated Wishlist table
+            if (WL) {
+                const [row, created] = await WL.findOrCreate({
+                    where: { userId, productId: product_id },
+                    defaults: {
+                        userId,
+                        productId: product_id,
+                        priceAtAdd: T ? (await T.findByPk(product_id, { attributes: ['price'] }))?.price : null,
+                        notifyOnDrop: true,
+                    },
+                });
+                if (!created) {
+                    await row.destroy();
+                    return ok(res, { saved: false, product_id }, 'Removed from wishlist');
+                }
+                return ok(res, { saved: true, product_id, wishlist_id: row.id }, 'Added to wishlist');
+            }
+            // fallback: savedBy array
+            if (!T) return next(new AppError('Product not found', 404));
             const product = await T.findByPk(product_id);
             if (!product) return next(new AppError('Product not found', 404));
-
-            const saved = await product.toggleSave(userId);
+            await product.toggleSave(userId);
             return ok(res, { saved: (product.savedBy||[]).includes(userId), product_id }, 'Wishlist updated');
         } catch(e) { err(next, e, 'toggleWishlist'); }
     }
 
     async removeFromWishlist(req, res, next) {
         try {
-            const T = Model.Tool;
+            const db = getDb();
+            const WL = db.Wishlist;
             const userId = req.user?.id;
+            if (WL) {
+                await WL.destroy({ where: { userId, productId: req.params.id } });
+                return ok(res, null, 'Removed from wishlist');
+            }
+            // fallback
+            const T = Model.Tool;
             const product = await T?.findByPk(req.params.id);
             if (!product) return next(new AppError('Product not found', 404));
             product.savedBy = (product.savedBy||[]).filter(id => id !== userId);
@@ -593,14 +694,36 @@ class MarketplaceController {
                 _socketBroadcast(req, 'order:created', { order_id: order.id, buyer_id: buyerId, seller_id: order.sellerId });
             }
 
+            // COD branch: mark order as confirmed immediately (no payment step)
+            if (payment_method === 'cod') {
+                for (const order of orders) {
+                    await order.update({ status: 'confirmed', paymentMethod: 'cod' }).catch(() => {});
+                }
+            }
+
             const primaryOrder = orders[0];
+            const finalStatus = payment_method === 'cod' ? 'confirmed' : 'pending';
+
+            // Send order confirmation email (non-blocking)
+            _getUserEmail(buyerId).then(email => {
+                if (email && emailService) {
+                    emailService.orderConfirmed(email, {
+                        orderId: primaryOrder.id,
+                        items: items || [],
+                        total: total || 0,
+                        currency,
+                        deliveryAddress: delivery_address,
+                    }).catch(() => {});
+                }
+            });
+
             return ok(res, {
                 order: {
-                    id: primaryOrder.id, buyer_id: buyerId, status: 'pending',
+                    id: primaryOrder.id, buyer_id: buyerId, status: finalStatus,
                     total: parseFloat(total||0), currency, payment_method,
                     delivery_address, items, orders: orders.map(o => o.id), created_at: primaryOrder.createdAt,
                 }
-            }, 'Order placed successfully', 201);
+            }, payment_method === 'cod' ? 'Order placed! Pay on delivery.' : 'Order placed successfully', 201);
         } catch(e) { err(next, e, 'createOrder'); }
     }
 
@@ -686,6 +809,30 @@ class MarketplaceController {
                 buyer_id:  order.buyerId,
                 seller_id: order.sellerId,
             });
+
+            // Audit log
+            _auditLog(req, `order:status:${status}`, 'order', order.id, { previous: order.status, new: status });
+
+            // Email notification to buyer on key status changes (non-blocking)
+            if (emailService && ['shipped', 'delivered'].includes(status)) {
+                _getUserEmail(order.buyerId).then(email => {
+                    if (!email) return;
+                    const orderId = order.id;
+                    if (status === 'shipped') {
+                        emailService.orderShipped(email, {
+                            orderId,
+                            trackingNumber: order.trackingNumber || req.body.tracking_number,
+                            estimatedDelivery: req.body.estimated_delivery || null,
+                        }).catch(() => {});
+                    } else if (status === 'delivered') {
+                        const items = order.metadata?.items || [];
+                        emailService.orderDelivered(email, {
+                            orderId,
+                            productTitle: items[0]?.title || null,
+                        }).catch(() => {});
+                    }
+                });
+            }
 
             return ok(res, { order_id: order.id, status }, 'Order status updated');
         } catch(e) { err(next, e, 'updateOrderStatus'); }
@@ -1189,9 +1336,9 @@ class MarketplaceController {
     async adminBanSeller(req, res, next) {
         try {
             if (req.user?.role !== 'admin') return next(new AppError('Admin only', 403));
-            // Mark all their listings inactive
             const T = Model.Tool;
             if (T) await T.update({ status:'inactive', available:false }, { where: { sellerId: req.params.sellerId } });
+            _auditLog(req, 'admin:seller:banned', 'user', req.params.sellerId, { reason: req.body?.reason || null });
             return ok(res, null, 'Seller banned');
         } catch(e) { err(next, e, 'adminBanSeller'); }
     }
@@ -1264,18 +1411,23 @@ class MarketplaceController {
             if (!product) return res.status(404).json({ success: false, message: 'Product not found' });
             await product.update({
                 status: 'active',
+                available: true,
                 approval_status: 'approved',
                 approvalStatus: 'approved',
                 approvedAt: new Date(),
                 approved_at: new Date(),
             });
-            // Notify seller via WebSocket if possible
+            // Audit log
+            _auditLog(req, 'admin:product:approved', 'product', product.id, { title: product.title, sellerId: product.sellerId });
+            // WebSocket
             try {
                 const io = global.__socketIO || global.io;
-                if (io && product.sellerId) {   // P1 FIX: was product.userId (wrong field)
-                    io.to(`user:${product.sellerId}`).emit('product:approved', { productId: product.id, title: product.title });
-                }
+                if (io && product.sellerId) io.to(`user:${product.sellerId}`).emit('product:approved', { productId: product.id, title: product.title });
             } catch(_) {}
+            // Email seller
+            _getUserEmail(product.sellerId).then(email => {
+                if (email && emailService) emailService.productApproved(email, { productTitle: product.title }).catch(() => {});
+            });
             return ok(res, product, 'Product approved');
         } catch(e) { err(next, e, 'adminApproveProduct'); }
     }
@@ -1291,17 +1443,22 @@ class MarketplaceController {
             const { reason } = req.body || {};
             await product.update({
                 status: 'rejected',
+                available: false,
                 approval_status: 'rejected',
                 approvalStatus: 'rejected',
                 rejectionReason: reason || 'Does not meet marketplace standards',
                 rejection_reason: reason || 'Does not meet marketplace standards',
             });
+            // Audit log
+            _auditLog(req, 'admin:product:rejected', 'product', product.id, { title: product.title, sellerId: product.sellerId, reason });
             try {
                 const io = global.__socketIO || global.io;
-                if (io && product.sellerId) {   // P1 FIX: was product.userId
-                    io.to(`user:${product.sellerId}`).emit('product:rejected', { productId: product.id, title: product.title, reason });
-                }
+                if (io && product.sellerId) io.to(`user:${product.sellerId}`).emit('product:rejected', { productId: product.id, title: product.title, reason });
             } catch(_) {}
+            // Email seller
+            _getUserEmail(product.sellerId).then(email => {
+                if (email && emailService) emailService.productRejected(email, { productTitle: product.title, reason }).catch(() => {});
+            });
             return ok(res, product, 'Product rejected');
         } catch(e) { err(next, e, 'adminRejectProduct'); }
     }
@@ -1415,6 +1572,10 @@ class MarketplaceController {
                 try { await T.increment('stock', { by: refund.quantity || 1, where: { id: refund.productId } }); } catch(_) {}
             }
             _socketBroadcast(req, 'refund:approved', { refund_id: refund.id, order_id: refund.orderId, buyer_id: refund.buyerId });
+            _auditLog(req, 'admin:refund:approved', 'refund', refund.id, { orderId: refund.orderId, amount: refund.amount });
+            _getUserEmail(refund.buyerId).then(email => {
+                if (email && emailService) emailService.refundApproved(email, { orderId: refund.orderId, amount: refund.amount, currency: refund.currency || 'KES' }).catch(() => {});
+            });
             return ok(res, { refund_id: refund.id, status: 'approved' }, 'Refund approved');
         } catch(e) { err(next, e, 'adminApproveRefund'); }
     }
@@ -1429,6 +1590,7 @@ class MarketplaceController {
             const { reason } = req.body;
             await refund.update({ status: 'rejected', rejectionReason: reason, rejectedAt: new Date(), rejectedBy: req.user.id });
             _socketBroadcast(req, 'refund:rejected', { refund_id: refund.id, order_id: refund.orderId, buyer_id: refund.buyerId, reason });
+            _auditLog(req, 'admin:refund:rejected', 'refund', refund.id, { orderId: refund.orderId, reason });
             return ok(res, { refund_id: refund.id, status: 'rejected' }, 'Refund rejected');
         } catch(e) { err(next, e, 'adminRejectRefund'); }
     }
@@ -1492,6 +1654,10 @@ class MarketplaceController {
             if (!profile) return next(new AppError('KYC record not found', 404));
             await profile.update({ kycStatus: 'approved', verified: true, verifiedAt: new Date(), verifiedBy: req.user.id });
             _socketBroadcast(req, 'kyc:approved', { user_id: profile.userId });
+            _auditLog(req, 'admin:kyc:approved', 'seller_profile', profile.id, { userId: profile.userId });
+            _getUserEmail(profile.userId).then(email => {
+                if (email && emailService) emailService.kycApproved(email).catch(() => {});
+            });
             return ok(res, null, 'KYC approved');
         } catch(e) { err(next, e, 'adminApproveKYC'); }
     }
@@ -1506,6 +1672,10 @@ class MarketplaceController {
             const { reason } = req.body;
             await profile.update({ kycStatus: 'rejected', rejectionReason: reason, rejectedAt: new Date() });
             _socketBroadcast(req, 'kyc:rejected', { user_id: profile.userId, reason });
+            _auditLog(req, 'admin:kyc:rejected', 'seller_profile', profile.id, { userId: profile.userId, reason });
+            _getUserEmail(profile.userId).then(email => {
+                if (email && emailService) emailService.kycRejected(email, { reason }).catch(() => {});
+            });
             return ok(res, null, 'KYC rejected');
         } catch(e) { err(next, e, 'adminRejectKYC'); }
     }
@@ -1580,6 +1750,12 @@ class MarketplaceController {
             const { reference } = req.body;
             await payout.update({ status: 'paid', paidAt: new Date(), reference, disbursedBy: req.user.id });
             _socketBroadcast(req, 'payout:disbursed', { seller_id: payout.sellerId, amount: payout.amount, reference });
+            _auditLog(req, 'admin:payout:disbursed', 'payout', payout.id, { sellerId: payout.sellerId, amount: payout.amount, reference });
+            _getUserEmail(payout.sellerId).then(email => {
+                if (email && emailService) emailService.payoutDisburse(email, {
+                    amount: payout.amount, currency: payout.currency || 'KES', method: payout.method || 'M-Pesa'
+                }).catch(() => {});
+            });
             return ok(res, { payout_id: payout.id, status: 'paid' }, 'Payout disbursed');
         } catch(e) { err(next, e, 'adminDisbursePayout'); }
     }
@@ -1796,7 +1972,7 @@ function _formatProduct(row) {
             id:       r.seller?.id || r.sellerId,
             name:     r.seller?.displayName || r.seller?.username || 'Seller',
             avatar:   r.seller?.avatar || '',
-            verified: false,
+            verified: !!(r.seller?.sellerProfile?.verified || r.seller?.verified),
             rating:   0,
         },
         title:          r.title,
@@ -1817,8 +1993,12 @@ function _formatProduct(row) {
         brand:          meta.brand || '',
         is_featured:    !!(r.isFeatured || r.is_featured),
         is_flash_sale:  !!(r.isFlashSale || r.is_flash_sale),
+        flash_sale_end: r.flashSaleEnd || r.flash_sale_end || null,
+        flash_sale_price: parseFloat(r.flashSalePrice || r.flash_sale_price) || null,
+        seller_verified: !!(r.seller?.sellerProfile?.verified || r.seller?.verified),
         available:      !!r.available,
         status:         r.status,
+        approval_status: r.approvalStatus || r.approval_status || null,
         views:          parseInt(r.views) || 0,
         sold_count:     (r.purchasedBy || []).length,
         created_at:     r.createdAt,

@@ -135,10 +135,6 @@ const MODEL_WHITELIST = [
   'GroupAISummary',
   'GroupActivityLog',
   'GroupAnalytics',
-  // P1 FIX: New moderation/reporting models
-  'ModerationLog',
-  // P2 FIX: Topic threads
-  'GroupThread',
 ];
 
 // CRITICAL: Patterns that indicate NON-MODEL files
@@ -1010,6 +1006,25 @@ async function runFullMigration() {
         CREATE INDEX IF NOT EXISTS idx_tools_flash_sale ON "tools" ("is_flash_sale", "available");
         CREATE UNIQUE INDEX IF NOT EXISTS idx_carts_user_unique ON "marketplace_carts" ("user_id");
       `).catch(e => console.log('[Migration] ⚠️ tools column patch (non-fatal):', e.message));
+
+      // ── Dedicated wishlists table (replaces savedBy UUID array on Tool) ───
+      await sequelize.query(`
+        CREATE TABLE IF NOT EXISTS "wishlists" (
+          "id"              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          "user_id"         UUID NOT NULL,
+          "product_id"      UUID NOT NULL,
+          "price_at_add"    DECIMAL(12,2),
+          "notify_on_drop"  BOOLEAN DEFAULT true,
+          "created_at"      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          CONSTRAINT uq_wishlist_user_product UNIQUE ("user_id","product_id")
+        );
+        CREATE INDEX IF NOT EXISTS idx_wishlists_user    ON "wishlists" ("user_id");
+        CREATE INDEX IF NOT EXISTS idx_wishlists_product ON "wishlists" ("product_id");
+
+        -- seller_verified field on seller_profiles (for badge display)
+        ALTER TABLE "seller_profiles" ADD COLUMN IF NOT EXISTS "verified" BOOLEAN DEFAULT false;
+        ALTER TABLE "seller_profiles" ADD COLUMN IF NOT EXISTS "verified_at" TIMESTAMPTZ;
+      `).catch(e => console.log('[Migration] ⚠️ wishlists/seller_verified (non-fatal):', e.message));
 
       // ── P2 FIX: Full-text search index on tools ───────────────────────────
       await sequelize.query(`
