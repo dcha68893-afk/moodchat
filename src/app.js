@@ -12,10 +12,61 @@ const logger = require('./utils/logger');
 
 const app = express();
 
-// Security middleware
+// Security middleware — OWASP Top 10 compliant headers
 app.use(helmet({
-  contentSecurityPolicy: config.nodeEnv === 'production' ? undefined : false,
+  // Content Security Policy — restrict sources
+  contentSecurityPolicy: config.nodeEnv === 'production' ? {
+    directives: {
+      defaultSrc:     ["'self'"],
+      scriptSrc:      ["'self'", "'strict-dynamic'"],
+      styleSrc:       ["'self'", "'unsafe-inline'", 'https://cdnjs.cloudflare.com'],
+      imgSrc:         ["'self'", 'data:', 'blob:', 'https:'],
+      mediaSrc:       ["'self'", 'blob:'],
+      connectSrc:     ["'self'", 'wss:', 'https:'],
+      fontSrc:        ["'self'", 'https://cdnjs.cloudflare.com'],
+      frameSrc:       ["'none'"],
+      objectSrc:      ["'none'"],
+      upgradeInsecureRequests: [],
+    },
+  } : false,
+
+  // HTTP Strict Transport Security — 1 year, include subdomains
+  hsts: {
+    maxAge:            31536000,
+    includeSubDomains: true,
+    preload:           true,
+  },
+
+  // Prevent MIME sniffing
+  noSniff: true,
+
+  // Block all framing (clickjacking prevention)
+  frameguard: { action: 'deny' },
+
+  // Referrer Policy — no referrer on cross-origin
+  referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
+
+  // Disable X-Powered-By (hides Express)
+  hidePoweredBy: true,
+
+  // XSS Filter (legacy IE)
+  xssFilter: true,
+
+  // Permissions Policy — disable dangerous browser features
+  permittedCrossDomainPolicies: { permittedPolicies: 'none' },
 }));
+
+// Permissions-Policy header (not in helmet by default)
+app.use(function(req, res, next) {
+  res.setHeader('Permissions-Policy',
+    'camera=(self), microphone=(self), display-capture=(self), ' +
+    'geolocation=(), payment=(), usb=(), magnetometer=(), gyroscope=()');
+  // Expose pagination headers to browser JS (needed by frontend infinite scroll)
+  res.setHeader('Access-Control-Expose-Headers',
+    'X-Total-Count, X-Page, X-Per-Page, X-Total-Pages, X-Request-Id');
+  next();
+});
+
 app.use(compression());
 
 // CORS configuration - more flexible for frontend access
@@ -23,11 +74,11 @@ const corsOptions = {
   origin: (origin, callback) => {
     // Allow requests with no origin (like mobile apps or curl requests)
     if (!origin) return callback(null, true);
-    
-    const allowedOrigins = config.corsOrigin 
+
+    const allowedOrigins = config.corsOrigin
       ? (Array.isArray(config.corsOrigin) ? config.corsOrigin : [config.corsOrigin])
-      : ['http://localhost:3000', 'http://localhost:5173', 'http://localhost:5500', 'http://127.0.0.1:5500', 'http://localhost:5501', 'http://127.0.0.1:5501']; // Default dev origins
-    
+      : ['http://localhost:3000', 'http://localhost:5173', 'http://localhost:5500', 'http://127.0.0.1:5500', 'http://localhost:5501', 'http://127.0.0.1:5501'];
+
     if (allowedOrigins.indexOf(origin) !== -1 || allowedOrigins.includes('*')) {
       callback(null, true);
     } else {

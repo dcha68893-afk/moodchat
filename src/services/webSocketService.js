@@ -509,6 +509,23 @@ class WebSocketService {
                 }
             });
 
+
+            // ── Multi-device call sync ────────────────────────────────────────────
+            // When user answers/declines on one device, broadcast to ALL their other
+            // devices so the incoming call UI dismisses everywhere automatically.
+            socket.off('call:device_sync').on('call:device_sync', async (payload = {}) => {
+                try {
+                    const { callId: syncCallId, action } = payload; // action: 'answered'|'declined'|'ended'
+                    if (!syncCallId || !action) return;
+                    const io = this.getIO();
+                    if (io) {
+                        const syncPayload = { callId: syncCallId, action, userId, timestamp: Date.now() };
+                        io.to(`user:${userId}`).except(socket.id).emit('call:device_sync', syncPayload);
+                        io.to(`user_${userId}`).except(socket.id).emit('call:device_sync', syncPayload);
+                    }
+                } catch (err) { console.warn('[WSService] call:device_sync error:', err.message); }
+            });
+
             // ── Live Caption relay ────────────────────────────────────────────────
             socket.off('call:caption').on('call:caption', async (payload = {}) => {
                 try {
@@ -922,6 +939,9 @@ class WebSocketService {
         }
 
         // Emit to ALL room name variants — client may have joined with int or string userId
+        // ── Multi-device sync: ALL of a user's devices are in these rooms ──────────
+        // When a call is accepted on device A, device B (same user) receives the same
+        // call:accepted event and can dismiss its incoming call UI automatically.
         const strUid = String(uid);
         const rooms = [
             `user:${uid}`,    // integer coerced

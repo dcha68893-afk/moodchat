@@ -123,7 +123,9 @@ async function safeIsUserOnline(userId) {
 // it will be null/undefined → callerName shows as "Unknown".
 // This helper fetches the authoritative username from the DB as a fallback.
 const _callerNameCache = new Map(); // short-lived in-process cache (avoids N+1 per call)
-async function resolveCallerName(userId, reqUser) {
+async function resolveCallerName(userId, reqUser, privacyMode = false) {
+  // Privacy mode: return anonymous identity
+  if (privacyMode) return 'Unknown Caller';
   // Fast path: JWT already has a non-empty username
   const jwtName = (reqUser && (reqUser.username || reqUser.displayName || reqUser.name)) || null;
   if (jwtName && jwtName !== 'Unknown') return jwtName;
@@ -140,6 +142,22 @@ async function resolveCallerName(userId, reqUser) {
     return jwtName || 'Unknown';
   }
 }
+
+// ── Call Privacy Mode ─────────────────────────────────────────────────────────
+// When privacy mode is active (req.body.privacyMode === true), the caller's
+// name, avatar, and userId are anonymized in the call:incoming payload.
+// This allows users to call without revealing their identity until accepted.
+function applyPrivacyMode(payload, privacyMode) {
+  if (!privacyMode) return payload;
+  return {
+    ...payload,
+    callerName:   'Unknown Caller',
+    callerAvatar: null,
+    callerId:     0,  // Masked until call is accepted
+    privacyMode:  true,
+  };
+}
+
 
 
 const checkAuth = (req, res) => {
@@ -270,6 +288,7 @@ router.post('/', apiRateLimiter, callInitiationLimiter, asyncHandler(async (req,
     const rawType        = req.body.callType || req.body.type || 'audio';
     const callType       = rawType === 'voice' ? 'audio' : rawType;
     const isGroupCall    = req.body.isGroupCall || false;
+    const privacyMode    = !!(req.body.privacyMode || req.body.privacy_mode);
     const participantIds = req.body.participantIds || req.body.participants;
     const calleeId       = req.body.calleeId || req.body.userId ||
       (Array.isArray(participantIds) && participantIds.length === 1 ? participantIds[0] : null);
@@ -327,7 +346,7 @@ router.post('/', apiRateLimiter, callInitiationLimiter, asyncHandler(async (req,
 
     // Always notify — if they are online, they'll get it; if not, it'll be a missed call
     const _callerDisplayName = await resolveCallerName(userId, req.user);
-    const _callIncomingPayload = {
+    const _rawCallPayload = {
       callId:       call.id,
       callerId:     userId,
       callerName:   _callerDisplayName,
@@ -336,6 +355,8 @@ router.post('/', apiRateLimiter, callInitiationLimiter, asyncHandler(async (req,
       isBusy,
       timestamp:    Date.now(),
     };
+    // Apply privacy mode — anonymize caller identity if requested
+    const _callIncomingPayload = applyPrivacyMode(_rawCallPayload, privacyMode);
 
     // If target is busy, notify the CALLER immediately with a busy signal
     // (the call record is still created so it appears in history as missed)
@@ -1951,6 +1972,49 @@ router.get('/admin/active', apiRateLimiter, asyncHandler(async (req, res) => {
     res.json({ success: true, data: { activeCalls, count: activeCalls.length, timestamp: Date.now() } });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Failed to get active calls' });
+  }
+}));
+
+// GET /admin/participant-stats/:userId — Per-participant call analytics
+router.get('/admin/participant-stats/:userId', apiRateLimiter, asyncHandler(async (req, res) => {
+  try {
+    const auth = checkAuth(req, res); if (!auth) return;
+    if (!checkModels(res)) return;
+    const { userId: targetId } = req.params;
+
+    const [totalCalls, completedCalls, missedCalls, avgQuality, avgDuration] = await Promise.all([
+      Call.count({ where: { [Op.or]: [{ callerId: targetId }, { receiverId: targetId }, { participants: { [Op.contains]: [parseInt(targetId)] } }] } }),
+      Call.count({ where: { status: 'completed', [Op.or]: [{ callerId: targetId }, { receiverId: targetId }, { participants: { [Op.contains]: [parseInt(targetId)] } }] } }),
+      Call.count({ where: { status: 'missed',    [Op.or]: [{ callerId: targetId }, { receiverId: targetId }, { participants: { [Op.contains]: [parseInt(targetId)] } }] } }),
+      Call.findOne({ where: { qualityScore: { [Op.not]: null }, [Op.or]: [{ callerId: targetId }, { receiverId: targetId }] }, attributes: [[fn('AVG', col('qualityScore')), 'avg']], raw: true }).then(r => r && r.avg ? parseFloat(parseFloat(r.avg).toFixed(2)) : null).catch(() => null),
+      Call.findOne({ where: { status: 'completed', duration: { [Op.gt]: 0 }, [Op.or]: [{ callerId: targetId }, { receiverId: targetId }] }, attributes: [[fn('AVG', col('duration')), 'avg']], raw: true }).then(r => r && r.avg ? Math.round(parseFloat(r.avg)) : 0).catch(() => 0),
+    ]);
+
+    const recentCalls = await Call.findAll({
+      where: { [Op.or]: [{ callerId: targetId }, { receiverId: targetId }, { participants: { [Op.contains]: [parseInt(targetId)] } }] },
+      order: [['createdAt', 'DESC']],
+      limit: 10,
+      attributes: ['id', 'type', 'status', 'duration', 'qualityScore', 'postCallRating', 'createdAt'],
+    });
+
+    res.json({
+      success: true,
+      data: {
+        userId: targetId,
+        stats: {
+          totalCalls,
+          completedCalls,
+          missedCalls,
+          completionRate: totalCalls ? Math.round((completedCalls / totalCalls) * 100) : 0,
+          avgQualityScore: avgQuality,
+          avgDurationSeconds: avgDuration,
+        },
+        recentCalls,
+      },
+    });
+  } catch (err) {
+    console.error('[GET /admin/participant-stats]', err.message);
+    res.status(500).json({ success: false, message: 'Failed to get participant stats' });
   }
 }));
 
