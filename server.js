@@ -3936,7 +3936,9 @@ class Application {
             systemState.recordStartupStep('api_routes_mount');
 
             // Import the main router from index.js
-            const mainRouter = require('./routes/index');
+            // FIX: was './routes/index' which only contained a handful of files;
+            // all route files (auth.js, users.js, calls.js, etc.) live in src/routes/
+            const mainRouter = require('./src/routes/index');
 
             // Server health endpoint (public) - moved to avoid conflict with user status routes
             // NOTE: /api/health is registered in setupHealthEndpoints() below — no duplicate here.
@@ -3991,6 +3993,12 @@ class Application {
                 });
             });
             
+            // FIX: Register health endpoints BEFORE mounting main router.
+            // src/routes/index.js ends with router.use('*', ...) which would
+            // swallow GET /health before setupHealthEndpoints() could register it.
+            systemState.recordStartupStep('health_endpoints');
+            this.setupHealthEndpoints();
+
             // Mount the main router
             this.app.use('/', mainRouter);
             console.log('✅ Mounted main API router');
@@ -4034,9 +4042,7 @@ class Application {
             console.log('\n🔍 Checking mounted routes...');
             console.log('Available routes will be handled by RouterManager');
             
-            // 6. Setup health and status endpoints (public) - AFTER API routes
-            systemState.recordStartupStep('health_endpoints');
-            this.setupHealthEndpoints();
+            // 6. Health endpoints moved BEFORE main router mount (see fix above)
             
             // 7. Initialize Redis
             systemState.recordStartupStep('redis_connection');
