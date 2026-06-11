@@ -135,6 +135,10 @@ const MODEL_WHITELIST = [
   'GroupAISummary',
   'GroupActivityLog',
   'GroupAnalytics',
+  // P1 FIX: New moderation/reporting models
+  'ModerationLog',
+  // P2 FIX: Topic threads
+  'GroupThread',
 ];
 
 // CRITICAL: Patterns that indicate NON-MODEL files

@@ -30,6 +30,38 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.DATE,
         allowNull: true,
       },
+      // ── P1 FIXES: Proper mute / ban columns ──────────────────────────────
+      mutedUntil: {
+        type: DataTypes.DATE,
+        allowNull: true,
+        comment: 'NULL = not muted; past date = mute expired; future = active mute',
+      },
+      isBanned: {
+        type: DataTypes.BOOLEAN,
+        defaultValue: false,
+        allowNull: false,
+      },
+      banReason: {
+        type: DataTypes.TEXT,
+        allowNull: true,
+      },
+      // ── P2 FIXES: Per-group nickname, custom title, warnings ──────────────
+      nickname: {
+        type: DataTypes.STRING(50),
+        allowNull: true,
+        comment: 'Per-group display nickname (Discord-style)',
+      },
+      customTitle: {
+        type: DataTypes.STRING(50),
+        allowNull: true,
+        comment: 'Custom admin title (Telegram-style)',
+      },
+      warnings: {
+        type: DataTypes.INTEGER,
+        defaultValue: 0,
+        allowNull: false,
+        comment: 'Number of moderation warnings received',
+      },
       notificationsMuted: {
         type: DataTypes.BOOLEAN,
         defaultValue: false,

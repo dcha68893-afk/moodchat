@@ -70,6 +70,17 @@ const formatGroup = (g, extraFields = {}) => {
         isVerified  : d.isVerified  || false,
         settings    : d.settings    || {},
         stats       : d.stats       || { totalMembers: 0, totalMessages: 0 },
+        // P1 FIX: Persist critical fields now exposed in API
+        slowModeInterval       : d.slowModeInterval       ?? 0,
+        postingRule            : d.postingRule             || 'open',
+        disappearingTimer      : d.disappearingTimer       ?? 0,
+        pinnedMessageIds       : d.pinnedMessageIds        || [],
+        inviteLinkMaxUses      : d.inviteLinkMaxUses       ?? 0,
+        inviteLinkUseCount     : d.inviteLinkUseCount      ?? 0,
+        groupUsername          : d.groupUsername           || null,
+        blockedWords           : d.blockedWords            || [],
+        scheduledPostingStart  : d.scheduledPostingStart   || null,
+        scheduledPostingEnd    : d.scheduledPostingEnd     || null,
         // LOCAL-FIRST fields
         serverId    : d.id,
         isLocalOnly : false,
@@ -598,6 +609,35 @@ class GroupService {
 
             const updatePayload = { settings: { ...existing, ...filtered } };
             if (settings.privacy !== undefined) updatePayload.isPublic = settings.privacy === 'public';
+
+            // ── P1 FIX: Persist critical moderation fields as dedicated DB columns ──
+            // slowModeInterval (seconds, 0 = disabled)
+            const slowSecs = settings.slowModeInterval ?? (settings.slowMode ? settings.slowMode * 60 : undefined);
+            if (slowSecs !== undefined) updatePayload.slowModeInterval = Math.max(0, parseInt(slowSecs) || 0);
+
+            // postingRule: open / read_only / announcement / admin_only / scheduled
+            if (settings.postingRule) {
+                const validRules = ['open', 'read_only', 'announcement', 'admin_only', 'scheduled'];
+                if (validRules.includes(settings.postingRule)) updatePayload.postingRule = settings.postingRule;
+            } else if (filtered.onlyAdminsCanPost) {
+                updatePayload.postingRule = 'admin_only';
+            }
+
+            // disappearingTimer (seconds, 0 = disabled). Also accept boolean flag
+            if (settings.disappearingTimer !== undefined) {
+                updatePayload.disappearingTimer = Math.max(0, parseInt(settings.disappearingTimer) || 0);
+            } else if (settings.disappearingMessages === false) {
+                updatePayload.disappearingTimer = 0;
+            }
+
+            // blockedWords
+            if (Array.isArray(settings.blockedWords)) {
+                updatePayload.blockedWords = settings.blockedWords.map(w => String(w).trim().toLowerCase()).filter(Boolean);
+            }
+
+            // scheduledPostingWindow
+            if (settings.scheduledPostingStart) updatePayload.scheduledPostingStart = settings.scheduledPostingStart;
+            if (settings.scheduledPostingEnd)   updatePayload.scheduledPostingEnd   = settings.scheduledPostingEnd;
 
             await group.update(updatePayload);
             const formatted = formatGroup(group);

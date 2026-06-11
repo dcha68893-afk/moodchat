@@ -518,4 +518,34 @@ router.get('/check-token', authenticateToken, asyncHandler(async (req, res) => {
     });
 }));
 
+// ── P1 FIX: FCM push token registration ──────────────────────────────────────
+// POST /api/auth/fcm-token  { token: "fcm_device_token" }
+router.post('/fcm-token', authenticateToken, asyncHandler(async (req, res) => {
+    const { token } = req.body;
+    if (!token || typeof token !== 'string' || token.length < 10) {
+        return res.status(400).json({ success: false, message: 'Valid FCM token required' });
+    }
+    try {
+        const pushService = require('../services/pushService');
+        const userId = req.user?.id || req.user?.uid;
+        const saved = await pushService.registerToken(userId, token);
+        return res.json({ success: true, message: saved ? 'FCM token registered' : 'Token save skipped' });
+    } catch (e) {
+        return res.status(500).json({ success: false, message: 'Failed to register token', error: e.message });
+    }
+}));
+
+// DELETE /api/auth/fcm-token  — clear token on logout
+router.delete('/fcm-token', authenticateToken, asyncHandler(async (req, res) => {
+    try {
+        const db   = require('../models');
+        const User = db.models?.Users || db.Users;
+        const userId = req.user?.id || req.user?.uid;
+        if (User && userId) await User.update({ fcmToken: null }, { where: { id: userId } });
+        return res.json({ success: true, message: 'FCM token cleared' });
+    } catch (e) {
+        return res.status(500).json({ success: false, message: 'Failed to clear token' });
+    }
+}));
+
 module.exports = router;

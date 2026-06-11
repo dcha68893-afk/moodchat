@@ -14,6 +14,10 @@ module.exports = (sequelize, DataTypes) => {
     timezone:     { type: DataTypes.STRING(50), defaultValue: 'UTC' },
     isRecurring:  { type: DataTypes.BOOLEAN, defaultValue: false },
     recurringRule:{ type: DataTypes.STRING(100) },
+    // P3 FIX: Full recurrence support
+    recurrenceRule:     { type: DataTypes.TEXT,    allowNull: true, comment: 'JSON: { frequency, interval, count, endDate }' },
+    recurrenceIndex:    { type: DataTypes.INTEGER, allowNull: true, defaultValue: 0 },
+    recurrenceParentId: { type: DataTypes.INTEGER, allowNull: true, comment: 'ID of first event in series' },
     rsvpEnabled:  { type: DataTypes.BOOLEAN, defaultValue: true },
     maxAttendees: { type: DataTypes.INTEGER },
     coverImage:   { type: DataTypes.STRING(500) },

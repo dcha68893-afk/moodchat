@@ -4881,7 +4881,6 @@ class Application {
                     this.websocket = WebSocketService;
                     this.websocket.init(this.io);
                     global.__io = this.io; // Phase11: direct io access for fallback delivery
-                    global.__socketIO = this.io; // P1 FIX: used by scheduled status auto-publish cron
 
                     // setupConnectionHandler handles room-join & presence only.
                     // verifyToken inside it is now a harmless secondary check —
@@ -5482,80 +5481,6 @@ async function main() {
     console.log('[StatusExpiryCron] ✅ Installed (runs every 5 minutes)');
 })();
 
-// ── P1 FIX: Scheduled Status Auto-Publish Cron ──────────────────────────────
-// Runs every 60 seconds. Finds scheduled statuses whose scheduledFor time has
-// arrived and publishes them (sets isActive=true, emits status:new to friends).
-(function _startScheduledStatusPublisher() {
-    async function _publishScheduledStatuses() {
-        try {
-            let Status, Op;
-            try { ({ Status } = require('./models')); Op = require('sequelize').Op; } catch (_) { return; }
-            if (!Status || !Op) return;
-            const now = new Date();
-
-            // Find statuses scheduled for now-or-past that haven't been published yet
-            const scheduled = await Status.findAll({
-                where: {
-                    isActive: false,
-                    expiresAt: { [Op.gt]: now },
-                },
-                limit: 50,
-            }).then(all => all.filter(s => {
-                const meta = s.metadata || {};
-                if (!meta.scheduled) return false;
-                if (!meta.scheduledFor) return false;
-                return new Date(meta.scheduledFor) <= now;
-            })).catch(() => []);
-
-            if (scheduled.length === 0) return;
-
-            const io = global.__socketIO;
-            for (const status of scheduled) {
-                try {
-                    const meta = status.metadata || {};
-                    // Publish: activate and remove scheduled flag
-                    const newMeta = { ...meta, scheduled: false, publishedAt: now.toISOString() };
-                    await Status.update({ isActive: true, metadata: newMeta }, { where: { id: status.id } });
-
-                    // Notify creator and friends via Socket.IO
-                    if (io) {
-                        const wsPayload = {
-                            statusId:  status.id,
-                            userId:    status.userId,
-                            type:      status.type,
-                            content:   status.content,
-                            mediaUrl:  status.mediaUrl || null,
-                            createdAt: status.createdAt,
-                            expiresAt: status.expiresAt || null,
-                            timestamp: now.toISOString(),
-                        };
-                        io.to(`user:${status.userId}`).emit('status:new', wsPayload);
-                        // Emit to friends
-                        try {
-                            const { getAcceptedFriendIds } = require('./services/statusService');
-                            const friendIds = await getAcceptedFriendIds(status.userId).catch(() => []);
-                            for (const fid of friendIds) {
-                                io.to(`user:${fid}`).emit('status:new', wsPayload);
-                            }
-                        } catch (_) {}
-                    }
-                } catch (innerErr) {
-                    console.warn('[ScheduledStatusCron] Failed to publish status', status.id, innerErr.message);
-                }
-            }
-            if (scheduled.length > 0) {
-                console.log(`[ScheduledStatusCron] Published ${scheduled.length} scheduled status(es)`);
-            }
-        } catch (err) {
-            console.warn('[ScheduledStatusCron] Error:', err.message);
-        }
-    }
-
-    setTimeout(_publishScheduledStatuses, 35000); // startup offset from expiry cron
-    setInterval(_publishScheduledStatuses, 60 * 1000); // every 60 seconds
-    console.log('[ScheduledStatusCron] ✅ Installed (runs every 60 seconds)');
-})();
-
 // ── SMART GROUPS OS ROUTES ──────────────────────────────────────────────────
 // Additive: mounts at /api/groups alongside existing group routes.
 // All routes are prefixed with /:groupId/tasks, /:groupId/polls etc.
@@ -5736,6 +5661,16 @@ setTimeout(() => {
     console.error('⚠️ scheduledMessageWorker failed to start (non-fatal):', e.message);
   }
 }, 5000);
+
+// ── P2 FIX: Group cron jobs (poll auto-close, daily AI summary, disappearing msgs)
+setTimeout(() => {
+  try {
+    const { startGroupCrons } = require('../workers/groupCronWorker');
+    startGroupCrons();
+  } catch (e) {
+    console.error('⚠️ groupCronWorker failed to start (non-fatal):', e.message);
+  }
+}, 8000);
 
 // Export for testing and programmatic use
 module.exports = {

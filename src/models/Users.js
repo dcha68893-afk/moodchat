@@ -155,6 +155,12 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: true,
         defaultValue: null
       },
+      // P1 FIX: FCM push notification token
+      fcmToken: {
+        type: DataTypes.TEXT,
+        allowNull: true,
+        comment: 'Firebase Cloud Messaging token for push notifications',
+      },
       status: {
         type: DataTypes.ENUM('online', 'offline', 'away', 'busy', 'invisible'),
         defaultValue: 'offline',

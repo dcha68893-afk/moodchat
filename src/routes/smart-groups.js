@@ -130,4 +130,35 @@ router.get('/:groupId/analytics', auth, _handler((svc,req) => svc.AnalyticsServi
 router.get('/:groupId/ai/summary',  auth, _handler((svc,req) => svc.AIService.getLatest(gid(req), uid(req), req.query.type||'daily')));
 router.post('/:groupId/ai/summary', auth, _handler((svc,req) => svc.AIService.queueSummary(gid(req), req.body.type||'daily')));
 
+// ── P3 FIX: SUB-TASKS ─────────────────────────────────────────────────────
+router.get('/:groupId/tasks/:taskId/subtasks',      auth, _handler((svc,req) => svc.TaskService.listSubTasks(gid(req), uid(req), req.params.taskId)));
+router.post('/:groupId/tasks/:taskId/subtasks',     auth, _handler((svc,req) => svc.TaskService.createSubTask(gid(req), uid(req), req.params.taskId, req.body)));
+
+// ── P3 FIX: TASK COMMENTS ─────────────────────────────────────────────────
+router.get('/:groupId/tasks/:taskId/comments',      auth, _handler((svc,req) => svc.TaskService.getComments(gid(req), uid(req), req.params.taskId)));
+router.post('/:groupId/tasks/:taskId/comments',     auth, _handler((svc,req) => svc.TaskService.addComment(gid(req), uid(req), req.params.taskId, req.body.content)));
+
+// ── P3 FIX: EXPENSE SPLITTING ─────────────────────────────────────────────
+router.post('/:groupId/finances/split',             auth, _handler((svc,req) => svc.FinanceService.splitExpense(gid(req), uid(req), req.body)));
+router.post('/:groupId/finances/:txId/settle',      auth, _handler((svc,req) => svc.FinanceService.settleExpense(gid(req), uid(req), req.params.txId)));
+
+// ── P3 FIX: RECURRING EVENTS ──────────────────────────────────────────────
+router.post('/:groupId/events/recurring',           auth, _handler((svc,req) => svc.EventService.createRecurring(gid(req), uid(req), req.body)));
+
+// ── P3 FIX: ICS EXPORT ────────────────────────────────────────────────────
+router.get('/:groupId/events/:eventId/ics', auth, wrap(async (req, res) => {
+    try {
+        const svc = _svc(); if (!svc) return res.status(503).json({ success: false, message: 'Service unavailable' });
+        const result = await svc.EventService.exportICS(gid(req), uid(req), req.params.eventId);
+        res.setHeader('Content-Type', result.contentType);
+        res.setHeader('Content-Disposition', `attachment; filename="${result.filename}"`);
+        res.send(result.ics);
+    } catch (e) {
+        res.status(e.status || 500).json({ success: false, message: e.message });
+    }
+}));
+
+// ── P2 FIX: THREAD ROUTES (re-exported from group.js via this router too) ─
+// (Group.js handles /:groupId/messages/:id/thread and /:groupId/threads/*)
+
 module.exports = router;

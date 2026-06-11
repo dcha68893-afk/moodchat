@@ -138,6 +138,48 @@ const TaskService = {
     _log(groupId, userId, 'task_deleted', 'tasks', taskId, 'GroupTask');
     return { success: true };
   },
+
+  // ── P3 FIX: Sub-tasks ─────────────────────────────────────────────────────
+  async createSubTask(groupId, userId, parentTaskId, data) {
+    await _assertMember(groupId, userId);
+    const GT = _m('GroupTask'); if (!GT) throw new Error('Model unavailable');
+    const parent = await GT.findOne({ where: { id: parentTaskId, groupId, deletedAt: null } });
+    if (!parent) throw Object.assign(new Error('Parent task not found'), { status: 404 });
+    const subTask = await GT.create({ groupId, createdBy: userId, parentTaskId, ...data });
+    _broadcast(groupId, 'group:task:subtask_created', { parentTaskId, subTask: subTask.toJSON() });
+    _log(groupId, userId, 'task_created', 'tasks', subTask.id, 'GroupTask', { parentTaskId });
+    return subTask;
+  },
+
+  async listSubTasks(groupId, userId, parentTaskId) {
+    await _assertMember(groupId, userId);
+    const GT = _m('GroupTask'); if (!GT) return [];
+    return GT.findAll({ where: { groupId, parentTaskId, deletedAt: null }, order: [['createdAt', 'ASC']] });
+  },
+
+  // ── P3 FIX: Task comments ─────────────────────────────────────────────────
+  async addComment(groupId, userId, taskId, content) {
+    await _assertMember(groupId, userId);
+    const GT = _m('GroupTask'); if (!GT) throw new Error('Model unavailable');
+    const task = await GT.findOne({ where: { id: taskId, groupId, deletedAt: null } });
+    if (!task) throw Object.assign(new Error('Task not found'), { status: 404 });
+    // Store comments in task.metadata.comments array
+    const meta = task.metadata || {};
+    const comments = Array.isArray(meta.comments) ? meta.comments : [];
+    const comment = { id: Date.now(), userId, content: String(content).slice(0, 2000), createdAt: new Date().toISOString() };
+    comments.push(comment);
+    await task.update({ metadata: { ...meta, comments } });
+    _broadcast(groupId, 'group:task:comment_added', { taskId, comment });
+    return comment;
+  },
+
+  async getComments(groupId, userId, taskId) {
+    await _assertMember(groupId, userId);
+    const GT = _m('GroupTask'); if (!GT) return [];
+    const task = await GT.findOne({ where: { id: taskId, groupId }, attributes: ['id','metadata'] });
+    return task?.metadata?.comments || [];
+  },
+
 };
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -195,6 +237,75 @@ const EventService = {
     rows.forEach(r => { if (counts[r.status] !== undefined) counts[r.status]++; });
     const total = rows.length;
     return { total, counts, attendanceRate: total > 0 ? Math.round((counts.present / total) * 100) : 0 };
+  },
+
+  // ── P3 FIX: Recurring events — generate next occurrence ──────────────────
+  async createRecurring(groupId, userId, data) {
+    await _assertMember(groupId, userId);
+    const GE = _m('GroupEvent'); if (!GE) throw new Error('Model unavailable');
+    // data.recurrence: { frequency: 'daily'|'weekly'|'monthly', interval: 1, count: 10, endDate: '...' }
+    const recurrence = data.recurrence || {};
+    if (!recurrence.frequency) throw new Error('recurrence.frequency required (daily|weekly|monthly)');
+    const events = [];
+    const startBase = new Date(data.startTime);
+    const endBase   = data.endTime ? new Date(data.endTime) : null;
+    const duration  = endBase ? (endBase - startBase) : 3600_000; // 1hr default
+    const count     = Math.min(recurrence.count || 4, 52); // max 52 occurrences
+    const interval  = recurrence.interval || 1;
+    for (let i = 0; i < count; i++) {
+      const startTime = new Date(startBase);
+      if (recurrence.frequency === 'daily')   startTime.setDate(startTime.getDate()   + i * interval);
+      if (recurrence.frequency === 'weekly')  startTime.setDate(startTime.getDate()   + i * interval * 7);
+      if (recurrence.frequency === 'monthly') startTime.setMonth(startTime.getMonth() + i * interval);
+      if (recurrence.endDate && startTime > new Date(recurrence.endDate)) break;
+      const event = await GE.create({
+        groupId, createdBy: userId,
+        ...data,
+        startTime,
+        endTime: new Date(startTime.getTime() + duration),
+        recurrenceRule: JSON.stringify(recurrence),
+        recurrenceIndex: i,
+        recurrenceParentId: i === 0 ? null : events[0]?.id,
+      });
+      events.push(event);
+    }
+    _broadcast(groupId, 'group:event:created', { recurring: true, count: events.length });
+    _log(groupId, userId, 'event_created', 'events', events[0]?.id, 'GroupEvent', { recurring: true, count: events.length });
+    return events;
+  },
+
+  // ── P3 FIX: ICS export ───────────────────────────────────────────────────
+  async exportICS(groupId, userId, eventId) {
+    await _assertMember(groupId, userId);
+    const GE = _m('GroupEvent'); if (!GE) throw new Error('Model unavailable');
+    const event = await GE.findOne({ where: { id: eventId, groupId } });
+    if (!event) throw Object.assign(new Error('Event not found'), { status: 404 });
+    const fmt = (d) => {
+      const dt = new Date(d);
+      return dt.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+    };
+    const uid  = `${event.id}-${groupId}@moodchat.app`;
+    const now  = fmt(new Date());
+    const dtStart = fmt(event.startTime);
+    const dtEnd   = event.endTime ? fmt(event.endTime) : fmt(new Date(new Date(event.startTime).getTime() + 3600_000));
+    const ics = [
+      'BEGIN:VCALENDAR',
+      'VERSION:2.0',
+      'PRODID:-//MoodChat//Group Events//EN',
+      'CALSCALE:GREGORIAN',
+      'METHOD:PUBLISH',
+      'BEGIN:VEVENT',
+      `UID:${uid}`,
+      `DTSTAMP:${now}`,
+      `DTSTART:${dtStart}`,
+      `DTEND:${dtEnd}`,
+      `SUMMARY:${(event.title || '').replace(/[,;\\]/g, '\\$&')}`,
+      `DESCRIPTION:${(event.description || '').replace(/\n/g, '\\n').replace(/[,;\\]/g, '\\$&')}`,
+      event.location ? `LOCATION:${event.location.replace(/[,;\\]/g, '\\$&')}` : '',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].filter(Boolean).join('\r\n');
+    return { ics, filename: `event-${event.id}.ics`, contentType: 'text/calendar; charset=utf-8' };
   },
 };
 
@@ -386,9 +497,14 @@ const FinanceService = {
   async create(groupId, userId, data) {
     await _assertMember(groupId, userId);
     const GFin = _m('GroupFinance'); if (!GFin) throw new Error('Model unavailable');
-    const tx = await GFin.create({ groupId, createdBy: userId, ...data });
-    _broadcast(groupId, 'group:finance:created', { transaction: tx.toJSON() });
-    _log(groupId, userId, 'finance_created', 'finances', tx.id, 'GroupFinance', { type: data.type, amount: data.amount });
+    // P2 FIX: Compute running balance from the latest transaction
+    const lastTx = await GFin.findOne({ where: { groupId, deletedAt: null }, order: [['createdAt','DESC']], attributes: ['runningBalance'] });
+    const prevBalance = lastTx ? parseFloat(lastTx.runningBalance || 0) : 0;
+    const delta = ['income','levy'].includes(data.type) ? +data.amount : -Math.abs(+data.amount);
+    const runningBalance = parseFloat((prevBalance + delta).toFixed(2));
+    const tx = await GFin.create({ groupId, createdBy: userId, ...data, runningBalance });
+    _broadcast(groupId, 'group:finance:created', { transaction: tx.toJSON(), runningBalance });
+    _log(groupId, userId, 'finance_created', 'finances', tx.id, 'GroupFinance', { type: data.type, amount: data.amount, runningBalance });
     return tx;
   },
 
@@ -399,6 +515,41 @@ const FinanceService = {
     if (!tx) throw Object.assign(new Error('Transaction not found'), { status: 404 });
     await tx.update({ status: 'approved', approvedBy: userId });
     _broadcast(groupId, 'group:finance:approved', { txId, approvedBy: userId });
+    return tx;
+  },
+
+  // ── P3 FIX: Expense splitting ─────────────────────────────────────────────
+  async splitExpense(groupId, userId, { amount, description, splitAmong, currency = 'KES' }) {
+    await _assertMember(groupId, userId);
+    const GFin = _m('GroupFinance'); if (!GFin) throw new Error('Model unavailable');
+    if (!splitAmong?.length) throw new Error('splitAmong must include at least 1 user');
+    const perPerson = parseFloat((amount / splitAmong.length).toFixed(2));
+    const splits = [];
+    for (const uid of splitAmong) {
+      const lastTx = await GFin.findOne({ where: { groupId, deletedAt: null }, order: [['createdAt','DESC']], attributes: ['runningBalance'] });
+      const prevBal = lastTx ? parseFloat(lastTx.runningBalance || 0) : 0;
+      const runningBalance = parseFloat((prevBal - perPerson).toFixed(2));
+      const tx = await GFin.create({
+        groupId, createdBy: userId, type: 'expense', amount: perPerson, currency,
+        description: `[Split] ${description} — share for user ${uid}`,
+        category: 'split_expense', status: 'pending', runningBalance,
+        reference: `split_${Date.now()}_${uid}`,
+      });
+      splits.push({ userId: uid, amount: perPerson, transactionId: tx.id });
+    }
+    _broadcast(groupId, 'group:finance:split', { splitBy: userId, total: amount, perPerson, splits, description });
+    _log(groupId, userId, 'finance_created', 'finances', null, 'GroupFinance', { type: 'split', amount, splitAmong });
+    return { total: amount, perPerson, splits };
+  },
+
+  // Settle a split expense
+  async settleExpense(groupId, userId, transactionId) {
+    await _assertMember(groupId, userId);
+    const GFin = _m('GroupFinance'); if (!GFin) throw new Error('Model unavailable');
+    const tx = await GFin.findOne({ where: { id: transactionId, groupId } });
+    if (!tx) throw Object.assign(new Error('Transaction not found'), { status: 404 });
+    await tx.update({ status: 'completed', approvedBy: userId });
+    _broadcast(groupId, 'group:finance:settled', { transactionId, settledBy: userId });
     return tx;
   },
 };
@@ -550,4 +701,10 @@ const ModuleService = {
   },
 };
 
-module.exports = { TaskService, EventService, PollService, NoteService, FileService, FinanceService, AnalyticsService, AIService, ModuleService, _log, _broadcast };
+module.exports = {
+  TaskService, EventService, PollService, NoteService, FileService,
+  FinanceService, AnalyticsService, AIService, ModuleService,
+  _log, _broadcast,
+  // P2 FIX: Alias used by groupCronWorker for daily auto-summaries
+  queueAISummary: (groupId, type = 'daily') => AIService.queueSummary(groupId, type),
+};

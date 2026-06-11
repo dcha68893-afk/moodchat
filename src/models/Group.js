@@ -74,6 +74,69 @@ module.exports = (sequelize, DataTypes) => {
         defaultValue: false,
         allowNull: false,
       },
+      // ── P1 FIXES: Persist slow mode, posting rule, disappearing msgs ──────
+      slowModeInterval: {
+        type: DataTypes.INTEGER,
+        defaultValue: 0,
+        allowNull: false,
+        comment: 'Slow mode cooldown in seconds (0 = disabled)',
+      },
+      postingRule: {
+        type: DataTypes.ENUM('open', 'read_only', 'announcement', 'admin_only', 'scheduled'),
+        defaultValue: 'open',
+        allowNull: false,
+        comment: 'Who can post: open / read_only / announcement / admin_only / scheduled',
+      },
+      disappearingTimer: {
+        type: DataTypes.INTEGER,
+        defaultValue: 0,
+        allowNull: false,
+        comment: 'Disappearing message timer in seconds (0 = disabled)',
+      },
+      // ── P1 FIX: Server-side pinned messages ────────────────────────────────
+      pinnedMessageIds: {
+        type: DataTypes.ARRAY(DataTypes.INTEGER),
+        defaultValue: [],
+        allowNull: false,
+        comment: 'Array of pinned message IDs (max 10)',
+      },
+      // ── P2 FIX: Invite link usage tracking ────────────────────────────────
+      inviteLinkMaxUses: {
+        type: DataTypes.INTEGER,
+        defaultValue: 0,
+        allowNull: false,
+        comment: '0 = unlimited; > 0 = cap on uses',
+      },
+      inviteLinkUseCount: {
+        type: DataTypes.INTEGER,
+        defaultValue: 0,
+        allowNull: false,
+      },
+      // ── P2 FIX: Group @username for discovery ─────────────────────────────
+      groupUsername: {
+        type: DataTypes.STRING(30),
+        allowNull: true,
+        unique: true,
+        comment: 'Unique @handle for group (alphanumeric + underscore, 3-30 chars)',
+      },
+      // ── P2 FIX: Content filter word blocklist ─────────────────────────────
+      blockedWords: {
+        type: DataTypes.ARRAY(DataTypes.STRING),
+        defaultValue: [],
+        allowNull: false,
+        comment: 'Admin-defined word blocklist for auto-moderation',
+      },
+      // ── P1 FIX: Scheduled posting window ─────────────────────────────────
+      scheduledPostingStart: {
+        type: DataTypes.STRING(5),
+        allowNull: true,
+        comment: 'HH:MM start time for scheduled posting window',
+      },
+      scheduledPostingEnd: {
+        type: DataTypes.STRING(5),
+        allowNull: true,
+        comment: 'HH:MM end time for scheduled posting window',
+      },
       settings: {
         type: DataTypes.JSONB,
         defaultValue: {
@@ -136,6 +199,12 @@ module.exports = (sequelize, DataTypes) => {
         {
           fields: ['tags'],
           using: 'gin',
+        },
+        {
+          fields: ['groupUsername'],
+        },
+        {
+          fields: ['postingRule'],
         },
       ],
     }

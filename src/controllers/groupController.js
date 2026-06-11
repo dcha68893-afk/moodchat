@@ -28,6 +28,8 @@ const groupService = require('../services/groupService');
 const { groupServiceEvents } = groupService;
 const { AppError } = require('../middleware/errorHandler');
 const logger = require('../utils/logger');
+// P1 FIX: Cloudinary for group avatar CDN storage
+const cloudinaryService = require('../services/cloudinaryService');
 
 // ── LOCAL-FIRST SYNC HOOK ─────────────────────────────────────────────────────
 groupServiceEvents.on('groupMutation', ({ action, group, groupId, userId }) => {
@@ -95,15 +97,32 @@ class GroupController {
                 ...(memberIds || []).map(String),
             ])].filter(Boolean);
 
+            // P1 FIX: Upload avatar to Cloudinary if file provided with request
+            let avatarUrl = avatar;
+            if (req.file) {
+                try {
+                    if (cloudinaryService.isConfigured()) {
+                        const tmpResult = await cloudinaryService.uploadToCloudinary(
+                            req.file.buffer || require('fs').readFileSync(req.file.path),
+                            { folder: 'moodchat/group-avatars', width: 400, height: 400 }
+                        );
+                        if (tmpResult?.url) avatarUrl = tmpResult.url;
+                        if (req.file.path) try { require('fs').unlinkSync(req.file.path); } catch (_) {}
+                    } else if (req.file.path) {
+                        avatarUrl = `/uploads/groups/${require('path').basename(req.file.path)}`;
+                    }
+                } catch (uploadErr) {
+                    logger.error('[GroupController] Create group avatar upload error:', uploadErr.message);
+                }
+            }
+
             // FIX: destructure { group } — service returns { group: formattedGroup }
-            // Previously `group` was actually { group: {...} }, so group.id was undefined.
             const { group } = await groupService.createGroup({
                 name,
                 description,
-                avatar,
+                avatar     : avatarUrl,
                 creatorId  : userId,
                 members    : allMemberIds,
-                // FIX: honour both `privacy` string and `isPublic` boolean from client
                 privacy    : privacy || (isPublic === true ? 'public' : isPublic === false ? 'private' : 'public'),
                 isPublic   : isPublic !== undefined ? isPublic : (privacy === 'public'),
                 settings   : settings || {},
@@ -258,9 +277,31 @@ class GroupController {
         try {
             const { groupId } = req.params;
             const userId = getUserId(req);
-            const updateData = req.body;
+            const updateData = { ...req.body };
             if (!groupId) throw new AppError('Group ID is required', 400);
             if (!updateData || typeof updateData !== 'object') throw new AppError('Update data is required', 400);
+
+            // P1 FIX: Upload avatar to Cloudinary if file provided
+            if (req.file) {
+                try {
+                    if (cloudinaryService.isConfigured()) {
+                        const result = await cloudinaryService.uploadGroupAvatar(req.file.buffer || require('fs').readFileSync(req.file.path), groupId);
+                        if (result?.url) {
+                            updateData.avatar = result.url;
+                            // Clean up disk file if it exists
+                            if (req.file.path) try { require('fs').unlinkSync(req.file.path); } catch (_) {}
+                        }
+                    } else {
+                        // Fallback: use relative path (disk — will be lost on redeploy)
+                        updateData.avatar = req.file.path
+                            ? `/uploads/groups/${require('path').basename(req.file.path)}`
+                            : updateData.avatar;
+                    }
+                } catch (uploadErr) {
+                    logger.error('[GroupController] Avatar upload error:', uploadErr.message);
+                    // Non-fatal — continue without avatar update
+                }
+            }
 
             const group = await groupService.updateGroup(groupId, userId, updateData);
             res.status(200).json({
@@ -461,11 +502,60 @@ class GroupController {
             const group = await grp.findByPk(groupId);
             if (!group) throw new AppError('Group not found', 404);
 
+            // P2 FIX: Enforce invite link usage-count limit
+            const { token } = req.body;
+            if (token && group.inviteLink === token) {
+                if (group.inviteLinkExpires && new Date(group.inviteLinkExpires) < new Date()) {
+                    throw new AppError('Invite link has expired', 400);
+                }
+                if (group.inviteLinkMaxUses > 0 && group.inviteLinkUseCount >= group.inviteLinkMaxUses) {
+                    throw new AppError('Invite link has reached its maximum uses', 400);
+                }
+                // Increment use count
+                await grp.update(
+                    { inviteLinkUseCount: (group.inviteLinkUseCount || 0) + 1 },
+                    { where: { id: groupId } }
+                );
+            }
+
             let membership;
             const existing = await GM.findOne({ where: { groupId, userId } });
             if (existing) {
                 // Re-join: clear leftAt if they had left
                 if (existing.leftAt) await existing.update({ leftAt: null, joinedAt: new Date() });
+                membership = existing;
+            } else {
+                membership = await GM.create({ groupId, userId, role: 'member', joinedAt: new Date() });
+            }
+
+            // Update group member count
+            try {
+                const liveCount = await GM.count({ where: { groupId, leftAt: null } });
+                await grp.update({ stats: { ...(group.stats || {}), totalMembers: liveCount } }, { where: { id: groupId } });
+            } catch (_) {}
+            const _ = membership; // suppress lint
+
+            const io = global.__socketIO;
+            if (io) {
+                io.to(`group:${groupId}`).emit('group:member:joined', { groupId, memberId: userId, timestamp: new Date() });
+                io.to(`user:${userId}`).emit('group:localSync', { action: 'member_add', groupId });
+                // Auto-join the socket room
+                const userRoom = io.sockets.adapter.rooms?.get(`user:${userId}`);
+                if (userRoom) {
+                    userRoom.forEach(socketId => {
+                        const sock = io.sockets.sockets?.get(socketId);
+                        if (sock) sock.join(`group:${groupId}`);
+                    });
+                }
+            }
+
+            res.status(200).json({
+                success: true,
+                message: 'Successfully joined the group',
+                data: withLocalSyncMeta({ joined: true, groupId }, 'member_add'),
+            });
+        } catch (error) { handleError(error, next, 'joinGroup'); }
+    }
                 membership = existing;
             } else {
                 membership = await GM.create({ groupId, userId, role: 'member', joinedAt: new Date() });

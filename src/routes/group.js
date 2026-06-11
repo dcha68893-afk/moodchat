@@ -44,6 +44,25 @@ try {
 
 const { Op } = require('sequelize');
 
+// ── P2 FIX: Content filter + moderation log ──────────────────────────────────
+let contentFilter, ModerationLog;
+try {
+    contentFilter  = require('../services/contentFilter');
+    const db2      = require('../models');
+    ModerationLog  = db2.models?.ModerationLog || db2.ModerationLog || null;
+} catch(_) {}
+
+// ── P1 FIX: FCM push notifications ───────────────────────────────────────────
+let pushService;
+try { pushService = require('../services/pushService'); } catch(_) {}
+
+// ── Helper: log a moderation action to DB ─────────────────────────────────────
+async function _logMod(groupId, performedBy, action, targetUserId = null, reason = null, metadata = {}) {
+    try {
+        if (ModerationLog) await ModerationLog.create({ groupId, performedBy, action, targetUserId, reason, metadata });
+    } catch (_) { /* non-fatal */ }
+}
+
 // ── FIX: import the fixed external controller ────────────────────────────────
 // This replaces the old inline GroupController class which had the broken
 // createGroup() that called Group.create() directly without creating a Chat.
@@ -268,7 +287,17 @@ router.get('/user', groupController.getUserGroups.bind(groupController));
 
 // ── Parametric group routes (after all static paths) ─────────────────────────
 router.get('/:groupId',    groupController.getGroupById.bind(groupController));
-router.put('/:groupId',    groupController.updateGroup.bind(groupController));
+// P1 FIX: Multer memoryStorage for Cloudinary — avatar goes to buffer not disk
+const _multer = require('multer');
+const _groupAvatarUpload = _multer({
+    storage: _multer.memoryStorage(),
+    limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+    fileFilter: (req, file, cb) => {
+        if (['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(file.mimetype)) cb(null, true);
+        else cb(new Error('Only image files allowed for group avatar'), false);
+    },
+});
+router.put('/:groupId', _groupAvatarUpload.single('avatar'), groupController.updateGroup.bind(groupController));
 router.delete('/:groupId', groupController.deleteGroup.bind(groupController));
 
 // ── Group members ─────────────────────────────────────────────────────────────
@@ -426,12 +455,82 @@ router.post('/:groupId/messages', async (req, res) => {
             if (!membership) return res.status(403).json({ success: false, message: 'You are not a member of this group' });
         }
 
-        const group = await Group.findByPk(groupId, { attributes: ['id', 'chatId', 'stats'] });
+        const group = await Group.findByPk(groupId, { attributes: ['id', 'chatId', 'stats', 'postingRule', 'slowModeInterval', 'blockedWords', 'scheduledPostingStart', 'scheduledPostingEnd', 'settings', 'disappearingTimer'] });
         if (!group) {
             return res.status(404).json({ success: false, message: 'Group not found' });
         }
         if (!Message || !group.chatId) {
             return res.status(503).json({ success: false, message: 'Group chat storage is not available' });
+        }
+
+        // ── P1 FIX: Enforce posting rule server-side ───────────────────────
+        const postingRule = group.postingRule || 'open';
+        if (postingRule !== 'open') {
+            let membership = GroupMember ? await GroupMember.findOne({ where: { groupId, userId } }) : null;
+            const isAdmin = membership && ['owner', 'admin', 'moderator'].includes(membership.role);
+            if (postingRule === 'read_only') {
+                return res.status(403).json({ success: false, message: 'This group is in read-only mode', code: 'READ_ONLY' });
+            }
+            if ((postingRule === 'announcement' || postingRule === 'admin_only') && !isAdmin) {
+                return res.status(403).json({ success: false, message: 'Only admins can post in this group', code: 'ADMIN_ONLY' });
+            }
+            if (postingRule === 'scheduled' && group.scheduledPostingStart && group.scheduledPostingEnd) {
+                const now = new Date();
+                const [sh, sm] = group.scheduledPostingStart.split(':').map(Number);
+                const [eh, em] = group.scheduledPostingEnd.split(':').map(Number);
+                const nowMins  = now.getUTCHours() * 60 + now.getUTCMinutes();
+                const startMins = sh * 60 + sm;
+                const endMins   = eh * 60 + em;
+                if (nowMins < startMins || nowMins > endMins) {
+                    return res.status(403).json({ success: false, message: `Posting is only allowed between ${group.scheduledPostingStart}–${group.scheduledPostingEnd} UTC`, code: 'OUTSIDE_WINDOW' });
+                }
+            }
+        }
+
+        // ── P1 FIX: Enforce slow mode server-side ─────────────────────────
+        const slowSecs = group.slowModeInterval || 0;
+        if (slowSecs > 0) {
+            // Use contentFilter flood tracker as a proxy for slow-mode tracking
+            const key = `slow:${userId}:${groupId}`;
+            const _slowMap = global.__slowModeMap = global.__slowModeMap || new Map();
+            const lastSent = _slowMap.get(key) || 0;
+            const elapsed  = (Date.now() - lastSent) / 1000;
+            if (elapsed < slowSecs) {
+                const remaining = Math.ceil(slowSecs - elapsed);
+                return res.status(429).json({ success: false, message: `Slow mode: wait ${remaining}s before sending again`, remaining, code: 'SLOW_MODE' });
+            }
+            _slowMap.set(key, Date.now());
+        }
+
+        // ── P2 FIX: Anti-flood AutoMod ─────────────────────────────────────
+        if (contentFilter) {
+            const { flooded } = contentFilter.trackAndCheckFlood(userId, groupId);
+            if (flooded && GroupMember) {
+                // Auto-mute user for FLOOD_MUTE_SECS
+                const muteUntil = new Date(Date.now() + contentFilter.FLOOD_MUTE_SECS * 1000);
+                await GroupMember.update({ mutedUntil: muteUntil }, { where: { groupId, userId } });
+                await _logMod(groupId, userId, 'mute', userId, 'Auto-muted: flood detection', { autoMod: true, mutedUntil: muteUntil });
+                const io = global.__socketIO;
+                if (io) io.to(`group:${groupId}`).emit('group:member:auto_muted', { userId, groupId, until: muteUntil });
+                return res.status(429).json({ success: false, message: `You have been auto-muted for ${contentFilter.FLOOD_MUTE_SECS}s due to flooding`, code: 'FLOOD_MUTED' });
+            }
+        }
+
+        // ── P2 FIX: Check mute status ──────────────────────────────────────
+        if (GroupMember) {
+            const membership = await GroupMember.findOne({ where: { groupId, userId } });
+            if (membership?.mutedUntil && new Date(membership.mutedUntil) > new Date()) {
+                return res.status(403).json({ success: false, message: 'You are muted in this group', mutedUntil: membership.mutedUntil, code: 'MUTED' });
+            }
+        }
+
+        // ── P2 FIX: Content filter (blocked words) ─────────────────────────
+        if (contentFilter && group.blockedWords?.length) {
+            const { blocked, word } = contentFilter.checkBlockedWords(trimmedContent, group.blockedWords);
+            if (blocked) {
+                await _logMod(groupId, userId, 'content_filtered', userId, `Blocked word: ${word}`, { word });
+                return res.status(400).json({ success: false, message: 'Your message contains prohibited content', code: 'BLOCKED_CONTENT' });
+            }
         }
 
         let senderName = 'User', senderAvatar = null;
@@ -445,6 +544,10 @@ router.post('/:groupId/messages', async (req, res) => {
                 }
             } catch (_) {}
         }
+
+        // P1 FIX: Set expiresAt if group has disappearing timer enabled
+        const disappearSecs = group.disappearingTimer || 0;
+        const expiresAt = disappearSecs > 0 ? new Date(Date.now() + disappearSecs * 1000) : null;
 
         const record = await Message.create({
             chatId: group.chatId,
@@ -465,7 +568,8 @@ router.post('/:groupId/messages', async (req, res) => {
                 attachment
             },
             sentAt: new Date(),
-            deliveredAt: new Date()
+            deliveredAt: new Date(),
+            ...(expiresAt && { expiresAt, disappearingTimer: disappearSecs }),
         });
 
         const savedRecord = await Message.findByPk(record.id, {
@@ -528,6 +632,39 @@ router.post('/:groupId/messages', async (req, res) => {
             }
         } else {
             console.warn('[GROUP FLOW] global.__socketIO not set — real-time not emitted');
+        }
+
+        // ── P2 FIX: @everyone bulk mention ────────────────────────────────
+        if (trimmedContent.includes('@everyone') && GroupMember) {
+            try {
+                const membership = await GroupMember.findOne({ where: { groupId, userId } });
+                const isAdmin = membership && ['owner', 'admin', 'moderator'].includes(membership.role);
+                if (isAdmin) {
+                    const io = global.__socketIO;
+                    if (io) {
+                        io.to(`group:${groupId}`).emit('group:mention:everyone', {
+                            groupId, messageId: savedMessage.id, senderId: userId, timestamp: new Date().toISOString(),
+                        });
+                    }
+                    await _logMod(groupId, userId, 'message_deleted', null, '@everyone mention sent', { messageId: savedMessage.id });
+                }
+            } catch (_) {}
+        }
+
+        // ── P1 FIX: FCM push notification to offline members ──────────────
+        if (pushService?.isConfigured()) {
+            setImmediate(async () => {
+                try {
+                    const senderName = req.user?.firstName
+                        ? `${req.user.firstName} ${req.user.lastName || ''}`.trim()
+                        : req.user?.username || 'Someone';
+                    await pushService.pushGroupMessage(
+                        groupId,
+                        { ...savedMessage, senderId: userId, senderName, content: trimmedContent },
+                        group.name || 'Group'
+                    );
+                } catch (_) {}
+            });
         }
 
         return res.status(201).json({ success: true, message: 'Message sent successfully', data: { message: savedMessage } });
@@ -594,6 +731,516 @@ router.delete('/:groupId/messages/:messageId', async (req, res) => {
     } catch (error) {
         console.error('[Groups] DELETE message error:', error.message);
         return res.status(500).json({ success: false, message: 'Failed to delete message' });
+    }
+});
+
+    } catch (error) {
+        console.error('[Groups] DELETE message error:', error.message);
+        return res.status(500).json({ success: false, message: 'Failed to delete message' });
+    }
+});
+
+// ============================================================================
+// P1 FIX: MESSAGE PINNING — POST/DELETE/GET /:groupId/messages/:id/pin
+// ============================================================================
+router.post('/:groupId/messages/:messageId/pin', async (req, res) => {
+    try {
+        const userId = getUserId(req);
+        const groupId = parseInt(req.params.groupId);
+        const messageId = parseInt(req.params.messageId);
+        if (!userId) return res.status(401).json({ success: false, message: 'Auth required' });
+        const membership = GroupMember ? await GroupMember.findOne({ where: { groupId, userId } }) : null;
+        if (!membership || !['owner', 'admin', 'moderator'].includes(membership.role))
+            return res.status(403).json({ success: false, message: 'Only admins can pin messages' });
+        const group = await Group.findByPk(groupId);
+        if (!group) return res.status(404).json({ success: false, message: 'Group not found' });
+        const pins = Array.isArray(group.pinnedMessageIds) ? [...group.pinnedMessageIds] : [];
+        if (!pins.includes(messageId)) {
+            if (pins.length >= 10) pins.shift(); // max 10 pins, drop oldest
+            pins.push(messageId);
+            await group.update({ pinnedMessageIds: pins });
+        }
+        const io = global.__socketIO;
+        if (io) io.to(`group:${groupId}`).emit('group:message:pinned', { groupId, messageId, pinnedBy: userId });
+        await _logMod(groupId, userId, 'message_deleted', null, 'Message pinned', { messageId, action: 'pin' });
+        return res.json({ success: true, message: 'Message pinned', data: { pinnedMessageIds: pins } });
+    } catch (e) {
+        return res.status(500).json({ success: false, message: 'Failed to pin message', error: e.message });
+    }
+});
+
+router.delete('/:groupId/messages/:messageId/pin', async (req, res) => {
+    try {
+        const userId = getUserId(req);
+        const groupId = parseInt(req.params.groupId);
+        const messageId = parseInt(req.params.messageId);
+        if (!userId) return res.status(401).json({ success: false, message: 'Auth required' });
+        const membership = GroupMember ? await GroupMember.findOne({ where: { groupId, userId } }) : null;
+        if (!membership || !['owner', 'admin', 'moderator'].includes(membership.role))
+            return res.status(403).json({ success: false, message: 'Only admins can unpin messages' });
+        const group = await Group.findByPk(groupId);
+        if (!group) return res.status(404).json({ success: false, message: 'Group not found' });
+        const pins = (group.pinnedMessageIds || []).filter(id => id !== messageId);
+        await group.update({ pinnedMessageIds: pins });
+        const io = global.__socketIO;
+        if (io) io.to(`group:${groupId}`).emit('group:message:unpinned', { groupId, messageId, unpinnedBy: userId });
+        return res.json({ success: true, message: 'Message unpinned', data: { pinnedMessageIds: pins } });
+    } catch (e) {
+        return res.status(500).json({ success: false, message: 'Failed to unpin message', error: e.message });
+    }
+});
+
+router.get('/:groupId/pinned', async (req, res) => {
+    try {
+        const userId = getUserId(req);
+        const groupId = parseInt(req.params.groupId);
+        if (!userId) return res.status(401).json({ success: false, message: 'Auth required' });
+        const group = await Group.findByPk(groupId, { attributes: ['id', 'pinnedMessageIds'] });
+        if (!group) return res.status(404).json({ success: false, message: 'Group not found' });
+        const ids = group.pinnedMessageIds || [];
+        let messages = [];
+        if (Message && ids.length) {
+            messages = await Message.findAll({ where: { id: ids } });
+            messages = messages.map(m => m.toJSON ? m.toJSON() : m);
+        }
+        return res.json({ success: true, data: { pinnedMessageIds: ids, messages } });
+    } catch (e) {
+        return res.status(500).json({ success: false, message: 'Failed to get pinned messages', error: e.message });
+    }
+});
+
+// ============================================================================
+// P1 FIX: REPORT MESSAGE — POST /:groupId/messages/:id/report
+// ============================================================================
+router.post('/:groupId/messages/:messageId/report', async (req, res) => {
+    try {
+        const userId = getUserId(req);
+        const groupId = parseInt(req.params.groupId);
+        const messageId = parseInt(req.params.messageId);
+        const { reason = 'spam', description = '' } = req.body;
+        if (!userId) return res.status(401).json({ success: false, message: 'Auth required' });
+        const dbInner = require('../models');
+        const MsgReport = dbInner.models?.MessageReport || dbInner.MessageReport || null;
+        if (!MsgReport) return res.status(503).json({ success: false, message: 'Report service unavailable' });
+        const msg = Message ? await Message.findByPk(messageId) : null;
+        if (!msg) return res.status(404).json({ success: false, message: 'Message not found' });
+        const report = await MsgReport.create({
+            reporterId: userId,
+            messageId,
+            chatId: msg.chatId || 0,
+            reason,
+            description,
+            status: 'pending',
+            context: { groupId },
+        });
+        return res.status(201).json({ success: true, message: 'Report submitted', data: { reportId: report.id } });
+    } catch (e) {
+        return res.status(500).json({ success: false, message: 'Failed to submit report', error: e.message });
+    }
+});
+
+// ============================================================================
+// P1 FIX: MODERATION AUDIT LOG — GET /:groupId/moderation-log
+// ============================================================================
+router.get('/:groupId/moderation-log', async (req, res) => {
+    try {
+        const userId = getUserId(req);
+        const groupId = parseInt(req.params.groupId);
+        if (!userId) return res.status(401).json({ success: false, message: 'Auth required' });
+        const membership = GroupMember ? await GroupMember.findOne({ where: { groupId, userId } }) : null;
+        if (!membership || !['owner', 'admin', 'moderator'].includes(membership.role))
+            return res.status(403).json({ success: false, message: 'Admin access required' });
+        if (!ModerationLog) return res.json({ success: true, data: { logs: [], note: 'ModerationLog model not available' } });
+        const limit = Math.min(parseInt(req.query.limit) || 50, 200);
+        const offset = parseInt(req.query.offset) || 0;
+        const logs = await ModerationLog.findAll({
+            where: { groupId },
+            order: [['createdAt', 'DESC']],
+            limit,
+            offset,
+        });
+        return res.json({ success: true, data: { logs, total: logs.length } });
+    } catch (e) {
+        return res.status(500).json({ success: false, message: 'Failed to get moderation log', error: e.message });
+    }
+});
+
+// ============================================================================
+// P1 FIX: UPDATE SETTINGS — persist slowModeInterval, postingRule, disappearingTimer
+// (augments existing PUT /:groupId/settings in groupController)
+// ============================================================================
+router.put('/:groupId/moderation-settings', async (req, res) => {
+    try {
+        const userId = getUserId(req);
+        const groupId = parseInt(req.params.groupId);
+        if (!userId) return res.status(401).json({ success: false, message: 'Auth required' });
+        const membership = GroupMember ? await GroupMember.findOne({ where: { groupId, userId } }) : null;
+        if (!membership || !['owner', 'admin'].includes(membership.role))
+            return res.status(403).json({ success: false, message: 'Admin access required' });
+        const group = await Group.findByPk(groupId);
+        if (!group) return res.status(404).json({ success: false, message: 'Group not found' });
+
+        const update = {};
+        if (req.body.slowModeInterval !== undefined) {
+            update.slowModeInterval = Math.max(0, parseInt(req.body.slowModeInterval) || 0);
+            await _logMod(groupId, userId,
+                update.slowModeInterval > 0 ? 'slow_mode_set' : 'slow_mode_disabled',
+                null, null, { intervalSeconds: update.slowModeInterval });
+        }
+        if (req.body.postingRule !== undefined) {
+            const validRules = ['open', 'read_only', 'announcement', 'admin_only', 'scheduled'];
+            if (!validRules.includes(req.body.postingRule))
+                return res.status(400).json({ success: false, message: 'Invalid posting rule' });
+            update.postingRule = req.body.postingRule;
+            await _logMod(groupId, userId, 'posting_rule_changed', null, null, { rule: update.postingRule });
+        }
+        if (req.body.disappearingTimer !== undefined) {
+            update.disappearingTimer = Math.max(0, parseInt(req.body.disappearingTimer) || 0);
+            await _logMod(groupId, userId, 'disappearing_set', null, null, { timerSeconds: update.disappearingTimer });
+        }
+        if (req.body.scheduledPostingStart) update.scheduledPostingStart = req.body.scheduledPostingStart;
+        if (req.body.scheduledPostingEnd)   update.scheduledPostingEnd   = req.body.scheduledPostingEnd;
+        if (Array.isArray(req.body.blockedWords)) update.blockedWords = req.body.blockedWords.map(w => String(w).trim().toLowerCase()).filter(Boolean);
+
+        await group.update(update);
+        const io = global.__socketIO;
+        if (io) io.to(`group:${groupId}`).emit('group:settings:updated', { groupId, settings: update });
+        return res.json({ success: true, message: 'Moderation settings updated', data: update });
+    } catch (e) {
+        return res.status(500).json({ success: false, message: 'Failed to update settings', error: e.message });
+    }
+});
+
+// ============================================================================
+// P2 FIX: MEMBER WARN — POST /:groupId/members/:memberId/warn
+// ============================================================================
+router.post('/:groupId/members/:memberId/warn', async (req, res) => {
+    try {
+        const userId = getUserId(req);
+        const groupId = parseInt(req.params.groupId);
+        const targetId = parseInt(req.params.memberId);
+        const { reason = '' } = req.body;
+        if (!userId) return res.status(401).json({ success: false, message: 'Auth required' });
+        const actor = GroupMember ? await GroupMember.findOne({ where: { groupId, userId } }) : null;
+        if (!actor || !['owner', 'admin', 'moderator'].includes(actor.role))
+            return res.status(403).json({ success: false, message: 'Admin access required' });
+        const target = GroupMember ? await GroupMember.findOne({ where: { groupId, userId: targetId } }) : null;
+        if (!target) return res.status(404).json({ success: false, message: 'Member not found' });
+        target.warnings = (target.warnings || 0) + 1;
+        await target.save();
+        await _logMod(groupId, userId, 'warn', targetId, reason, { warningCount: target.warnings });
+        const io = global.__socketIO;
+        if (io) io.to(`user:${targetId}`).emit('group:member:warned', { groupId, warnings: target.warnings, reason });
+        return res.json({ success: true, message: 'Warning issued', data: { warnings: target.warnings, targetId } });
+    } catch (e) {
+        return res.status(500).json({ success: false, message: 'Failed to issue warning', error: e.message });
+    }
+});
+
+// ============================================================================
+// P2 FIX: MEMBER NICKNAME & CUSTOM TITLE — PUT /:groupId/members/:memberId/profile
+// ============================================================================
+router.put('/:groupId/members/:memberId/profile', async (req, res) => {
+    try {
+        const userId = getUserId(req);
+        const groupId = parseInt(req.params.groupId);
+        const memberId = parseInt(req.params.memberId);
+        const { nickname, customTitle } = req.body;
+        if (!userId) return res.status(401).json({ success: false, message: 'Auth required' });
+        const actor = GroupMember ? await GroupMember.findOne({ where: { groupId, userId } }) : null;
+        const isSelf = String(userId) === String(memberId);
+        const isAdmin = actor && ['owner', 'admin'].includes(actor.role);
+        // Can set own nickname; customTitle requires admin
+        if (!isSelf && !isAdmin) return res.status(403).json({ success: false, message: 'Not authorized' });
+        if (customTitle && !isAdmin) return res.status(403).json({ success: false, message: 'Only admins can set custom titles' });
+        const target = GroupMember ? await GroupMember.findOne({ where: { groupId, userId: memberId } }) : null;
+        if (!target) return res.status(404).json({ success: false, message: 'Member not found' });
+        const update = {};
+        if (nickname !== undefined) update.nickname = nickname ? String(nickname).slice(0, 50) : null;
+        if (customTitle !== undefined && isAdmin) update.customTitle = customTitle ? String(customTitle).slice(0, 50) : null;
+        await target.update(update);
+        return res.json({ success: true, message: 'Member profile updated', data: update });
+    } catch (e) {
+        return res.status(500).json({ success: false, message: 'Failed to update member profile', error: e.message });
+    }
+});
+
+// ============================================================================
+// P2 FIX: INVITE LINK WITH USAGE COUNT — PATCH existing invite-link route
+// Now handled via maxUses param in POST /:groupId/invite-link
+// ============================================================================
+router.get('/:groupId/invite-link/qr', async (req, res) => {
+    // P2 FIX: Return QR code data for invite link (frontend renders via qrcode.js)
+    try {
+        const userId = getUserId(req);
+        const groupId = parseInt(req.params.groupId);
+        if (!userId) return res.status(401).json({ success: false, message: 'Auth required' });
+        const group = await Group.findByPk(groupId, { attributes: ['id', 'inviteLink', 'inviteLinkExpires'] });
+        if (!group) return res.status(404).json({ success: false, message: 'Group not found' });
+        if (!group.inviteLink) return res.status(404).json({ success: false, message: 'No invite link generated. Create one first.' });
+        // Return the link URL — frontend generates QR code client-side
+        const baseUrl = process.env.FRONTEND_URL || 'https://moodchat.app';
+        const inviteUrl = `${baseUrl}/join?token=${group.inviteLink}`;
+        return res.json({ success: true, data: { inviteUrl, inviteToken: group.inviteLink, expiresAt: group.inviteLinkExpires } });
+    } catch (e) {
+        return res.status(500).json({ success: false, message: 'Failed to get QR data', error: e.message });
+    }
+});
+
+// ============================================================================
+// P2 FIX: GROUP @USERNAME LOOKUP — GET /by-username/:username
+// ============================================================================
+router.get('/by-username/:username', async (req, res) => {
+    try {
+        const { username } = req.params;
+        if (!username || !/^[a-zA-Z0-9_]{3,30}$/.test(username))
+            return res.status(400).json({ success: false, message: 'Invalid username format' });
+        const group = await Group.findOne({ where: { groupUsername: username.toLowerCase(), isPublic: true } });
+        if (!group) return res.status(404).json({ success: false, message: 'Group not found' });
+        return res.json({ success: true, data: formatGroup(group) });
+    } catch (e) {
+        return res.status(500).json({ success: false, message: 'Lookup failed', error: e.message });
+    }
+});
+
+router.put('/:groupId/username', async (req, res) => {
+    try {
+        const userId = getUserId(req);
+        const groupId = parseInt(req.params.groupId);
+        const { username } = req.body;
+        if (!userId) return res.status(401).json({ success: false, message: 'Auth required' });
+        if (!username || !/^[a-zA-Z0-9_]{3,30}$/.test(username))
+            return res.status(400).json({ success: false, message: 'Username must be 3-30 alphanumeric/underscore characters' });
+        const membership = GroupMember ? await GroupMember.findOne({ where: { groupId, userId } }) : null;
+        if (!membership || !['owner', 'admin'].includes(membership.role))
+            return res.status(403).json({ success: false, message: 'Only owner/admin can set group username' });
+        const group = await Group.findByPk(groupId);
+        if (!group) return res.status(404).json({ success: false, message: 'Group not found' });
+        const lower = username.toLowerCase();
+        const existing = await Group.findOne({ where: { groupUsername: lower } });
+        if (existing && existing.id !== groupId)
+            return res.status(409).json({ success: false, message: 'Username already taken' });
+        await group.update({ groupUsername: lower });
+        return res.json({ success: true, message: 'Group username set', data: { groupUsername: lower } });
+    } catch (e) {
+        return res.status(500).json({ success: false, message: 'Failed to set username', error: e.message });
+    }
+});
+
+// ============================================================================
+// P3 FIX: TRENDING GROUPS — GET /trending
+// ============================================================================
+router.get('/trending', async (req, res) => {
+    try {
+        const limit = Math.min(parseInt(req.query.limit) || 10, 50);
+        const { Op: OpInner } = require('sequelize');
+        // Use stats.totalMessages as velocity proxy — groups with most recent activity
+        const groups = await Group.findAll({
+            where: { isPublic: true },
+            order: [['updatedAt', 'DESC']],
+            limit,
+            attributes: ['id', 'name', 'description', 'avatar', 'purpose', 'tags', 'stats', 'isVerified', 'groupUsername'],
+        });
+        return res.json({ success: true, data: { groups: groups.map(g => formatGroup(g)) } });
+    } catch (e) {
+        return res.status(500).json({ success: false, message: 'Failed to get trending groups', error: e.message });
+    }
+});
+
+// ============================================================================
+// P2 FIX: ADMIN — VERIFY GROUP — POST /admin/:groupId/verify
+// ============================================================================
+router.post('/admin/:groupId/verify', async (req, res) => {
+    try {
+        const userId = getUserId(req);
+        if (!userId) return res.status(401).json({ success: false, message: 'Auth required' });
+        // Basic: only platform admin — check via user record
+        const dbInner = require('../models');
+        const UserModel = dbInner.models?.Users || dbInner.Users;
+        const actor = UserModel ? await UserModel.findByPk(userId, { attributes: ['id', 'role'] }) : null;
+        if (!actor || actor.role !== 'admin') return res.status(403).json({ success: false, message: 'Platform admin access required' });
+        const groupId = parseInt(req.params.groupId);
+        const group = await Group.findByPk(groupId);
+        if (!group) return res.status(404).json({ success: false, message: 'Group not found' });
+        await group.update({ isVerified: true });
+        const io = global.__socketIO;
+        if (io) io.to(`group:${groupId}`).emit('group:verified', { groupId });
+        return res.json({ success: true, message: 'Group verified', data: { groupId, isVerified: true } });
+    } catch (e) {
+        return res.status(500).json({ success: false, message: 'Failed to verify group', error: e.message });
+    }
+});
+
+// ============================================================================
+// P2 FIX: INVITE LINK WITH MAX USES
+// Override the generateInviteLink to accept maxUses param
+// ============================================================================
+router.post('/:groupId/invite-link/generate', async (req, res) => {
+    try {
+        const userId = getUserId(req);
+        const groupId = parseInt(req.params.groupId);
+        if (!userId) return res.status(401).json({ success: false, message: 'Auth required' });
+        const membership = GroupMember ? await GroupMember.findOne({ where: { groupId, userId } }) : null;
+        if (!membership || !['owner', 'admin'].includes(membership.role))
+            return res.status(403).json({ success: false, message: 'Admin access required' });
+        const group = await Group.findByPk(groupId);
+        if (!group) return res.status(404).json({ success: false, message: 'Group not found' });
+        const crypto = require('crypto');
+        const expiresIn = parseInt(req.body.expiresInHours) || 24;
+        const maxUses = parseInt(req.body.maxUses) || 0;
+        group.inviteLink = crypto.randomBytes(16).toString('hex');
+        group.inviteLinkExpires = new Date(Date.now() + expiresIn * 3600_000);
+        group.inviteLinkMaxUses = maxUses;
+        group.inviteLinkUseCount = 0;
+        await group.save();
+        const baseUrl = process.env.FRONTEND_URL || 'https://moodchat.app';
+        return res.json({
+            success: true, message: 'Invite link generated',
+            data: { inviteLink: group.inviteLink, inviteUrl: `${baseUrl}/join?token=${group.inviteLink}`, expiresAt: group.inviteLinkExpires, maxUses, useCount: 0 },
+        });
+    } catch (e) {
+        return res.status(500).json({ success: false, message: 'Failed to generate invite link', error: e.message });
+    }
+});
+
+// ============================================================================
+// P2 FIX: TOPIC THREADS
+// POST   /:groupId/messages/:messageId/thread  — create thread from message
+// GET    /:groupId/threads                     — list threads in group
+// GET    /:groupId/threads/:threadId/replies   — get replies in thread
+// POST   /:groupId/threads/:threadId/reply     — post reply to thread
+// PATCH  /:groupId/threads/:threadId/lock      — lock/unlock thread (admin)
+// ============================================================================
+router.post('/:groupId/messages/:messageId/thread', async (req, res) => {
+    try {
+        const userId  = getUserId(req);
+        const groupId = parseInt(req.params.groupId);
+        const parentMessageId = parseInt(req.params.messageId);
+        const { title = '' } = req.body;
+        if (!userId) return res.status(401).json({ success: false, message: 'Auth required' });
+        const db = require('../models');
+        const GroupThread = db.models?.GroupThread || db.GroupThread;
+        if (!GroupThread) return res.status(503).json({ success: false, message: 'Thread service unavailable' });
+        // Check not already threaded
+        const existing = await GroupThread.findOne({ where: { groupId, parentMessageId } });
+        if (existing) return res.json({ success: true, message: 'Thread already exists', data: { thread: existing } });
+        const thread = await GroupThread.create({ groupId, parentMessageId, createdBy: userId, title: title.slice(0, 200) });
+        const io = global.__socketIO;
+        if (io) io.to(`group:${groupId}`).emit('group:thread:created', { groupId, thread });
+        return res.status(201).json({ success: true, message: 'Thread created', data: { thread } });
+    } catch (e) {
+        return res.status(500).json({ success: false, message: 'Failed to create thread', error: e.message });
+    }
+});
+
+router.get('/:groupId/threads', async (req, res) => {
+    try {
+        const userId  = getUserId(req);
+        const groupId = parseInt(req.params.groupId);
+        if (!userId) return res.status(401).json({ success: false, message: 'Auth required' });
+        const db = require('../models');
+        const GroupThread = db.models?.GroupThread || db.GroupThread;
+        if (!GroupThread) return res.json({ success: true, data: { threads: [] } });
+        const limit  = Math.min(parseInt(req.query.limit) || 20, 100);
+        const offset = parseInt(req.query.offset) || 0;
+        const threads = await GroupThread.findAll({
+            where: { groupId, isArchived: false },
+            order: [['lastReplyAt', 'DESC'], ['createdAt', 'DESC']],
+            limit, offset,
+        });
+        return res.json({ success: true, data: { threads } });
+    } catch (e) {
+        return res.status(500).json({ success: false, message: 'Failed to get threads', error: e.message });
+    }
+});
+
+router.get('/:groupId/threads/:threadId/replies', async (req, res) => {
+    try {
+        const userId   = getUserId(req);
+        const groupId  = parseInt(req.params.groupId);
+        const threadId = parseInt(req.params.threadId);
+        if (!userId) return res.status(401).json({ success: false, message: 'Auth required' });
+        const limit  = Math.min(parseInt(req.query.limit) || 50, 200);
+        const offset = parseInt(req.query.offset) || 0;
+        // Replies stored as Messages with metadata.threadId
+        const { Op } = require('sequelize');
+        const replies = Message ? await Message.findAll({
+            where: {
+                isDeleted: false,
+                metadata: { [Op.contains]: { threadId } },
+            },
+            order: [['createdAt', 'ASC']],
+            limit, offset,
+            include: [{ model: User, as: 'messageSender', attributes: ['id','username','firstName','lastName','avatar'], required: false }],
+        }) : [];
+        return res.json({ success: true, data: { replies: replies.map(r => _fmtMessage ? _fmtMessage(r, userId, groupId) : r), total: replies.length } });
+    } catch (e) {
+        return res.status(500).json({ success: false, message: 'Failed to get thread replies', error: e.message });
+    }
+});
+
+router.post('/:groupId/threads/:threadId/reply', async (req, res) => {
+    try {
+        const userId   = getUserId(req);
+        const groupId  = parseInt(req.params.groupId);
+        const threadId = parseInt(req.params.threadId);
+        const { content = '' } = req.body;
+        if (!userId) return res.status(401).json({ success: false, message: 'Auth required' });
+        if (!content.trim()) return res.status(400).json({ success: false, message: 'Reply content required' });
+        const db = require('../models');
+        const GroupThread = db.models?.GroupThread || db.GroupThread;
+        const thread = GroupThread ? await GroupThread.findOne({ where: { id: threadId, groupId } }) : null;
+        if (!thread) return res.status(404).json({ success: false, message: 'Thread not found' });
+        if (thread.isLocked) return res.status(403).json({ success: false, message: 'Thread is locked', code: 'THREAD_LOCKED' });
+
+        const group = await Group.findByPk(groupId, { attributes: ['id','chatId','name','disappearingTimer'] });
+        if (!group?.chatId || !Message) return res.status(503).json({ success: false, message: 'Chat unavailable' });
+
+        const disappearSecs = group.disappearingTimer || 0;
+        const expiresAt = disappearSecs > 0 ? new Date(Date.now() + disappearSecs * 1000) : null;
+
+        const reply = await Message.create({
+            chatId: group.chatId, senderId: userId, content: content.trim(), type: 'text',
+            isRead: false, reactions: {},
+            metadata: { groupId, threadId, readBy: [userId] },
+            sentAt: new Date(), deliveredAt: new Date(),
+            ...(expiresAt && { expiresAt }),
+        });
+        // Update thread stats
+        await thread.update({ replyCount: thread.replyCount + 1, lastReplyAt: new Date(), lastReplyBy: userId });
+        const io = global.__socketIO;
+        if (io) io.to(`group:${groupId}`).emit('group:thread:reply', { groupId, threadId, reply });
+        // Push notification
+        if (pushService?.isConfigured()) {
+            setImmediate(() => pushService.pushGroupMessage(groupId, { ...reply.dataValues, senderId: userId, content: content.trim() }, group.name).catch(() => {}));
+        }
+        return res.status(201).json({ success: true, message: 'Reply posted', data: { reply } });
+    } catch (e) {
+        return res.status(500).json({ success: false, message: 'Failed to post reply', error: e.message });
+    }
+});
+
+router.patch('/:groupId/threads/:threadId/lock', async (req, res) => {
+    try {
+        const userId   = getUserId(req);
+        const groupId  = parseInt(req.params.groupId);
+        const threadId = parseInt(req.params.threadId);
+        if (!userId) return res.status(401).json({ success: false, message: 'Auth required' });
+        const membership = GroupMember ? await GroupMember.findOne({ where: { groupId, userId } }) : null;
+        if (!membership || !['owner','admin','moderator'].includes(membership.role))
+            return res.status(403).json({ success: false, message: 'Admin access required' });
+        const db = require('../models');
+        const GroupThread = db.models?.GroupThread || db.GroupThread;
+        const thread = GroupThread ? await GroupThread.findOne({ where: { id: threadId, groupId } }) : null;
+        if (!thread) return res.status(404).json({ success: false, message: 'Thread not found' });
+        const locked = req.body.locked !== undefined ? Boolean(req.body.locked) : !thread.isLocked;
+        await thread.update({ isLocked: locked });
+        const io = global.__socketIO;
+        if (io) io.to(`group:${groupId}`).emit('group:thread:lock_changed', { groupId, threadId, isLocked: locked });
+        await _logMod(groupId, userId, locked ? 'group_locked' : 'group_unlocked', null, `Thread ${threadId} ${locked ? 'locked' : 'unlocked'}`, { threadId });
+        return res.json({ success: true, message: `Thread ${locked ? 'locked' : 'unlocked'}`, data: { isLocked: locked } });
+    } catch (e) {
+        return res.status(500).json({ success: false, message: 'Failed to lock thread', error: e.message });
     }
 });
 
