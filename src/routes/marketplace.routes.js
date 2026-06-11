@@ -174,6 +174,20 @@ if (ctrl) {
 
     // P2 FIX: Admin order management
     router.get('/admin/orders',                    safe(ctrl.adminGetOrders?.bind(ctrl)));
+    router.put('/admin/orders/:id/status',         safe(ctrl.updateOrderStatus?.bind(ctrl)));
+    router.put('/admin/orders/:id/cancel',         safe(ctrl.cancelOrder?.bind(ctrl)));
+
+    // Flash sale admin CRUD (frontend calls these)
+    router.get('/admin/flash-sales',               safe(ctrl.adminGetFlashSales?.bind(ctrl)));
+    router.post('/admin/flash-sales',              safe(ctrl.adminCreateFlashSale?.bind(ctrl)));
+    router.delete('/admin/flash-sales/:id',        safe(ctrl.adminEndFlashSale?.bind(ctrl)));
+
+    // Broadcast notifications (admin)
+    router.post('/admin/notifications/broadcast',  safe(ctrl.adminBroadcastNotification?.bind(ctrl)));
+
+    // Admin reviews
+    router.get('/admin/reviews',                   safe(ctrl.adminGetReviews?.bind(ctrl)));
+    router.delete('/admin/reviews/:id',            safe(ctrl.adminDeleteReview?.bind(ctrl)));
 }
 
 module.exports = router;

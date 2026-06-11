@@ -328,7 +328,8 @@ async function createMissingTables() {
     'Calls', 'Call', 'UserStatus', 'TypingIndicator', 'ReadReceipt',
     'statuses', 'status_views', 'status_reactions', 'status_replies',
     // ── Marketplace ───────────────────────────────────────────────────────────
-    'tools', 'marketplace_orders', 'marketplace_reviews', 'marketplace_carts'
+    'tools', 'marketplace_orders', 'marketplace_reviews', 'marketplace_carts',
+    'wishlists', 'coupons', 'seller_profiles', 'payouts', 'refunds'
   ];
   
   const missingTables = [];
@@ -1197,250 +1198,7 @@ async function runFullMigration() {
     } catch (mpErr) {
       console.error('[Migration] ⚠️ Marketplace table creation error (non-fatal):', mpErr.message);
     }
-
-    // STEP 7: Messaging feature tables
-    console.log('[Migration] STEP 7: Messaging feature tables...');
-    try {
-      await sequelize.query(`
-        CREATE TABLE IF NOT EXISTS starred_messages (
-          id SERIAL PRIMARY KEY,
-          "userId" INTEGER NOT NULL,
-          "messageId" INTEGER NOT NULL,
-          "chatId" INTEGER NOT NULL,
-          "starredAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          CONSTRAINT uq_starred_user_msg UNIQUE ("userId","messageId")
-        );
-        CREATE INDEX IF NOT EXISTS idx_starred_user ON starred_messages("userId");
-        CREATE INDEX IF NOT EXISTS idx_starred_msg  ON starred_messages("messageId");
-
-        CREATE TABLE IF NOT EXISTS scheduled_messages (
-          id SERIAL PRIMARY KEY,
-          "userId" INTEGER NOT NULL,
-          "chatId" INTEGER NOT NULL,
-          content TEXT,
-          type VARCHAR(20) NOT NULL DEFAULT 'text',
-          "mediaUrl" VARCHAR(2048),
-          metadata JSONB NOT NULL DEFAULT '{}',
-          "sendAt" TIMESTAMPTZ NOT NULL,
-          status VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','sent','failed','cancelled')),
-          "sentAt" TIMESTAMPTZ,
-          "failureReason" VARCHAR(500),
-          "retryCount" INTEGER NOT NULL DEFAULT 0,
-          "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        );
-        CREATE INDEX IF NOT EXISTS idx_sched_status_time ON scheduled_messages(status,"sendAt");
-
-        CREATE TABLE IF NOT EXISTS message_reports (
-          id SERIAL PRIMARY KEY,
-          "reporterId" INTEGER NOT NULL,
-          "messageId" INTEGER NOT NULL,
-          "chatId" INTEGER NOT NULL,
-          reason VARCHAR(50) NOT NULL,
-          details TEXT,
-          status VARCHAR(20) NOT NULL DEFAULT 'pending',
-          "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          CONSTRAINT uq_report_user_msg UNIQUE ("reporterId","messageId")
-        );
-
-        CREATE TABLE IF NOT EXISTS pinned_messages (
-          id SERIAL PRIMARY KEY,
-          "chatId" INTEGER NOT NULL,
-          "messageId" INTEGER NOT NULL,
-          "pinnedBy" INTEGER NOT NULL,
-          "pinnedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          CONSTRAINT uq_pinned_chat_msg UNIQUE ("chatId","messageId")
-        );
-        CREATE INDEX IF NOT EXISTS idx_pinned_chat ON pinned_messages("chatId");
-
-        CREATE TABLE IF NOT EXISTS link_previews (
-          id SERIAL PRIMARY KEY,
-          url VARCHAR(2048) NOT NULL,
-          title VARCHAR(500),
-          description TEXT,
-          "imageUrl" VARCHAR(2048),
-          "siteName" VARCHAR(200),
-          "fetchedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          CONSTRAINT uq_preview_url UNIQUE (url)
-        );
-      `);
-      console.log('[Migration] ✅ STEP 7: Messaging feature tables ensured');
-    } catch (e7) {
-      console.error('[Migration] ⚠️ STEP 7 error (non-fatal):', e7.message);
-    }
-
-    // STEP 8: E2E encryption, push, TOTP, device, backup, delivery, FTS tables
-    console.log('[Migration] STEP 8: Security & platform tables...');
-    try {
-      await sequelize.query(`
-        CREATE TABLE IF NOT EXISTS user_encryption_keys (
-          id SERIAL PRIMARY KEY,
-          "userId" INTEGER NOT NULL,
-          "publicKey" TEXT NOT NULL,
-          "keyId" VARCHAR(64) NOT NULL,
-          algorithm VARCHAR(50) NOT NULL DEFAULT 'ECDH-P256-AES256GCM',
-          "isActive" BOOLEAN NOT NULL DEFAULT true,
-          "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          CONSTRAINT uq_user_keyid UNIQUE ("userId","keyId")
-        );
-        CREATE INDEX IF NOT EXISTS idx_enc_keys_user ON user_encryption_keys("userId","isActive");
-
-        CREATE TABLE IF NOT EXISTS push_subscriptions (
-          id SERIAL PRIMARY KEY,
-          "userId" INTEGER NOT NULL,
-          endpoint TEXT NOT NULL,
-          p256dh TEXT NOT NULL,
-          auth TEXT NOT NULL,
-          "userAgent" VARCHAR(200),
-          "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          "lastUsedAt" TIMESTAMPTZ,
-          CONSTRAINT uq_push_endpoint UNIQUE (endpoint)
-        );
-        CREATE INDEX IF NOT EXISTS idx_push_user ON push_subscriptions("userId");
-
-        CREATE TABLE IF NOT EXISTS user_totp_secrets (
-          id SERIAL PRIMARY KEY,
-          "userId" INTEGER NOT NULL UNIQUE,
-          secret VARCHAR(64) NOT NULL,
-          "isEnabled" BOOLEAN NOT NULL DEFAULT false,
-          "backupCodes" JSONB NOT NULL DEFAULT '[]',
-          "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        );
-
-        CREATE TABLE IF NOT EXISTS linked_devices (
-          id SERIAL PRIMARY KEY,
-          "userId" INTEGER NOT NULL,
-          "deviceId" VARCHAR(128) NOT NULL,
-          "deviceName" VARCHAR(100),
-          platform VARCHAR(20),
-          "publicKey" TEXT,
-          "lastSeenAt" TIMESTAMPTZ,
-          "isActive" BOOLEAN NOT NULL DEFAULT true,
-          "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          CONSTRAINT uq_linked_device UNIQUE ("userId","deviceId")
-        );
-        CREATE INDEX IF NOT EXISTS idx_linked_user ON linked_devices("userId");
-
-        CREATE TABLE IF NOT EXISTS message_delivery_logs (
-          id SERIAL PRIMARY KEY,
-          "messageId" INTEGER NOT NULL,
-          "userId" INTEGER NOT NULL,
-          "chatId" INTEGER NOT NULL,
-          event VARCHAR(20) NOT NULL CHECK (event IN ('sent','delivered','read','failed')),
-          "deviceId" VARCHAR(100),
-          "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          CONSTRAINT uq_delivery_event UNIQUE ("messageId","userId","event")
-        );
-        CREATE INDEX IF NOT EXISTS idx_delivery_msg ON message_delivery_logs("messageId");
-
-        CREATE TABLE IF NOT EXISTS message_views (
-          id SERIAL PRIMARY KEY,
-          "messageId" INTEGER NOT NULL,
-          "userId" INTEGER NOT NULL,
-          "viewedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          CONSTRAINT uq_view UNIQUE ("messageId","userId")
-        );
-
-        CREATE TABLE IF NOT EXISTS message_mentions (
-          id SERIAL PRIMARY KEY,
-          "messageId" INTEGER NOT NULL,
-          "chatId" INTEGER NOT NULL,
-          "mentionedUserId" INTEGER NOT NULL,
-          "mentionedBy" INTEGER NOT NULL,
-          "isRead" BOOLEAN NOT NULL DEFAULT false,
-          "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        );
-        CREATE INDEX IF NOT EXISTS idx_mentions_user ON message_mentions("mentionedUserId");
-
-        CREATE TABLE IF NOT EXISTS message_edits (
-          id SERIAL PRIMARY KEY,
-          "messageId" INTEGER NOT NULL,
-          "editedBy" INTEGER NOT NULL,
-          "previousContent" TEXT NOT NULL,
-          "newContent" TEXT NOT NULL,
-          "editedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        );
-        CREATE INDEX IF NOT EXISTS idx_edits_msg ON message_edits("messageId");
-
-        CREATE TABLE IF NOT EXISTS message_backups (
-          id SERIAL PRIMARY KEY,
-          "userId" INTEGER NOT NULL,
-          "backupKey" VARCHAR(128) NOT NULL UNIQUE,
-          "encryptedData" TEXT,
-          "storageUrl" VARCHAR(2048),
-          "messageCount" INTEGER DEFAULT 0,
-          "sizeBytes" BIGINT DEFAULT 0,
-          "completedAt" TIMESTAMPTZ,
-          status VARCHAR(20) DEFAULT 'pending',
-          "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        );
-        CREATE INDEX IF NOT EXISTS idx_backup_user ON message_backups("userId");
-      `);
-      console.log('[Migration] ✅ STEP 8: Security & platform tables ensured');
-    } catch (e8) {
-      console.error('[Migration] ⚠️ STEP 8 error (non-fatal):', e8.message);
-    }
-
-    // STEP 9: GIN full-text search index on Messages
-    console.log('[Migration] STEP 9: GIN FTS index on Messages...');
-    try {
-      await sequelize.query(`
-        DO $$
-        BEGIN
-          IF NOT EXISTS (
-            SELECT 1 FROM pg_indexes WHERE tablename='Messages' AND indexname='idx_messages_fts'
-          ) THEN
-            ALTER TABLE "Messages" ADD COLUMN IF NOT EXISTS "searchVector" TSVECTOR;
-            CREATE INDEX idx_messages_fts ON "Messages" USING GIN("searchVector");
-          END IF;
-        END$$;
-      `);
-      console.log('[Migration] ✅ STEP 9: GIN FTS index ensured');
-    } catch (e9) {
-      console.error('[Migration] ⚠️ STEP 9 error (non-fatal):', e9.message);
-    }
-
-    // STEP 10: Add missing columns to chat_participants
-    console.log('[Migration] STEP 10: chat_participants columns...');
-    try {
-      for (const col of [
-        { name: 'mutedUntil', sql: 'TIMESTAMPTZ' },
-        { name: 'isPinned',   sql: 'BOOLEAN NOT NULL DEFAULT false' },
-        { name: 'pinnedAt',   sql: 'TIMESTAMPTZ' },
-      ]) {
-        await sequelize.query(
-          `ALTER TABLE chat_participants ADD COLUMN IF NOT EXISTS "${col.name}" ${col.sql}`
-        ).catch(() => {});
-      }
-      console.log('[Migration] ✅ STEP 10: chat_participants columns ensured');
-    } catch (e10) {
-      console.error('[Migration] ⚠️ STEP 10 error (non-fatal):', e10.message);
-    }
-
-    // STEP 11: Add missing columns to Messages
-    console.log('[Migration] STEP 11: Messages extra columns...');
-    try {
-      for (const col of [
-        { name: 'expiresAt',         sql: 'TIMESTAMPTZ' },
-        { name: 'disappearingTimer', sql: 'INTEGER' },
-        { name: 'isPinned',          sql: 'BOOLEAN NOT NULL DEFAULT false' },
-        { name: 'pinnedAt',          sql: 'TIMESTAMPTZ' },
-        { name: 'pinnedBy',          sql: 'INTEGER' },
-        { name: 'searchVector',      sql: 'TSVECTOR' },
-      ]) {
-        await sequelize.query(
-          `ALTER TABLE "Messages" ADD COLUMN IF NOT EXISTS "${col.name}" ${col.sql}`
-        ).catch(() => {});
-      }
-      console.log('[Migration] ✅ STEP 11: Messages extra columns ensured');
-    } catch (e11) {
-      console.error('[Migration] ⚠️ STEP 11 error (non-fatal):', e11.message);
-    }
-
+    
     console.log('\n[Migration] ===== MIGRATION COMPLETE =====\n');
     
   } catch (error) {
@@ -1783,15 +1541,27 @@ module.exports = {
   get TypingIndicator() { return db.models.TypingIndicator || null; },
   getUserStatus() { return db.models.UserStatus || null; },
   // ── Marketplace models ────────────────────────────────────────────────────
-  get Tool()   { return db.models.Tool   || null; },
-  get Order()  { return db.models.Order  || null; },
-  get Review() { return db.models.Review || null; },
+  get Tool()          { return db.models.Tool          || null; },
+  get Order()         { return db.models.Order         || null; },
+  get Review()        { return db.models.Review        || null; },
+  get Wishlist()      { return db.models.Wishlist      || null; },
+  get Coupon()        { return db.models.Coupon        || null; },
+  get Refund()        { return db.models.Refund        || null; },
+  get SellerProfile() { return db.models.SellerProfile || null; },
+  get AuditLog()      { return db.models.AuditLog      || null; },
+  get Payout()        { return db.models.Payout        || null; },
   // ── Marketplace operational status ───────────────────────────────────────
   getMarketplaceStatus() {
     return {
-      toolModel:   !!(db.models.Tool),
-      orderModel:  !!(db.models.Order),
-      reviewModel: !!(db.models.Review),
+      toolModel:          !!(db.models.Tool),
+      orderModel:         !!(db.models.Order),
+      reviewModel:        !!(db.models.Review),
+      wishlistModel:      !!(db.models.Wishlist),
+      couponModel:        !!(db.models.Coupon),
+      refundModel:        !!(db.models.Refund),
+      sellerProfileModel: !!(db.models.SellerProfile),
+      auditLogModel:      !!(db.models.AuditLog),
+      payoutModel:        !!(db.models.Payout),
       operational: !!(db.models.Tool && db.models.Order && db.models.Review),
     };
   }

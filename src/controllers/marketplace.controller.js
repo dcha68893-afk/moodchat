@@ -90,12 +90,17 @@ function getDb() {
     return _db || {};
 }
 const Model = {
-    get Tool()   { return getDb().Tool   || getDb().Listing   || null; },
-    get Order()  { return getDb().Order  || null; },
-    get Review() { return getDb().Review || null; },
-    get User()   { return getDb().Users  || getDb().User || null; },
-    // FIX (Forensic Audit P1): Cart model now exists — resolves to the Cart Sequelize model
-    get Cart()   { return getDb().Cart   || null; },
+    get Tool()          { return getDb().Tool          || getDb().Listing   || null; },
+    get Order()         { return getDb().Order         || null; },
+    get Review()        { return getDb().Review        || null; },
+    get User()          { return getDb().Users         || getDb().User      || null; },
+    get Cart()          { return getDb().Cart          || null; },
+    get Wishlist()      { return getDb().Wishlist      || null; },
+    get Coupon()        { return getDb().Coupon        || null; },
+    get Refund()        { return getDb().Refund        || null; },
+    get SellerProfile() { return getDb().SellerProfile || null; },
+    get AuditLog()      { return getDb().AuditLog      || null; },
+    get Payout()        { return getDb().Payout        || null; },
 };
 
 // ─── Sequelize instance ───────────────────────────────────────────────────────
@@ -1892,6 +1897,132 @@ class MarketplaceController {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
+    // FLASH SALE ADMIN CRUD
+    // ══════════════════════════════════════════════════════════════════════════
+
+    async adminGetFlashSales(req, res, next) {
+        try {
+            const T = Model.Tool;
+            if (!T) return ok(res, { flash_sales: [] });
+            const now = new Date();
+            const sales = await T.findAll({
+                where: { isFlashSale: true },
+                order: [['flashSaleEnd', 'DESC']],
+                limit: 50,
+            });
+            return ok(res, {
+                flash_sales: sales.map(p => ({
+                    id: p.id, title: p.title, image: p.images?.[0] || null,
+                    price: parseFloat(p.price) || 0,
+                    flash_price: parseFloat(p.flashSalePrice || p.flash_sale_price) || parseFloat(p.price) || 0,
+                    flash_ends_at: p.flashSaleEnd || p.flash_sale_end,
+                    active: p.available && p.flashSaleEnd && new Date(p.flashSaleEnd) > now,
+                }))
+            });
+        } catch(e) { err(next, e, 'adminGetFlashSales'); }
+    }
+
+    async adminCreateFlashSale(req, res, next) {
+        try {
+            if (req.user?.role !== 'admin') return next(new AppError('Admin only', 403));
+            const T = Model.Tool;
+            if (!T) return next(new AppError('Product model unavailable', 503));
+            const { product_id, flash_price, ends_at, flash_stock } = req.body;
+            if (!product_id || !flash_price || !ends_at) return next(new AppError('product_id, flash_price and ends_at required', 400));
+            const product = await T.findByPk(product_id);
+            if (!product) return next(new AppError('Product not found', 404));
+            await product.update({
+                isFlashSale: true, is_flash_sale: true,
+                flashSalePrice: parseFloat(flash_price), flash_sale_price: parseFloat(flash_price),
+                flashSaleEnd: new Date(ends_at), flash_sale_end: new Date(ends_at),
+                ...(flash_stock ? { stock: parseInt(flash_stock) } : {}),
+            });
+            _auditLog(req, 'admin:flash_sale:created', 'product', product.id, { flash_price, ends_at });
+            _socketBroadcast(req, 'flash_sale:started', { product_id, flash_price, ends_at });
+            return ok(res, { product_id, flash_price, ends_at }, 'Flash sale launched', 201);
+        } catch(e) { err(next, e, 'adminCreateFlashSale'); }
+    }
+
+    async adminEndFlashSale(req, res, next) {
+        try {
+            if (req.user?.role !== 'admin') return next(new AppError('Admin only', 403));
+            const T = Model.Tool;
+            if (!T) return next(new AppError('Product model unavailable', 503));
+            const product = await T.findByPk(req.params.id);
+            if (!product) return next(new AppError('Product not found', 404));
+            await product.update({ isFlashSale: false, is_flash_sale: false, flashSaleEnd: null, flash_sale_end: null });
+            _auditLog(req, 'admin:flash_sale:ended', 'product', product.id);
+            _socketBroadcast(req, 'flash_sale:ended', { product_id: product.id });
+            return ok(res, null, 'Flash sale ended');
+        } catch(e) { err(next, e, 'adminEndFlashSale'); }
+    }
+
+    // ADMIN BROADCAST NOTIFICATION
+    // ══════════════════════════════════════════════════════════════════════════
+
+    async adminBroadcastNotification(req, res, next) {
+        try {
+            if (req.user?.role !== 'admin') return next(new AppError('Admin only', 403));
+            const { title, message, type = 'announcement', target = 'all' } = req.body;
+            if (!title || !message) return next(new AppError('title and message required', 400));
+            _socketBroadcast(req, 'marketplace:notification', { title, message, type, target, sentAt: new Date().toISOString() });
+            _auditLog(req, 'admin:notification:broadcast', 'notification', 'broadcast', { title, type, target });
+            return ok(res, { sent: true }, 'Notification broadcast sent');
+        } catch(e) { err(next, e, 'adminBroadcastNotification'); }
+    }
+
+    // ADMIN REVIEW MODERATION
+    // ══════════════════════════════════════════════════════════════════════════
+
+    async adminGetReviews(req, res, next) {
+        try {
+            const R = Model.Review;
+            if (!R) return ok(res, { reviews: [] });
+            const { limit = 30, page = 1, flagged } = req.query;
+            const where = flagged ? { flagged: true } : {};
+            const reviews = await R.findAll({
+                where,
+                order: [['createdAt', 'DESC']],
+                limit: parseInt(limit),
+                offset: (parseInt(page) - 1) * parseInt(limit),
+            });
+            return ok(res, { reviews: reviews.map(r => r.toJSON ? r.toJSON() : r), total: await R.count({ where }) });
+        } catch(e) { err(next, e, 'adminGetReviews'); }
+    }
+
+    async adminDeleteReview(req, res, next) {
+        try {
+            if (req.user?.role !== 'admin') return next(new AppError('Admin only', 403));
+            const R = Model.Review;
+            if (!R) return next(new AppError('Review model unavailable', 503));
+            const review = await R.findByPk(req.params.id);
+            if (!review) return next(new AppError('Review not found', 404));
+            await review.destroy();
+            _auditLog(req, 'admin:review:deleted', 'review', req.params.id, { reason: req.body?.reason });
+            return ok(res, null, 'Review deleted');
+        } catch(e) { err(next, e, 'adminDeleteReview'); }
+    }
+
+    // CANCEL ORDER (admin)
+    async cancelOrder(req, res, next) {
+        try {
+            const O = Model.Order;
+            if (!O) return next(new AppError('Order model unavailable', 503));
+            const order = await O.findByPk(req.params.id);
+            if (!order) return next(new AppError('Order not found', 404));
+            // Restore stock
+            const T = Model.Tool;
+            if (T && order.productId) {
+                try { await T.increment('stock', { by: order.quantity || 1, where: { id: order.productId } }); } catch(_) {}
+            }
+            await order.update({ status: 'cancelled', cancelledAt: new Date(), cancelNote: req.body?.note || 'Admin cancelled' });
+            _socketBroadcast(req, 'order:cancelled', { order_id: order.id, buyer_id: order.buyerId });
+            _auditLog(req, 'admin:order:cancelled', 'order', order.id, { note: req.body?.note });
+            return ok(res, { order_id: order.id, status: 'cancelled' }, 'Order cancelled');
+        } catch(e) { err(next, e, 'cancelOrder'); }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
     // AUDIT LOG (P2 FIX — was completely absent)
     // ══════════════════════════════════════════════════════════════════════════
 
@@ -1920,8 +2051,15 @@ class MarketplaceController {
 
 function _sellerInclude(T) {
     try {
+        const db = getDb();
+        const SP = db.SellerProfile;
         if (T.associations?.seller) {
-            return [{ association: T.associations.seller, attributes: ['id','username','displayName','avatar'], required: false }];
+            const inc = { association: T.associations.seller, attributes: ['id','username','displayName','avatar'], required: false };
+            // Include SellerProfile nested if association exists (for verified badge)
+            if (SP && T.associations.seller?.target?.associations?.sellerProfile) {
+                inc.include = [{ association: T.associations.seller.target.associations.sellerProfile, attributes: ['verified','verifiedAt'], required: false }];
+            }
+            return [inc];
         }
     } catch(_) {}
     return [];
