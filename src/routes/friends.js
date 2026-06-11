@@ -890,42 +890,63 @@ router.get('/contacts/synced', apiRateLimiter, asyncHandler(async (req, res) => 
     }
 }));
 
-// ===== STATS =====
+// ===== STATS (MERGED P2 FIX) =====
+// Merged original stats (total/online/pinned/muted) with new category analytics
+// (categories/snoozed/restricted/pending/blocked). Both fields in one response.
 router.get('/stats', apiRateLimiter, asyncHandler(async (req, res) => {
     try {
         const userId = getUserId(req);
         if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
-        if (!Friend) return res.json({ success: true, data: { total: 0, online: 0, offline: 0, recentlyActive: 0, pinned: 0, muted: 0 } });
+        const empty = { total: 0, online: 0, offline: 0, recentlyActive: 0, pinned: 0, muted: 0, pending: 0, blocked: 0, snoozed: 0, restricted: 0, categories: {} };
+        if (!Friend) return res.json({ success: true, data: empty });
 
-        const friendships = await withTimeout(Friend.findAll({
-            where: { [Op.or]: [{ requesterId: userId, status: 'accepted' }, { receiverId: userId, status: 'accepted' }] },
-            attributes: ['requesterId', 'receiverId', 'isPinned', 'isMuted'], raw: true, limit: 500
+        const all = await withTimeout(Friend.findAll({
+            where: { [Op.or]: [{ requesterId: userId }, { receiverId: userId }] },
+            attributes: ['requesterId', 'receiverId', 'status', 'category', 'isPinned', 'isMuted', 'snoozedUntil', 'isRestricted'],
+            raw: true, limit: 1000
         }));
 
-        if (!friendships || !friendships.length) return res.json({ success: true, data: { total: 0, online: 0, offline: 0, recentlyActive: 0, pinned: 0, muted: 0 } });
+        if (!all || !all.length) return res.json({ success: true, data: empty });
 
-        // 🔴 BUG 3 FIX: Handle both camelCase and snake_case from raw queries
-        const friendIds = friendships.map(f => {
-            const rid = f.requesterId || f.requester_id;
-            const rcid = f.receiverId || f.receiver_id;
-            return rid === userId ? rcid : rid;
-        }).filter(id => id && id !== userId);
+        const now = new Date();
+        const stats = { total: 0, online: 0, offline: 0, recentlyActive: 0, pinned: 0, muted: 0, pending: 0, blocked: 0, snoozed: 0, restricted: 0, categories: {} };
+        const friendIds = [];
 
-        const pinnedCount = friendships.filter(f => f.isPinned || f.is_pinned).length;
-        const mutedCount  = friendships.filter(f => f.isMuted  || f.is_muted).length;
+        all.forEach(f => {
+            const rid  = parseInt(f.requesterId || f.requester_id);
+            const rcid = parseInt(f.receiverId  || f.receiver_id);
+            const otherId = rid === parseInt(userId) ? rcid : rid;
 
-        let onlineCount = 0, recentlyActiveCount = 0;
+            if (f.status === 'accepted') {
+                stats.total++;
+                friendIds.push(otherId);
+                const cat = f.category || 'friend';
+                stats.categories[cat] = (stats.categories[cat] || 0) + 1;
+                if (f.isPinned    || f.is_pinned)    stats.pinned++;
+                if (f.isMuted     || f.is_muted)     stats.muted++;
+                if (f.isRestricted)                  stats.restricted++;
+                if (f.snoozedUntil && new Date(f.snoozedUntil) > now) stats.snoozed++;
+            } else if (f.status === 'pending') {
+                stats.pending++;
+            } else if (f.status === 'blocked') {
+                stats.blocked++;
+            }
+        });
+
         if (friendIds.length) {
-            const friends = await withTimeout(User.findAll({ where: { id: { [Op.in]: friendIds } }, attributes: ['status', 'lastSeen'], limit: 500 }));
-            onlineCount = friends.filter(f => f.status === 'online').length;
-            const ago30 = new Date(Date.now() - 30 * 60 * 1000);
-            recentlyActiveCount = friends.filter(f => f.lastSeen && new Date(f.lastSeen) > ago30).length;
+            try {
+                const users = await withTimeout(User.findAll({ where: { id: { [Op.in]: friendIds } }, attributes: ['id', 'status', 'lastSeen'], limit: 1000 }));
+                const ago30 = new Date(Date.now() - 30 * 60 * 1000);
+                stats.online         = users.filter(u => u.status === 'online').length;
+                stats.offline        = stats.total - stats.online;
+                stats.recentlyActive = users.filter(u => u.lastSeen && new Date(u.lastSeen) > ago30).length;
+            } catch (_) {}
         }
 
-        return res.json({ success: true, data: { total: friendIds.length, online: onlineCount, offline: friendIds.length - onlineCount, recentlyActive: recentlyActiveCount, pinned: pinnedCount, muted: mutedCount } });
+        return res.json({ success: true, data: stats });
     } catch (e) {
         console.error('[Friends GET /stats]', e.message);
-        return res.json({ success: true, data: { total: 0, online: 0, offline: 0, recentlyActive: 0, pinned: 0, muted: 0 } });
+        return res.json({ success: true, data: { total: 0, online: 0, offline: 0, recentlyActive: 0, pinned: 0, muted: 0, pending: 0, blocked: 0, snoozed: 0, restricted: 0, categories: {} } });
     }
 }));
 
@@ -1706,41 +1727,7 @@ router.delete('/:friendId/restrict', apiRateLimiter, asyncHandler(async (req, re
     }
 }));
 
-// ===== CATEGORY ANALYTICS (P2 FIX) =====
-// /stats endpoint now includes category breakdown. Was missing from the route entirely.
-router.get('/stats', apiRateLimiter, asyncHandler(async (req, res) => {
-    try {
-        const userId = getUserId(req);
-        if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
-        if (!Friend) return res.json({ success: true, data: { total: 0, pending: 0, blocked: 0, categories: {}, snoozed: 0, restricted: 0 } });
 
-        const all = await withTimeout(Friend.findAll({
-            where: { [Op.or]: [{ requesterId: userId }, { receiverId: userId }] },
-            attributes: ['status', 'category', 'snoozedUntil', 'isRestricted'], raw: true
-        }));
-
-        const stats = { total: 0, pending: 0, blocked: 0, snoozed: 0, restricted: 0, categories: {} };
-        const now = new Date();
-        all.forEach(f => {
-            if (f.status === 'accepted') {
-                stats.total++;
-                const cat = f.category || 'friend';
-                stats.categories[cat] = (stats.categories[cat] || 0) + 1;
-                if (f.snoozedUntil && new Date(f.snoozedUntil) > now) stats.snoozed++;
-                if (f.isRestricted) stats.restricted++;
-            } else if (f.status === 'pending') {
-                stats.pending++;
-            } else if (f.status === 'blocked') {
-                stats.blocked++;
-            }
-        });
-
-        return res.json({ success: true, data: stats });
-    } catch (e) {
-        console.error('[Friends GET /stats]', e.message);
-        return res.status(500).json({ success: false, message: 'Failed to get stats' });
-    }
-}));
 
 // ===== CSV EXPORT (P3 FIX) =====
 // Export friend list as CSV — basic privacy: only includes data the user owns.

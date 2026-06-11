@@ -392,6 +392,51 @@ async function getNearbyUsers(userId, { lat, lng, radius = 5000 } = {}) {
     return { users: result, count: result.length, mode: 'online' };
 }
 
+// ── P3 FIX: snoozeFriend / unsnoozeFriend ────────────────────────────────────
+async function snoozeFriend(userId, friendId, days = 7) {
+    const record = await getFriendshipRecord(userId, friendId);
+    if (!record) { const e = new Error('Friendship not found'); e.status = 404; throw e; }
+    record.snoozedUntil = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+    record.updatedAt = new Date();
+    await record.save();
+    return record;
+}
+
+async function unsnoozeFriend(userId, friendId) {
+    const record = await getFriendshipRecord(userId, friendId);
+    if (!record) { const e = new Error('Friendship not found'); e.status = 404; throw e; }
+    record.snoozedUntil = null;
+    record.updatedAt = new Date();
+    await record.save();
+    return record;
+}
+
+// ── P3 FIX: restrictFriend / unrestrictFriend ─────────────────────────────────
+async function restrictFriend(userId, friendId) {
+    const record = await getFriendshipRecord(userId, friendId);
+    if (!record) { const e = new Error('Friendship not found'); e.status = 404; throw e; }
+    record.isRestricted = true;
+    record.updatedAt = new Date();
+    await record.save();
+    return record;
+}
+
+async function unrestrictFriend(userId, friendId) {
+    const record = await getFriendshipRecord(userId, friendId);
+    if (!record) { const e = new Error('Friendship not found'); e.status = 404; throw e; }
+    record.isRestricted = false;
+    record.updatedAt = new Date();
+    await record.save();
+    return record;
+}
+
+// ── Helper: find accepted friendship record ───────────────────────────────────
+async function getFriendshipRecord(userId, friendId) {
+    return Friend.findOne({
+        where: { [Op.or]: [{ requesterId: userId, receiverId: friendId }, { requesterId: friendId, receiverId: userId }], status: 'accepted' }
+    });
+}
+
 module.exports = {
     sendFriendRequest,
     respondToFriendRequest,
@@ -409,4 +454,9 @@ module.exports = {
     getNearbyUsers,
     formatUser,
     formatFriend,
+    // P3 FIX additions
+    snoozeFriend,
+    unsnoozeFriend,
+    restrictFriend,
+    unrestrictFriend,
 };

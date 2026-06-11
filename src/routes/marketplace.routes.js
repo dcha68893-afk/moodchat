@@ -1,70 +1,41 @@
 'use strict';
-// marketplace.routes.js — ALL P1/P2 FORENSIC FIXES APPLIED
-// P1: adminOnly middleware at router level (not just controller)
-// P1: Approval gate enforced — products default to pending_review
-// P1: Refund workflow routes added
-// P1: Payment + checkout rate limiting applied
-// P2: Coupon validation, Flash sales, Recommendations, Wallet, KYC, Payouts, AuditLog
-const express  = require('express');
-const rateLimit = require('express-rate-limit');
-const router   = express.Router();
+/**
+ * marketplace.routes.js — COMPLETE FORENSIC FIX
+ * 109 routes wired. Every URL the buyer/seller/admin frontend calls is here.
+ */
+const express    = require('express');
+const rateLimit  = require('express-rate-limit');
+const router     = express.Router();
 
 let ctrl;
-try {
-    ctrl = require('../controllers/marketplace.controller');
-} catch(e) {
-    console.warn('[marketplace.routes] controller load failed:', e.message);
-}
+try { ctrl = require('../controllers/marketplace.controller'); }
+catch(e) { console.warn('[marketplace.routes] controller load failed:', e.message); }
 
-// P1 FIX: Load adminOnly middleware at route file level
 let adminOnly;
-try {
-    adminOnly = require('../middleware/auth').adminOnly;
-} catch(_) {
+try { adminOnly = require('../middleware/auth').adminOnly; }
+catch(_) {
     adminOnly = (req, res, next) => {
-        if (!req.user || req.user.role !== 'admin') {
+        if (!req.user || req.user.role !== 'admin')
             return res.status(403).json({ success: false, message: 'Admin access required.' });
-        }
         next();
     };
 }
 
-// P1 FIX: Payment-specific rate limiting — stricter than general API limiter
-// Prevents payment fraud attempts, brute-force checkout, and webhook replay attacks
-const paymentLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000,   // 15 minutes
-    max: 10,                      // max 10 payment attempts per IP per 15min
-    message: { success: false, message: 'Too many payment attempts. Please wait 15 minutes.', code: 'PAYMENT_RATE_LIMITED' },
-    standardHeaders: true,
-    legacyHeaders: false,
-    keyGenerator: (req) => req.user?.id || req.ip,  // per-user not per-IP when authenticated
-});
-
-const checkoutLimiter = rateLimit({
-    windowMs: 60 * 1000,         // 1 minute
-    max: 5,                       // max 5 checkout attempts per minute (double-click protection)
-    message: { success: false, message: 'Too many checkout requests. Please wait a moment.', code: 'CHECKOUT_RATE_LIMITED' },
-    standardHeaders: true,
-    legacyHeaders: false,
-    keyGenerator: (req) => req.user?.id || req.ip,
-});
-
-const searchLimiter = rateLimit({
-    windowMs: 60 * 1000,
-    max: 60,                     // 60 searches per minute
-    message: { success: false, message: 'Search rate limit exceeded.' },
-    standardHeaders: true,
-    legacyHeaders: false,
-    skip: (req) => !req.query.q, // don't limit listing/browse, only search
-});
+const paymentLimiter  = rateLimit({ windowMs:15*60*1000, max:10, keyGenerator:r=>r.user?.id||r.ip,
+    message:{success:false,message:'Too many payment attempts. Wait 15 minutes.'},standardHeaders:true,legacyHeaders:false });
+const checkoutLimiter = rateLimit({ windowMs:60*1000,    max:5,  keyGenerator:r=>r.user?.id||r.ip,
+    message:{success:false,message:'Too many checkout requests. Wait a moment.'},standardHeaders:true,legacyHeaders:false });
+const searchLimiter   = rateLimit({ windowMs:60*1000,    max:60, keyGenerator:r=>r.user?.id||r.ip,
+    message:{success:false,message:'Search rate limit exceeded.'},standardHeaders:true,legacyHeaders:false,
+    skip:r=>!r.query.q });
 
 const safe = (fn) => (req, res, next) => {
     if (typeof fn === 'function') return fn(req, res, next);
-    return res.status(501).json({ success: false, message: 'Not yet implemented' });
+    return res.status(501).json({ success:false, message:'Not yet implemented' });
 };
 
 if (ctrl) {
-    // ── Products ──────────────────────────────────────────────────────────────
+    // ── Products ─────────────────────────────────────────────────────────────
     router.get('/products',              safe(ctrl.getProducts?.bind(ctrl)));
     router.get('/products/:id',          safe(ctrl.getProductById?.bind(ctrl)));
     router.post('/products',             safe(ctrl.createProduct?.bind(ctrl)));
@@ -77,24 +48,23 @@ if (ctrl) {
     router.get('/search',                searchLimiter, safe(ctrl.getProducts?.bind(ctrl)));
     router.get('/search/suggest',        searchLimiter, safe(ctrl.searchSuggest?.bind(ctrl)));
 
-    // ── Categories ────────────────────────────────────────────────────────────
+    // ── Discovery ────────────────────────────────────────────────────────────
     router.get('/categories',            safe(ctrl.getCategories?.bind(ctrl)));
-
-    // ── Flash Sales (P2 FIX: real endpoint) ──────────────────────────────────
     router.get('/flash-sales',           safe(ctrl.getFlashSales?.bind(ctrl)));
-
-    // ── Recommendations (P2 FIX: real endpoint) ───────────────────────────────
     router.get('/recommendations',       safe(ctrl.getRecommendations?.bind(ctrl)));
+    router.get('/trending',              safe(ctrl.getProducts?.bind(ctrl)));
 
-    // ── Cart ──────────────────────────────────────────────────────────────────
+    // ── Cart ─────────────────────────────────────────────────────────────────
     router.get('/cart',                  safe(ctrl.getCart?.bind(ctrl)));
     router.post('/cart',                 safe(ctrl.addToCart?.bind(ctrl)));
     router.patch('/cart',                safe(ctrl.updateCartItem?.bind(ctrl)));
+    router.post('/cart/sync',            safe(ctrl.syncCart?.bind(ctrl)));
     router.delete('/cart/clear',         safe(ctrl.clearCart?.bind(ctrl)));
     router.delete('/cart',               safe(ctrl.removeFromCart?.bind(ctrl)));
 
-    // ── Coupon validation (P1 FIX) ────────────────────────────────────────────
+    // ── Coupon ────────────────────────────────────────────────────────────────
     router.post('/coupon/validate',      safe(ctrl.validateCoupon?.bind(ctrl)));
+    router.get('/coupons',               safe(ctrl.getPublicCoupons?.bind(ctrl)));
 
     // ── Wishlist ──────────────────────────────────────────────────────────────
     router.get('/wishlist',              safe(ctrl.getWishlist?.bind(ctrl)));
@@ -108,86 +78,149 @@ if (ctrl) {
     router.patch('/orders/:id/status',   safe(ctrl.updateOrderStatus?.bind(ctrl)));
     router.get('/orders/:id/tracking',   safe(ctrl.getOrderTracking?.bind(ctrl)));
     router.put('/orders/:id/tracking',   safe(ctrl.updateTracking?.bind(ctrl)));
-    // P1 FIX: Refund request by buyer
     router.post('/orders/:id/refund',    safe(ctrl.requestRefund?.bind(ctrl)));
+    router.post('/orders/:id/cancel',    safe(ctrl.cancelOrder?.bind(ctrl)));
 
-    // ── Checkout ──────────────────────────────────────────────────────────────
+    // ── Checkout ─────────────────────────────────────────────────────────────
     router.post('/checkout',             checkoutLimiter, safe(ctrl.createOrder?.bind(ctrl)));
 
-    // ── Payments ──────────────────────────────────────────────────────────────
+    // ── Payments ─────────────────────────────────────────────────────────────
     router.post('/payment/mpesa',              paymentLimiter, safe(ctrl.initiateMpesa?.bind(ctrl)));
-    router.post('/payment/mpesa/callback',     safe(ctrl.mpesaCallback?.bind(ctrl)));   // no rate limit — Safaricom webhook
-    router.get('/payment/mpesa/verify',        paymentLimiter, safe(ctrl.verifyMpesa?.bind(ctrl)));
+    router.post('/payment/mpesa/callback',     safe(ctrl.mpesaCallback?.bind(ctrl)));
+    router.get('/payment/mpesa/verify',        safe(ctrl.verifyMpesa?.bind(ctrl)));
     router.post('/payment/card',               paymentLimiter, safe(ctrl.cardPayment?.bind(ctrl)));
     router.post('/payment/wallet',             paymentLimiter, safe(ctrl.walletPayment?.bind(ctrl)));
     router.get('/payment/wallet/balance',      safe(ctrl.getWalletBalance?.bind(ctrl)));
     router.post('/payment/wallet/topup',       paymentLimiter, safe(ctrl.walletTopup?.bind(ctrl)));
 
-    // ── Reviews ───────────────────────────────────────────────────────────────
-    router.get('/products/:id/reviews',        safe(ctrl.getReviews?.bind(ctrl)));
-    router.post('/products/:id/reviews',       safe(ctrl.createReview?.bind(ctrl)));
-    router.post('/reviews/:id/respond',        safe(ctrl.respondToReview?.bind(ctrl)));
-    router.post('/reviews/:id/helpful',        safe(ctrl.markReviewHelpful?.bind(ctrl)));
+    // ── Wallet (advanced.js calls /marketplace/wallet) ────────────────────────
+    router.get('/wallet',                safe(ctrl.getWalletBalance?.bind(ctrl)));
+    router.post('/wallet/top-up',        paymentLimiter, safe(ctrl.walletTopup?.bind(ctrl)));
 
-    // ── Seller ────────────────────────────────────────────────────────────────
-    router.get('/seller/products',             safe(ctrl.getSellerDashboard?.bind(ctrl)));
-    router.get('/seller/orders',               safe(ctrl.getOrders?.bind(ctrl)));
-    router.get('/seller/dashboard',            safe(ctrl.getSellerDashboard?.bind(ctrl)));
-    router.get('/seller/earnings',             safe(ctrl.getSellerEarnings?.bind(ctrl)));
-    // P2 FIX: Seller KYC
-    router.post('/seller/kyc',                 safe(ctrl.submitSellerKYC?.bind(ctrl)));
-    router.get('/seller/kyc/status',           safe(ctrl.getKYCStatus?.bind(ctrl)));
-    // P2 FIX: Payout requests
-    router.get('/seller/payouts',              safe(ctrl.getPayouts?.bind(ctrl)));
-    router.post('/seller/payouts/request',     safe(ctrl.requestPayout?.bind(ctrl)));
-    router.get('/seller/:id',                  safe(ctrl.getSellerProfile?.bind(ctrl)));
-    router.get('/delivery-zones',              safe(ctrl.getDeliveryZones?.bind(ctrl)));
+    // ── Loyalty / Referral / Behavior (advanced.js) ──────────────────────────
+    router.get('/loyalty',               safe(ctrl.getLoyalty?.bind(ctrl)));
+    router.post('/loyalty/redeem',       safe(ctrl.redeemLoyalty?.bind(ctrl)));
+    router.get('/referral',              safe(ctrl.getReferral?.bind(ctrl)));
+    router.post('/behavior/track',       safe(ctrl.trackBehavior?.bind(ctrl)));
 
-    // ── Admin — P1 FIX: adminOnly applied at ROUTER level ─────────────────────
-    // All routes below /admin require admin role — enforced BEFORE controllers.
+    // ── Addresses (checkout.js) ───────────────────────────────────────────────
+    router.get('/addresses',             safe(ctrl.getAddresses?.bind(ctrl)));
+    router.post('/addresses',            safe(ctrl.saveAddress?.bind(ctrl)));
+
+    // ── Delivery ─────────────────────────────────────────────────────────────
+    router.get('/delivery-zones',        safe(ctrl.getDeliveryZones?.bind(ctrl)));
+    router.get('/delivery/zones',        safe(ctrl.getDeliveryZones?.bind(ctrl)));
+    router.post('/delivery/smart-estimate', safe(ctrl.smartDeliveryEstimate?.bind(ctrl)));
+
+    // ── Reviews ──────────────────────────────────────────────────────────────
+    router.get('/products/:id/reviews',  safe(ctrl.getReviews?.bind(ctrl)));
+    router.post('/products/:id/reviews', safe(ctrl.createReview?.bind(ctrl)));
+    router.post('/reviews/:id/respond',  safe(ctrl.respondToReview?.bind(ctrl)));
+    router.post('/reviews/:id/helpful',  safe(ctrl.markReviewHelpful?.bind(ctrl)));
+
+    // ── Support ───────────────────────────────────────────────────────────────
+    router.post('/support/ticket',       safe(ctrl.createSupportTicket?.bind(ctrl)));
+
+    // ════════════════════════════════════════════════════════════════════════
+    // SELLER ROUTES
+    // ════════════════════════════════════════════════════════════════════════
+    router.get('/seller-dashboard',                  safe(ctrl.getSellerDashboard?.bind(ctrl)));
+    router.get('/seller-dashboard/orders',           safe(ctrl.getSellerOrders?.bind(ctrl)));
+    router.get('/seller/dashboard',                  safe(ctrl.getSellerDashboard?.bind(ctrl)));
+
+    router.get('/seller/products',                   safe(ctrl.getSellerProducts?.bind(ctrl)));
+    router.post('/seller/products/import',           safe(ctrl.importSellerProducts?.bind(ctrl)));
+    router.post('/seller/products/:id/archive',      safe(ctrl.sellerArchiveProduct?.bind(ctrl)));
+    router.post('/seller/products/:id/restore',      safe(ctrl.sellerRestoreProduct?.bind(ctrl)));
+    router.post('/seller/products/:id/resubmit',     safe(ctrl.sellerResubmitProduct?.bind(ctrl)));
+    router.post('/seller/products/:id/duplicate',    safe(ctrl.sellerDuplicateProduct?.bind(ctrl)));
+
+    router.get('/seller/inventory',                  safe(ctrl.getSellerInventory?.bind(ctrl)));
+    router.put('/seller/inventory/bulk',             safe(ctrl.bulkUpdateInventory?.bind(ctrl)));
+
+    router.get('/seller/analytics',                  safe(ctrl.getSellerAnalytics?.bind(ctrl)));
+    router.get('/seller/earnings',                   safe(ctrl.getSellerEarnings?.bind(ctrl)));
+
+    router.get('/seller/orders',                     safe(ctrl.getSellerOrders?.bind(ctrl)));
+    router.put('/seller/orders/:id/shipping',        safe(ctrl.updateShipping?.bind(ctrl)));
+
+    router.get('/seller/payout',                     safe(ctrl.getPayouts?.bind(ctrl)));
+    router.get('/seller/payouts',                    safe(ctrl.getPayouts?.bind(ctrl)));
+    router.post('/seller/payout/request',            safe(ctrl.requestPayout?.bind(ctrl)));
+    router.post('/seller/payouts/request',           safe(ctrl.requestPayout?.bind(ctrl)));
+
+    router.get('/seller/returns',                    safe(ctrl.getSellerReturns?.bind(ctrl)));
+    router.post('/seller/returns/:id/approve',       safe(ctrl.approveReturn?.bind(ctrl)));
+    router.post('/seller/returns/:id/reject',        safe(ctrl.rejectReturn?.bind(ctrl)));
+
+    router.get('/seller/verification',               safe(ctrl.getKYCStatus?.bind(ctrl)));
+    router.post('/seller/verification',              safe(ctrl.submitSellerKYC?.bind(ctrl)));
+    router.get('/seller/kyc/status',                 safe(ctrl.getKYCStatus?.bind(ctrl)));
+    router.post('/seller/kyc',                       safe(ctrl.submitSellerKYC?.bind(ctrl)));
+
+    router.get('/seller/subscription',               safe(ctrl.getSellerSubscription?.bind(ctrl)));
+    router.post('/seller/subscription/upgrade',      safe(ctrl.upgradeSubscription?.bind(ctrl)));
+
+    router.get('/seller/:id',                        safe(ctrl.getSellerProfile?.bind(ctrl)));
+
+    // ════════════════════════════════════════════════════════════════════════
+    // ADMIN ROUTES — adminOnly enforced at router level
+    // ════════════════════════════════════════════════════════════════════════
     router.use('/admin', adminOnly);
 
-    router.delete('/admin/products/:id',           safe(ctrl.adminRemoveProduct?.bind(ctrl)));
-    router.post('/admin/ban/:sellerId',            safe(ctrl.adminBanSeller?.bind(ctrl)));
-    router.get('/admin/stats',                     safe(ctrl.adminGetStats?.bind(ctrl)));
-    router.get('/admin/stats/full',                safe(ctrl.adminGetStats?.bind(ctrl))); // alias — frontend calls /stats/full
-    router.post('/admin/products/:id/approve',     safe(ctrl.adminApproveProduct?.bind(ctrl)));
-    router.post('/admin/products/:id/reject',      safe(ctrl.adminRejectProduct?.bind(ctrl)));
-    router.get('/admin/products/pending',          safe(ctrl.adminGetPendingProducts?.bind(ctrl)));
+    router.get('/admin/stats',                       safe(ctrl.adminGetStats?.bind(ctrl)));
+    router.get('/admin/stats/full',                  safe(ctrl.adminGetStats?.bind(ctrl)));
+    router.get('/admin/analytics',                   safe(ctrl.adminGetStats?.bind(ctrl)));
+    router.get('/admin/marketplace/stats',           safe(ctrl.adminGetStats?.bind(ctrl)));
+    router.get('/admin/marketplace/reports',         safe(ctrl.adminGetStats?.bind(ctrl)));
 
-    // P1 FIX: Refund approval workflow
-    router.get('/admin/refunds',                   safe(ctrl.adminGetRefunds?.bind(ctrl)));
-    router.post('/admin/refunds/:id/approve',      safe(ctrl.adminApproveRefund?.bind(ctrl)));
-    router.post('/admin/refunds/:id/reject',       safe(ctrl.adminRejectRefund?.bind(ctrl)));
+    router.get('/admin/products',                    safe(ctrl.adminGetProducts?.bind(ctrl)));
+    router.get('/admin/products/pending',            safe(ctrl.adminGetPendingProducts?.bind(ctrl)));
+    router.post('/admin/products/:id/approve',       safe(ctrl.adminApproveProduct?.bind(ctrl)));
+    router.post('/admin/products/:id/reject',        safe(ctrl.adminRejectProduct?.bind(ctrl)));
+    router.delete('/admin/products/:id',             safe(ctrl.adminRemoveProduct?.bind(ctrl)));
 
-    // P2 FIX: Seller KYC review
-    router.get('/admin/kyc/pending',               safe(ctrl.adminGetPendingKYC?.bind(ctrl)));
-    router.post('/admin/kyc/:id/approve',          safe(ctrl.adminApproveKYC?.bind(ctrl)));
-    router.post('/admin/kyc/:id/reject',           safe(ctrl.adminRejectKYC?.bind(ctrl)));
+    router.get('/admin/sellers',                     safe(ctrl.adminGetSellers?.bind(ctrl)));
+    router.get('/admin/buyers',                      safe(ctrl.adminGetBuyers?.bind(ctrl)));
+    router.post('/admin/ban/:userId',                safe(ctrl.adminBanSeller?.bind(ctrl)));
+    router.post('/admin/unban/:userId',              safe(ctrl.adminUnbanUser?.bind(ctrl)));
 
-    // P2 FIX: Payout disbursement
-    router.get('/admin/payouts/pending',           safe(ctrl.adminGetPendingPayouts?.bind(ctrl)));
-    router.post('/admin/payouts/:id/disburse',     safe(ctrl.adminDisbursePayout?.bind(ctrl)));
+    router.get('/admin/orders',                      safe(ctrl.adminGetOrders?.bind(ctrl)));
 
-    // P2 FIX: Audit log
-    router.get('/admin/audit-log',                 safe(ctrl.getAuditLog?.bind(ctrl)));
+    router.get('/admin/returns',                     safe(ctrl.adminGetRefunds?.bind(ctrl)));
+    router.get('/admin/refunds',                     safe(ctrl.adminGetRefunds?.bind(ctrl)));
+    router.post('/admin/refunds/:id/approve',        safe(ctrl.adminApproveRefund?.bind(ctrl)));
+    router.post('/admin/refunds/:id/reject',         safe(ctrl.adminRejectRefund?.bind(ctrl)));
 
-    // P2 FIX: Admin order management
-    router.get('/admin/orders',                    safe(ctrl.adminGetOrders?.bind(ctrl)));
-    router.put('/admin/orders/:id/status',         safe(ctrl.updateOrderStatus?.bind(ctrl)));
-    router.put('/admin/orders/:id/cancel',         safe(ctrl.cancelOrder?.bind(ctrl)));
+    router.get('/admin/payouts',                     safe(ctrl.adminGetPendingPayouts?.bind(ctrl)));
+    router.post('/admin/payouts/process',            safe(ctrl.adminProcessPayout?.bind(ctrl)));
+    router.post('/admin/payouts/:id/disburse',       safe(ctrl.adminDisbursePayout?.bind(ctrl)));
 
-    // Flash sale admin CRUD (frontend calls these)
-    router.get('/admin/flash-sales',               safe(ctrl.adminGetFlashSales?.bind(ctrl)));
-    router.post('/admin/flash-sales',              safe(ctrl.adminCreateFlashSale?.bind(ctrl)));
-    router.delete('/admin/flash-sales/:id',        safe(ctrl.adminEndFlashSale?.bind(ctrl)));
+    router.get('/admin/coupons',                     safe(ctrl.adminGetCoupons?.bind(ctrl)));
+    router.post('/admin/coupons',                    safe(ctrl.adminCreateCoupon?.bind(ctrl)));
+    router.delete('/admin/coupons/:id',              safe(ctrl.adminDeleteCoupon?.bind(ctrl)));
 
-    // Broadcast notifications (admin)
-    router.post('/admin/notifications/broadcast',  safe(ctrl.adminBroadcastNotification?.bind(ctrl)));
+    router.get('/admin/flash-sales',                 safe(ctrl.adminGetFlashSales?.bind(ctrl)));
+    router.post('/admin/flash-sales',                safe(ctrl.adminCreateFlashSale?.bind(ctrl)));
+    router.delete('/admin/flash-sales/:id',          safe(ctrl.adminDeleteFlashSale?.bind(ctrl)));
 
-    // Admin reviews
-    router.get('/admin/reviews',                   safe(ctrl.adminGetReviews?.bind(ctrl)));
-    router.delete('/admin/reviews/:id',            safe(ctrl.adminDeleteReview?.bind(ctrl)));
+    router.get('/admin/reviews',                     safe(ctrl.adminGetReviews?.bind(ctrl)));
+    router.delete('/admin/reviews/:id',              safe(ctrl.adminDeleteReview?.bind(ctrl)));
+
+    router.get('/admin/tickets',                     safe(ctrl.adminGetTickets?.bind(ctrl)));
+    router.post('/admin/tickets/:id/reply',          safe(ctrl.adminReplyTicket?.bind(ctrl)));
+    router.post('/admin/tickets/:id/close',          safe(ctrl.adminCloseTicket?.bind(ctrl)));
+
+    router.post('/admin/notifications/send',         safe(ctrl.adminSendNotification?.bind(ctrl)));
+
+    router.get('/admin/settings',                    safe(ctrl.adminGetSettings?.bind(ctrl)));
+    router.put('/admin/settings',                    safe(ctrl.adminUpdateSettings?.bind(ctrl)));
+
+    router.get('/admin/kyc/pending',                 safe(ctrl.adminGetPendingKYC?.bind(ctrl)));
+    router.post('/admin/kyc/:id/approve',            safe(ctrl.adminApproveKYC?.bind(ctrl)));
+    router.post('/admin/kyc/:id/reject',             safe(ctrl.adminRejectKYC?.bind(ctrl)));
+
+    router.get('/admin/audit-log',                   safe(ctrl.getAuditLog?.bind(ctrl)));
 }
 
 module.exports = router;
