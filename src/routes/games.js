@@ -477,4 +477,71 @@ router.post('/share', async (req, res) => {
   }
 });
 
+// ══════════════════════════════════════════════════════════════════════════════
+// POST /api/games/push/subscribe — register a push subscription for reminders
+// ══════════════════════════════════════════════════════════════════════════════
+router.post('/push/subscribe', async (req, res) => {
+  try {
+    const PushSubscription = db.models?.PushSubscription || db.PushSubscription;
+    if (!PushSubscription) return res.status(503).json({ error: 'Service unavailable' });
+
+    const userId = req.user?.id || req.userId;
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    const { endpoint, keys } = req.body;
+    if (!endpoint || !keys?.p256dh || !keys?.auth) {
+      return res.status(400).json({ error: 'Invalid subscription payload' });
+    }
+
+    await PushSubscription.upsert({
+      userId,
+      endpoint,
+      p256dh: keys.p256dh,
+      auth: keys.auth,
+      gameRemindersEnabled: true,
+    });
+
+    return res.status(201).json({ ok: true });
+  } catch (err) {
+    console.error('[games] POST /push/subscribe:', err.message);
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// POST /api/games/push/unsubscribe — disable game reminders for this device
+// ══════════════════════════════════════════════════════════════════════════════
+router.post('/push/unsubscribe', async (req, res) => {
+  try {
+    const PushSubscription = db.models?.PushSubscription || db.PushSubscription;
+    if (!PushSubscription) return res.status(503).json({ error: 'Service unavailable' });
+
+    const userId = req.user?.id || req.userId;
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    const { endpoint } = req.body;
+    if (!endpoint) return res.status(400).json({ error: 'endpoint required' });
+
+    await PushSubscription.update(
+      { gameRemindersEnabled: false },
+      { where: { userId, endpoint } }
+    );
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('[games] POST /push/unsubscribe:', err.message);
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// GET /api/games/push/vapid-public-key — expose VAPID public key for subscription
+// (Also mountable at /api/push/vapid-public-key if a global push router exists)
+// ══════════════════════════════════════════════════════════════════════════════
+router.get('/push/vapid-public-key', (req, res) => {
+  const key = process.env.VAPID_PUBLIC_KEY;
+  if (!key) return res.status(503).json({ error: 'Push not configured' });
+  return res.json({ key });
+});
+
 module.exports = router;

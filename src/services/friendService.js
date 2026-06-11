@@ -85,7 +85,7 @@ const FRIEND_INCLUDES = [
 
 // ─── service methods ───────────────────────────────────────────────────────────
 
-async function sendFriendRequest(requesterId, receiverId, notes = '') {
+async function sendFriendRequest(requesterId, receiverId, notes = '', options = {}) {
     // eslint-disable-next-line eqeqeq
     if (requesterId == receiverId) {
         throw Object.assign(new Error('Cannot send friend request to yourself'), { status: 400 });
@@ -138,8 +138,13 @@ async function sendFriendRequest(requesterId, receiverId, notes = '') {
     return Friend.create({
         requesterId,
         receiverId,
-        status: 'pending',
-        notes:  notes || null,
+        status:         'pending',
+        notes:          notes || null,
+        isBusiness:     options?.isBusiness     ? true : false,
+        requestMessage: options?.message        ? String(options.message).substring(0, 300) : null,
+        expiresAt:      (options?.isTemporary && options?.duration)
+                            ? new Date(Date.now() + (parseInt(options.duration) * 1000))
+                            : null,
     });
 }
 

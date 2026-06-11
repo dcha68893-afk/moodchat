@@ -23,7 +23,7 @@ module.exports = (sequelize, DataTypes) => {
       status: {
         // FIX: Added 'removed' and 'cancelled' — codebase writes these values but they
         // were missing from the ENUM, causing Sequelize validation errors or silent DB failures.
-        type: DataTypes.ENUM('pending', 'accepted', 'rejected', 'blocked', 'removed', 'cancelled'),
+        type: DataTypes.ENUM('pending', 'accepted', 'rejected', 'blocked', 'removed', 'cancelled', 'expired'),
         defaultValue: 'pending',
         allowNull: false,
       },
@@ -73,6 +73,36 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.BOOLEAN,
         defaultValue: false,
         field: 'is_muted',
+      },
+      // P1 FIX: server-side temporary friend expiry
+      expiresAt: {
+        type: DataTypes.DATE,
+        allowNull: true,
+        field: 'expires_at',
+      },
+      // P2 FIX: isBusiness flag (was sent by frontend but silently dropped)
+      isBusiness: {
+        type: DataTypes.BOOLEAN,
+        defaultValue: false,
+        field: 'is_business',
+      },
+      // P2 FIX: LinkedIn-style connection note sent with request
+      requestMessage: {
+        type: DataTypes.STRING(300),
+        allowNull: true,
+        field: 'request_message',
+      },
+      // P3 FIX: snooze — hide friend from feed for N days without unfriending
+      snoozedUntil: {
+        type: DataTypes.DATE,
+        allowNull: true,
+        field: 'snoozed_until',
+      },
+      // P3 FIX: restrict — friend can see public posts but not private ones
+      isRestricted: {
+        type: DataTypes.BOOLEAN,
+        defaultValue: false,
+        field: 'is_restricted',
       },
     },
     {

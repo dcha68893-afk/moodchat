@@ -81,7 +81,10 @@ module.exports = (sequelize, DataTypes) => {
           readReceipts: true,
           typingIndicators: true,
           onlineStatus: true,
-          lastSeen: true
+          lastSeen: true,
+          whoCanSendFriendRequests: 'everyone',  // P3 FIX: 'everyone'|'friends_of_friends'|'nobody'
+          whoCanSeeMyFriends: 'everyone',         // P3 FIX: 'everyone'|'friends'|'nobody'
+          anniversaryNotifications: true          // P3 FIX: friendship anniversaries
         }
       },
       chatPreferences: {

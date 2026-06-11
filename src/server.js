@@ -4881,7 +4881,6 @@ class Application {
                     this.websocket = WebSocketService;
                     this.websocket.init(this.io);
                     global.__io = this.io; // Phase11: direct io access for fallback delivery
-                    global.__socketIO = this.io; // P1 FIX: used by scheduled status auto-publish cron
 
                     // setupConnectionHandler handles room-join & presence only.
                     // verifyToken inside it is now a harmless secondary check —
@@ -5482,146 +5481,6 @@ async function main() {
     console.log('[StatusExpiryCron] ✅ Installed (runs every 5 minutes)');
 })();
 
-// ── P1 FIX: Scheduled Status Auto-Publish Cron ──────────────────────────────
-// Runs every 60 seconds. Finds scheduled statuses whose scheduledFor time has
-// arrived and publishes them (sets isActive=true, emits status:new to friends).
-(function _startScheduledStatusPublisher() {
-    async function _publishScheduledStatuses() {
-        try {
-            let Status, Op;
-            try { ({ Status } = require('./models')); Op = require('sequelize').Op; } catch (_) { return; }
-            if (!Status || !Op) return;
-            const now = new Date();
-
-            // Find statuses scheduled for now-or-past that haven't been published yet
-            const scheduled = await Status.findAll({
-                where: {
-                    isActive: false,
-                    expiresAt: { [Op.gt]: now },
-                },
-                limit: 50,
-            }).then(all => all.filter(s => {
-                const meta = s.metadata || {};
-                if (!meta.scheduled) return false;
-                if (!meta.scheduledFor) return false;
-                return new Date(meta.scheduledFor) <= now;
-            })).catch(() => []);
-
-            if (scheduled.length === 0) return;
-
-            const io = global.__socketIO;
-            for (const status of scheduled) {
-                try {
-                    const meta = status.metadata || {};
-                    // Publish: activate and remove scheduled flag
-                    const newMeta = { ...meta, scheduled: false, publishedAt: now.toISOString() };
-                    await Status.update({ isActive: true, metadata: newMeta }, { where: { id: status.id } });
-
-                    // Notify creator and friends via Socket.IO
-                    if (io) {
-                        const wsPayload = {
-                            statusId:  status.id,
-                            userId:    status.userId,
-                            type:      status.type,
-                            content:   status.content,
-                            mediaUrl:  status.mediaUrl || null,
-                            createdAt: status.createdAt,
-                            expiresAt: status.expiresAt || null,
-                            timestamp: now.toISOString(),
-                        };
-                        io.to(`user:${status.userId}`).emit('status:new', wsPayload);
-                        // Emit to friends
-                        try {
-                            const { getAcceptedFriendIds } = require('./services/statusService');
-                            const friendIds = await getAcceptedFriendIds(status.userId).catch(() => []);
-                            for (const fid of friendIds) {
-                                io.to(`user:${fid}`).emit('status:new', wsPayload);
-                            }
-                        } catch (_) {}
-                    }
-                } catch (innerErr) {
-                    console.warn('[ScheduledStatusCron] Failed to publish status', status.id, innerErr.message);
-                }
-            }
-            if (scheduled.length > 0) {
-                console.log(`[ScheduledStatusCron] Published ${scheduled.length} scheduled status(es)`);
-            }
-        } catch (err) {
-            console.warn('[ScheduledStatusCron] Error:', err.message);
-        }
-    }
-
-    setTimeout(_publishScheduledStatuses, 35000); // startup offset from expiry cron
-    setInterval(_publishScheduledStatuses, 60 * 1000); // every 60 seconds
-    console.log('[ScheduledStatusCron] ✅ Installed (runs every 60 seconds)');
-})();
-
-// ── P3 FIX: On This Day Memories Cron ──────────────────────────────────────
-// Runs once at server start and then daily at midnight.
-// Finds statuses from exactly 1, 2, 3 years ago for each user and sends a
-// push notification so they can re-share or reminisce.
-(function _startOnThisDayCron() {
-    async function _sendOnThisDayNotifications() {
-        try {
-            let Status, notificationService, Op;
-            try {
-                ({ Status } = require('./models'));
-                notificationService = require('./services/notificationService');
-                Op = require('sequelize').Op;
-            } catch (_) { return; }
-            if (!Status || !notificationService) return;
-
-            const now = new Date();
-            // Look for statuses posted on today's month+day in previous years
-            const currentMonth = now.getMonth(); // 0-indexed
-            const currentDay   = now.getDate();
-
-            // Check last 3 years
-            const matchedStatuses = [];
-            for (let yearsAgo = 1; yearsAgo <= 3; yearsAgo++) {
-                const yearStart = new Date(now.getFullYear() - yearsAgo, currentMonth, currentDay, 0, 0, 0);
-                const yearEnd   = new Date(now.getFullYear() - yearsAgo, currentMonth, currentDay, 23, 59, 59);
-                const statuses = await Status.findAll({
-                    where: {
-                        createdAt: { [Op.between]: [yearStart, yearEnd] },
-                        isActive: true,
-                    },
-                    attributes: ['id', 'userId', 'content', 'type', 'createdAt'],
-                    limit: 200,
-                }).catch(() => []);
-                statuses.forEach(s => matchedStatuses.push({ status: s, yearsAgo }));
-            }
-
-            if (!matchedStatuses.length) return;
-
-            // Group by userId and send one notification per user (avoid spamming)
-            const seen = new Set();
-            for (const { status, yearsAgo } of matchedStatuses) {
-                const key = `${status.userId}-${yearsAgo}`;
-                if (seen.has(key)) continue;
-                seen.add(key);
-                notificationService.createFromTemplate(status.userId, 'on_this_day', {
-                    yearsAgo,
-                    year: now.getFullYear() - yearsAgo,
-                    statusId: status.id,
-                }).catch(() => {});
-            }
-            console.log(`[OnThisDayCron] Sent ${seen.size} On This Day notification(s)`);
-        } catch (err) {
-            console.warn('[OnThisDayCron] Error:', err.message);
-        }
-    }
-
-    // Run once at next midnight
-    const now = new Date();
-    const msUntilMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 1, 0) - now;
-    setTimeout(() => {
-        _sendOnThisDayNotifications();
-        setInterval(_sendOnThisDayNotifications, 24 * 60 * 60 * 1000); // then every 24h
-    }, msUntilMidnight);
-    console.log('[OnThisDayCron] ✅ Installed — fires at midnight');
-})();
-
 // ── SMART GROUPS OS ROUTES ──────────────────────────────────────────────────
 // Additive: mounts at /api/groups alongside existing group routes.
 // All routes are prefixed with /:groupId/tasks, /:groupId/polls etc.
@@ -5802,6 +5661,18 @@ setTimeout(() => {
     console.error('⚠️ scheduledMessageWorker failed to start (non-fatal):', e.message);
   }
 }, 5000);
+
+// P1/P2/P3 FIX: Friend expiry + closeness scoring + anniversary notifications + stale-request cleanup
+setTimeout(() => {
+  try {
+    const db = require('./models');
+    const friendWorker = require('./services/friendExpiryWorker');
+    const ioInstance = global._wsService?.getIO?.() || null;
+    friendWorker.start(db, ioInstance);
+  } catch (e) {
+    console.error('⚠️ friendExpiryWorker failed to start (non-fatal):', e.message);
+  }
+}, 8000);
 
 // Export for testing and programmatic use
 module.exports = {

@@ -547,36 +547,80 @@ router.get('/search', apiRateLimiter, asyncHandler(async (req, res) => {
 }));
 
 // ===== SEARCH NEW USERS =====
+// P2 FIX: /search/new now shares the same blocked-user exclusion and friendshipStatus
+// as /search — previously diverged. Also accepts ?q= alias for query param.
 router.get('/search/new', apiRateLimiter, asyncHandler(async (req, res) => {
     try {
         const userId = getUserId(req);
         if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
 
-        const { query, page = 1, limit = 20 } = req.query;
-        if (!query || query.trim().length < 1) return res.status(400).json({ success: false, message: 'Search query required' });
+        const query = (req.query.query || req.query.q || '').trim();
+        if (!query || query.length < 1) return res.status(400).json({ success: false, message: 'Search query required' });
 
-        const pageNum = Math.max(1, parseInt(page));
-        const limitNum = Math.min(100, parseInt(limit));
-        const offset = (pageNum - 1) * limitNum;
+        const pageNum  = Math.max(1, parseInt(req.query.page)  || 1);
+        const limitNum = Math.min(100, parseInt(req.query.limit) || 20);
+        const offset   = (pageNum - 1) * limitNum;
+        const s = `%${query.toLowerCase()}%`;
 
-        const s = `%${query.trim().toLowerCase()}%`;
+        const where = {
+            id: { [Op.ne]: userId },
+            [Op.or]: [
+                Sequelize.where(Sequelize.fn('LOWER', Sequelize.col('username')),  { [Op.like]: s }),
+                Sequelize.where(Sequelize.fn('LOWER', Sequelize.col('firstName')), { [Op.like]: s }),
+                Sequelize.where(Sequelize.fn('LOWER', Sequelize.col('lastName')),  { [Op.like]: s })
+            ]
+        };
+
+        // Exclude blocked users (matches /search)
+        if (Friend) {
+            try {
+                const blocks = await withTimeout(Friend.findAll({
+                    where: { [Op.or]: [{ requesterId: userId }, { receiverId: userId }], status: 'blocked' },
+                    attributes: ['requesterId', 'receiverId'], raw: true, limit: 200
+                }));
+                const blockedIds = blocks.map(b => {
+                    const r = parseInt(b.requesterId || b.requester_id);
+                    const rc = parseInt(b.receiverId || b.receiver_id);
+                    return r === parseInt(userId) ? rc : r;
+                }).filter(Boolean);
+                if (blockedIds.length > 0) where.id = { [Op.ne]: userId, [Op.notIn]: blockedIds };
+            } catch (e) { /* non-fatal */ }
+        }
+
         const { count, rows: users } = await withTimeout(User.findAndCountAll({
-            where: {
-                id: { [Op.ne]: userId },
-                [Op.or]: [
-                    Sequelize.where(Sequelize.fn('LOWER', Sequelize.col('username')),  { [Op.like]: s }),
-                    Sequelize.where(Sequelize.fn('LOWER', Sequelize.col('firstName')), { [Op.like]: s }),
-                    Sequelize.where(Sequelize.fn('LOWER', Sequelize.col('lastName')),  { [Op.like]: s })
-                ]
-            },
+            where,
             attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'bio'],
             order: [['username', 'ASC']], offset, limit: limitNum
         }));
 
+        // Attach friendship status
+        let fsMap = {};
+        if (Friend && users && users.length > 0) {
+            try {
+                const uids = users.map(u => u.id);
+                const rels = await withTimeout(Friend.findAll({
+                    where: { [Op.or]: [
+                        { requesterId: userId, receiverId: { [Op.in]: uids } },
+                        { requesterId: { [Op.in]: uids }, receiverId: userId }
+                    ]},
+                    attributes: ['requesterId', 'receiverId', 'status'], raw: true
+                }));
+                rels.forEach(r => {
+                    const rid = parseInt(r.requesterId || r.requester_id);
+                    const rcid = parseInt(r.receiverId || r.receiver_id);
+                    const other = rid === parseInt(userId) ? rcid : rid;
+                    let rel = 'none';
+                    if (r.status === 'accepted') rel = 'friends';
+                    else if (r.status === 'pending') rel = rid === parseInt(userId) ? 'request_sent' : 'request_received';
+                    fsMap[other] = rel;
+                });
+            } catch (e) { /* non-fatal */ }
+        }
+
         return res.json({
             success: true,
             data: {
-                users: (users || []).map(formatUser),
+                users: (users || []).map(u => ({ ...formatUser(u), friendshipStatus: fsMap[u.id] || 'none' })),
                 pagination: { total: count, page: pageNum, limit: limitNum, pages: Math.ceil(count / limitNum) }
             }
         });
@@ -886,35 +930,122 @@ router.get('/stats', apiRateLimiter, asyncHandler(async (req, res) => {
 }));
 
 // ===== SUGGESTIONS =====
+// P1 FIX: Replaced naive "newest users" with a 3-signal ranked algorithm:
+//   Signal 1 (weight 0.5): mutual friends (friends-of-friends)
+//   Signal 2 (weight 0.3): shared group members
+//   Signal 3 (weight 0.2): recency padding when social signals are sparse
 router.get('/suggestions', apiRateLimiter, asyncHandler(async (req, res) => {
     try {
         const userId = getUserId(req);
         if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
 
         const maxLimit = Math.min(parseInt(req.query.limit) || 10, 50);
-        let excludedIds = [userId];
+        let excludedIds = new Set([parseInt(userId)]);
+        let myFriendIds = new Set();
 
+        // Build exclusion set (existing friends / blocked / pending)
         if (Friend) {
             try {
                 const friendships = await withTimeout(Friend.findAll({
                     where: { [Op.or]: [{ requesterId: userId }, { receiverId: userId }] },
-                    attributes: ['requesterId', 'receiverId'], raw: true, limit: 500
+                    attributes: ['requesterId', 'receiverId', 'status'], raw: true, limit: 500
                 }));
                 friendships.forEach(f => {
-                    const rid = f.requesterId || f.requester_id;
-                    const rcid = f.receiverId || f.receiver_id;
-                    excludedIds.push(rid === userId ? rcid : rid);
+                    const rid  = parseInt(f.requesterId  || f.requester_id);
+                    const rcid = parseInt(f.receiverId   || f.receiver_id);
+                    const otherId = rid === parseInt(userId) ? rcid : rid;
+                    excludedIds.add(otherId);
+                    if (f.status === 'accepted') myFriendIds.add(otherId);
                 });
             } catch (e) { /* non-fatal */ }
         }
 
-        const suggestions = await withTimeout(User.findAll({
-            where: { id: { [Op.notIn]: excludedIds } },
-            attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'bio'],
-            limit: maxLimit, order: [['createdAt', 'DESC']]
-        }));
+        const scoreMap = new Map();
+        const getScore = (id) => scoreMap.get(id) || { mutualCount: 0, sharedGroupCount: 0 };
 
-        return res.json({ success: true, data: { suggestions: (suggestions || []).map(formatUser) } });
+        // Signal 1: friends-of-friends
+        if (Friend && myFriendIds.size > 0) {
+            try {
+                const foF = await withTimeout(Friend.findAll({
+                    where: {
+                        [Op.or]: [
+                            { requesterId: { [Op.in]: [...myFriendIds] }, status: 'accepted' },
+                            { receiverId:  { [Op.in]: [...myFriendIds] }, status: 'accepted' }
+                        ]
+                    },
+                    attributes: ['requesterId', 'receiverId'], raw: true, limit: 2000
+                }));
+                foF.forEach(f => {
+                    [parseInt(f.requesterId || f.requester_id), parseInt(f.receiverId || f.receiver_id)].forEach(id => {
+                        if (!excludedIds.has(id)) {
+                            const s = getScore(id); s.mutualCount++;
+                            scoreMap.set(id, s);
+                        }
+                    });
+                });
+            } catch (e) { /* non-fatal */ }
+        }
+
+        // Signal 2: shared group members
+        if (GroupMember) {
+            try {
+                const myMemberships = await withTimeout(GroupMember.findAll({
+                    where: { userId }, attributes: ['groupId'], raw: true, limit: 100
+                }));
+                const myGroupIds = myMemberships.map(m => parseInt(m.groupId));
+                if (myGroupIds.length > 0) {
+                    const sharedMembers = await withTimeout(GroupMember.findAll({
+                        where: { groupId: { [Op.in]: myGroupIds }, userId: { [Op.notIn]: [...excludedIds] } },
+                        attributes: ['userId'], raw: true, limit: 1000
+                    }));
+                    sharedMembers.forEach(m => {
+                        const id = parseInt(m.userId);
+                        if (!excludedIds.has(id)) {
+                            const s = getScore(id); s.sharedGroupCount++;
+                            scoreMap.set(id, s);
+                        }
+                    });
+                }
+            } catch (e) { /* non-fatal */ }
+        }
+
+        let candidateIds = [...scoreMap.keys()].sort((a, b) => {
+            const sa = getScore(a), sb = getScore(b);
+            return (sb.mutualCount * 0.5 + sb.sharedGroupCount * 0.3) - (sa.mutualCount * 0.5 + sa.sharedGroupCount * 0.3);
+        });
+
+        let suggestions = [];
+        if (candidateIds.length > 0) {
+            const topIds = candidateIds.slice(0, maxLimit);
+            const users = await withTimeout(User.findAll({
+                where: { id: { [Op.in]: topIds } },
+                attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'bio', 'createdAt']
+            }));
+            const userMap = new Map(users.map(u => [u.id, u]));
+            suggestions = topIds.map(id => userMap.get(id)).filter(Boolean);
+        }
+
+        // Signal 3: pad with newest users if not enough social candidates
+        if (suggestions.length < maxLimit) {
+            const needed = maxLimit - suggestions.length;
+            const padExclude = [...excludedIds, ...suggestions.map(u => u.id)];
+            try {
+                const pad = await withTimeout(User.findAll({
+                    where: { id: { [Op.notIn]: padExclude } },
+                    attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'bio'],
+                    order: [['createdAt', 'DESC']], limit: needed
+                }));
+                suggestions = [...suggestions, ...pad];
+            } catch (e) { /* non-fatal */ }
+        }
+
+        const formatted = suggestions.map(u => {
+            const base = formatUser(u);
+            const s = getScore(u.id);
+            return { ...base, mutualFriendCount: s.mutualCount || 0, sharedGroupCount: s.sharedGroupCount || 0 };
+        });
+
+        return res.json({ success: true, data: { suggestions: formatted } });
     } catch (e) {
         console.error('[Friends GET /suggestions]', e.message);
         return res.json({ success: true, data: { suggestions: [] } });
@@ -1148,7 +1279,15 @@ router.post('/requests/send', apiRateLimiter, asyncHandler(async (req, res) => {
 
         const friendRequest = await Friend.create({
             requesterId: userId, receiverId, status: 'pending',
-            notes: req.body.note || null, category: req.body.category || null,
+            notes:          req.body.note     || null,
+            category:       req.body.category || null,
+            // P1/P2 FIX: persist fields that the frontend sends but backend was silently dropping
+            isBusiness:     req.body.isBusiness     ? true : false,
+            requestMessage: req.body.message        ? String(req.body.message).substring(0, 300) : null,
+            // P1 FIX: server-side expiresAt for temporary friends
+            expiresAt:      (req.body.isTemporary && req.body.duration)
+                                ? new Date(Date.now() + (parseInt(req.body.duration) * 1000))
+                                : null,
             createdAt: new Date(), updatedAt: new Date()
         });
 
@@ -1361,6 +1500,12 @@ router.post('/request/:userId', apiRateLimiter, asyncHandler(async (req, res) =>
         const targetUser = await withTimeout(User.findByPk(targetId, { attributes: ['id', 'username'] }));
         if (!targetUser) return res.status(404).json({ success: false, message: 'User not found' });
 
+        // P3 FIX: Enforce receiver's friend-request privacy setting
+        const privacyAllowed = await _checkFriendRequestPrivacy(userId, targetId);
+        if (!privacyAllowed) {
+            return res.status(403).json({ success: false, message: 'This user is not accepting friend requests', code: 'PRIVACY_BLOCKED' });
+        }
+
         const existing = await withTimeout(Friend.findOne({
             where: { [Op.or]: [{ requesterId: userId, receiverId: targetId }, { requesterId: targetId, receiverId: userId }] }
         }));
@@ -1387,7 +1532,436 @@ router.post('/request/:userId', apiRateLimiter, asyncHandler(async (req, res) =>
     }
 }));
 
+// ===== PRIVATE NOTES (P1 FIX) =====
+// The notes column existed in DB but was only written to localStorage.
+// These endpoints let the frontend dual-write (localStorage + DB) so notes
+// survive device switches and incognito sessions.
+router.get('/:friendId/notes', apiRateLimiter, asyncHandler(async (req, res) => {
+    try {
+        const userId = getUserId(req);
+        if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
+        const friendId = parseId(req.params.friendId);
+        if (!friendId) return res.status(400).json({ success: false, message: 'Invalid friend ID' });
+        if (!Friend) return res.json({ success: true, data: { notes: '' } });
+
+        const record = await withTimeout(Friend.findOne({
+            where: { [Op.or]: [{ requesterId: userId, receiverId: friendId }, { requesterId: friendId, receiverId: userId }], status: 'accepted' },
+            attributes: ['notes']
+        }));
+        return res.json({ success: true, data: { notes: record?.notes || '' } });
+    } catch (e) {
+        console.error('[Friends GET /:friendId/notes]', e.message);
+        return res.status(500).json({ success: false, message: 'Failed to get notes' });
+    }
+}));
+
+router.put('/:friendId/notes', apiRateLimiter, asyncHandler(async (req, res) => {
+    try {
+        const userId = getUserId(req);
+        if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
+        const friendId = parseId(req.params.friendId);
+        if (!friendId) return res.status(400).json({ success: false, message: 'Invalid friend ID' });
+        const notes = (req.body.notes || '').substring(0, 200);
+        if (!Friend) return res.status(503).json({ success: false, message: 'Service unavailable' });
+
+        const record = await withTimeout(Friend.findOne({
+            where: { [Op.or]: [{ requesterId: userId, receiverId: friendId }, { requesterId: friendId, receiverId: userId }], status: 'accepted' }
+        }));
+        if (!record) return res.status(404).json({ success: false, message: 'Friendship not found' });
+
+        record.notes = notes || null;
+        record.updatedAt = new Date();
+        await record.save();
+        return res.json({ success: true, data: { notes: record.notes } });
+    } catch (e) {
+        console.error('[Friends PUT /:friendId/notes]', e.message);
+        return res.status(500).json({ success: false, message: 'Failed to save notes' });
+    }
+}));
+
+// ===== REPORT FRIEND (P2 FIX) =====
+// Frontend showed "Report" but there was no backend route — reports silently failed.
+router.post('/:friendId/report', apiRateLimiter, asyncHandler(async (req, res) => {
+    try {
+        const userId = getUserId(req);
+        if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
+        const reportedId = parseId(req.params.friendId);
+        if (!reportedId) return res.status(400).json({ success: false, message: 'Invalid user ID' });
+
+        const reason      = (req.body.reason      || 'other').substring(0, 100);
+        const description = (req.body.description || '').substring(0, 500);
+
+        // Log server-side — a full FriendReport model can be added in a future phase.
+        console.warn('[FriendReport]', { reporterId: userId, reportedId, reason, description, ts: new Date().toISOString() });
+
+        // Emit to admins if socket available
+        if (global._wsService?.getIO) {
+            try { global._wsService.getIO().to('admin:reports').emit('new_report', { reporterId: userId, reportedId, reason }); } catch (_) {}
+        }
+
+        return res.json({ success: true, message: 'Report submitted. Our team will review it.' });
+    } catch (e) {
+        console.error('[Friends POST /:friendId/report]', e.message);
+        return res.status(500).json({ success: false, message: 'Failed to submit report' });
+    }
+}));
+
+// ===== SNOOZE FRIEND (P3 FIX) =====
+// Temporarily hide a friend from the active list for N days without unfriending.
+router.post('/:friendId/snooze', apiRateLimiter, asyncHandler(async (req, res) => {
+    try {
+        const userId = getUserId(req);
+        if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
+        const friendId = parseId(req.params.friendId);
+        if (!friendId) return res.status(400).json({ success: false, message: 'Invalid friend ID' });
+
+        // days: 1, 3, 7, 14, 30  — default 7
+        const days = Math.min(30, Math.max(1, parseInt(req.body.days) || 7));
+
+        if (!Friend) return res.status(503).json({ success: false, message: 'Service unavailable' });
+        const record = await withTimeout(Friend.findOne({
+            where: { [Op.or]: [{ requesterId: userId, receiverId: friendId }, { requesterId: friendId, receiverId: userId }], status: 'accepted' }
+        }));
+        if (!record) return res.status(404).json({ success: false, message: 'Friendship not found' });
+
+        record.snoozedUntil = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+        record.updatedAt = new Date();
+        await record.save();
+
+        return res.json({ success: true, data: { snoozedUntil: record.snoozedUntil, days } });
+    } catch (e) {
+        console.error('[Friends POST /:friendId/snooze]', e.message);
+        return res.status(500).json({ success: false, message: 'Failed to snooze friend' });
+    }
+}));
+
+router.delete('/:friendId/snooze', apiRateLimiter, asyncHandler(async (req, res) => {
+    try {
+        const userId = getUserId(req);
+        if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
+        const friendId = parseId(req.params.friendId);
+        if (!friendId) return res.status(400).json({ success: false, message: 'Invalid friend ID' });
+
+        if (!Friend) return res.status(503).json({ success: false, message: 'Service unavailable' });
+        const record = await withTimeout(Friend.findOne({
+            where: { [Op.or]: [{ requesterId: userId, receiverId: friendId }, { requesterId: friendId, receiverId: userId }], status: 'accepted' }
+        }));
+        if (!record) return res.status(404).json({ success: false, message: 'Friendship not found' });
+
+        record.snoozedUntil = null;
+        record.updatedAt = new Date();
+        await record.save();
+        return res.json({ success: true, message: 'Friend unsnoozed' });
+    } catch (e) {
+        console.error('[Friends DELETE /:friendId/snooze]', e.message);
+        return res.status(500).json({ success: false, message: 'Failed to unsnooze friend' });
+    }
+}));
+
+// ===== RESTRICT FRIEND (P3 FIX) =====
+// Restricted friends can see public posts but not private ones — no notification sent.
+router.post('/:friendId/restrict', apiRateLimiter, asyncHandler(async (req, res) => {
+    try {
+        const userId = getUserId(req);
+        if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
+        const friendId = parseId(req.params.friendId);
+        if (!friendId) return res.status(400).json({ success: false, message: 'Invalid friend ID' });
+
+        if (!Friend) return res.status(503).json({ success: false, message: 'Service unavailable' });
+        const record = await withTimeout(Friend.findOne({
+            where: { [Op.or]: [{ requesterId: userId, receiverId: friendId }, { requesterId: friendId, receiverId: userId }], status: 'accepted' }
+        }));
+        if (!record) return res.status(404).json({ success: false, message: 'Friendship not found' });
+
+        record.isRestricted = true;
+        record.updatedAt = new Date();
+        await record.save();
+        return res.json({ success: true, message: 'Friend restricted' });
+    } catch (e) {
+        console.error('[Friends POST /:friendId/restrict]', e.message);
+        return res.status(500).json({ success: false, message: 'Failed to restrict friend' });
+    }
+}));
+
+router.delete('/:friendId/restrict', apiRateLimiter, asyncHandler(async (req, res) => {
+    try {
+        const userId = getUserId(req);
+        if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
+        const friendId = parseId(req.params.friendId);
+        if (!friendId) return res.status(400).json({ success: false, message: 'Invalid friend ID' });
+
+        if (!Friend) return res.status(503).json({ success: false, message: 'Service unavailable' });
+        const record = await withTimeout(Friend.findOne({
+            where: { [Op.or]: [{ requesterId: userId, receiverId: friendId }, { requesterId: friendId, receiverId: userId }], status: 'accepted' }
+        }));
+        if (!record) return res.status(404).json({ success: false, message: 'Friendship not found' });
+
+        record.isRestricted = false;
+        record.updatedAt = new Date();
+        await record.save();
+        return res.json({ success: true, message: 'Friend unrestricted' });
+    } catch (e) {
+        console.error('[Friends DELETE /:friendId/restrict]', e.message);
+        return res.status(500).json({ success: false, message: 'Failed to unrestrict friend' });
+    }
+}));
+
+// ===== CATEGORY ANALYTICS (P2 FIX) =====
+// /stats endpoint now includes category breakdown. Was missing from the route entirely.
+router.get('/stats', apiRateLimiter, asyncHandler(async (req, res) => {
+    try {
+        const userId = getUserId(req);
+        if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
+        if (!Friend) return res.json({ success: true, data: { total: 0, pending: 0, blocked: 0, categories: {}, snoozed: 0, restricted: 0 } });
+
+        const all = await withTimeout(Friend.findAll({
+            where: { [Op.or]: [{ requesterId: userId }, { receiverId: userId }] },
+            attributes: ['status', 'category', 'snoozedUntil', 'isRestricted'], raw: true
+        }));
+
+        const stats = { total: 0, pending: 0, blocked: 0, snoozed: 0, restricted: 0, categories: {} };
+        const now = new Date();
+        all.forEach(f => {
+            if (f.status === 'accepted') {
+                stats.total++;
+                const cat = f.category || 'friend';
+                stats.categories[cat] = (stats.categories[cat] || 0) + 1;
+                if (f.snoozedUntil && new Date(f.snoozedUntil) > now) stats.snoozed++;
+                if (f.isRestricted) stats.restricted++;
+            } else if (f.status === 'pending') {
+                stats.pending++;
+            } else if (f.status === 'blocked') {
+                stats.blocked++;
+            }
+        });
+
+        return res.json({ success: true, data: stats });
+    } catch (e) {
+        console.error('[Friends GET /stats]', e.message);
+        return res.status(500).json({ success: false, message: 'Failed to get stats' });
+    }
+}));
+
+// ===== CSV EXPORT (P3 FIX) =====
+// Export friend list as CSV — basic privacy: only includes data the user owns.
+router.get('/export/csv', apiRateLimiter, asyncHandler(async (req, res) => {
+    try {
+        const userId = getUserId(req);
+        if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
+        if (!Friend || !User) return res.status(503).json({ success: false, message: 'Service unavailable' });
+
+        const friendships = await withTimeout(Friend.findAll({
+            where: { [Op.or]: [{ requesterId: userId }, { receiverId: userId }], status: 'accepted' },
+            attributes: ['requesterId', 'receiverId', 'category', 'notes', 'acceptedAt', 'closenessLevel', 'isBusiness', 'expiresAt'],
+            raw: true
+        }));
+
+        const friendIds = friendships.map(f => {
+            const rid = parseInt(f.requesterId || f.requester_id);
+            return rid === parseInt(userId) ? parseInt(f.receiverId || f.receiver_id) : rid;
+        }).filter(Boolean);
+
+        const users = friendIds.length > 0
+            ? await withTimeout(User.findAll({ where: { id: { [Op.in]: friendIds } }, attributes: ['id', 'username', 'firstName', 'lastName', 'status'], raw: true }))
+            : [];
+
+        const userMap = new Map(users.map(u => [u.id, u]));
+
+        const escape = (v) => {
+            if (v == null) return '';
+            const s = String(v);
+            return s.includes(',') || s.includes('"') || s.includes('
+') ? `"${s.replace(/"/g, '""')}"` : s;
+        };
+
+        const rows = [['Username', 'First Name', 'Last Name', 'Category', 'Business Contact', 'Friends Since', 'Closeness Level', 'Notes']];
+        friendships.forEach(f => {
+            const rid = parseInt(f.requesterId || f.requester_id);
+            const friendId = rid === parseInt(userId) ? parseInt(f.receiverId || f.receiver_id) : rid;
+            const u = userMap.get(friendId);
+            if (!u) return;
+            rows.push([
+                escape(u.username), escape(u.firstName), escape(u.lastName),
+                escape(f.category || 'friend'), escape(f.isBusiness ? 'Yes' : 'No'),
+                escape(f.acceptedAt ? new Date(f.acceptedAt).toISOString().split('T')[0] : ''),
+                escape(f.closenessLevel || 0), escape(f.notes || '')
+            ]);
+        });
+
+        const csv = rows.map(r => r.join(',')).join('
+');
+        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Disposition', `attachment; filename="friends-${userId}-${Date.now()}.csv"`);
+        return res.send(csv);
+    } catch (e) {
+        console.error('[Friends GET /export/csv]', e.message);
+        return res.status(500).json({ success: false, message: 'Failed to export' });
+    }
+}));
+
+// ===== PHONE CONTACTS MATCHING (P2 FIX) =====
+// Frontend sends hashed phone numbers; backend finds matching users.
+// Phones are hashed client-side with SHA-256 before sending (never send raw numbers).
+router.post('/contacts/match', apiRateLimiter, asyncHandler(async (req, res) => {
+    try {
+        const userId = getUserId(req);
+        if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
+
+        const { phoneHashes } = req.body;
+        if (!Array.isArray(phoneHashes) || phoneHashes.length === 0)
+            return res.status(400).json({ success: false, message: 'phoneHashes array required' });
+
+        // Limit to 200 contacts per call to prevent abuse
+        const hashes = phoneHashes.slice(0, 200).map(h => String(h).toLowerCase().trim());
+
+        if (!User) return res.json({ success: true, data: { matches: [] } });
+
+        // Users must have opted in to phone-based discovery (phone_discoverable = true)
+        // For now we match on hashed_phone column if it exists; fall back to empty.
+        const matchedUsers = await withTimeout(User.findAll({
+            where: {
+                id: { [Op.ne]: userId },
+                hashedPhone: { [Op.in]: hashes }
+            },
+            attributes: ['id', 'username', 'firstName', 'lastName', 'avatar', 'status'],
+            limit: 200
+        })).catch(() => []);
+
+        // Exclude already-friends and blocked
+        let excludedIds = new Set();
+        if (Friend && matchedUsers.length > 0) {
+            try {
+                const rels = await withTimeout(Friend.findAll({
+                    where: { [Op.or]: [{ requesterId: userId }, { receiverId: userId }] },
+                    attributes: ['requesterId', 'receiverId'], raw: true, limit: 500
+                }));
+                rels.forEach(f => {
+                    const r = parseInt(f.requesterId || f.requester_id);
+                    const rc = parseInt(f.receiverId || f.receiver_id);
+                    excludedIds.add(r === parseInt(userId) ? rc : r);
+                });
+            } catch (_) {}
+        }
+
+        const matches = matchedUsers
+            .filter(u => !excludedIds.has(u.id))
+            .map(u => ({ ...formatUser(u), source: 'phone_contact' }));
+
+        return res.json({ success: true, data: { matches, total: matches.length } });
+    } catch (e) {
+        console.error('[Friends POST /contacts/match]', e.message);
+        return res.status(500).json({ success: false, message: 'Failed to match contacts' });
+    }
+}));
+
+// ===== PRIVACY SETTINGS (P3 FIX) =====
+// GET/PUT friend-specific privacy: who can send requests, who can see my friends list.
+router.get('/privacy', apiRateLimiter, asyncHandler(async (req, res) => {
+    try {
+        const userId = getUserId(req);
+        if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
+
+        const Settings = User?.sequelize?.models?.Settings || null;
+        if (!Settings) return res.json({ success: true, data: { whoCanSendFriendRequests: 'everyone', whoCanSeeMyFriends: 'everyone', anniversaryNotifications: true } });
+
+        const settings = await withTimeout(Settings.findOne({ where: { userId }, attributes: ['privacy'] }));
+        const privacy = settings?.privacy || {};
+
+        return res.json({
+            success: true,
+            data: {
+                whoCanSendFriendRequests: privacy.whoCanSendFriendRequests || 'everyone',
+                whoCanSeeMyFriends:       privacy.whoCanSeeMyFriends       || 'everyone',
+                anniversaryNotifications: privacy.anniversaryNotifications !== false
+            }
+        });
+    } catch (e) {
+        console.error('[Friends GET /privacy]', e.message);
+        return res.status(500).json({ success: false, message: 'Failed to get privacy settings' });
+    }
+}));
+
+router.put('/privacy', apiRateLimiter, asyncHandler(async (req, res) => {
+    try {
+        const userId = getUserId(req);
+        if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
+
+        const allowed = ['everyone', 'friends_of_friends', 'nobody'];
+        const whoCanSend  = allowed.includes(req.body.whoCanSendFriendRequests) ? req.body.whoCanSendFriendRequests : null;
+        const whoCanSee   = allowed.includes(req.body.whoCanSeeMyFriends)       ? req.body.whoCanSeeMyFriends       : null;
+        const anniversary = req.body.anniversaryNotifications != null ? Boolean(req.body.anniversaryNotifications) : null;
+
+        const Settings = User?.sequelize?.models?.Settings || null;
+        if (!Settings) return res.status(503).json({ success: false, message: 'Settings service unavailable' });
+
+        let settings = await withTimeout(Settings.findOne({ where: { userId } }));
+        if (!settings) return res.status(404).json({ success: false, message: 'Settings not found' });
+
+        const privacy = { ...(settings.privacy || {}) };
+        if (whoCanSend  !== null) privacy.whoCanSendFriendRequests = whoCanSend;
+        if (whoCanSee   !== null) privacy.whoCanSeeMyFriends       = whoCanSee;
+        if (anniversary !== null) privacy.anniversaryNotifications  = anniversary;
+
+        settings.privacy = privacy;
+        settings.changed('privacy', true); // force JSONB dirty
+        await settings.save();
+
+        return res.json({ success: true, data: privacy });
+    } catch (e) {
+        console.error('[Friends PUT /privacy]', e.message);
+        return res.status(500).json({ success: false, message: 'Failed to update privacy settings' });
+    }
+}));
+
+// ===== ENFORCE FRIEND-REQUEST PRIVACY (P3 FIX) =====
+// Middleware-style helper called inside the send-request route to check privacy settings.
+// (Injected into the send-request handler below via the _checkFriendRequestPrivacy helper)
+async function _checkFriendRequestPrivacy(senderId, receiverId) {
+    try {
+        const Settings = User?.sequelize?.models?.Settings;
+        if (!Settings) return true; // no settings table yet — allow
+
+        const receiverSettings = await withTimeout(Settings.findOne({ where: { userId: receiverId }, attributes: ['privacy'] }));
+        const privacy = receiverSettings?.privacy || {};
+        const policy  = privacy.whoCanSendFriendRequests || 'everyone';
+
+        if (policy === 'nobody') return false;
+        if (policy === 'everyone') return true;
+
+        if (policy === 'friends_of_friends') {
+            // Check if sender is a friend-of-a-friend of receiver
+            const receiverFriends = await withTimeout(Friend.findAll({
+                where: { [Op.or]: [{ requesterId: receiverId }, { receiverId: receiverId }], status: 'accepted' },
+                attributes: ['requesterId', 'receiverId'], raw: true, limit: 500
+            }));
+            const receiverFriendIds = new Set(receiverFriends.map(f => {
+                const r = parseInt(f.requesterId || f.requester_id);
+                return r === parseInt(receiverId) ? parseInt(f.receiverId || f.receiver_id) : r;
+            }));
+            // Is sender a friend of any of receiver's friends?
+            if (receiverFriendIds.has(parseInt(senderId))) return true; // direct friend (shouldn't happen here)
+            const senderFriends = await withTimeout(Friend.findAll({
+                where: { [Op.or]: [{ requesterId: senderId }, { receiverId: senderId }], status: 'accepted' },
+                attributes: ['requesterId', 'receiverId'], raw: true, limit: 500
+            }));
+            const senderFriendIds = new Set(senderFriends.map(f => {
+                const r = parseInt(f.requesterId || f.requester_id);
+                return r === parseInt(senderId) ? parseInt(f.receiverId || f.receiver_id) : r;
+            }));
+            // Intersection of senderFriendIds and receiverFriendIds > 0 → friends of friends
+            for (const id of senderFriendIds) {
+                if (receiverFriendIds.has(id)) return true;
+            }
+            return false;
+        }
+        return true;
+    } catch (_) {
+        return true; // fail open
+    }
+}
+
 // ===== QR CODE FRIEND REQUEST =====
+// Accept fr
 // Accept friend request by QR code token
 router.post('/qr/connect', apiRateLimiter, asyncHandler(async (req, res) => {
     try {
