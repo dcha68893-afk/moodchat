@@ -111,7 +111,6 @@
     "node-schedule": "^2.1.1",
     "nodemailer": "^7.0.12",
     "otp-generator": "^4.0.1",
-    "otplib": "^13.4.1",
     "pg": "^8.20.0",
     "pg-hstore": "^2.3.4",
     "pm2": "^6.0.14",
@@ -127,7 +126,8 @@
     "web-push": "^3.6.7",
     "winston": "^3.11.0",
     "winston-daily-rotate-file": "^4.7.1",
-    "zod": "^3.22.4"
+    "zod": "^3.22.4",
+    "otplib": "^13.0.0"
   },
   "devDependencies": {
     "@eslint/css": "^0.14.1",
