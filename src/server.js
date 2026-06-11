@@ -5660,6 +5660,14 @@ setTimeout(() => {
   } catch (e) {
     console.error('⚠️ scheduledMessageWorker failed to start (non-fatal):', e.message);
   }
+
+  // Initialize VAPID for web push notifications
+  try {
+    const pushSvc = require('./services/pushNotificationService');
+    pushSvc.initVapid();
+  } catch (e) {
+    console.error('⚠️ VAPID init failed (non-fatal):', e.message);
+  }
 }, 5000);
 
 // P1/P2/P3 FIX: Friend expiry + closeness scoring + anniversary notifications + stale-request cleanup

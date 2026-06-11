@@ -769,6 +769,75 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
         const _failed    = deliveryResults.length - _delivered;
         console.log(`[FORENSIC] BROADCASTED | messageId=${messageId} | chatId=${chatId} | recipients=${recipientIds.join(',')} | delivered=${_delivered}/${deliveryResults.length} | failed=${_failed} | ts=${Date.now()}`);
 
+        // ── PUSH NOTIFICATIONS: send to offline recipients ──────────────────
+        const _offlineRecipients = deliveryResults
+          .map((r, i) => ({ uid: recipientIds[i], delivered: r.status === 'fulfilled' && r.value === true }))
+          .filter(r => !r.delivered).map(r => r.uid);
+
+        if (_offlineRecipients.length > 0) {
+          setImmediate(async () => {
+            try {
+              const pushSvc = require('../services/pushNotificationService');
+              const sRows   = await sequelize.query(
+                `SELECT username, avatar FROM "Users" WHERE id=:id LIMIT 1`,
+                { replacements: { id: senderId }, type: sequelize.QueryTypes.SELECT }
+              );
+              const notifContent = messageType === 'text' ? (content || '').slice(0, 100) : `Sent a ${messageType}`;
+              await Promise.allSettled(_offlineRecipients.map(uid =>
+                pushSvc.notifyNewMessage(uid, {
+                  senderName: sRows?.[0]?.username || 'Someone',
+                  senderAvatar: sRows?.[0]?.avatar || null,
+                  content: notifContent, chatId, messageId,
+                }, sequelize)
+              ));
+            } catch (_pe) { console.warn('[messages.js] Push error (non-fatal):', _pe.message); }
+          });
+        }
+
+        // ── DELIVERY LOGS ───────────────────────────────────────────────────
+        setImmediate(async () => {
+          try {
+            await Promise.allSettled(recipientIds.map(uid =>
+              sequelize.query(
+                `INSERT INTO message_delivery_logs ("messageId","userId","chatId","event","createdAt")
+                 VALUES (:messageId,:uid,:chatId,'delivered',NOW())
+                 ON CONFLICT ("messageId","userId","event") DO NOTHING`,
+                { replacements: { messageId, uid, chatId } }
+              )
+            ));
+          } catch (_) {}
+        });
+
+        // ── MENTIONS: store + push notify ───────────────────────────────────
+        setImmediate(async () => {
+          try {
+            const mentionMatches = (content || '').match(/@(\w+)/g);
+            if (mentionMatches && mentionMatches.length > 0) {
+              const usernames = mentionMatches.map(m => m.slice(1));
+              const mUsers = await sequelize.query(
+                `SELECT id FROM "Users" WHERE username = ANY(:usernames)`,
+                { replacements: { usernames }, type: sequelize.QueryTypes.SELECT }
+              );
+              const pushSvc = require('../services/pushNotificationService');
+              const sRows   = await sequelize.query(
+                `SELECT username FROM "Users" WHERE id=:id LIMIT 1`,
+                { replacements: { id: senderId }, type: sequelize.QueryTypes.SELECT }
+              );
+              await Promise.allSettled(mUsers.map(async u => {
+                await sequelize.query(
+                  `INSERT INTO message_mentions ("messageId","chatId","mentionedUserId","mentionedBy","createdAt")
+                   VALUES (:messageId,:chatId,:uid,:senderId,NOW()) ON CONFLICT DO NOTHING`,
+                  { replacements: { messageId, chatId, uid: u.id, senderId } }
+                ).catch(() => {});
+                await pushSvc.notifyMention(u.id, {
+                  senderName: sRows?.[0]?.username || 'Someone',
+                  content: (content || '').slice(0, 100), chatId, messageId,
+                }, sequelize);
+              }));
+            }
+          } catch (_) {}
+        });
+
         // FIX Bug #1 & #4: Fetch chat type so group broadcasts work correctly.
         // Previously `chat` and `safeChatId` were never defined in this POST scope,
         // causing a ReferenceError that crashed the entire realtime delivery block.
