@@ -1923,6 +1923,10 @@ router.get('/admin/stats', apiRateLimiter, asyncHandler(async (req, res) => {
   try {
     const auth = checkAuth(req, res); if (!auth) return;
     if (!checkModels(res)) return;
+    // Admin-only endpoint
+    if (!req.user || (req.user.role !== 'admin' && req.user.role !== 'superadmin')) {
+      return res.status(403).json({ success: false, message: 'Admin access required' });
+    }
 
     const { from, to } = req.query;
     const where = {};
@@ -1961,6 +1965,9 @@ router.get('/admin/active', apiRateLimiter, asyncHandler(async (req, res) => {
   try {
     const auth = checkAuth(req, res); if (!auth) return;
     if (!checkModels(res)) return;
+    if (!req.user || (req.user.role !== 'admin' && req.user.role !== 'superadmin')) {
+      return res.status(403).json({ success: false, message: 'Admin access required' });
+    }
 
     const activeCalls = await Call.findAll({
       where: { status: { [Op.in]: ['ringing', 'in-progress'] } },
@@ -1980,6 +1987,9 @@ router.get('/admin/participant-stats/:userId', apiRateLimiter, asyncHandler(asyn
   try {
     const auth = checkAuth(req, res); if (!auth) return;
     if (!checkModels(res)) return;
+    if (!req.user || (req.user.role !== 'admin' && req.user.role !== 'superadmin')) {
+      return res.status(403).json({ success: false, message: 'Admin access required' });
+    }
     const { userId: targetId } = req.params;
 
     const [totalCalls, completedCalls, missedCalls, avgQuality, avgDuration] = await Promise.all([

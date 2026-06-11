@@ -4,6 +4,9 @@
 const EventEmitter = require('events');
 EventEmitter.defaultMaxListeners = 20;
 
+// Sequelize Op for call status queries
+const { Op: WsOp } = require('sequelize');
+
 /**
  * webSocketService.js — FIXED v3.3.0 (call-ack, delivery-ack, offline-queue)
  *
@@ -615,7 +618,7 @@ class WebSocketService {
                     const callRecord = await Call.findOne({
                         where: {
                             id: chatCallId,
-                            status: { $in: ['ringing', 'in-progress'] },
+                            status: { [WsOp.in]: ['ringing', 'in-progress'] },
                         },
                     }).catch(() => null);
 
