@@ -3914,13 +3914,34 @@ class Application {
             systemState.recordStartupStep('middleware_setup');
             this.setupMiddleware();
             
-            // 3. Initialize database (CRITICAL) with OPTIMIZED pool
+            // 2.5 CRITICAL FIX: Register health/status endpoints IMMEDIATELY
+            // after middleware, BEFORE database/router initialization. Any
+            // exception thrown by later steps (DB connect, route discovery,
+            // require() of routes/index.js, etc.) used to abort initialize()
+            // before these were registered, leaving Express with zero routes
+            // and causing "Cannot GET /health" on every request — even though
+            // the process itself was up. Registering them this early guarantees
+            // /, /health, /ready, /live, /api/health, /api/info, /api/cors-info
+            // always respond, no matter what happens downstream.
+            systemState.recordStartupStep('health_endpoints');
+            this.setupHealthEndpoints();
+            
+            // 3. Initialize database with OPTIMIZED pool
+            // CRITICAL FIX: Previously, a failed DB connection threw here and
+            // ABORTED initialize() before any routes (including /health,
+            // /api/health, /api/auth/login, etc.) were mounted. That left the
+            // Express app with ZERO routes registered, so every request —
+            // even health checks — fell through to Express's bare-default
+            // 404 handler ("Cannot GET /health", "Cannot POST /api/auth/login").
+            // We now log the failure but ALWAYS proceed to mount routes so
+            // health endpoints and auth endpoints stay reachable, and DB-backed
+            // routes fail with proper JSON 503/500 responses instead of 404.
             systemState.recordStartupStep('database_connection');
             this.database = new DatabaseService();
             const dbConnected = await this.database.initialize();
             
             if (!dbConnected) {
-                throw new Error('Database connection failed - CRITICAL');
+                logger.error('Database connection failed — continuing in DEGRADED mode so health/auth routes remain reachable', null, 'DATABASE');
             }
             
             // 4. RouterManager is DISABLED - using index.js for all routes
@@ -3935,8 +3956,17 @@ class Application {
             // 5. CRITICAL: Mount the main API router
             systemState.recordStartupStep('api_routes_mount');
 
-            // Import the main router from index.js
-            const mainRouter = require('./routes/index');
+            // CRITICAL FIX: wrap require()+mount in try/catch. If routes/index.js
+            // (or any route file it requires at module scope) throws, this used
+            // to propagate out of initialize() and skip setupErrorHandling() /
+            // app.locals wiring below — leaving the process half-initialized.
+            // Health endpoints (registered in step 2.5) remain available either way.
+            let mainRouter = null;
+            try {
+                mainRouter = require('./routes/index');
+            } catch (routeErr) {
+                logger.error(`Failed to load main API router (routes/index.js): ${routeErr.message}`, routeErr, 'ROUTER');
+            }
 
             // Server health endpoint (public) - moved to avoid conflict with user status routes
             // NOTE: /api/health is registered in setupHealthEndpoints() below — no duplicate here.
@@ -3996,8 +4026,12 @@ class Application {
             // so paths here must NOT include /api prefix"). The previous mount at '/'
             // meant every route was reachable only at /auth/login, /users/*, etc. —
             // the /api prefix was absent, causing 404 on every API call including login.
-            this.app.use('/api', mainRouter);
-            console.log('✅ Mounted main API router at /api');
+            if (mainRouter) {
+                this.app.use('/api', mainRouter);
+                console.log('✅ Mounted main API router at /api');
+            } else {
+                console.error('❌ Main API router NOT mounted — /api/* routes (including /api/auth/login) will 404 until routes/index.js error above is fixed');
+            }
 
             // ── FALLBACK: /api/deletions — always available even before Phase10 loads ──
             // Phase10 registers its own handler via registerRoutes() ~6s after startup.
@@ -4038,9 +4072,9 @@ class Application {
             console.log('\n🔍 Checking mounted routes...');
             console.log('Available routes will be handled by RouterManager');
             
-            // 6. Setup health and status endpoints (public) - AFTER API routes
-            systemState.recordStartupStep('health_endpoints');
-            this.setupHealthEndpoints();
+            // 6. Health/status endpoints were already registered in step 2.5
+            // (right after middleware setup) so they remain reachable even
+            // if any step above throws.
             
             // 7. Initialize Redis
             systemState.recordStartupStep('redis_connection');
@@ -4058,11 +4092,16 @@ class Application {
             this.setupErrorHandling();
             
             // 9. Attach models to app.locals for easy access in routes
-            this.app.locals.models = this.database.getModels();
-            this.app.locals.db = this.database.getInstance();
+            // Null-safe: if DB init failed before this.sequelize/this.models
+            // were ever set, fall back to {} / null instead of leaving
+            // app.locals.models undefined (which would throw inside routes
+            // and surface as 500s rather than a clean degraded response).
+            this.app.locals.models = this.database.getModels() || {};
+            this.app.locals.db = this.database.getInstance() || null;
             this.app.locals.redis = this.redis.getClient();
             this.app.locals.corsManager = corsManager;
             this.app.locals.routerManager = this.routerManager;
+            this.app.locals.databaseHealthy = !!dbConnected;
             
             this.initialized = true;
             
