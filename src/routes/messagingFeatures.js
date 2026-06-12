@@ -418,6 +418,21 @@ router.post('/chats/:chatId/disappear', asyncHandler(async (req, res) => {
 // PINNED MESSAGES
 // ────────────────────────────────────────────────────────────────────────────
 
+// GET /api/messaging/chats/pinned — return all pinned chats for user (for initial load)
+// NOTE: must be declared BEFORE /chats/:chatId/pinned to avoid Express matching 'pinned' as chatId
+router.get('/chats/pinned', asyncHandler(async (req, res) => {
+  const userId    = req.user.id;
+  const sequelize = getSequelize();
+  const rows      = await sequelize.query(
+    `SELECT cp."chatId", cp."pinnedAt"
+     FROM chat_participants cp
+     WHERE cp."userId"=:userId AND cp."isPinned"=true
+     ORDER BY cp."pinnedAt" ASC`,
+    { replacements: { userId }, type: sequelize.QueryTypes.SELECT }
+  );
+  res.json({ status: 'success', data: { pinned: rows.map(r => r.chatId) } });
+}));
+
 // GET /api/messaging/chats/:chatId/pinned
 router.get('/chats/:chatId/pinned', asyncHandler(async (req, res) => {
   const userId = req.user.id;
@@ -564,20 +579,6 @@ router.put('/chats/:chatId/pin', asyncHandler(async (req, res) => {
   );
 
   res.json({ status: 'success', message: pinned ? 'Chat pinned' : 'Chat unpinned' });
-}));
-
-// GET /api/messaging/chats/pinned — return all pinned chats for user (for initial load)
-router.get('/chats/pinned', asyncHandler(async (req, res) => {
-  const userId    = req.user.id;
-  const sequelize = getSequelize();
-  const rows      = await sequelize.query(
-    `SELECT cp."chatId", cp."pinnedAt"
-     FROM chat_participants cp
-     WHERE cp."userId"=:userId AND cp."isPinned"=true
-     ORDER BY cp."pinnedAt" ASC`,
-    { replacements: { userId }, type: sequelize.QueryTypes.SELECT }
-  );
-  res.json({ status: 'success', data: { pinned: rows.map(r => r.chatId) } });
 }));
 
 // ────────────────────────────────────────────────────────────────────────────
