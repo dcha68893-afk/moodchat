@@ -268,6 +268,7 @@ router.post('/login', asyncHandler(async (req, res) => {
         // POST /auth/2fa/challenge can exchange (with a valid TOTP code) for
         // real tokens.
         if (user.mfaEnabled === true) {
+            const tempToken = jwt.sign(
                 { userId: user.id, type: 'mfa_temp' },
                 JWT_SECRET,
                 { expiresIn: '10m' }
