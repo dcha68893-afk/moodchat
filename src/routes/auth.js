@@ -306,24 +306,31 @@ router.get('/me', authenticateToken, asyncHandler(async (req, res) => {
         }
         
         const displayName = [user.firstName, user.lastName].filter(Boolean).join(' ').trim() || user.username;
-        
+
+        // PHASE15 FIX: Frontend getCurrentUser() reads response.data and sets
+        // window.currentUser = response.data. If we nest the user under data.user,
+        // then window.currentUser ends up as { user: {...} } which breaks
+        // window.currentUser.id throughout the app.
+        // FIX: expose user fields directly on data (and also keep data.user for
+        // any code that explicitly reads response.data.user).
+        const userPayload = {
+            id: user.id,
+            username: user.username,
+            email: user.email,
+            avatar: user.avatar,
+            displayName: displayName,
+            firstName: user.firstName,
+            lastName: user.lastName,
+            bio: user.bio,
+            role: user.role || 'user',
+            status: user.status || 'offline',
+            lastActive: user.lastSeen
+        };
+
         res.json({
             success: true,
-            data: {
-                user: {
-                    id: user.id,
-                    username: user.username,
-                    email: user.email,
-                    avatar: user.avatar,
-                    displayName: displayName,
-                    firstName: user.firstName,
-                    lastName: user.lastName,
-                    bio: user.bio,
-                    role: user.role || 'user',
-                    status: user.status || 'offline',
-                    lastActive: user.lastSeen
-                }
-            }
+            user: userPayload,   // top-level user for legacy callers
+            data: userPayload    // data IS the user — so window.currentUser = response.data works
         });
     } catch (error) {
         console.error('[AUTH] Error in /me endpoint:', error);
@@ -451,6 +458,36 @@ router.post('/logout', authenticateToken, asyncHandler(async (req, res) => {
     const refreshToken = req.body.refreshToken;
     if (refreshToken) {
         await tokenService.invalidateRefreshToken(refreshToken);
+    }
+
+    // PHASE15 FIX: Also revoke ALL refresh tokens for this user so every device
+    // is forced to re-authenticate. This prevents a logged-out session on one device
+    // from being replayed on another device that still holds the same refresh token.
+    const userId = req.user?.userId || req.user?.id;
+    if (userId) {
+        try {
+            const TokenModel = tokenService.getTokenModel();
+            if (TokenModel) {
+                await TokenModel.update(
+                    { isRevoked: true },
+                    { where: { userId, tokenType: 'refresh', isRevoked: false } }
+                );
+            }
+        } catch (revokeErr) {
+            console.warn('[Auth] Could not revoke all refresh tokens on logout (non-fatal):', revokeErr.message);
+        }
+
+        // Update user status to offline
+        try {
+            const db = require('../models');
+            const Users = db.User || db.Users;
+            if (Users) {
+                await Users.update(
+                    { status: 'offline', lastSeen: new Date() },
+                    { where: { id: userId } }
+                );
+            }
+        } catch (_) {}
     }
 
     // P1 FIX (Forensic Audit): blacklist the access token so it can't be
