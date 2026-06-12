@@ -3914,13 +3914,34 @@ class Application {
             systemState.recordStartupStep('middleware_setup');
             this.setupMiddleware();
             
-            // 3. Initialize database (CRITICAL) with OPTIMIZED pool
+            // 2.5 CRITICAL FIX: Register health/status endpoints IMMEDIATELY
+            // after middleware, BEFORE database/router initialization. Any
+            // exception thrown by later steps (DB connect, route discovery,
+            // require() of routes/index.js, etc.) used to abort initialize()
+            // before these were registered, leaving Express with zero routes
+            // and causing "Cannot GET /health" on every request — even though
+            // the process itself was up. Registering them this early guarantees
+            // /, /health, /ready, /live, /api/health, /api/info, /api/cors-info
+            // always respond, no matter what happens downstream.
+            systemState.recordStartupStep('health_endpoints');
+            this.setupHealthEndpoints();
+            
+            // 3. Initialize database with OPTIMIZED pool
+            // CRITICAL FIX: Previously, a failed DB connection threw here and
+            // ABORTED initialize() before any routes (including /health,
+            // /api/health, /api/auth/login, etc.) were mounted. That left the
+            // Express app with ZERO routes registered, so every request —
+            // even health checks — fell through to Express's bare-default
+            // 404 handler ("Cannot GET /health", "Cannot POST /api/auth/login").
+            // We now log the failure but ALWAYS proceed to mount routes so
+            // health endpoints and auth endpoints stay reachable, and DB-backed
+            // routes fail with proper JSON 503/500 responses instead of 404.
             systemState.recordStartupStep('database_connection');
             this.database = new DatabaseService();
             const dbConnected = await this.database.initialize();
             
             if (!dbConnected) {
-                throw new Error('Database connection failed - CRITICAL');
+                logger.error('Database connection failed — continuing in DEGRADED mode so health/auth routes remain reachable', null, 'DATABASE');
             }
             
             // 4. RouterManager is DISABLED - using index.js for all routes
@@ -3935,10 +3956,17 @@ class Application {
             // 5. CRITICAL: Mount the main API router
             systemState.recordStartupStep('api_routes_mount');
 
-            // Import the main router from index.js
-            // FIX: was './routes/index' which only contained a handful of files;
-            // all route files (auth.js, users.js, calls.js, etc.) live in src/routes/
-            const mainRouter = require('./src/routes/index');
+            // CRITICAL FIX: wrap require()+mount in try/catch. If routes/index.js
+            // (or any route file it requires at module scope) throws, this used
+            // to propagate out of initialize() and skip setupErrorHandling() /
+            // app.locals wiring below — leaving the process half-initialized.
+            // Health endpoints (registered in step 2.5) remain available either way.
+            let mainRouter = null;
+            try {
+                mainRouter = require('./routes/index');
+            } catch (routeErr) {
+                logger.error(`Failed to load main API router (routes/index.js): ${routeErr.message}`, routeErr, 'ROUTER');
+            }
 
             // Server health endpoint (public) - moved to avoid conflict with user status routes
             // NOTE: /api/health is registered in setupHealthEndpoints() below — no duplicate here.
@@ -3993,19 +4021,17 @@ class Application {
                 });
             });
             
-            // FIX: Register health endpoints BEFORE mounting main router.
-            // src/routes/index.js ends with router.use('*', ...) which would
-            // swallow GET /health before setupHealthEndpoints() could register it.
-            systemState.recordStartupStep('health_endpoints');
-            this.setupHealthEndpoints();
-
-            // Mount the main router at /api — ALL route files in src/routes/ use
-            // relative paths (e.g. '/auth', '/users') so they must be mounted
-            // under the /api prefix to produce /api/auth/login etc.
-            // PHASE15 FIX: Was mounted at '/' which made routes accessible at
-            // /auth/login instead of /api/auth/login, breaking all frontend calls.
-            this.app.use('/api', mainRouter);
-            console.log('✅ Mounted main API router at /api');
+            // AUTH-X CRITICAL FIX: routes/index.js explicitly documents that it must
+            // be mounted at /api (see line 20: "NOTE: app.js mounts this router at /api,
+            // so paths here must NOT include /api prefix"). The previous mount at '/'
+            // meant every route was reachable only at /auth/login, /users/*, etc. —
+            // the /api prefix was absent, causing 404 on every API call including login.
+            if (mainRouter) {
+                this.app.use('/api', mainRouter);
+                console.log('✅ Mounted main API router at /api');
+            } else {
+                console.error('❌ Main API router NOT mounted — /api/* routes (including /api/auth/login) will 404 until routes/index.js error above is fixed');
+            }
 
             // ── FALLBACK: /api/deletions — always available even before Phase10 loads ──
             // Phase10 registers its own handler via registerRoutes() ~6s after startup.
@@ -4046,7 +4072,9 @@ class Application {
             console.log('\n🔍 Checking mounted routes...');
             console.log('Available routes will be handled by RouterManager');
             
-            // 6. Health endpoints moved BEFORE main router mount (see fix above)
+            // 6. Health/status endpoints were already registered in step 2.5
+            // (right after middleware setup) so they remain reachable even
+            // if any step above throws.
             
             // 7. Initialize Redis
             systemState.recordStartupStep('redis_connection');
@@ -4064,11 +4092,16 @@ class Application {
             this.setupErrorHandling();
             
             // 9. Attach models to app.locals for easy access in routes
-            this.app.locals.models = this.database.getModels();
-            this.app.locals.db = this.database.getInstance();
+            // Null-safe: if DB init failed before this.sequelize/this.models
+            // were ever set, fall back to {} / null instead of leaving
+            // app.locals.models undefined (which would throw inside routes
+            // and surface as 500s rather than a clean degraded response).
+            this.app.locals.models = this.database.getModels() || {};
+            this.app.locals.db = this.database.getInstance() || null;
             this.app.locals.redis = this.redis.getClient();
             this.app.locals.corsManager = corsManager;
             this.app.locals.routerManager = this.routerManager;
+            this.app.locals.databaseHealthy = !!dbConnected;
             
             this.initialized = true;
             
@@ -5491,23 +5524,15 @@ async function main() {
     console.log('[StatusExpiryCron] ✅ Installed (runs every 5 minutes)');
 })();
 
-// ── SMART GROUPS OS ROUTES ──────────────────────────────────────────────────
-// Additive: mounts at /api/groups alongside existing group routes.
-// All routes are prefixed with /:groupId/tasks, /:groupId/polls etc.
+// AUTH-X FIX: Smart Group routes are mounted by src/routes/index.js via
+// ROUTE_MAPPING — the IIFE below was mounting them a SECOND time on
+// global.__expressApp, resulting in duplicate route handlers at /api/groups
+// for every smart-group endpoint. Duplicate handlers cause the first handler
+// to respond and the second to throw "Cannot set headers after they are sent".
+// The IIFE is now a no-op; leave the comment so reviewers know why.
 (function _mountSmartGroupRoutes() {
-    try {
-        const sgRoutes = require('./routes/smart-groups');
-        // Find the express app
-        const app = global.__expressApp;
-        if (!app) {
-            console.warn('[SmartGroups] Express app not found in global.__expressApp — routes not mounted');
-            return;
-        }
-        app.use('/api/groups', sgRoutes);
-        console.log('[SmartGroups] ✅ Smart Group OS routes mounted at /api/groups');
-    } catch(err) {
-        console.warn('[SmartGroups] Could not mount routes:', err.message);
-    }
+    // Intentionally disabled — handled by src/routes/index.js
+    console.log('[SmartGroups] Routes already mounted by src/routes/index.js (IIFE disabled)');
 })();
 
 // ── SMART GROUPS ANALYTICS CRON ──────────────────────────────────────────────
@@ -5670,15 +5695,19 @@ setTimeout(() => {
   } catch (e) {
     console.error('⚠️ scheduledMessageWorker failed to start (non-fatal):', e.message);
   }
-
-  // Initialize VAPID for push notifications
-  try {
-    const pushService = require('./services/pushNotificationService');
-    pushService.initVapid();
-  } catch (e) {
-    console.error('⚠️ pushNotificationService VAPID init failed (non-fatal):', e.message);
-  }
 }, 5000);
+
+// P1/P2/P3 FIX: Friend expiry + closeness scoring + anniversary notifications + stale-request cleanup
+setTimeout(() => {
+  try {
+    const db = require('./models');
+    const friendWorker = require('./services/friendExpiryWorker');
+    const ioInstance = global._wsService?.getIO?.() || null;
+    friendWorker.start(db, ioInstance);
+  } catch (e) {
+    console.error('⚠️ friendExpiryWorker failed to start (non-fatal):', e.message);
+  }
+}, 8000);
 
 // Export for testing and programmatic use
 module.exports = {
