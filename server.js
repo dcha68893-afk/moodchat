@@ -3999,9 +3999,13 @@ class Application {
             systemState.recordStartupStep('health_endpoints');
             this.setupHealthEndpoints();
 
-            // Mount the main router
-            this.app.use('/', mainRouter);
-            console.log('✅ Mounted main API router');
+            // Mount the main router at /api — ALL route files in src/routes/ use
+            // relative paths (e.g. '/auth', '/users') so they must be mounted
+            // under the /api prefix to produce /api/auth/login etc.
+            // PHASE15 FIX: Was mounted at '/' which made routes accessible at
+            // /auth/login instead of /api/auth/login, breaking all frontend calls.
+            this.app.use('/api', mainRouter);
+            console.log('✅ Mounted main API router at /api');
 
             // ── FALLBACK: /api/deletions — always available even before Phase10 loads ──
             // Phase10 registers its own handler via registerRoutes() ~6s after startup.
