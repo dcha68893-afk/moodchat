@@ -1,9 +1,10 @@
-﻿const path = require('path');
+const path = require('path');
 const asyncHandler = require('express-async-handler');
 const express = require('express');
 const router = express.Router();
 const { apiRateLimiter } = require('../middleware/rateLimiter');
 const { User, Settings } = require('../models');
+const models = require('../models'); // for Friend + Token access
 const { Op } = require('sequelize');
 const bcrypt = require('bcryptjs');
 const multer = require('multer');
@@ -854,109 +855,104 @@ router.get(
     asyncHandler(async (req, res) => {
         try {
             const userId = getUserId(req);
-            
-            if (!userId) {
-                return res.status(401).json({
-                    status: 'error',
-                    message: 'Authentication required'
-                });
-            }
+            if (!userId) return res.status(401).json({ status: 'error', message: 'Authentication required' });
 
-            res.status(200).json({
-                status: 'success',
-                data: { blockedUsers: [] }
+            const Friend = models.Friend;
+            if (!Friend) return res.status(200).json({ status: 'success', data: { blockedUsers: [] } });
+
+            const blockedRelations = await Friend.findAll({
+                where: {
+                    status: 'blocked',
+                    [Op.or]: [{ requesterId: userId }, { receiverId: userId }]
+                },
+                include: [
+                    { model: User, as: 'requester', attributes: ['id', 'username', 'avatar', 'firstName', 'lastName'] },
+                    { model: User, as: 'receiver',  attributes: ['id', 'username', 'avatar', 'firstName', 'lastName'] }
+                ]
             });
+
+            const blockedUsers = blockedRelations
+                .filter(r => String(r.requesterId) === String(userId))
+                .map(r => ({
+                    id:        r.receiver?.id,
+                    username:  r.receiver?.username,
+                    avatar:    r.receiver?.avatar,
+                    firstName: r.receiver?.firstName,
+                    lastName:  r.receiver?.lastName,
+                    blockedAt: r.blockedAt || r.updatedAt
+                }))
+                .filter(u => u.id);
+
+            res.status(200).json({ status: 'success', data: { blockedUsers } });
         } catch (error) {
             console.error('Error getting blocked users:', error);
-            res.status(200).json({
-                status: 'success',
-                data: { blockedUsers: [] }
-            });
+            res.status(200).json({ status: 'success', data: { blockedUsers: [] } });
         }
     })
 );
 
-// Block a user - placeholder
+// Block a user
 router.post(
     '/block-user',
     apiRateLimiter,
     asyncHandler(async (req, res) => {
         try {
             const userId = getUserId(req);
-            
-            if (!userId) {
-                return res.status(401).json({
-                    status: 'error',
-                    message: 'Authentication required'
-                });
-            }
-            
+            if (!userId) return res.status(401).json({ status: 'error', message: 'Authentication required' });
+
             const { targetUserId } = req.body;
+            if (!targetUserId) return res.status(400).json({ status: 'error', message: 'Target user ID is required' });
+            if (String(userId) === String(targetUserId)) return res.status(400).json({ status: 'error', message: 'Cannot block yourself' });
 
-            if (!targetUserId) {
-                return res.status(400).json({
-                    status: 'error',
-                    message: 'Target user ID is required'
+            const Friend = models.Friend;
+            if (Friend) {
+                let relation = await Friend.findOne({
+                    where: {
+                        [Op.or]: [
+                            { requesterId: userId, receiverId: targetUserId },
+                            { requesterId: targetUserId, receiverId: userId }
+                        ]
+                    }
                 });
+                if (relation) {
+                    await relation.update({ status: 'blocked', requesterId: userId, receiverId: targetUserId, blockedAt: new Date() });
+                } else {
+                    await Friend.create({ requesterId: userId, receiverId: targetUserId, status: 'blocked', blockedAt: new Date() });
+                }
             }
 
-            if (userId === targetUserId) {
-                return res.status(400).json({
-                    status: 'error',
-                    message: 'Cannot block yourself'
-                });
-            }
-
-            res.status(200).json({
-                status: 'success',
-                message: 'User blocked successfully',
-                data: { blockedUserId: targetUserId }
-            });
+            res.status(200).json({ status: 'success', message: 'User blocked successfully', data: { blockedUserId: targetUserId } });
         } catch (error) {
             console.error('Error blocking user:', error);
-            res.status(500).json({
-                status: 'error',
-                message: 'Failed to block user'
-            });
+            res.status(500).json({ status: 'error', message: 'Failed to block user' });
         }
     })
 );
 
-// Unblock a user - placeholder
+// Unblock a user
 router.post(
     '/unblock-user',
     apiRateLimiter,
     asyncHandler(async (req, res) => {
         try {
             const userId = getUserId(req);
-            
-            if (!userId) {
-                return res.status(401).json({
-                    status: 'error',
-                    message: 'Authentication required'
-                });
-            }
-            
+            if (!userId) return res.status(401).json({ status: 'error', message: 'Authentication required' });
+
             const { targetUserId } = req.body;
+            if (!targetUserId) return res.status(400).json({ status: 'error', message: 'Target user ID is required' });
 
-            if (!targetUserId) {
-                return res.status(400).json({
-                    status: 'error',
-                    message: 'Target user ID is required'
+            const Friend = models.Friend;
+            if (Friend) {
+                const relation = await Friend.findOne({
+                    where: { requesterId: userId, receiverId: targetUserId, status: 'blocked' }
                 });
+                if (relation) await relation.destroy();
             }
 
-            res.status(200).json({
-                status: 'success',
-                message: 'User unblocked successfully',
-                data: { unblockedUserId: targetUserId }
-            });
+            res.status(200).json({ status: 'success', message: 'User unblocked successfully', data: { unblockedUserId: targetUserId } });
         } catch (error) {
             console.error('Error unblocking user:', error);
-            res.status(500).json({
-                status: 'error',
-                message: 'Failed to unblock user'
-            });
+            res.status(500).json({ status: 'error', message: 'Failed to unblock user' });
         }
     })
 );
@@ -1084,18 +1080,36 @@ router.delete(
                 });
             }
 
-            // Verify password if provided
-            if (password) {
-                const isPasswordValid = await bcrypt.compare(password, user.password);
-                if (!isPasswordValid) {
-                    return res.status(400).json({
-                        status: 'error',
-                        message: 'Incorrect password'
-                    });
+            // P1 FIX: Password is MANDATORY — prevents session-hijack deletion
+            if (!password) {
+                return res.status(400).json({
+                    status: 'error',
+                    message: 'Password is required to delete your account'
+                });
+            }
+
+            const isPasswordValid = await bcrypt.compare(password, user.password);
+            if (!isPasswordValid) {
+                return res.status(400).json({
+                    status: 'error',
+                    message: 'Incorrect password'
+                });
+            }
+
+            // P1 FIX: Revoke ALL tokens so deleted user cannot re-authenticate
+            const Token = models.Token;
+            if (Token) {
+                try {
+                    await Token.update({ isRevoked: true }, { where: { userId } });
+                } catch (tokenErr) {
+                    console.warn('[DeleteAccount] Token revocation error:', tokenErr.message);
                 }
             }
 
-            // Soft delete - mark as inactive
+            // Generate irreversible random password hash
+            const randomHash = await bcrypt.hash(`deleted_${userId}_${Date.now()}_${Math.random()}`, 12);
+
+            // Soft delete — anonymise all PII
             await user.update({
                 email: `deleted_${user.id}@deleted.com`,
                 username: `deleted_user_${user.id}`,
@@ -1103,18 +1117,18 @@ router.delete(
                 lastName: null,
                 avatar: null,
                 bio: null,
+                password: randomHash,
                 isActive: false,
                 deletedAt: new Date()
             });
 
-            // Delete settings if exists
             if (Settings) {
-                await Settings.destroy({ where: { userId: userId } });
+                await Settings.destroy({ where: { userId } });
             }
 
             res.status(200).json({
                 status: 'success',
-                message: 'Account scheduled for deletion'
+                message: 'Account deleted successfully'
             });
         } catch (error) {
             console.error('Error deleting account:', error);
@@ -1126,5 +1140,144 @@ router.delete(
     })
 );
 
-module.exports = router;
+// ─── 2FA TOTP routes ──────────────────────────────────────────────────────────
 
+router.get('/2fa/status', apiRateLimiter, asyncHandler(async (req, res) => {
+    try {
+        const userId = getUserId(req);
+        if (!userId) return res.status(401).json({ status: 'error', message: 'Authentication required' });
+        const user = await User.findByPk(userId, { attributes: ['id', 'mfaEnabled'] });
+        if (!user) return res.status(404).json({ status: 'error', message: 'User not found' });
+        res.status(200).json({ status: 'success', data: { mfaEnabled: user.mfaEnabled === true } });
+    } catch (e) {
+        console.error('2FA status error:', e);
+        res.status(500).json({ status: 'error', message: 'Failed to get 2FA status' });
+    }
+}));
+
+router.post('/2fa/setup', apiRateLimiter, asyncHandler(async (req, res) => {
+    try {
+        const userId = getUserId(req);
+        if (!userId) return res.status(401).json({ status: 'error', message: 'Authentication required' });
+
+        const user = await User.findByPk(userId);
+        if (!user) return res.status(404).json({ status: 'error', message: 'User not found' });
+        if (user.mfaEnabled) return res.status(400).json({ status: 'error', message: '2FA is already enabled' });
+
+        const { authenticator } = require('otplib');
+        const QRCode = require('qrcode');
+        const crypto = require('crypto');
+
+        const secret = authenticator.generateSecret();
+        const otpAuthUrl = authenticator.keyuri(user.email || user.username, 'MoodChat', secret);
+        const qrCodeDataUrl = await QRCode.toDataURL(otpAuthUrl);
+
+        const backupCodes = Array.from({ length: 8 }, () =>
+            crypto.randomBytes(4).toString('hex').toUpperCase()
+        );
+
+        await user.update({
+            mfaSecret: secret,
+            mfaBackupCodes: backupCodes.map(code => ({ code, used: false }))
+        });
+
+        res.status(200).json({
+            status: 'success',
+            data: { qrCode: qrCodeDataUrl, secret, backupCodes }
+        });
+    } catch (e) {
+        console.error('2FA setup error:', e);
+        res.status(500).json({ status: 'error', message: 'Failed to set up 2FA' });
+    }
+}));
+
+router.post('/2fa/verify', apiRateLimiter, asyncHandler(async (req, res) => {
+    try {
+        const userId = getUserId(req);
+        if (!userId) return res.status(401).json({ status: 'error', message: 'Authentication required' });
+
+        const { token } = req.body;
+        if (!token) return res.status(400).json({ status: 'error', message: 'TOTP token is required' });
+
+        const user = await User.findByPk(userId);
+        if (!user) return res.status(404).json({ status: 'error', message: 'User not found' });
+        if (!user.mfaSecret) return res.status(400).json({ status: 'error', message: 'Run /2fa/setup first' });
+
+        const { authenticator } = require('otplib');
+        const isValid = authenticator.verify({ token, secret: user.mfaSecret });
+
+        if (!isValid) return res.status(400).json({ status: 'error', message: 'Invalid TOTP token — check your authenticator app' });
+
+        await user.update({ mfaEnabled: true });
+        res.status(200).json({ status: 'success', message: '2FA has been enabled on your account' });
+    } catch (e) {
+        console.error('2FA verify error:', e);
+        res.status(500).json({ status: 'error', message: 'Failed to verify 2FA' });
+    }
+}));
+
+router.post('/2fa/disable', apiRateLimiter, asyncHandler(async (req, res) => {
+    try {
+        const userId = getUserId(req);
+        if (!userId) return res.status(401).json({ status: 'error', message: 'Authentication required' });
+
+        const { password, token } = req.body;
+        if (!password || !token) return res.status(400).json({ status: 'error', message: 'Password and TOTP token are required' });
+
+        const user = await User.findByPk(userId);
+        if (!user) return res.status(404).json({ status: 'error', message: 'User not found' });
+        if (!user.mfaEnabled) return res.status(400).json({ status: 'error', message: '2FA is not enabled' });
+
+        const isPasswordValid = await bcrypt.compare(password, user.password);
+        if (!isPasswordValid) return res.status(400).json({ status: 'error', message: 'Incorrect password' });
+
+        const { authenticator } = require('otplib');
+        const isTokenValid = authenticator.verify({ token, secret: user.mfaSecret });
+        if (!isTokenValid) return res.status(400).json({ status: 'error', message: 'Invalid TOTP token' });
+
+        await user.update({ mfaEnabled: false, mfaSecret: null, mfaBackupCodes: null });
+        res.status(200).json({ status: 'success', message: '2FA has been disabled' });
+    } catch (e) {
+        console.error('2FA disable error:', e);
+        res.status(500).json({ status: 'error', message: 'Failed to disable 2FA' });
+    }
+}));
+
+// ─── P1: Message retention server enforcement (weekly cron) ──────────────────
+try {
+    const schedule = require('node-schedule');
+    const { Message } = require('../models');
+
+    if (Message && schedule) {
+        schedule.scheduleJob('0 3 * * 0', async () => {
+            console.log('[MessageRetention] Running weekly retention sweep...');
+            try {
+                const retentionMap = { '1month': 30, '6months': 180, '1year': 365 };
+                const allSettings = await Settings.findAll({
+                    attributes: ['userId', 'chatPreferences']
+                });
+
+                for (const s of allSettings) {
+                    const history = s.chatPreferences?.messageHistory;
+                    if (!history || history === 'forever') continue;
+                    const days = retentionMap[history];
+                    if (!days) continue;
+
+                    const cutoff = new Date(Date.now() - days * 86400 * 1000);
+                    await Message.update(
+                        { isDeleted: true, deletedAt: new Date() },
+                        { where: { senderId: s.userId, sentAt: { [Op.lt]: cutoff }, isDeleted: false } }
+                    );
+                }
+                console.log('[MessageRetention] Sweep complete');
+            } catch (err) {
+                console.error('[MessageRetention] Sweep error:', err.message);
+            }
+        });
+        console.log('[Settings] ✅ Message retention cron scheduled (weekly Sunday 03:00)');
+    }
+} catch (cronErr) {
+    console.warn('[Settings] Message retention cron not available:', cronErr.message);
+}
+
+module.exports = router;

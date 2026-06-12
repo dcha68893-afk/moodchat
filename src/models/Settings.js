@@ -93,9 +93,54 @@ module.exports = (sequelize, DataTypes) => {
           enterToSend: true,
           mediaQuality: 'auto',
           saveToGallery: false,
-          messageBackup: true
+          messageBackup: true,
+          messageHistory: 'forever'
         },
         field: 'chat_preferences',
+      },
+      moodSettings: {
+        type: DataTypes.JSONB,
+        defaultValue: {
+          currentMood: 'neutral',
+          autoMoodDetection: false,
+          showMoodTo: 'friendsOnly',
+          moodColors: {
+            neutral: '#808080', happy: '#FFD700', calm: '#87CEEB',
+            energetic: '#FF6347', focused: '#4169E1', relaxed: '#90EE90',
+            stressed: '#DC143C', tired: '#9370DB', excited: '#FF69B4'
+          }
+        },
+        field: 'mood_settings',
+      },
+      callSettings: {
+        type: DataTypes.JSONB,
+        defaultValue: { whoCanCallMe: 'everyone', callVibration: true, videoQuality: 'auto', voiceQuality: 'high', allowScreenShare: true },
+        field: 'call_settings',
+      },
+      friendSettings: {
+        type: DataTypes.JSONB,
+        defaultValue: { whoCanAddMe: 'everyone', contactDiscovery: true },
+        field: 'friend_settings',
+      },
+      groupSettings: {
+        type: DataTypes.JSONB,
+        defaultValue: { groupInvitations: 'everyone' },
+        field: 'group_settings',
+      },
+      statusSettings: {
+        type: DataTypes.JSONB,
+        defaultValue: { statusVisibility: 'everyone', autoMuteStatuses: false },
+        field: 'status_settings',
+      },
+      backupSettings: {
+        type: DataTypes.JSONB,
+        defaultValue: { autoBackup: false, backupFrequency: 'weekly', backupIncludeMedia: false },
+        field: 'backup_settings',
+      },
+      advancedSettings: {
+        type: DataTypes.JSONB,
+        defaultValue: { syncEnabled: true, offlineMode: false, debugMode: false, developerTools: false, experimentalFeatures: false, performanceMode: false, reduceMotion: false },
+        field: 'advanced_settings',
       },
       createdAt: {
         type: DataTypes.DATE,
@@ -161,7 +206,9 @@ module.exports = (sequelize, DataTypes) => {
     const allowedUpdates = [
       'theme', 'accentColor', 'notificationsEnabled', 'language', 'fontSize',
       'timezone', 'emailNotifications', 'pushNotifications', 'soundEnabled',
-      'vibrationEnabled', 'dataSaver', 'autoDownload', 'privacy', 'chatPreferences'
+      'vibrationEnabled', 'dataSaver', 'autoDownload', 'privacy', 'chatPreferences',
+      'moodSettings', 'callSettings', 'friendSettings', 'groupSettings',
+      'statusSettings', 'backupSettings', 'advancedSettings'
     ];
     
     Object.keys(updates).forEach(key => {

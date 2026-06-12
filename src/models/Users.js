@@ -171,10 +171,20 @@ module.exports = (sequelize, DataTypes) => {
         defaultValue: false,
         allowNull: false,
       },
+      mfaBackupCodes: {
+        type: DataTypes.JSONB,
+        allowNull: true,
+        field: 'mfa_backup_codes',
+      },
       isActive: {
         type: DataTypes.BOOLEAN,
         defaultValue: true,
         allowNull: false,
+      },
+      deletedAt: {
+        type: DataTypes.DATE,
+        allowNull: true,
+        defaultValue: null,
       },
       lastSeen: {
         type: DataTypes.DATE,
