@@ -2358,6 +2358,14 @@ class DatabaseService {
     
     async syncSchema() {
         try {
+            // ── Self-healing schema: detect and add any missing columns/tables ──
+            try {
+                const ensureSchema = require('./src/utils/ensureSchema');
+                await ensureSchema(this.sequelize);
+            } catch (schemaErr) {
+                logger.warn(`Schema enforcer non-fatal error: ${schemaErr.message}`, 'DATABASE');
+            }
+
             // Safe sync with configurable options
             const force = config.get('DB_SYNC_FORCE');
             const alter = config.get('DB_SYNC_ALTER');

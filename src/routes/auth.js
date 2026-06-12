@@ -189,14 +189,40 @@ router.post('/login', asyncHandler(async (req, res) => {
     }
     
     try {
-        const user = await _getUsers().findOne({
-            where: {
-                [require('sequelize').Op.or]: [
-                    { email: identifier },
-                    { username: identifier }
-                ]
+        // Safe login query: try default SELECT * first; if migration columns are
+        // missing (pg error 42703 = undefined_column) fall back to base columns only.
+        const UsersModel = _getUsers();
+        let user;
+        try {
+            user = await UsersModel.findOne({
+                where: {
+                    [require('sequelize').Op.or]: [
+                        { email: identifier },
+                        { username: identifier }
+                    ]
+                }
+            });
+        } catch (findErr) {
+            const isMissingCol = (findErr.original?.code === '42703') ||
+                                 (findErr.message || '').includes('does not exist');
+            if (isMissingCol) {
+                console.warn('[AUTH] ⚠️  DB column missing — retrying with base attributes. Run migrations!', findErr.message);
+                user = await UsersModel.findOne({
+                    where: {
+                        [require('sequelize').Op.or]: [
+                            { email: identifier },
+                            { username: identifier }
+                        ]
+                    },
+                    attributes: ['id', 'email', 'username', 'password', 'avatar',
+                                 'firstName', 'lastName', 'role', 'isVerified',
+                                 'isActive', 'status', 'lastSeen', 'settings',
+                                 'theme', 'language', 'createdAt', 'updatedAt']
+                });
+            } else {
+                throw findErr;
             }
-        });
+        }
         
         if (!user) {
             await loginAttemptService.recordFailedAttempt(identifier, clientIp);
@@ -241,8 +267,7 @@ router.post('/login', asyncHandler(async (req, res) => {
         // access/refresh tokens yet. Issue a short-lived tempToken that only
         // POST /auth/2fa/challenge can exchange (with a valid TOTP code) for
         // real tokens.
-        if (user.mfaEnabled) {
-            const tempToken = jwt.sign(
+        if (user.mfaEnabled === true) {
                 { userId: user.id, type: 'mfa_temp' },
                 JWT_SECRET,
                 { expiresIn: '10m' }
