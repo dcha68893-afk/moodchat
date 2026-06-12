@@ -3991,9 +3991,13 @@ class Application {
                 });
             });
             
-            // Mount the main router
-            this.app.use('/', mainRouter);
-            console.log('✅ Mounted main API router');
+            // AUTH-X CRITICAL FIX: routes/index.js explicitly documents that it must
+            // be mounted at /api (see line 20: "NOTE: app.js mounts this router at /api,
+            // so paths here must NOT include /api prefix"). The previous mount at '/'
+            // meant every route was reachable only at /auth/login, /users/*, etc. —
+            // the /api prefix was absent, causing 404 on every API call including login.
+            this.app.use('/api', mainRouter);
+            console.log('✅ Mounted main API router at /api');
 
             // ── FALLBACK: /api/deletions — always available even before Phase10 loads ──
             // Phase10 registers its own handler via registerRoutes() ~6s after startup.
