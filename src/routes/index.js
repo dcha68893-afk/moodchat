@@ -117,6 +117,10 @@ const ROUTE_MAPPING = {
   // PHASE14 FIX: payments.js — frontend calls /api/payments/* (mpesa, card, wallet)
   'payments.js': '/payments',
   // FIX: smart-groups.js was missing — ALL Group OS tabs returned 404
+  // AUTH-X FIX: smart-groups.js has its own internal auth middleware.
+  // Mounting it at /groups alongside group.js (which gets a separate auth
+  // wrapper) is correct, but must NOT get an additional wrapper here.
+  // Mark it as public so index.js doesn't add authenticateToken on top.
   'smart-groups.js': '/groups',
   // FIX: invites.js was missing — group invite links returned 404
   'invites.js': '/invites',
@@ -179,6 +183,14 @@ function deriveMountPath(filename) {
 function isPublicRoute(mountPath, filename) {
   // Auth routes are always public
   if (filename === 'auth.js') {
+    return true;
+  }
+
+  // AUTH-X FIX: smart-groups.js has its own internal auth middleware
+  // (the `auth()` function at the top of the file). Wrapping it in
+  // authenticateToken here adds a double-auth that breaks every request
+  // to Group OS endpoints. Mount without wrapper — internal auth is sufficient.
+  if (filename === 'smart-groups.js') {
     return true;
   }
   

@@ -5481,23 +5481,15 @@ async function main() {
     console.log('[StatusExpiryCron] ✅ Installed (runs every 5 minutes)');
 })();
 
-// ── SMART GROUPS OS ROUTES ──────────────────────────────────────────────────
-// Additive: mounts at /api/groups alongside existing group routes.
-// All routes are prefixed with /:groupId/tasks, /:groupId/polls etc.
+// AUTH-X FIX: Smart Group routes are mounted by src/routes/index.js via
+// ROUTE_MAPPING — the IIFE below was mounting them a SECOND time on
+// global.__expressApp, resulting in duplicate route handlers at /api/groups
+// for every smart-group endpoint. Duplicate handlers cause the first handler
+// to respond and the second to throw "Cannot set headers after they are sent".
+// The IIFE is now a no-op; leave the comment so reviewers know why.
 (function _mountSmartGroupRoutes() {
-    try {
-        const sgRoutes = require('./routes/smart-groups');
-        // Find the express app
-        const app = global.__expressApp;
-        if (!app) {
-            console.warn('[SmartGroups] Express app not found in global.__expressApp — routes not mounted');
-            return;
-        }
-        app.use('/api/groups', sgRoutes);
-        console.log('[SmartGroups] ✅ Smart Group OS routes mounted at /api/groups');
-    } catch(err) {
-        console.warn('[SmartGroups] Could not mount routes:', err.message);
-    }
+    // Intentionally disabled — handled by src/routes/index.js
+    console.log('[SmartGroups] Routes already mounted by src/routes/index.js (IIFE disabled)');
 })();
 
 // ── SMART GROUPS ANALYTICS CRON ──────────────────────────────────────────────

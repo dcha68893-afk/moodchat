@@ -8,8 +8,16 @@ const asyncHandler = require('express-async-handler');
 const { hashPassword, comparePassword } = require('../utils/passwordUtils');
 
 const router = express.Router();
-const db = require('../models');
-const Users = db.User || db.Users;
+
+// AUTH-X FIX: Do NOT capture db.Users at module load time — at that point
+// sequelize.sync() has not completed and db.Users is undefined, causing every
+// auth endpoint to throw "Cannot read property 'findOne' of undefined".
+// Resolve lazily on first request via a getter function instead.
+const _getDb = () => require('../models');
+const _getUsers = () => {
+    const db = _getDb();
+    return db.User || db.Users || db.sequelize?.models?.Users || db.sequelize?.models?.User;
+};
 
 // IMPORT tokenService
 const tokenService = require('../services/tokenService');
@@ -64,7 +72,7 @@ router.post('/register', asyncHandler(async (req, res) => {
 
     try {
         // Check if email already exists
-        const existingEmail = await Users.findOne({ where: { email } });
+        const existingEmail = await _getUsers().findOne({ where: { email } });
         if (existingEmail) {
             return res.status(409).json({
                 success: false,
@@ -73,7 +81,7 @@ router.post('/register', asyncHandler(async (req, res) => {
         }
 
         // Check if username already exists
-        const existingUsername = await Users.findOne({ where: { username } });
+        const existingUsername = await _getUsers().findOne({ where: { username } });
         if (existingUsername) {
             return res.status(409).json({
                 success: false,
@@ -85,7 +93,7 @@ router.post('/register', asyncHandler(async (req, res) => {
         const hashedPassword = await hashPassword(password);
 
         // Create user
-        const newUser = await Users.create({
+        const newUser = await _getUsers().create({
             email,
             username,
             password: hashedPassword,
@@ -181,7 +189,7 @@ router.post('/login', asyncHandler(async (req, res) => {
     }
     
     try {
-        const user = await Users.findOne({
+        const user = await _getUsers().findOne({
             where: {
                 [require('sequelize').Op.or]: [
                     { email: identifier },
@@ -286,7 +294,7 @@ router.get('/me', authenticateToken, asyncHandler(async (req, res) => {
         
         console.log('[AUTH] /me called for user:', userId);
         
-        const user = await Users.findByPk(userId, {
+        const user = await _getUsers().findByPk(userId, {
             attributes: ['id', 'username', 'email', 'avatar', 'firstName', 'lastName', 'bio', 'role', 'status', 'lastSeen']
         });
         
@@ -407,7 +415,7 @@ router.post('/refresh', asyncHandler(async (req, res) => {
         });
     }
     
-    const user = await Users.findByPk(stored.userId);
+    const user = await _getUsers().findByPk(stored.userId);
     
     if (!user) {
         return res.status(404).json({
@@ -472,7 +480,7 @@ router.post('/forgot-password', asyncHandler(async (req, res) => {
     }
 
     try {
-        const user = await Users.findOne({ where: { email: email.toLowerCase().trim() } });
+        const user = await _getUsers().findOne({ where: { email: email.toLowerCase().trim() } });
 
         // Always return success to prevent email enumeration attacks
         if (!user) {
@@ -543,7 +551,7 @@ router.get('/verify-email', asyncHandler(async (req, res) => {
         }
 
         const { Op } = require('sequelize');
-        const user = await Users.findOne({
+        const user = await _getUsers().findOne({
             where: {
                 id: decoded.userId,
                 resetToken: resetToken,
@@ -583,7 +591,7 @@ router.post('/resend-verification', asyncHandler(async (req, res) => {
     }
 
     try {
-        const user = await Users.findOne({ where: { email: email.toLowerCase().trim() } });
+        const user = await _getUsers().findOne({ where: { email: email.toLowerCase().trim() } });
 
         // Always return success to prevent email enumeration
         if (!user || user.isVerified) {
@@ -650,7 +658,7 @@ router.post('/reset-password', asyncHandler(async (req, res) => {
 
         // Find user and confirm token still matches (not already used)
         const { Op } = require('sequelize');
-        const user = await Users.findOne({
+        const user = await _getUsers().findOne({
             where: {
                 id: decoded.userId,
                 resetToken: resetToken,
@@ -760,7 +768,7 @@ router.post('/2fa/enable', authenticateToken, asyncHandler(async (req, res) => {
         const QRCode = require('qrcode');
 
         const userId = req.user.userId || req.user.id;
-        const user = await Users.findByPk(userId);
+        const user = await _getUsers().findByPk(userId);
         if (!user) {
             return res.status(404).json({ success: false, message: 'User not found' });
         }
@@ -800,7 +808,7 @@ router.post('/2fa/verify', authenticateToken, asyncHandler(async (req, res) => {
         }
 
         const userId = req.user.userId || req.user.id;
-        const user = await Users.findByPk(userId);
+        const user = await _getUsers().findByPk(userId);
         if (!user || !user.mfaSecret) {
             return res.status(400).json({ success: false, message: '2FA setup has not been started' });
         }
@@ -826,7 +834,7 @@ router.post('/2fa/disable', authenticateToken, asyncHandler(async (req, res) => 
         const { token: totpToken } = req.body;
 
         const userId = req.user.userId || req.user.id;
-        const user = await Users.findByPk(userId);
+        const user = await _getUsers().findByPk(userId);
         if (!user || !user.mfaEnabled) {
             return res.status(400).json({ success: false, message: '2FA is not enabled' });
         }
@@ -867,7 +875,7 @@ router.post('/2fa/challenge', asyncHandler(async (req, res) => {
             return res.status(400).json({ success: false, message: 'Invalid token type' });
         }
 
-        const user = await Users.findByPk(decoded.userId);
+        const user = await _getUsers().findByPk(decoded.userId);
         if (!user || !user.mfaEnabled || !user.mfaSecret) {
             return res.status(400).json({ success: false, message: '2FA is not enabled for this account' });
         }

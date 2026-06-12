@@ -147,6 +147,20 @@ module.exports = (sequelize, DataTypes) => {
         defaultValue: false,
         allowNull: false,
       },
+      // AUTH-X FIX: resetToken / resetTokenExpiry were missing from model definition
+      // but used in forgot-password and verify-email routes. Without these columns
+      // Sequelize silently ignores user.update({ resetToken: ... }) calls,
+      // breaking password reset and email verification flows.
+      resetToken: {
+        type: DataTypes.TEXT,
+        allowNull: true,
+        defaultValue: null,
+      },
+      resetTokenExpiry: {
+        type: DataTypes.DATE,
+        allowNull: true,
+        defaultValue: null,
+      },
       // P2 FIX (Forensic Audit): Two-Factor Authentication (TOTP) support
       mfaSecret: {
         type: DataTypes.STRING,
