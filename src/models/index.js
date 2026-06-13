@@ -123,7 +123,7 @@ const MODEL_WHITELIST = [
   'Status', 'StatusView', 'StatusReaction', 'StatusReply', 'Category', 'Template', 'Notes', 'File', 'Features',
   // ── Marketplace models ──────────────────────────────────────────────────────
   'Tool', 'Order', 'Review', 'Cart', 'Coupon',
-  'Wallet', 'WalletTransaction', 'Refund', 'Payout', 'SellerProfile', 'AuditLog',
+  'Wallet', 'WalletTransaction', 'Refund', 'Payout', 'SellerProfile', 'AuditLog', 'PasswordHistory',
   // ── Group OS models — CRITICAL FIX: were missing, causing all Group OS tabs
   //    to return 503 "Service unavailable" because _m() always returned null ──
   'GroupTask', 'GroupTaskAssignment',
@@ -441,11 +441,7 @@ async function addMissingColumns() {
       { name: 'last_active', type: Sequelize.DATE, allowNull: true },
       { name: 'is_online', type: Sequelize.BOOLEAN, defaultValue: false, allowNull: false },
       { name: 'avatar', type: Sequelize.STRING(255), allowNull: true },
-      { name: 'bio',               type: Sequelize.TEXT,    allowNull: true },
-      { name: 'mfa_enabled',        type: Sequelize.BOOLEAN, defaultValue: false, allowNull: false },
-      { name: 'mfa_secret',         type: Sequelize.STRING,  allowNull: true },
-      { name: 'mfa_backup_codes',   type: Sequelize.JSONB,   allowNull: true },
-      { name: 'deletedAt',          type: Sequelize.DATE,    allowNull: true }
+      { name: 'bio', type: Sequelize.TEXT, allowNull: true }
     ],
     'chats': [
       { name: 'name', type: Sequelize.STRING(100), allowNull: true },
@@ -550,14 +546,7 @@ async function addMissingColumns() {
       { name: 'data_saver', type: Sequelize.BOOLEAN, defaultValue: false, allowNull: false },
       { name: 'auto_download', type: Sequelize.BOOLEAN, defaultValue: false, allowNull: false },
       { name: 'privacy', type: Sequelize.JSONB, defaultValue: {}, allowNull: false },
-      { name: 'chat_preferences', type: Sequelize.JSONB, defaultValue: {}, allowNull: false },
-      { name: 'mood_settings',     type: Sequelize.JSONB, defaultValue: null, allowNull: true },
-      { name: 'call_settings',     type: Sequelize.JSONB, defaultValue: null, allowNull: true },
-      { name: 'friend_settings',   type: Sequelize.JSONB, defaultValue: null, allowNull: true },
-      { name: 'group_settings',    type: Sequelize.JSONB, defaultValue: null, allowNull: true },
-      { name: 'status_settings',   type: Sequelize.JSONB, defaultValue: null, allowNull: true },
-      { name: 'backup_settings',   type: Sequelize.JSONB, defaultValue: null, allowNull: true },
-      { name: 'advanced_settings', type: Sequelize.JSONB, defaultValue: null, allowNull: true }
+      { name: 'chat_preferences', type: Sequelize.JSONB, defaultValue: {}, allowNull: false }
     ],
     // ── Marketplace: tools (listings) ─────────────────────────────────────────
     'tools': [

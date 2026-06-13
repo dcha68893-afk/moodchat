@@ -37,7 +37,7 @@ try {
 const Sequelize = require('sequelize');
 const { Op } = Sequelize;
 const asyncHandler = require('express-async-handler');
-const { apiRateLimiter } = require('../middleware/rateLimiter');
+const { apiRateLimiter, searchLimiter } = require('../middleware/rateLimiter');
 
 // ===== AUTHENTICATION MIDDLEWARE IMPORT =====
 let authenticateToken;
@@ -487,7 +487,8 @@ router.get('/nearby', apiRateLimiter, asyncHandler(async (req, res) => {
 }));
 
 // ===== SEARCH USERS =====
-router.get('/search', apiRateLimiter, asyncHandler(async (req, res) => {
+// P3 FIX (Forensic Audit): stricter searchLimiter prevents user enumeration
+router.get('/search', searchLimiter, asyncHandler(async (req, res) => {
     try {
         const userId = getUserId(req);
         if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
@@ -549,7 +550,8 @@ router.get('/search', apiRateLimiter, asyncHandler(async (req, res) => {
 // ===== SEARCH NEW USERS =====
 // P2 FIX: /search/new now shares the same blocked-user exclusion and friendshipStatus
 // as /search — previously diverged. Also accepts ?q= alias for query param.
-router.get('/search/new', apiRateLimiter, asyncHandler(async (req, res) => {
+// P3 FIX (Forensic Audit): stricter searchLimiter prevents user enumeration
+router.get('/search/new', searchLimiter, asyncHandler(async (req, res) => {
     try {
         const userId = getUserId(req);
         if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
@@ -1757,8 +1759,7 @@ router.get('/export/csv', apiRateLimiter, asyncHandler(async (req, res) => {
         const escape = (v) => {
             if (v == null) return '';
             const s = String(v);
-            return s.includes(',') || s.includes('"') || s.includes('
-') ? `"${s.replace(/"/g, '""')}"` : s;
+            return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s;
         };
 
         const rows = [['Username', 'First Name', 'Last Name', 'Category', 'Business Contact', 'Friends Since', 'Closeness Level', 'Notes']];
@@ -1775,8 +1776,7 @@ router.get('/export/csv', apiRateLimiter, asyncHandler(async (req, res) => {
             ]);
         });
 
-        const csv = rows.map(r => r.join(',')).join('
-');
+        const csv = rows.map(r => r.join(',')).join('\n');
         res.setHeader('Content-Type', 'text/csv');
         res.setHeader('Content-Disposition', `attachment; filename="friends-${userId}-${Date.now()}.csv"`);
         return res.send(csv);

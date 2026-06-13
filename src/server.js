@@ -4362,6 +4362,13 @@ class Application {
             res.setHeader('X-XSS-Protection', '1; mode=block');
             res.setHeader('X-Request-ID', req.requestId);
             res.setHeader('Access-Control-Allow-Credentials', 'true');
+            // P2 FIX (Forensic Audit): restrict powerful browser features to
+            // same-origin only. payment=() disables the Payment Request API
+            // entirely since checkout is handled server-side via M-Pesa/Flutterwave.
+            res.setHeader(
+                'Permissions-Policy',
+                'camera=(self), microphone=(self), geolocation=(self), payment=()'
+            );
             next();
         });
         

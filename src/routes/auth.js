@@ -24,6 +24,8 @@ const tokenService = require('../services/tokenService');
 const { blacklistAccessToken } = require('../services/tokenBlacklistService');
 const loginAttemptService = require('../services/loginAttemptService');
 const emailService = require('../services/emailService');
+const { checkPwnedPassword } = require('../utils/pwnedPasswordCheck');
+const passwordHistoryService = require('../services/passwordHistoryService');
 
 // IMPORT authenticateToken middleware
 const { authenticateToken } = require('../middleware/auth');
@@ -39,7 +41,7 @@ console.log('✅ AUTH ROUTER LOADED - FIXED VERSION');
 // REGISTER ENDPOINT
 router.post('/register', asyncHandler(async (req, res) => {
     console.log('📝 REGISTER called');
-    const { email, username, password, name } = req.body;
+    const { email, username, password, name, acceptPrivacyPolicy } = req.body;
 
     // Validate required fields
     if (!email || !username || !password) {
@@ -49,7 +51,15 @@ router.post('/register', asyncHandler(async (req, res) => {
         });
     }
 
-    if (!email.includes('@')) {
+    // P3 FIX (Forensic Audit): proper email validation via validator.js
+    // (falls back to a basic regex if the package isn't installed yet)
+    let isEmailValid;
+    try {
+        isEmailValid = require('validator').isEmail(email);
+    } catch (_) {
+        isEmailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+    }
+    if (!isEmailValid) {
         return res.status(400).json({
             success: false,
             message: 'Valid email is required'
@@ -67,6 +77,17 @@ router.post('/register', asyncHandler(async (req, res) => {
         return res.status(400).json({
             success: false,
             message: 'Password must be at least 8 characters'
+        });
+    }
+
+    // P2 FIX (Forensic Audit): reject passwords found in known data breaches
+    // via the HaveIBeenPwned k-anonymity API. Fails open on API errors.
+    const pwnedCheck = await checkPwnedPassword(password);
+    if (pwnedCheck.pwned) {
+        return res.status(400).json({
+            success: false,
+            message: 'This password has appeared in a data breach. Please choose a different password.',
+            errorCode: 'PASSWORD_PWNED'
         });
     }
 
@@ -99,7 +120,12 @@ router.post('/register', asyncHandler(async (req, res) => {
             password: hashedPassword,
             ...(name && { firstName: name.split(' ')[0], lastName: name.split(' ').slice(1).join(' ') || null }),
             role: 'user',
-            status: 'offline'
+            status: 'offline',
+            // P3 FIX (Forensic Audit): "Privacy policy acceptance on registration"
+            // Stored when the frontend sends acceptPrivacyPolicy: true (e.g. a
+            // required checkbox). Optional for now so existing/older frontend
+            // builds that don't send this field don't break registration.
+            ...(acceptPrivacyPolicy === true && { acceptedPrivacyPolicyAt: new Date() })
         });
 
         // Generate tokens
@@ -112,6 +138,9 @@ router.post('/register', asyncHandler(async (req, res) => {
         });
 
         console.log('✅ User registered:', newUser.id, newUser.username);
+        // P3 FIX (Forensic Audit): seed password history with the initial password
+        passwordHistoryService.recordPasswordHash(newUser.id, hashedPassword)
+            .catch(e => console.warn('[Auth] Failed to record initial password history:', e.message));
 
         // P1 FIX (Forensic Audit): send an email verification link.
         // Reuses the existing resetToken/resetTokenExpiry columns with a
@@ -733,6 +762,15 @@ router.post('/reset-password', asyncHandler(async (req, res) => {
             return res.status(400).json({ success: false, message: 'Invalid or expired reset token' });
         }
 
+        // P3 FIX (Forensic Audit): "Implement password history (last 5)"
+        if (await passwordHistoryService.isPasswordReused(user.id, passwordToSet)) {
+            return res.status(400).json({
+                success: false,
+                message: `You can't reuse one of your last ${passwordHistoryService.HISTORY_LIMIT} passwords. Please choose a different password.`,
+                errorCode: 'PASSWORD_REUSED'
+            });
+        }
+
         // Hash the new password
         const hashedPassword = await hashPassword(passwordToSet);
 
@@ -742,6 +780,7 @@ router.post('/reset-password', asyncHandler(async (req, res) => {
             resetToken: null,
             resetTokenExpiry: null
         });
+        await passwordHistoryService.recordPasswordHash(user.id, hashedPassword);
 
         console.log('✅ Password reset successful for user:', user.id);
 

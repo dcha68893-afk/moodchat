@@ -104,6 +104,39 @@ const passwordResetLimiter = rateLimit({
   }
 });
 
+// P2 FIX (Forensic Audit): GDPR data export — limit to 1 export per 24h per user
+const dataExportLimiter = rateLimit({
+  store: redisStore,
+  windowMs: 24 * 60 * 60 * 1000, // 24 hours
+  max: 1,
+  message: {
+    success: false,
+    message: 'You can request a data export once every 24 hours. Please try again later.',
+    timestamp: new Date().toISOString()
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `export:${(req.user && (req.user.userId || req.user.id)) || req.ip}`
+});
+
+// P3 FIX (Forensic Audit): "Add rate limit on search/discovery endpoints —
+// prevent user enumeration via /friends/search and /users/search."
+// Stricter than the general apiLimiter (100/min) since search endpoints are
+// the primary vector for enumerating valid usernames/emails.
+const searchLimiter = rateLimit({
+  store: redisStore,
+  windowMs: 60 * 1000, // 1 minute
+  max: 20, // 20 searches per minute per IP
+  message: {
+    success: false,
+    message: 'Too many search requests. Please slow down and try again shortly.',
+    timestamp: new Date().toISOString()
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `search:${(req.user && (req.user.userId || req.user.id)) || req.ip}`
+});
+
 // Rate limiter for file uploads
 const uploadLimiter = rateLimit({
   store: redisStore,
@@ -227,6 +260,8 @@ module.exports = {
   apiRateLimiter, // Added alias for backward compatibility
   registerLimiter,
   passwordResetLimiter,
+  dataExportLimiter,
+  searchLimiter,
   uploadLimiter,
   chatLimiter,
   callInitiationLimiter,

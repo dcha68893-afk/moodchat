@@ -734,12 +734,6 @@ router.delete('/:groupId/messages/:messageId', async (req, res) => {
     }
 });
 
-    } catch (error) {
-        console.error('[Groups] DELETE message error:', error.message);
-        return res.status(500).json({ success: false, message: 'Failed to delete message' });
-    }
-});
-
 // ============================================================================
 // P1 FIX: MESSAGE PINNING — POST/DELETE/GET /:groupId/messages/:id/pin
 // ============================================================================

@@ -556,39 +556,6 @@ class GroupController {
             });
         } catch (error) { handleError(error, next, 'joinGroup'); }
     }
-                membership = existing;
-            } else {
-                membership = await GM.create({ groupId, userId, role: 'member', joinedAt: new Date() });
-            }
-
-            // Update group member count
-            try {
-                const liveCount = await GM.count({ where: { groupId, leftAt: null } });
-                await grp.update({ stats: { ...(group.stats || {}), totalMembers: liveCount } }, { where: { id: groupId } });
-            } catch (_) {}
-            const _ = membership; // suppress lint
-
-            const io = global.__socketIO;
-            if (io) {
-                io.to(`group:${groupId}`).emit('group:member:joined', { groupId, memberId: userId, timestamp: new Date() });
-                io.to(`user:${userId}`).emit('group:localSync', { action: 'member_add', groupId });
-                // Auto-join the socket room
-                const userRoom = io.sockets.adapter.rooms?.get(`user:${userId}`);
-                if (userRoom) {
-                    userRoom.forEach(socketId => {
-                        const sock = io.sockets.sockets?.get(socketId);
-                        if (sock) sock.join(`group:${groupId}`);
-                    });
-                }
-            }
-
-            res.status(200).json({
-                success: true,
-                message: 'Successfully joined the group',
-                data: withLocalSyncMeta({ joined: true, groupId }, 'member_add'),
-            });
-        } catch (error) { handleError(error, next, 'joinGroup'); }
-    }
 
     // ── SEARCH GROUPS ──────────────────────────────────────────────────────
     async searchGroups(req, res, next) {

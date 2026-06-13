@@ -254,29 +254,50 @@ class UserStatusService {
         status
       } = options;
 
-      const skip = (page - 1) * limit;
+      // NOTE: there is no status-history table in the current schema —
+      // UserStatus stores only the current status per user (one row per
+      // userId). This was previously a broken/merged stub that crashed on
+      // require(). Returning an empty, correctly-paginated result here
+      // restores the route to a working (if not yet feature-complete) state.
+      // To implement real history, add a StatusHistory model/table and
+      // record a row on every status change.
+      void startDate; void endDate; void status; // reserved for future filtering
 
-      // Build query
-      const query = { userId };
-      
-      if (startDate || endDate) {
-        query.timestamp = {};
-        if (startDate) query.timestamp_gte = startDate;
-        if (endDate) query.timestamp_lte = endDate;
+      return {
+        history: [],
+        pagination: {
+          page: parseInt(page, 10),
+          limit: parseInt(limit, 10),
+          total: 0,
+          totalPages: 0
+        }
+      };
+    } catch (error) {
+      if (error instanceof ValidationError) {
+        throw error;
       }
-      
-      if (status) {
-        query.status = status;
+      logger.error('Error getting status history:', error);
+      throw new ServerError('Failed to get status history');
+    }
+  }
+
+  /**
+   * Get a user's Do Not Disturb settings.
+   * NOTE: there is no doNotDisturb column on UserStatus in the current
+   * schema. Returns the safe default shape until a column/table is added;
+   * isDoNotDisturbActive() below already handles this shape correctly.
+   * @param {string|number} userId - User ID
+   * @returns {Promise<Object>} DND status object
+   */
+  async getDoNotDisturbStatus(userId) {
+    try {
+      if (!userId) {
+        throw new ValidationError('User ID is required');
       }
 
-      const [history, total] = await Promise.all([
-        [],
-        [],
-          lastUpdated: null
-        };
-      }
+      const userStatus = await getUserStatus().findOne({ where: { userId } });
 
-      return userStatus.doNotDisturb || {
+      return (userStatus && userStatus.doNotDisturb) || {
         enabled: false,
         schedule: {},
         exceptions: [],

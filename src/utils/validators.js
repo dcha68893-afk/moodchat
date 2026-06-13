@@ -1,4 +1,7 @@
-﻿const mongoose = require('mongoose');
+// P2 FIX (Forensic Audit - "Remove unused packages"): mongoose was removed
+// from package.json during the Postgres migration, but this file still
+// required it — require('mongoose') would throw MODULE_NOT_FOUND for any
+// caller. Replaced with a UUID v4 regex (Postgres uses UUID primary keys).
 const { ValidationError } = require('./errors');
 
 /**
@@ -89,13 +92,15 @@ class Validators {
   }
 
   /**
-   * Validate MongoDB ObjectId
+   * Validate UUID (Postgres primary key format)
+   * P2 FIX (Forensic Audit): replaces the old MongoDB ObjectId validator.
    * @param {string} id - ID to validate
-   * @returns {boolean} True if valid ObjectId
+   * @returns {boolean} True if valid UUID
    */
   static validateObjectId(id) {
     if (!id || typeof id !== 'string') return false;
-    return mongoose.Types.ObjectId.isValid(id) && new mongoose.Types.ObjectId(id).toString() === id;
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    return uuidRegex.test(id.trim());
   }
 
   /**

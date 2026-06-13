@@ -171,20 +171,21 @@ module.exports = (sequelize, DataTypes) => {
         defaultValue: false,
         allowNull: false,
       },
-      mfaBackupCodes: {
-        type: DataTypes.JSONB,
+      // P2 FIX (Forensic Audit): GDPR right to erasure — set when a user
+      // requests account deletion; permanent purge runs 30 days later.
+      deletionRequestedAt: {
+        type: DataTypes.DATE,
         allowNull: true,
-        field: 'mfa_backup_codes',
+      },
+      // P3 FIX (Forensic Audit): "Privacy policy acceptance on registration"
+      acceptedPrivacyPolicyAt: {
+        type: DataTypes.DATE,
+        allowNull: true,
       },
       isActive: {
         type: DataTypes.BOOLEAN,
         defaultValue: true,
         allowNull: false,
-      },
-      deletedAt: {
-        type: DataTypes.DATE,
-        allowNull: true,
-        defaultValue: null,
       },
       lastSeen: {
         type: DataTypes.DATE,

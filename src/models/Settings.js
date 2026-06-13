@@ -100,16 +100,7 @@ module.exports = (sequelize, DataTypes) => {
       },
       moodSettings: {
         type: DataTypes.JSONB,
-        defaultValue: {
-          currentMood: 'neutral',
-          autoMoodDetection: false,
-          showMoodTo: 'friendsOnly',
-          moodColors: {
-            neutral: '#808080', happy: '#FFD700', calm: '#87CEEB',
-            energetic: '#FF6347', focused: '#4169E1', relaxed: '#90EE90',
-            stressed: '#DC143C', tired: '#9370DB', excited: '#FF69B4'
-          }
-        },
+        defaultValue: { currentMood: 'neutral', autoMoodDetection: false, showMoodTo: 'friendsOnly' },
         field: 'mood_settings',
       },
       callSettings: {
@@ -139,7 +130,7 @@ module.exports = (sequelize, DataTypes) => {
       },
       advancedSettings: {
         type: DataTypes.JSONB,
-        defaultValue: { syncEnabled: true, offlineMode: false, debugMode: false, developerTools: false, experimentalFeatures: false, performanceMode: false, reduceMotion: false },
+        defaultValue: { syncEnabled: true, offlineMode: false, debugMode: false, developerTools: false, experimentalFeatures: false },
         field: 'advanced_settings',
       },
       createdAt: {

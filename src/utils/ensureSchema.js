@@ -42,6 +42,16 @@ const REQUIRED_COLUMNS = [
     table: 'Users', column: 'mfaEnabled',
     sql: `ALTER TABLE "Users" ADD COLUMN IF NOT EXISTS "mfaEnabled" BOOLEAN NOT NULL DEFAULT false`,
   },
+  // P2 FIX (Forensic Audit): GDPR right to erasure
+  {
+    table: 'Users', column: 'deletionRequestedAt',
+    sql: `ALTER TABLE "Users" ADD COLUMN IF NOT EXISTS "deletionRequestedAt" TIMESTAMP WITH TIME ZONE`,
+  },
+  // P3 FIX (Forensic Audit): privacy policy acceptance on registration
+  {
+    table: 'Users', column: 'acceptedPrivacyPolicyAt',
+    sql: `ALTER TABLE "Users" ADD COLUMN IF NOT EXISTS "acceptedPrivacyPolicyAt" TIMESTAMP WITH TIME ZONE`,
+  },
   {
     table: 'Users', column: 'fcmToken',
     sql: `ALTER TABLE "Users" ADD COLUMN IF NOT EXISTS "fcmToken" TEXT`,
@@ -150,6 +160,16 @@ const REQUIRED_TABLES = [
       "items"       JSONB NOT NULL DEFAULT '[]',
       "createdAt"   TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
       "updatedAt"   TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+    )`,
+  },
+  // P3 FIX (Forensic Audit): "Implement password history (last 5)"
+  {
+    name: 'password_history',
+    sql: `CREATE TABLE IF NOT EXISTS "password_history" (
+      "id"             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      "user_id"        INTEGER NOT NULL,
+      "password_hash"  VARCHAR(255) NOT NULL,
+      "created_at"     TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
     )`,
   },
 ];
