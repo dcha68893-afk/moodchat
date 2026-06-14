@@ -93,7 +93,7 @@ const ROUTE_MAPPING = {
   'push.js': '/push',
   'twoFactor.js': '/2fa',
   'devices.js': '/devices',
-  'status.js': '/status',
+  'statusFeed.js': '/status',
   'notifications.js': '/notifications',
   'settings.js': '/settings',
   'search.js': '/search',
@@ -280,7 +280,7 @@ function scanAndMountRouters() {
           });
         }
         // Status routes - mount WITHOUT auth middleware (handles its own auth internally)
-        else if (filename === 'status.js') {
+        else if (filename === 'statusFeed.js') {
           console.log(`🔓 ${mountPath} - HYBRID (Status router handles its own auth - see breakdown below)`);
           router.use(mountPath, routerInstance);
           results.publicRoutes.push({ 
@@ -311,7 +311,7 @@ function scanAndMountRouters() {
           filename,
           path: mountPath,
           routes: routerInstance.stack ? routerInstance.stack.length : 'unknown',
-          authRequired: !isPublic && filename !== 'auth.js' && filename !== 'status.js',
+          authRequired: !isPublic && filename !== 'auth.js' && filename !== 'statusFeed.js',
           isPublic: isPublic || filename === 'auth.js'
         });
         
