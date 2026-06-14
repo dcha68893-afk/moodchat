@@ -403,12 +403,14 @@ class SyncWorker {
       const batch = usersToSync.slice(0, this.batchSize);
       
       const syncPromises = batch.map(userId => 
-        this.queueSyncJob({
-          userId,
-          operation: 'sync_messages',
-          data: { lastSyncTime: await this.getLastSyncTime(userId) },
-          timestamp: new Date().toISOString()
-        }, 0)
+        this.getLastSyncTime(userId).then(lastSyncTime =>
+          this.queueSyncJob({
+            userId,
+            operation: 'sync_messages',
+            data: { lastSyncTime },
+            timestamp: new Date().toISOString()
+          }, 0)
+        )
       );
 
       await Promise.all(syncPromises);

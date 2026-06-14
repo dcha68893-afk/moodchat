@@ -7,12 +7,12 @@
  *
  * Add to server.js AFTER Phase 2 block:
  *
- *   const { initPhase3 } = require('./services/phase3/phase3.bootstrap');
+ *   const { initPhase3 } = require('./phase3.bootstrap');
  *   setTimeout(() => {
  *     global.__phase3 = initPhase3(io, app, {
  *       phase1: global.__phase1,
  *       phase2: global.__phase2,
- *       wsService: require('./services/webSocketService'),
+ *       wsService: require('../webSocketService'),
  *       logger: console,
  *     });
  *   }, 2000);

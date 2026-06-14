@@ -80,4 +80,39 @@ router.post('/test', asyncHandler(async (req, res) => {
   res.json({ status: 'success', message: 'Test notification sent' });
 }));
 
+// ── FCM Token Registration ────────────────────────────────────────────────────
+// POST /api/push/fcm-token — save FCM token for native push delivery
+router.post('/fcm-token', asyncHandler(async (req, res) => {
+  const userId = req.user?.id || req.user?.userId;
+  const { token } = req.body;
+  if (!token) return res.status(400).json({ status: 'error', message: 'token is required' });
+  try {
+    if (typeof pushService.registerFCMToken === 'function') {
+      await pushService.registerFCMToken(userId, token);
+    } else {
+      // Fallback: store on Users row directly
+      const db = require('../models');
+      const User = db.Users || db.User;
+      if (User) await User.update({ fcmToken: token }, { where: { id: userId } });
+    }
+    res.json({ status: 'success', message: 'FCM token registered' });
+  } catch (err) {
+    res.status(500).json({ status: 'error', message: err.message });
+  }
+}));
+
+// DELETE /api/push/fcm-token — remove FCM token on logout/unregister
+router.delete('/fcm-token', asyncHandler(async (req, res) => {
+  const userId = req.user?.id || req.user?.userId;
+  try {
+    const db   = require('../models');
+    const User = db.Users || db.User;
+    if (User) await User.update({ fcmToken: null }, { where: { id: userId } });
+    res.json({ status: 'success', message: 'FCM token removed' });
+  } catch (err) {
+    res.status(500).json({ status: 'error', message: err.message });
+  }
+}));
+
+
 module.exports = router;

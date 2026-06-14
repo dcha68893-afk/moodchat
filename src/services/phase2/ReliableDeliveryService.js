@@ -257,7 +257,7 @@ class ReliableDeliveryService extends EventEmitter {
         const sinceTs = parseInt(since, 10) || Date.now() - 5 * 60 * 1000;
 
         // Delegate to existing message service
-        const db = require('../models');
+        const db = require('../../models');
         const Message = db.Message || db.Messages;
         if (!Message) return res.json({ messages: [], since: sinceTs });
 

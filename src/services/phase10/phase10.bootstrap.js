@@ -62,7 +62,7 @@ function initPhase10(io, app, options = {}) {
 
   // Register deletion REST endpoints
   try {
-    const { authenticateToken } = require('../middleware/auth');
+    const { authenticateToken } = require('../../middleware/auth');
     hydration.registerRoutes(app, authenticateToken);
   } catch (_) {
     hydration.registerRoutes(app, (req, res, next) => next());

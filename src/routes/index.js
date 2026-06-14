@@ -93,7 +93,7 @@ const ROUTE_MAPPING = {
   'push.js': '/push',
   'twoFactor.js': '/2fa',
   'devices.js': '/devices',
-  'statusFeed.js': '/status',
+  'status.js': '/status',
   'notifications.js': '/notifications',
   'settings.js': '/settings',
   'search.js': '/search',
@@ -111,6 +111,11 @@ const ROUTE_MAPPING = {
   'templates.js': '/templates',
   'categories.js': '/categories',
   'files.js': '/files',
+  'analytics.js': '/analytics',
+  'conversations.js': '/conversations',
+  'teams.js': '/teams',
+  'offline.js': '/offline',
+  'account.js': '/account',
   'tokens.js': '/tokens',
   // FIX B-01: marketplace.routes.js was missing — all marketplace endpoints returned 404
   'marketplace.routes.js': '/marketplace',
@@ -280,7 +285,7 @@ function scanAndMountRouters() {
           });
         }
         // Status routes - mount WITHOUT auth middleware (handles its own auth internally)
-        else if (filename === 'statusFeed.js') {
+        else if (filename === 'status.js') {
           console.log(`🔓 ${mountPath} - HYBRID (Status router handles its own auth - see breakdown below)`);
           router.use(mountPath, routerInstance);
           results.publicRoutes.push({ 
@@ -311,7 +316,7 @@ function scanAndMountRouters() {
           filename,
           path: mountPath,
           routes: routerInstance.stack ? routerInstance.stack.length : 'unknown',
-          authRequired: !isPublic && filename !== 'auth.js' && filename !== 'statusFeed.js',
+          authRequired: !isPublic && filename !== 'auth.js' && filename !== 'status.js',
           isPublic: isPublic || filename === 'auth.js'
         });
         

@@ -21,7 +21,7 @@ const getDbConfig = () => {
         acquire: parseInt(process.env.DB_POOL_ACQUIRE) || 30000,
         idle: parseInt(process.env.DB_POOL_IDLE) || 10000
       },
-      dialectOptions: process.env.DB_SSL === 'true' ? {
+      dialectOptions: (process.env.DB_SSL === 'true' || process.env.RENDER || process.env.RENDER_SERVICE_ID) ? {
         ssl: {
           require: true,
           rejectUnauthorized: false,
@@ -45,7 +45,7 @@ const getDbConfig = () => {
       acquire: parseInt(process.env.DB_POOL_ACQUIRE) || 30000,
       idle: parseInt(process.env.DB_POOL_IDLE) || 10000
     },
-    dialectOptions: process.env.DB_SSL === 'true' ? {
+    dialectOptions: (process.env.DB_SSL === 'true' || process.env.RENDER || process.env.RENDER_SERVICE_ID) ? {
       ssl: {
         require: true,
         rejectUnauthorized: false,
@@ -117,24 +117,40 @@ const db = {
 
 // CRITICAL: Whitelist of all expected model files - ORDERED BY DEPENDENCIES
 const MODEL_WHITELIST = [
-  'Users', 'Token', 'Profile', 'Settings', 'Chats', 'ChatParticipant',
-  'Messages', 'GroupMembers', 'TypingIndicator', 'UserStatus', 'ReadReceipt',
-  'SharedMood', 'Notification', 'Friend', 'Calls', 'Groups', 'Media', 'Mood',
-  'Status', 'StatusView', 'StatusReaction', 'StatusReply', 'Category', 'Template', 'Notes', 'File', 'Features',
-  // ── Marketplace models ──────────────────────────────────────────────────────
-  'Tool', 'Order', 'Review', 'Cart', 'Coupon',
-  'Wallet', 'WalletTransaction', 'Refund', 'Payout', 'SellerProfile', 'AuditLog', 'PasswordHistory',
-  // ── Group OS models — CRITICAL FIX: were missing, causing all Group OS tabs
-  //    to return 503 "Service unavailable" because _m() always returned null ──
+  // ── Core user models ────────────────────────────────────────────────────────
+  'Users', 'Token', 'Profile', 'Settings',
+  // ── Chat & messaging ────────────────────────────────────────────────────────
+  'Chats', 'ChatParticipant',
+  'Messages', 'Message', 'MessageReport', 'StarredMessage', 'ScheduledMessage', 'PinnedMessage',
+  // ── Social & presence ───────────────────────────────────────────────────────
+  'GroupMembers', 'TypingIndicator', 'UserStatus', 'ReadReceipt',
+  'SharedMood', 'Notification', 'Friend',
+  // ── Calls ───────────────────────────────────────────────────────────────────
+  'Calls', 'Call',
+  // ── Groups ──────────────────────────────────────────────────────────────────
+  'Groups', 'Group',
+  // ── Media & content ─────────────────────────────────────────────────────────
+  'Media', 'Mood', 'Notes', 'File', 'Features', 'Category', 'Template',
+  // ── Status / Story ──────────────────────────────────────────────────────────
+  'Status', 'StatusView', 'StatusReaction', 'StatusReply', 'StatusComment', 'StatusLike',
+  // ── Push notifications ───────────────────────────────────────────────────────
+  'PushSubscription',
+  // ── Games ───────────────────────────────────────────────────────────────────
+  'GameProgress', 'GameChallenge',
+  // ── Moderation ──────────────────────────────────────────────────────────────
+  'ModerationLog', 'AuditLog',
+  // ── Marketplace ─────────────────────────────────────────────────────────────
+  'Tool', 'Order', 'Review', 'Cart', 'Coupon', 'Wishlist',
+  'Wallet', 'WalletTransaction', 'Refund', 'Payout', 'SellerProfile',
+  // ── Account security ────────────────────────────────────────────────────────
+  'PasswordHistory',
+  // ── Group OS ────────────────────────────────────────────────────────────────
   'GroupTask', 'GroupTaskAssignment',
   'GroupEvent', 'GroupAttendance',
   'GroupPoll', 'GroupPollOption', 'GroupPollVote',
-  'GroupNote',
-  'GroupFile',
-  'GroupFinance',
-  'GroupAISummary',
-  'GroupActivityLog',
-  'GroupAnalytics',
+  'GroupNote', 'GroupThread',
+  'GroupFile', 'GroupFinance',
+  'GroupAISummary', 'GroupActivityLog', 'GroupAnalytics',
 ];
 
 // CRITICAL: Patterns that indicate NON-MODEL files
@@ -148,7 +164,8 @@ const NON_MODEL_PATTERNS = [
   'message.route', 'notification.route', 'status.route',
   'router.get', 'router.post', 'router.put', 'router.delete', 'router.use',
   'app.get', 'app.post', 'app.put', 'app.delete', 'app.use',
-  'express.Router()', 'express.Router('
+  'express.Router()', 'express.Router(',
+  'gameDailyReminder', // cron job — not a Sequelize model; lives in src/jobs/
 ];
 
 // ===== MODEL FILE VALIDATION =====

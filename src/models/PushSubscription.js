@@ -41,7 +41,7 @@ module.exports = (sequelize, DataTypes) => {
       },
     },
     {
-      tableName: 'PushSubscriptions',
+      tableName: 'push_subscriptions',
       timestamps: true,
     }
   );

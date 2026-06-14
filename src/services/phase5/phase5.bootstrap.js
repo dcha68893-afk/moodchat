@@ -4,12 +4,12 @@
  *
  * Final phase initialization. Add to server.js AFTER Phase 4 block:
  *
- *   const { initPhase5 } = require('./services/phase5/phase5.bootstrap');
+ *   const { initPhase5 } = require('./phase5.bootstrap');
  *   setTimeout(() => {
  *     global.__phase5 = initPhase5(io, app, {
  *       phase1: global.__phase1, phase2: global.__phase2,
  *       phase3: global.__phase3, phase4: global.__phase4,
- *       wsService: require('./services/webSocketService'),
+ *       wsService: require('../webSocketService'),
  *       logger: console,
  *     });
  *   }, 4000);

@@ -4,11 +4,11 @@
  *
  * Add to server.js AFTER Phase 3 block:
  *
- *   const { initPhase4 } = require('./services/phase4/phase4.bootstrap');
+ *   const { initPhase4 } = require('./phase4.bootstrap');
  *   setTimeout(() => {
  *     global.__phase4 = initPhase4(io, app, {
  *       phase1: global.__phase1, phase2: global.__phase2, phase3: global.__phase3,
- *       wsService: require('./services/webSocketService'), logger: console,
+ *       wsService: require('../webSocketService'), logger: console,
  *     });
  *   }, 3000);
  *
@@ -91,7 +91,7 @@ function _registerRoutes(app, groupStory, wsService, logger) {
   // Community discovery
   app.get('/api/groups/discover', async (req, res) => {
     try {
-      const db     = require('../models');
+      const db     = require('../../models');
       const Groups = db.models?.Groups || db.Group || db.groups;
       if (!Groups) return res.json({ groups: [] });
 

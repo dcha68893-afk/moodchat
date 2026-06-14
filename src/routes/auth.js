@@ -1017,4 +1017,21 @@ router.post('/2fa/challenge', asyncHandler(async (req, res) => {
     }
 }));
 
+// POST /validate — alias for /validate-token (frontend api.auth.js calls /api/auth/validate)
+router.post('/validate', async (req, res) => {
+    try {
+        const { token } = req.body;
+        if (!token) return res.status(400).json({ success: false, message: 'Token required', code: 'MISSING_TOKEN' });
+        const tokenService = require('../services/tokenService');
+        const result = tokenService.verifyAccessToken(token);
+        if (result.valid) {
+            return res.json({ success: true, valid: true, user: result.decoded });
+        }
+        return res.json({ success: false, valid: false, message: result.message || 'Invalid token', code: result.error || 'INVALID_TOKEN' });
+    } catch (err) {
+        return res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+
 module.exports = router;

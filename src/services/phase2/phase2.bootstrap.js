@@ -6,7 +6,7 @@
  * Called by server.js AFTER Phase 1 and existing setup.
  *
  * Usage (in server.js, after Phase 1 block):
- *   const { initPhase2 } = require('./services/phase2/phase2.bootstrap');
+ *   const { initPhase2 } = require('./phase2.bootstrap');
  *   setTimeout(() => {
  *     global.__phase2 = initPhase2(io, app, { phase1: global.__phase1, logger: console });
  *   }, 1500);
@@ -56,7 +56,7 @@ function initPhase2(io, app, options = {}) {
 
   // Register delta sync route if auth middleware available
   try {
-    const authenticateToken = require('../middleware/auth');
+    const authenticateToken = require('../../middleware/auth');
     delivery.registerDeltaSyncRoute(app, authenticateToken);
   } catch (_) {
     // auth middleware not found at expected path — register without auth guard
