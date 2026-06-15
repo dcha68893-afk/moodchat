@@ -4034,6 +4034,15 @@ class Application {
             // so paths here must NOT include /api prefix"). The previous mount at '/'
             // meant every route was reachable only at /auth/login, /users/*, etc. —
             // the /api prefix was absent, causing 404 on every API call including login.
+            // ── CRITICAL FIX: Inject global.__socketIO into req.io for ALL routes ──
+            // friends.js, chats.js, messages.js etc. all call req.io to emit socket
+            // events. Without this middleware req.io is always undefined, so friend
+            // requests, messages and status changes are never delivered in real-time.
+            this.app.use('/api', (req, _res, next) => {
+                if (!req.io) req.io = global.__socketIO || null;
+                next();
+            });
+
             if (mainRouter) {
                 this.app.use('/api', mainRouter);
                 console.log('✅ Mounted main API router at /api');

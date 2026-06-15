@@ -13,7 +13,11 @@ const {
 } = require('../middleware/errorHandler');
 const { apiRateLimiter } = require('../middleware/rateLimiter');
 
+// ── CRITICAL: Inject global.__socketIO into req.io so all handlers can emit ──
+router.use((req, _, next) => { if (!req.io) req.io = global.__socketIO || null; next(); });
+
 // All routes are protected by parent auth middleware in index.js
+
 
 const MAX_FILE_SIZE = parseInt(process.env.MAX_FILE_SIZE) || 100 * 1024 * 1024; // raised to 100MB
 const ALLOWED_FILE_TYPES = (

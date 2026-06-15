@@ -2,6 +2,8 @@
 const asyncHandler = require('express-async-handler');
 const express = require('express');
 const router = express.Router();
+// ── CRITICAL: Inject global.__socketIO into req.io so all handlers can emit ──
+router.use((req, _, next) => { if (!req.io) req.io = global.__socketIO || null; next(); });
 const { apiRateLimiter } = require('../middleware/rateLimiter');
 const { User, Settings } = require('../models');
 const { Op } = require('sequelize');

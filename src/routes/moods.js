@@ -1,6 +1,8 @@
 const path = require('path');
 const express = require('express');
 const router = express.Router();
+// ── CRITICAL: Inject global.__socketIO into req.io so all handlers can emit ──
+router.use((req, _, next) => { if (!req.io) req.io = global.__socketIO || null; next(); });
 const asyncHandler = require('express-async-handler');
 const {
   NotFoundError,

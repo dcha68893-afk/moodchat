@@ -1,9 +1,12 @@
-﻿const path = require('path');
+const path = require('path');
 const asyncHandler = require('express-async-handler');
 const express = require('express');
 const router = express.Router();
 const { Op } = require('sequelize');
 const db = require('../models');
+
+// ── CRITICAL: Inject global.__socketIO into req.io so all handlers can emit ──
+router.use((req, _, next) => { if (!req.io) req.io = global.__socketIO || null; next(); });
 
 // These will now work correctly with the new getters
 const User = db.User;

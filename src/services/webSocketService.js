@@ -162,9 +162,40 @@ class WebSocketService {
 
             // join_user_room: moved below with call-room fix (see FIX-CALL-ROOM)
 
-            socket.off('disconnect').on('disconnect', (reason) => {
+            socket.off('disconnect').on('disconnect', async (reason) => {
                 this.removeUser(userId, socket);
                 console.log(`[WSService] socket disconnected uid=${userId} sid=${socket.id} reason=${reason}`);
+
+                // ── STALE CALL FIX: When a user disconnects, end any DB call where
+                // they are a participant and the call is still 'initiated' or 'active'.
+                // Without this, page reload replays the same call:incoming on reconnect.
+                try {
+                    const Call = db.Calls || db.Call;
+                    if (Call) {
+                        const staleCalls = await Call.findAll({
+                            where: {
+                                status: ['initiated', 'active', 'ringing'],
+                                callerId: userId,
+                            }
+                        }).catch(() => []);
+                        for (const call of staleCalls) {
+                            call.status   = 'ended';
+                            call.endedAt  = new Date();
+                            await call.save().catch(() => {});
+                            // Notify all other participants that the call ended
+                            const participants = call.participantIds || [];
+                            const notifyIds = participants.filter(pid => String(pid) !== String(userId));
+                            for (const pid of notifyIds) {
+                                await this.sendToUser(pid, 'call:ended', {
+                                    callId: call.id, reason: 'caller_disconnected', endedAt: Date.now()
+                                }).catch(() => {});
+                            }
+                            console.log(`[WSService] Stale call ${call.id} ended on disconnect uid=${userId}`);
+                        }
+                    }
+                } catch (e) {
+                    console.warn('[WSService] stale-call cleanup error on disconnect:', e.message);
+                }
             });
 
             // ── TYPING INDICATORS — FIX: were completely missing ──────────────

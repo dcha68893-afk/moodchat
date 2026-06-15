@@ -4,6 +4,8 @@
 //         share score/achievement to chat, basic anti-cheat
 const express = require('express');
 const router = express.Router();
+// ── CRITICAL: Inject global.__socketIO into req.io so all handlers can emit ──
+router.use((req, _, next) => { if (!req.io) req.io = global.__socketIO || null; next(); });
 
 // ─── Model references ──────────────────────────────────────────────────────
 let db, User, GameProgress, GameChallenge, Message, Notification, Friend;
