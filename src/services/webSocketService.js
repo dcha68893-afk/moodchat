@@ -167,30 +167,66 @@ class WebSocketService {
                 console.log(`[WSService] socket disconnected uid=${userId} sid=${socket.id} reason=${reason}`);
 
                 // ── STALE CALL FIX: When a user disconnects, end any DB call where
-                // they are a participant and the call is still 'initiated' or 'active'.
+                // they are a participant and the call is still in a live state.
                 // Without this, page reload replays the same call:incoming on reconnect.
+                //
+                // FIX 1: Only run this when the user has NO other live socket left.
+                // MAX_SOCKETS_PER_USER allows multiple tabs/devices per user; this handler
+                // previously ran unconditionally on every single socket disconnect, so
+                // closing just one of several open tabs during an active call would
+                // incorrectly end that call for a user who was still connected and on
+                // the call via another tab. removeUser() above already pruned this
+                // socket, so isUserOnline() now accurately reflects whether any other
+                // socket remains.
                 try {
+                    const stillOnline = await this.isUserOnline(userId).catch(() => false);
+                    if (stillOnline) {
+                        console.log(`[WSService] uid=${userId} still has other live sockets — skipping stale-call cleanup`);
+                        return;
+                    }
+
                     const Call = db.Calls || db.Call;
                     if (Call) {
+                        // FIX 2: 'active' and 'ended' are not valid values of the Calls.status
+                        // ENUM ('initiated', 'ringing', 'in-progress', 'completed', 'missed',
+                        // 'rejected', 'cancelled', 'failed'). Querying for 'active' silently
+                        // matched nothing (so genuinely in-progress calls were never found),
+                        // and writing 'ended' on save() threw a Sequelize validation error
+                        // that was silently swallowed by .catch(() => {}), so the call row
+                        // was never actually updated even when found.
+                        //
+                        // FIX 3: Only filtered on callerId, so a disconnecting RECEIVER never
+                        // triggered cleanup at all. Now checks both sides.
                         const staleCalls = await Call.findAll({
                             where: {
-                                status: ['initiated', 'active', 'ringing'],
-                                callerId: userId,
+                                status: ['initiated', 'ringing', 'in-progress'],
+                                [WsOp.or]: [
+                                    { callerId: userId },
+                                    { receiverId: userId },
+                                ],
                             }
                         }).catch(() => []);
+
                         for (const call of staleCalls) {
-                            call.status   = 'ended';
-                            call.endedAt  = new Date();
-                            await call.save().catch(() => {});
-                            // Notify all other participants that the call ended
-                            const participants = call.participantIds || [];
-                            const notifyIds = participants.filter(pid => String(pid) !== String(userId));
-                            for (const pid of notifyIds) {
-                                await this.sendToUser(pid, 'call:ended', {
+                            const wasConnected = call.status === 'in-progress';
+                            call.status  = wasConnected ? 'completed' : 'missed';
+                            call.endedAt = new Date();
+                            await call.save().catch((saveErr) => {
+                                console.warn(`[WSService] Failed to save stale call ${call.id}:`, saveErr.message);
+                            });
+
+                            // FIX 4: call.participantIds does not exist on the Calls model —
+                            // it has dedicated callerId/receiverId columns instead, so the
+                            // "notify the other side" loop below was always a no-op.
+                            const otherPartyId = String(call.callerId) === String(userId)
+                                ? call.receiverId
+                                : call.callerId;
+                            if (otherPartyId) {
+                                await this.sendToUser(otherPartyId, 'call:ended', {
                                     callId: call.id, reason: 'caller_disconnected', endedAt: Date.now()
                                 }).catch(() => {});
                             }
-                            console.log(`[WSService] Stale call ${call.id} ended on disconnect uid=${userId}`);
+                            console.log(`[WSService] Stale call ${call.id} marked ${call.status} on disconnect uid=${userId}`);
                         }
                     }
                 } catch (e) {

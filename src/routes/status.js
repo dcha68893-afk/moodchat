@@ -1,868 +1,269 @@
-// --- MODEL: Status.js ---
-const { Op } = require('sequelize');
-
-module.exports = (sequelize, DataTypes) => {
-  const Status = sequelize.define(
-    'Status',
-    {
-      id: {
-        type: DataTypes.INTEGER,
-        primaryKey: true,
-        autoIncrement: true,
-      },
-      userId: {
-        type: DataTypes.INTEGER,
-        allowNull: false,
-      },
-      content: {
-        type: DataTypes.TEXT,
-        allowNull: true,
-        validate: {
-          len: {
-            args: [0, 500],
-            msg: 'Status content must be less than 500 characters',
-          },
-        },
-      },
-      type: {
-        type: DataTypes.ENUM('text', 'image', 'video', 'audio', 'mood', 'location'),
-        defaultValue: 'text',
-        allowNull: false,
-      },
-      moodType: {
-        type: DataTypes.ENUM(
-          'happy',
-          'sad',
-          'angry',
-          'excited',
-          'calm',
-          'anxious',
-          'tired',
-          'energetic',
-          'focused',
-          'relaxed',
-          'nostalgic',
-          'romantic',
-          'lonely',
-          'confused',
-          'proud',
-          'grateful',
-          'hopeful',
-          'bored',
-          'sick',
-          'neutral'
-        ),
-        allowNull: true,
-      },
-      mediaUrl: {
-        type: DataTypes.STRING(500),
-        allowNull: true,
-        validate: {
-          isUrl: {
-            msg: 'Media URL must be a valid URL',
-          },
-        },
-      },
-      location: {
-        type: DataTypes.STRING(200),
-        allowNull: true,
-      },
-      latitude: {
-        type: DataTypes.FLOAT,
-        allowNull: true,
-        validate: {
-          min: {
-            args: [-90],
-            msg: 'Latitude must be between -90 and 90',
-          },
-          max: {
-            args: [90],
-            msg: 'Latitude must be between -90 and 90',
-          },
-        },
-      },
-      longitude: {
-        type: DataTypes.FLOAT,
-        allowNull: true,
-        validate: {
-          min: {
-            args: [-180],
-            msg: 'Longitude must be between -180 and 180',
-          },
-          max: {
-            args: [180],
-            msg: 'Longitude must be between -180 and 180',
-          },
-        },
-      },
-      isActive: {
-        type: DataTypes.BOOLEAN,
-        defaultValue: true,
-        allowNull: false,
-      },
-      isPublic: {
-        type: DataTypes.BOOLEAN,
-        defaultValue: true,
-        allowNull: false,
-      },
-      // privacy: human-readable visibility level that maps to/from isPublic.
-      // 'public'/'everyone' = isPublic true  (visible to all friends and on discover)
-      // 'friends'           = isPublic false (visible only to accepted friends)
-      // 'close-friends'     = isPublic false (visible only to close-friends list)
-      // 'private'           = isPublic false (visible only to creator)
-      // Stored as a VARCHAR so the client can filter by named level without
-      // running a separate close-friends membership check on every row.
-      privacy: {
-        type: DataTypes.ENUM('public', 'friends', 'close-friends', 'private', 'everyone'),
-        defaultValue: 'friends',
-        allowNull: false,
-      },
-      expiresAt: {
-        type: DataTypes.DATE,
-        // Not nullable — every status must have a real expiry.
-        // The controller always sets a default of 24 h when the client omits it.
-        allowNull: true,
-      },
-      viewCount: {
-        type: DataTypes.INTEGER,
-        defaultValue: 0,
-        allowNull: false,
-        validate: {
-          min: {
-            args: [0],
-            msg: 'View count cannot be negative',
-          },
-        },
-      },
-      likeCount: {
-        type: DataTypes.INTEGER,
-        defaultValue: 0,
-        allowNull: false,
-        validate: {
-          min: {
-            args: [0],
-            msg: 'Like count cannot be negative',
-          },
-        },
-      },
-      commentCount: {
-        type: DataTypes.INTEGER,
-        defaultValue: 0,
-        allowNull: false,
-        validate: {
-          min: {
-            args: [0],
-            msg: 'Comment count cannot be negative',
-          },
-        },
-      },
-      shareCount: {
-        type: DataTypes.INTEGER,
-        defaultValue: 0,
-        allowNull: false,
-        validate: {
-          min: {
-            args: [0],
-            msg: 'Share count cannot be negative',
-          },
-        },
-      },
-      metadata: {
-        type: DataTypes.JSONB,
-        defaultValue: {},
-        allowNull: false,
-      },
-      // P2 FIX: isPinned as first-class column (not JSONB flag) for indexed queries
-      isPinned: {
-        type: DataTypes.BOOLEAN,
-        defaultValue: false,
-        allowNull: false,
-      },
-      // P2 FIX: isHighlight first-class flag
-      isHighlight: {
-        type: DataTypes.BOOLEAN,
-        defaultValue: false,
-        allowNull: false,
-      },
-      // P2 FIX: altText for accessibility on image/video statuses
-      altText: {
-        type: DataTypes.STRING(500),
-        allowNull: true,
-      },
-      // P3 FIX: musicTrack for audio overlay feature
-      musicTrack: {
-        type: DataTypes.JSONB,
-        allowNull: true,
-        defaultValue: null,
-      },
-      createdAt: {
-        type: DataTypes.DATE,
-        allowNull: false,
-        defaultValue: DataTypes.NOW,
-      },
-      updatedAt: {
-        type: DataTypes.DATE,
-        allowNull: false,
-        defaultValue: DataTypes.NOW,
-      },
-    },
-    {
-      tableName: 'statuses',
-      modelName: 'Status',
-      timestamps: true,
-      underscored: false,
-      freezeTableName: true,
-      indexes: [
-        {
-          fields: ['userId'],
-          name: 'idx_statuses_user',
-        },
-        {
-          fields: ['type'],
-          name: 'idx_statuses_type',
-        },
-        {
-          fields: ['moodType'],
-          name: 'idx_statuses_mood',
-        },
-        {
-          fields: ['isActive'],
-          name: 'idx_statuses_active',
-        },
-        {
-          fields: ['isPublic'],
-          name: 'idx_statuses_public',
-        },
-        {
-          fields: ['createdAt'],
-          name: 'idx_statuses_created',
-        },
-        {
-          fields: ['expiresAt'],
-          name: 'idx_statuses_expires',
-        },
-        {
-          fields: ['userId', 'createdAt'],
-          name: 'idx_statuses_user_created',
-        },
-        {
-          fields: ['isActive', 'createdAt'],
-          name: 'idx_statuses_active_created',
-        },
-        {
-          fields: ['isPublic', 'createdAt'],
-          name: 'idx_statuses_public_created',
-        },
-      ],
-      hooks: {
-        beforeCreate: (status) => {
-          if (!status.createdAt) {
-            status.createdAt = new Date();
-          }
-          if (status.type === 'mood' && !status.moodType) {
-            throw new Error('Mood type is required for mood status');
-          }
-        },
-        beforeUpdate: (status) => {
-          if (status.changed('isActive') && !status.isActive) {
-            status.expiresAt = new Date();
-          }
-        },
-      },
-    }
-  );
-
-  // Instance methods (PRESERVED)
-  Status.prototype.incrementViewCount = async function () {
-    this.viewCount += 1;
-    return await this.save();
-  };
-
-  Status.prototype.incrementLikeCount = async function () {
-    this.likeCount += 1;
-    return await this.save();
-  };
-
-  Status.prototype.decrementLikeCount = async function () {
-    if (this.likeCount > 0) {
-      this.likeCount -= 1;
-    }
-    return await this.save();
-  };
-
-  Status.prototype.incrementCommentCount = async function () {
-    this.commentCount += 1;
-    return await this.save();
-  };
-
-  Status.prototype.decrementCommentCount = async function () {
-    if (this.commentCount > 0) {
-      this.commentCount -= 1;
-    }
-    return await this.save();
-  };
-
-  Status.prototype.incrementShareCount = async function () {
-    this.shareCount += 1;
-    return await this.save();
-  };
-
-  Status.prototype.deactivate = async function () {
-    this.isActive = false;
-    this.expiresAt = new Date();
-    return await this.save();
-  };
-
-  Status.prototype.activate = async function () {
-    this.isActive = true;
-    this.expiresAt = null;
-    return await this.save();
-  };
-
-  Status.prototype.setPrivate = async function () {
-    this.isPublic = false;
-    return await this.save();
-  };
-
-  Status.prototype.setPublic = async function () {
-    this.isPublic = true;
-    return await this.save();
-  };
-
-  Status.prototype.updateContent = async function (newContent) {
-    this.content = newContent;
-    return await this.save();
-  };
-
-  Status.prototype.updateMood = async function (moodType) {
-    this.type = 'mood';
-    this.moodType = moodType;
-    return await this.save();
-  };
-
-  Status.prototype.updateLocation = async function (location, latitude = null, longitude = null) {
-    this.location = location;
-    this.latitude = latitude;
-    this.longitude = longitude;
-    return await this.save();
-  };
-
-  Status.prototype.addMetadata = async function (key, value) {
-    if (!this.metadata) {
-      this.metadata = {};
-    }
-    this.metadata[key] = value;
-    return await this.save();
-  };
-
-  Status.prototype.removeMetadata = async function (key) {
-    if (this.metadata && this.metadata[key]) {
-      delete this.metadata[key];
-      return await this.save();
-    }
-    return this;
-  };
-
-  Status.prototype.isExpired = function () {
-    if (!this.expiresAt) return false;
-    return new Date() > new Date(this.expiresAt);
-  };
-
-  Status.prototype.getTimeSinceCreated = function () {
-    const now = new Date();
-    const created = new Date(this.createdAt);
-    const diffMs = now - created;
-    const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
-    const diffHours = Math.floor((diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
-    const diffMinutes = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
-
-    if (diffDays > 0) {
-      return `${diffDays} day${diffDays !== 1 ? 's' : ''} ago`;
-    } else if (diffHours > 0) {
-      return `${diffHours} hour${diffHours !== 1 ? 's' : ''} ago`;
-    } else if (diffMinutes > 0) {
-      return `${diffMinutes} minute${diffMinutes !== 1 ? 's' : ''} ago`;
-    } else {
-      return 'Just now';
-    }
-  };
-
-  Status.prototype.toJSON = function () {
-    const values = Object.assign({}, this.get());
-    values.timeSinceCreated = this.getTimeSinceCreated();
-    values.isExpired = this.isExpired();
-    return values;
-  };
-
-  // Static methods (PRESERVED)
-  Status.getUserStatuses = async function (userId, options = {}) {
-    const where = { userId };
-
-    if (options.activeOnly !== false) {
-      where.isActive = true;
-    }
-
-    if (options.type) {
-      where.type = options.type;
-    }
-
-    if (options.moodType) {
-      where.moodType = options.moodType;
-    }
-
-    const include = [];
-
-    if (options.includeUser) {
-      include.push({
-        model: this.sequelize.models.Users,
-        as: 'statusUser',
-        attributes: ['id', 'username', 'avatar', 'status'],
-      });
-    }
-
-    if (options.includeLikes) {
-      include.push({
-        model: this.sequelize.models.StatusLike,
-        as: 'statusLikes',
-        attributes: ['id', 'userId', 'createdAt'],
-        limit: 5,
-        include: [
-          {
-            model: this.sequelize.models.Users,
-            as: 'likeUser',
-            attributes: ['id', 'username', 'avatar'],
-          },
-        ],
-      });
-    }
-
-    if (options.includeComments) {
-      include.push({
-        model: this.sequelize.models.StatusComment,
-        as: 'statusComments',
-        attributes: ['id', 'userId', 'content', 'createdAt'],
-        limit: 5,
-        order: [['createdAt', 'DESC']],
-        include: [
-          {
-            model: this.sequelize.models.Users,
-            as: 'commentUser',
-            attributes: ['id', 'username', 'avatar'],
-          },
-        ],
-      });
-    }
-
-    return await this.findAll({
-      where,
-      include: include.length > 0 ? include : undefined,
-      order: [['createdAt', 'DESC']],
-      limit: options.limit || 50,
-      offset: options.offset || 0,
-    });
-  };
-
-  Status.getActiveStatuses = async function (options = {}) {
-    const where = {
-      isActive: true,
-      isPublic: true,
-    };
-
-    if (options.userId) {
-      where.userId = options.userId;
-    }
-
-    if (options.type) {
-      where.type = options.type;
-    }
-
-    if (options.moodType) {
-      where.moodType = options.moodType;
-    }
-
-    where[Op.or] = [
-      { expiresAt: null },
-      { expiresAt: { [Op.gt]: new Date() } },
-    ];
-
-    const include = [
-      {
-        model: this.sequelize.models.Users,
-        as: 'statusUser',
-        attributes: ['id', 'username', 'avatar', 'status'],
-      },
-    ];
-
-    return await this.findAll({
-      where,
-      include,
-      order: [['createdAt', 'DESC']],
-      limit: options.limit || 100,
-      offset: options.offset || 0,
-    });
-  };
-
-  Status.getFriendsStatuses = async function (userId, friendIds, options = {}) {
-    const where = {
-      userId: { [Op.in]: friendIds },
-      isActive: true,
-      [Op.or]: [
-        { isPublic: true },
-        { userId: userId },
-      ],
-    };
-
-    where[Op.or] = [
-      ...(where[Op.or] || []),
-      { expiresAt: null },
-      { expiresAt: { [Op.gt]: new Date() } },
-    ];
-
-    const include = [
-      {
-        model: this.sequelize.models.Users,
-        as: 'statusUser',
-        attributes: ['id', 'username', 'avatar', 'status'],
-      },
-    ];
-
-    if (options.includeStats) {
-      include.push({
-        model: this.sequelize.models.StatusLike,
-        as: 'statusLikes',
-        attributes: ['id'],
-        required: false,
-      });
-    }
-
-    return await this.findAll({
-      where,
-      include,
-      order: [['createdAt', 'DESC']],
-      limit: options.limit || 100,
-      offset: options.offset || 0,
-    });
-  };
-
-  Status.createStatus = async function (userId, statusData) {
-    const status = await this.create({
-      userId,
-      ...statusData,
-      isActive: true,
-    });
-
-    return status;
-  };
-
-  Status.updateStatus = async function (statusId, updates) {
-    const [affectedRows] = await this.update(updates, {
-      where: { id: statusId },
-    });
-
-    return affectedRows > 0;
-  };
-
-  Status.deactivateStatus = async function (statusId) {
-    const [affectedRows] = await this.update(
-      {
-        isActive: false,
-        expiresAt: new Date(),
-      },
-      {
-        where: { id: statusId },
-      }
-    );
-
-    return affectedRows > 0;
-  };
-
-  Status.deleteStatus = async function (statusId) {
-    const result = await this.destroy({
-      where: { id: statusId },
-    });
-
-    return result > 0;
-  };
-
-  Status.getStatusById = async function (statusId, options = {}) {
-    const include = [];
-
-    if (options.includeUser) {
-      include.push({
-        model: this.sequelize.models.Users,
-        as: 'statusUser',
-        attributes: ['id', 'username', 'avatar', 'status'],
-      });
-    }
-
-    if (options.includeLikes) {
-      include.push({
-        model: this.sequelize.models.StatusLike,
-        as: 'statusLikes',
-        attributes: ['id', 'userId', 'createdAt'],
-        include: [
-          {
-            model: this.sequelize.models.Users,
-            as: 'likeUser',
-            attributes: ['id', 'username', 'avatar'],
-          },
-        ],
-      });
-    }
-
-    if (options.includeComments) {
-      include.push({
-        model: this.sequelize.models.StatusComment,
-        as: 'statusComments',
-        attributes: ['id', 'userId', 'content', 'createdAt'],
-        include: [
-          {
-            model: this.sequelize.models.Users,
-            as: 'commentUser',
-            attributes: ['id', 'username', 'avatar'],
-          },
-        ],
-        order: [['createdAt', 'DESC']],
-      });
-    }
-
-    return await this.findByPk(statusId, {
-      include: include.length > 0 ? include : undefined,
-    });
-  };
-
-  Status.searchStatuses = async function (query, options = {}) {
-    const where = {
-      isActive: true,
-      isPublic: true,
-      [Op.or]: [
-        { content: { [Op.iLike]: `%${query}%` } },
-        { location: { [Op.iLike]: `%${query}%` } },
-      ],
-    };
-
-    where[Op.or] = [
-      ...where[Op.or],
-      { expiresAt: null },
-      { expiresAt: { [Op.gt]: new Date() } },
-    ];
-
-    const include = [
-      {
-        model: this.sequelize.models.Users,
-        as: 'statusUser',
-        attributes: ['id', 'username', 'avatar', 'status'],
-      },
-    ];
-
-    return await this.findAll({
-      where,
-      include,
-      order: [['createdAt', 'DESC']],
-      limit: options.limit || 50,
-      offset: options.offset || 0,
-    });
-  };
-
-  Status.getTrendingStatuses = async function (options = {}) {
-    const where = {
-      isActive: true,
-      isPublic: true,
-      createdAt: {
-        [Op.gte]: new Date(Date.now() - 24 * 60 * 60 * 1000),
-      },
-    };
-
-    where[Op.or] = [
-      { expiresAt: null },
-      { expiresAt: { [Op.gt]: new Date() } },
-    ];
-
-    const include = [
-      {
-        model: this.sequelize.models.Users,
-        as: 'statusUser',
-        attributes: ['id', 'username', 'avatar', 'status'],
-      },
-    ];
-
-    return await this.findAll({
-      where,
-      include,
-      order: [
-        ['likeCount', 'DESC'],
-        ['viewCount', 'DESC'],
-        ['createdAt', 'DESC'],
-      ],
-      limit: options.limit || 20,
-      offset: options.offset || 0,
-    });
-  };
-
-  Status.getMoodStatuses = async function (moodType, options = {}) {
-    const where = {
-      isActive: true,
-      isPublic: true,
-      type: 'mood',
-      moodType: moodType,
-    };
-
-    where[Op.or] = [
-      { expiresAt: null },
-      { expiresAt: { [Op.gt]: new Date() } },
-    ];
-
-    const include = [
-      {
-        model: this.sequelize.models.Users,
-        as: 'statusUser',
-        attributes: ['id', 'username', 'avatar', 'status'],
-      },
-    ];
-
-    return await this.findAll({
-      where,
-      include,
-      order: [['createdAt', 'DESC']],
-      limit: options.limit || 50,
-      offset: options.offset || 0,
-    });
-  };
-
-  Status.cleanupExpiredStatuses = async function () {
-    const result = await this.update(
-      { isActive: false },
-      {
-        where: {
-          expiresAt: { [Op.lte]: new Date() },
-          isActive: true,
-        },
-      }
-    );
-
-    return result[0] || 0;
-  };
-
-  Status.getStatusStats = async function (userId = null) {
-    const where = {};
-
-    if (userId) {
-      where.userId = userId;
-    }
-
-    const totalStatuses = await this.count({ where });
-
-    const activeStatuses = await this.count({
-      where: {
-        ...where,
-        isActive: true,
-        [Op.or]: [
-          { expiresAt: null },
-          { expiresAt: { [Op.gt]: new Date() } },
-        ],
-      },
-    });
-
-    const publicStatuses = await this.count({
-      where: {
-        ...where,
-        isPublic: true,
-        isActive: true,
-      },
-    });
-
-    const moodStatuses = await this.count({
-      where: {
-        ...where,
-        type: 'mood',
-        isActive: true,
-      },
-    });
-
-    const todayStatuses = await this.count({
-      where: {
-        ...where,
-        createdAt: {
-          [Op.gte]: new Date(new Date().setHours(0, 0, 0, 0)),
-        },
-      },
-    });
-
-    const totalLikes = await this.sum('likeCount', { where });
-    const totalViews = await this.sum('viewCount', { where });
-    const totalComments = await this.sum('commentCount', { where });
-
-    return {
-      totalStatuses,
-      activeStatuses,
-      publicStatuses,
-      moodStatuses,
-      todayStatuses,
-      totalLikes: totalLikes || 0,
-      totalViews: totalViews || 0,
-      totalComments: totalComments || 0,
-    };
-  };
-
-  // FIXED: Associations with unique aliases
-  Status.associate = function (models) {
-    // CRITICAL: Prevent duplicate associations (alias conflict fix)
-    if (this.associations && Object.keys(this.associations).length > 0) {
-        // Skip if associations already defined to prevent alias conflicts
-        return;
-    }
-        
-    if (models.Users) {
-      Status.belongsTo(models.Users, {
-        foreignKey: 'userId',
-        as: 'statusUser',
-        constraints: true,
-        onDelete: 'CASCADE',
-        onUpdate: 'CASCADE',
-      });
-    }
-
-    if (models.StatusLike) {
-      Status.hasMany(models.StatusLike, {
-        foreignKey: 'statusId',
-        as: 'statusLikes',
-        constraints: true,
-        onDelete: 'CASCADE',
-        onUpdate: 'CASCADE',
-      });
-    }
-
-    if (models.StatusComment) {
-      Status.hasMany(models.StatusComment, {
-        foreignKey: 'statusId',
-        as: 'statusComments',
-        constraints: true,
-        onDelete: 'CASCADE',
-        onUpdate: 'CASCADE',
-      });
-    }
-
-    if (models.StatusView) {
-      Status.hasMany(models.StatusView, {
-        foreignKey: 'statusId',
-        as: 'statusViews',
-        constraints: true,
-        onDelete: 'CASCADE',
-        onUpdate: 'CASCADE',
-      });
-    }
-
-    if (models.StatusReaction || models.StatusReactions) {
-      const ReactModel = models.StatusReaction || models.StatusReactions;
-      Status.hasMany(ReactModel, {
-        foreignKey: 'statusId',
-        as: 'statusReactions',
-        constraints: true,
-        onDelete: 'CASCADE',
-        onUpdate: 'CASCADE',
-      });
-    }
-  };
-
-  return Status;
-};
+'use strict';
+/**
+ * src/routes/status.js
+ *
+ * Mood/status posts feature — mounted at /api/status/*.
+ * (Not to be confused with /api/user-status/* which is online-presence,
+ * implemented separately in userStatus.js.)
+ *
+ * HISTORY / WHY THIS FILE LOOKS THE WAY IT DOES:
+ * A file previously at this path was a stray byte-identical copy of
+ * src/models/Status.js (a Sequelize model factory `(sequelize, DataTypes) =>
+ * {...}`), accidentally saved into routes/ instead of models/. The route
+ * auto-loader in index.js treated it as a router, called it with zero
+ * arguments (`routerInstance = routeHandler()`), and the model factory threw
+ * "Cannot read properties of undefined (reading 'define')" because
+ * `sequelize` was undefined. That failure was caught per-file by the mount
+ * loop's try/catch, logged, and skipped — so it never crashed the server,
+ * but it meant THIS file mounted nothing.
+ *
+ * A second file, statusFeed.js, was created as a workaround and mounted at
+ * the same /status path immediately after (alphabetical load order), so in
+ * practice statusFeed.js silently took over the /status mount and served a
+ * partial implementation (/my, /friends, /stats, /user/:userId only).
+ *
+ * This file replaces both: it's the real router, covering every endpoint
+ * documented in index.js's API listing, built on top of the existing,
+ * already-correct statusController.js + statusService.js (which already
+ * handle WebSocket broadcast via getIO(req) with multiple fallbacks, so no
+ * req.io injection is required here). statusFeed.js has been removed —
+ * see index.js for the corresponding mount-path fix.
+ */
+const express = require('express');
+const router = express.Router();
+const asyncHandler = require('express-async-handler');
+
+const statusController = require('../controllers/statusController');
+const { authenticateToken, optionalAuthenticateToken } = require('../middleware/auth');
+const { apiRateLimiter } = require('../middleware/rateLimiter');
+
+const _getStatusModel = () => require('../models').Status;
+
+function getUserId(req) {
+  return req.user?.userId || req.user?.id;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// PUBLIC ENDPOINTS (no auth required — router mounted without auth wrapper
+// in index.js; optionalAuthenticateToken lets logged-in users still get
+// privacy-aware results where relevant, without forcing a 401 for guests)
+// ─────────────────────────────────────────────────────────────────────────
+
+// GET /api/status/health
+router.get('/health', (req, res) => {
+  res.status(200).json({ success: true, message: 'Status service healthy' });
+});
+
+// GET /api/status/  and  GET /api/status/public — active public statuses
+router.get(['/', '/public'], optionalAuthenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+  const Status = _getStatusModel();
+  if (!Status) return res.status(503).json({ success: false, message: 'Status feature unavailable' });
+
+  const { limit, offset, type, moodType } = req.query;
+  const statuses = await Status.getActiveStatuses({
+    type: type || undefined,
+    moodType: moodType || undefined,
+    limit: limit ? parseInt(limit, 10) : undefined,
+    offset: offset ? parseInt(offset, 10) : undefined,
+  });
+
+  return res.json({ success: true, data: statuses });
+}));
+
+// GET /api/status/trending
+router.get('/trending', optionalAuthenticateToken, apiRateLimiter, statusController.getTrendingStatuses);
+
+// GET /api/status/search?q=...
+router.get('/search', optionalAuthenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+  const Status = _getStatusModel();
+  if (!Status) return res.status(503).json({ success: false, message: 'Status feature unavailable' });
+
+  const { q, limit, offset } = req.query;
+  if (!q || !q.trim()) {
+    return res.status(400).json({ success: false, message: 'Query parameter "q" is required' });
+  }
+
+  const statuses = await Status.searchStatuses(q.trim(), {
+    limit: limit ? parseInt(limit, 10) : undefined,
+    offset: offset ? parseInt(offset, 10) : undefined,
+  });
+
+  return res.json({ success: true, data: statuses });
+}));
+
+// GET /api/status/mood/:moodType
+router.get('/mood/:moodType', optionalAuthenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+  const Status = _getStatusModel();
+  if (!Status) return res.status(503).json({ success: false, message: 'Status feature unavailable' });
+
+  const { moodType } = req.params;
+  const { limit, offset } = req.query;
+  const statuses = await Status.getMoodStatuses(moodType, {
+    limit: limit ? parseInt(limit, 10) : undefined,
+    offset: offset ? parseInt(offset, 10) : undefined,
+  });
+
+  return res.json({ success: true, data: statuses });
+}));
+
+// POST /api/status/view — record a view (body: { statusId })
+router.post('/view', authenticateToken, apiRateLimiter, asyncHandler(async (req, res, next) => {
+  req.params.statusId = req.body.statusId;
+  return statusController.viewStatus(req, res, next);
+}));
+
+// POST /api/status/:statusId/view — record a view via URL param
+router.post('/:statusId/view', authenticateToken, apiRateLimiter, statusController.viewStatus);
+
+// ─────────────────────────────────────────────────────────────────────────
+// PROTECTED ENDPOINTS (JWT required)
+// ─────────────────────────────────────────────────────────────────────────
+
+// POST /api/status/ — create a new status
+router.post('/', authenticateToken, apiRateLimiter, statusController.createStatus);
+
+// GET /api/status/my — current user's own statuses
+router.get('/my', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+  const userId = getUserId(req);
+  const Status = _getStatusModel();
+  if (!Status) return res.status(503).json({ success: false, message: 'Status feature unavailable' });
+
+  const { activeOnly, type, moodType, limit, offset } = req.query;
+  const statuses = await Status.getUserStatuses(userId, {
+    activeOnly: activeOnly !== 'false',
+    ...(type && { type }),
+    ...(moodType && { moodType }),
+    includeUser: true,
+    limit: limit ? parseInt(limit, 10) : undefined,
+    offset: offset ? parseInt(offset, 10) : undefined,
+  });
+
+  return res.json({ success: true, data: statuses });
+}));
+
+// GET /api/status/friends — statuses from the current user's friends
+// This is the endpoint status-api.js's getFriendsStatuses() calls.
+router.get('/friends', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+  const userId = getUserId(req);
+  const Status = _getStatusModel();
+  const Friend = require('../models').Friend;
+
+  if (!Status || !Friend) {
+    return res.status(503).json({ success: false, message: 'Status feature unavailable' });
+  }
+
+  const { limit, offset } = req.query;
+
+  const friendRows = await Friend.getUserFriends(userId, 'accepted');
+  const friendIds = friendRows.map(f => (f.requesterId === userId ? f.receiverId : f.requesterId));
+
+  if (friendIds.length === 0) {
+    return res.json({ success: true, data: [] });
+  }
+
+  const statuses = await Status.getFriendsStatuses(userId, friendIds, {
+    includeStats: true,
+    limit: limit ? parseInt(limit, 10) : undefined,
+    offset: offset ? parseInt(offset, 10) : undefined,
+  });
+
+  return res.json({ success: true, data: statuses });
+}));
+
+// GET /api/status/stats — status statistics for the current user
+router.get('/stats', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+  const userId = getUserId(req);
+  const Status = _getStatusModel();
+  if (!Status) return res.status(503).json({ success: false, message: 'Status feature unavailable' });
+
+  const stats = await Status.getStatusStats(userId);
+  return res.json({ success: true, data: stats });
+}));
+
+// GET /api/status/timeline — feed of friends' (or all-followed) statuses
+router.get('/timeline', authenticateToken, apiRateLimiter, statusController.getTimeline);
+
+// GET /api/status/user/:userId — another user's public statuses
+router.get('/user/:userId', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+  const Status = _getStatusModel();
+  if (!Status) return res.status(503).json({ success: false, message: 'Status feature unavailable' });
+
+  const targetUserId = parseInt(req.params.userId, 10);
+  if (!targetUserId) {
+    return res.status(400).json({ success: false, message: 'Invalid user ID' });
+  }
+
+  const statuses = await Status.getUserStatuses(targetUserId, {
+    activeOnly: true,
+    includeUser: true,
+  });
+
+  return res.json({ success: true, data: statuses.filter(s => s.isPublic !== false) });
+}));
+
+// GET /api/status/:statusId — single status (controller handles privacy via canView)
+router.get('/:statusId', optionalAuthenticateToken, apiRateLimiter, statusController.getStatusById);
+
+// PUT /api/status/:statusId — update (owner only)
+router.put('/:statusId', authenticateToken, apiRateLimiter, statusController.updateStatus);
+
+// DELETE /api/status/:statusId — delete (owner only)
+router.delete('/:statusId', authenticateToken, apiRateLimiter, statusController.deleteStatus);
+
+// GET /api/status/:statusId/comments
+router.get('/:statusId/comments', optionalAuthenticateToken, apiRateLimiter, statusController.getStatusComments);
+
+// POST /api/status/:statusId/comment
+router.post('/:statusId/comment', authenticateToken, apiRateLimiter, statusController.commentOnStatus);
+
+// DELETE /api/status/:statusId/comment/:commentId
+router.delete('/:statusId/comment/:commentId', authenticateToken, apiRateLimiter, statusController.deleteComment);
+
+// GET /api/status/:statusId/likes
+router.get('/:statusId/likes', optionalAuthenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+  const db = require('../models');
+  const StatusLike = db.StatusLike;
+  if (!StatusLike) return res.status(503).json({ success: false, message: 'Status feature unavailable' });
+
+  const { statusId } = req.params;
+  const Users = db.Users || db.User;
+  const likes = await StatusLike.findAll({
+    where: { statusId },
+    include: Users ? [{ model: Users, as: 'liker', attributes: ['id', 'username', 'avatar'] }] : [],
+    order: [['createdAt', 'DESC']],
+  });
+
+  return res.json({ success: true, data: likes });
+}));
+
+// POST /api/status/:statusId/like
+router.post('/:statusId/like', authenticateToken, apiRateLimiter, statusController.likeStatus);
+
+// DELETE /api/status/:statusId/like
+router.delete('/:statusId/like', authenticateToken, apiRateLimiter, statusController.unlikeStatus);
+
+// POST /api/status/:statusId/share
+router.post('/:statusId/share', authenticateToken, apiRateLimiter, statusController.shareStatus);
+
+// GET /api/status/:statusId/stats — per-status statistics (distinct from /stats above)
+router.get('/:statusId/stats', authenticateToken, apiRateLimiter, statusController.getStatusStatistics);
+
+// POST /api/status/:statusId/report
+router.post('/:statusId/report', authenticateToken, apiRateLimiter, statusController.reportStatus);
+
+// POST /api/status/:statusId/pin
+router.post('/:statusId/pin', authenticateToken, apiRateLimiter, statusController.pinStatus);
+
+// DELETE /api/status/:statusId/pin
+router.delete('/:statusId/pin', authenticateToken, apiRateLimiter, statusController.unpinStatus);
+
+// POST /api/status/:statusId/react   { emoji }
+router.post('/:statusId/react', authenticateToken, apiRateLimiter, statusController.addReaction);
+
+// DELETE /api/status/:statusId/react
+router.delete('/:statusId/react', authenticateToken, apiRateLimiter, statusController.removeReaction);
+
+// POST /api/status/:statusId/reply   { content } — sends a chat message
+router.post('/:statusId/reply', authenticateToken, apiRateLimiter, statusController.replyToStatus);
+
+module.exports = router;
