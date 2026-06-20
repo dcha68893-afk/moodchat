@@ -4930,14 +4930,26 @@ class Application {
                         // is blocked on Render's free tier, then auto-upgrades to WS
                         transports: ['polling', 'websocket'],
                         allowUpgrades: true,
-                        // PHASE15 FIX: pingInterval must be < Render's 55s idle-close window.
-                        // 20s interval means a ping goes out every 20s, so the connection
-                        // is never idle long enough for Render to close it.
-                        pingTimeout:    60000,   // was 90000 — reduce so dead sockets are detected faster
-                        pingInterval:   20000,   // was 30000 — must beat Render's 55s idle timeout
-                        upgradeTimeout: 30000,
-                        connectTimeout: 45000,
+                        // ── LOW-BANDWIDTH FIX: at ~1KB/s a ping/pong round-trip alone can take
+                        // 10-20s. pingTimeout must comfortably exceed worst-case RTT or the
+                        // server force-disconnects clients that are still alive but slow.
+                        // pingInterval must still beat Render's 55s idle-close window.
+                        pingTimeout:    90000,   // was 60000 — tolerate slow pong replies on 1KB/s links
+                        pingInterval:   25000,   // was 20000 — still well under Render's 55s idle cutoff
+                        upgradeTimeout: 45000,   // was 30000 — give slow links more time to upgrade to WS
+                        connectTimeout: 60000,   // was 45000 — handshake itself can be slow at 1KB/s
                         allowEIO3:      true,
+                        // ── LOW-BANDWIDTH FIX: compress every frame above 256 bytes.
+                        // This is the single biggest win for 1KB/s links — most chat/call
+                        // signaling payloads are highly compressible JSON.
+                        perMessageDeflate: {
+                            threshold: 256,
+                            zlibDeflateOptions: { level: 6 }
+                        },
+                        httpCompression: { threshold: 256 },
+                        // Cap a single incoming frame so one slow client can't hog the
+                        // server reading a huge payload byte-by-byte over a slow link.
+                        maxHttpBufferSize: 5e6,
                     });
 
                     // FIX: Auth runs in middleware (before 'connection').
