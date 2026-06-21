@@ -1165,6 +1165,13 @@ async function runFullMigration() {
       `).catch(e => console.log('[Migration] ⚠️ seller_profiles (non-fatal):', e.message));
 
       // ── P2 FIX: Coupons table (model existed but no DDL) ─────────────────
+      // FIX (forensic audit 2026-06-21): CREATE TABLE IF NOT EXISTS silently
+      // skips when the table already exists from a prior deploy — it does NOT
+      // add new columns to that pre-existing table. That left old "coupons"
+      // tables missing "is_active", causing the CREATE INDEX below to fail
+      // with "column is_active does not exist" on every boot. Added explicit
+      // ALTER ADD COLUMN IF NOT EXISTS guards (same pattern already used for
+      // "tools" above) so both fresh and pre-existing tables converge.
       await sequelize.query(`
         CREATE TABLE IF NOT EXISTS "coupons" (
           "id" SERIAL PRIMARY KEY,
@@ -1189,11 +1196,29 @@ async function runFullMigration() {
           "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
+        ALTER TABLE "coupons" ADD COLUMN IF NOT EXISTS "is_active" BOOLEAN NOT NULL DEFAULT true;
+        ALTER TABLE "coupons" ADD COLUMN IF NOT EXISTS "is_public" BOOLEAN NOT NULL DEFAULT true;
+        ALTER TABLE "coupons" ADD COLUMN IF NOT EXISTS "min_order_amt" DECIMAL(10,2) DEFAULT 0;
+        ALTER TABLE "coupons" ADD COLUMN IF NOT EXISTS "max_discount" DECIMAL(10,2);
+        ALTER TABLE "coupons" ADD COLUMN IF NOT EXISTS "usage_limit" INTEGER DEFAULT 9999;
+        ALTER TABLE "coupons" ADD COLUMN IF NOT EXISTS "usage_count" INTEGER DEFAULT 0;
+        ALTER TABLE "coupons" ADD COLUMN IF NOT EXISTS "per_user_limit" INTEGER DEFAULT 1;
+        ALTER TABLE "coupons" ADD COLUMN IF NOT EXISTS "starts_at" TIMESTAMPTZ;
+        ALTER TABLE "coupons" ADD COLUMN IF NOT EXISTS "expires_at" TIMESTAMPTZ;
+        ALTER TABLE "coupons" ADD COLUMN IF NOT EXISTS "user_id" UUID;
+        ALTER TABLE "coupons" ADD COLUMN IF NOT EXISTS "seller_id" UUID;
+        ALTER TABLE "coupons" ADD COLUMN IF NOT EXISTS "category_slug" VARCHAR(64);
+        ALTER TABLE "coupons" ADD COLUMN IF NOT EXISTS "description" VARCHAR(255);
+        ALTER TABLE "coupons" ADD COLUMN IF NOT EXISTS "metadata" JSONB DEFAULT '{}';
+        ALTER TABLE "coupons" ADD COLUMN IF NOT EXISTS "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW();
+        ALTER TABLE "coupons" ADD COLUMN IF NOT EXISTS "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW();
         CREATE UNIQUE INDEX IF NOT EXISTS idx_coupons_code ON "coupons" ("code");
         CREATE INDEX IF NOT EXISTS idx_coupons_active ON "coupons" ("is_active", "expires_at");
       `).catch(e => console.log('[Migration] ⚠️ coupons (non-fatal):', e.message));
 
       // ── P2 FIX: Audit log table ───────────────────────────────────────────
+      // Same pre-existing-table issue: old "audit_logs" tables were missing
+      // "createdAt", breaking the index below. ALTER guards added.
       await sequelize.query(`
         CREATE TABLE IF NOT EXISTS "audit_logs" (
           "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1206,6 +1231,13 @@ async function runFullMigration() {
           "user_agent" TEXT,
           "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
+        ALTER TABLE "audit_logs" ADD COLUMN IF NOT EXISTS "user_id" UUID;
+        ALTER TABLE "audit_logs" ADD COLUMN IF NOT EXISTS "resource_type" VARCHAR(50);
+        ALTER TABLE "audit_logs" ADD COLUMN IF NOT EXISTS "resource_id" VARCHAR(255);
+        ALTER TABLE "audit_logs" ADD COLUMN IF NOT EXISTS "details" JSONB DEFAULT '{}';
+        ALTER TABLE "audit_logs" ADD COLUMN IF NOT EXISTS "ip_address" VARCHAR(50);
+        ALTER TABLE "audit_logs" ADD COLUMN IF NOT EXISTS "user_agent" TEXT;
+        ALTER TABLE "audit_logs" ADD COLUMN IF NOT EXISTS "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW();
         CREATE INDEX IF NOT EXISTS idx_audit_logs_user ON "audit_logs" ("user_id");
         CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON "audit_logs" ("action");
         CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON "audit_logs" ("createdAt" DESC);

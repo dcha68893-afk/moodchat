@@ -55,12 +55,23 @@ function initPhase2(io, app, options = {}) {
   delivery.attach();
 
   // Register delta sync route if auth middleware available
+  // FIX (forensic audit 2026-06-21): src/middleware/auth.js exports an OBJECT
+  // ({ authenticateToken, authenticate, ... }), not a bare function. The
+  // previous code did `const authenticateToken = require(...)`, which grabbed
+  // the whole exports object instead of the function inside it. Express then
+  // threw on registration (non-function middleware), which was silently
+  // swallowed by the catch block below, leaving GET /api/messages/delta
+  // running with NO auth guard in production.
   try {
-    const authenticateToken = require('../../middleware/auth');
+    const { authenticateToken } = require('../../middleware/auth');
+    if (typeof authenticateToken !== 'function') {
+      throw new Error('authenticateToken export is not a function');
+    }
     delivery.registerDeltaSyncRoute(app, authenticateToken);
-  } catch (_) {
-    // auth middleware not found at expected path — register without auth guard
-    logger.warn('[Phase2Bootstrap] Could not load auth middleware — delta sync route unguarded');
+    logger.log('[Phase2Bootstrap] ✅ Delta sync route registered WITH auth guard');
+  } catch (err) {
+    // auth middleware genuinely unavailable — register without auth guard
+    logger.warn('[Phase2Bootstrap] Could not load auth middleware — delta sync route unguarded:', err.message);
     delivery.registerDeltaSyncRoute(app, (req, res, next) => next());
   }
 
