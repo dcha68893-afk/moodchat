@@ -4901,6 +4901,16 @@ class Application {
                 const port = config.get('PORT');
                 
                 logger.success(`HTTP server listening on ${host}:${port}`, 'APPLICATION');
+
+                // FIX (Render free-tier sleep, forensic audit outstanding issue): self-ping
+                // every 10 minutes so the dyno never idles out, preventing the cascading
+                // 503s + Socket.IO failures that happen when multiple clients hit a cold
+                // service simultaneously on wake. No-op when not running on Render.
+                try {
+                    require('./jobs/keepAlive').start();
+                } catch (err) {
+                    console.warn('[Server] KeepAlive job failed to start (non-fatal):', err.message);
+                }
                 
                 // Initialize Socket.IO for real-time messaging
                 if (config.get('FEATURE_WEBSOCKETS')) {
@@ -5025,156 +5035,153 @@ class Application {
                     // Non-destructive: each phase wraps existing services, never replaces them.
                     // ═══════════════════════════════════════════════════════════════════════
 
-                    // ── DETERMINISTIC SEQUENTIAL PHASE BOOT ───────────────────────────────
-                    // FIX (forensic audit 2026-06-20): the previous implementation staggered
-                    // phase init with hardcoded setTimeout delays (1s,2s,3s...7s+poll), under
-                    // the false assumption that fixed delays = "phase N-1 is done by now".
-                    // Every initPhaseN() is actually SYNCHRONOUS — it returns immediately.
-                    // On Render's free tier, cold-start CPU throttling could make a phase's
-                    // synchronous init take longer than its allotted window in wall-clock
-                    // terms relative to the timer queue, OR (more commonly) a phase could
-                    // simply throw, get caught, default to `{}`, and every downstream phase
-                    // would silently run against that empty stub with no visibility into
-                    // why. That produced exactly the "feature silently does nothing" pattern
-                    // (friends/calls/status) seen in production.
-                    //
-                    // Fix: call each phase strictly after the previous one has returned
-                    // (no timers needed — they're synchronous), accumulate per-phase
-                    // success/failure into a single status object, and log ONE consolidated
-                    // summary line so a failed phase is immediately visible in Render logs
-                    // instead of buried in scrollback.
-                    const _phaseBootStatus = {};
-                    const _bootPhase = (name, fn) => {
-                        try {
-                            const result = fn();
-                            _phaseBootStatus[name] = 'ok';
-                            return result;
-                        } catch (err) {
-                            console.warn(`[${name}] Init failed (non-fatal):`, err.message);
-                            _phaseBootStatus[name] = `failed: ${err.message}`;
-                            return {};
-                        }
-                    };
-
                     // ── PHASE 1: FOUNDATION ───────────────────────────────────────────────
-                    global.__phase1 = _bootPhase('Phase1', () => {
+                    try {
                         const { initPhase1 } = require('./core/phase1.bootstrap');
-                        const r = initPhase1(this.io, this.app, {
+                        global.__phase1 = initPhase1(this.io, this.app, {
                             adminToken: process.env.INTERNAL_DIAG_TOKEN,
                             adminPath:  '/internal/diagnostics',
                             logger:     console,
                         });
                         logger.success('MoodChat Phase 1 — Foundation Layer ✅', 'PHASE1');
-                        return r;
-                    });
 
-                    // ── PHASE 15: Message & Call delivery hardening ───────────────────────
-                    // (independent of Phase 1's result — no longer nested inside its try block)
-                    _bootPhase('Phase15', () => {
+                    // ── PHASE 15: Message & Call delivery hardening ───────────
+                    try {
                         const { installMessageDeliveryPatch } = require('./services/phase15/MessageDeliveryPatch');
                         installMessageDeliveryPatch(this.io, this.app);
                         logger.success('MoodChat Phase 15 — Delivery Patch ✅', 'PHASE15');
-                    });
+                    } catch (err) {
+                        console.warn('[Phase15] Init failed (non-fatal):', err.message);
+                    }
+                    } catch (err) {
+                        console.warn('[Phase1] Init failed (non-fatal):', err.message);
+                        global.__phase1 = {};
+                    }
 
                     // ── PHASE 2: HYBRID TRANSPORT ─────────────────────────────────────────
-                    global.__phase2 = _bootPhase('Phase2', () => {
-                        const { initPhase2 } = require('./services/phase2/phase2.bootstrap');
-                        const r = initPhase2(this.io, this.app, {
-                            phase1: global.__phase1, logger: console,
-                        });
-                        logger.success('MoodChat Phase 2 — Hybrid Transport Engine ✅', 'PHASE2');
-                        return r;
-                    });
+                    setTimeout(() => {
+                        try {
+                            const { initPhase2 } = require('./services/phase2/phase2.bootstrap');
+                            global.__phase2 = initPhase2(this.io, this.app, {
+                                phase1: global.__phase1, logger: console,
+                            });
+                            logger.success('MoodChat Phase 2 — Hybrid Transport Engine ✅', 'PHASE2');
+                        } catch (err) {
+                            console.warn('[Phase2] Init failed (non-fatal):', err.message);
+                            global.__phase2 = {};
+                        }
+                    }, 1000);
 
                     // ── PHASE 3: WEBRTC CALL ENGINE ───────────────────────────────────────
-                    global.__phase3 = _bootPhase('Phase3', () => {
-                        const { initPhase3 } = require('./services/phase3/phase3.bootstrap');
-                        const r = initPhase3(this.io, this.app, {
-                            phase1: global.__phase1, phase2: global.__phase2,
-                            wsService: this.websocket, logger: console,
-                        });
-                        logger.success('MoodChat Phase 3 — WebRTC Call Engine ✅', 'PHASE3');
-                        return r;
-                    });
+                    setTimeout(() => {
+                        try {
+                            const { initPhase3 } = require('./services/phase3/phase3.bootstrap');
+                            global.__phase3 = initPhase3(this.io, this.app, {
+                                phase1: global.__phase1, phase2: global.__phase2,
+                                wsService: this.websocket, logger: console,
+                            });
+                            logger.success('MoodChat Phase 3 — WebRTC Call Engine ✅', 'PHASE3');
+                        } catch (err) {
+                            console.warn('[Phase3] Init failed (non-fatal):', err.message);
+                            global.__phase3 = {};
+                        }
+                    }, 2000);
 
                     // ── PHASE 4: SOCIAL ECOSYSTEM ─────────────────────────────────────────
-                    global.__phase4 = _bootPhase('Phase4', () => {
-                        const { initPhase4 } = require('./services/phase4/phase4.bootstrap');
-                        const r = initPhase4(this.io, this.app, {
-                            phase1: global.__phase1, phase2: global.__phase2,
-                            phase3: global.__phase3, wsService: this.websocket,
-                            logger: console,
-                        });
-                        logger.success('MoodChat Phase 4 — Social Ecosystem ✅', 'PHASE4');
-                        return r;
-                    });
+                    setTimeout(() => {
+                        try {
+                            const { initPhase4 } = require('./services/phase4/phase4.bootstrap');
+                            global.__phase4 = initPhase4(this.io, this.app, {
+                                phase1: global.__phase1, phase2: global.__phase2,
+                                phase3: global.__phase3, wsService: this.websocket,
+                                logger: console,
+                            });
+                            logger.success('MoodChat Phase 4 — Social Ecosystem ✅', 'PHASE4');
+                        } catch (err) {
+                            console.warn('[Phase4] Init failed (non-fatal):', err.message);
+                            global.__phase4 = {};
+                        }
+                    }, 3000);
 
                     // ── PHASE 5: PRODUCTION RELIABILITY ──────────────────────────────────
-                    global.__phase5 = _bootPhase('Phase5', () => {
-                        const { initPhase5 } = require('./services/phase5/phase5.bootstrap');
-                        const r = initPhase5(this.io, this.app, {
-                            phase1: global.__phase1, phase2: global.__phase2,
-                            phase3: global.__phase3, phase4: global.__phase4,
-                            wsService: this.websocket, logger: console,
-                        });
-                        logger.success('MoodChat Phase 5 — Production Reliability ✅', 'PHASE5');
-                        return r;
-                    });
+                    setTimeout(() => {
+                        try {
+                            const { initPhase5 } = require('./services/phase5/phase5.bootstrap');
+                            global.__phase5 = initPhase5(this.io, this.app, {
+                                phase1: global.__phase1, phase2: global.__phase2,
+                                phase3: global.__phase3, phase4: global.__phase4,
+                                wsService: this.websocket, logger: console,
+                            });
+                            logger.success('MoodChat Phase 5 — Production Reliability ✅', 'PHASE5');
+                        } catch (err) {
+                            console.warn('[Phase5] Init failed (non-fatal):', err.message);
+                            global.__phase5 = {};
+                        }
+                    }, 4000);
 
                     // ── PHASE 6: RUNTIME INTEGRATION VALIDATOR ────────────────────────────
-                    global.__phase6 = _bootPhase('Phase6', () => {
-                        const { initPhase6 } = require('./services/phase6/phase6.bootstrap');
-                        const r = initPhase6(this.io, this.app, {
-                            phase1: global.__phase1, phase2: global.__phase2,
-                            phase3: global.__phase3, phase4: global.__phase4,
-                            phase5: global.__phase5, wsService: this.websocket,
-                            logger: console,
-                        });
-                        logger.success('MoodChat Phase 6 — Runtime Integration ✅', 'PHASE6');
-                        return r;
-                    });
+                    setTimeout(() => {
+                        try {
+                            const { initPhase6 } = require('./services/phase6/phase6.bootstrap');
+                            global.__phase6 = initPhase6(this.io, this.app, {
+                                phase1: global.__phase1, phase2: global.__phase2,
+                                phase3: global.__phase3, phase4: global.__phase4,
+                                phase5: global.__phase5, wsService: this.websocket,
+                                logger: console,
+                            });
+                            logger.success('MoodChat Phase 6 — Runtime Integration ✅', 'PHASE6');
+                        } catch (err) {
+                            console.warn('[Phase6] Init failed (non-fatal):', err.message);
+                            global.__phase6 = {};
+                        }
+                    }, 5000);
+
+                    // ── PHASE 11: Unified Runtime Orchestrator ────────────────────────────
+                    // FIX-AUDIT-3: Increased to 12s so Phase 10 (6s) + init time is complete
+                    // Also polls until global.__HybridTransportRuntime exists
+                    const _initPhase11 = () => {
+                        try {
+                            const { initPhase11 } = require('./services/phase11/phase11.bootstrap');
+                            global.__phase11 = initPhase11(this.io, this.app, {
+                                logger: console, phase10: global.__phase10,
+                            });
+                            console.log('[Server] ✅ Phase 11 Unified Runtime Orchestrator active');
+                        } catch (err) {
+                            console.warn('[Phase11] Init failed (non-fatal):', err.message);
+                        }
+                    };
+                    setTimeout(() => {
+                        // Wait for HybridTransportRuntime to be ready, poll every 500ms up to 15s
+                        let _p11Attempts = 0;
+                        const _p11Poll = setInterval(() => {
+                            _p11Attempts++;
+                            if (global.__HybridTransportRuntime || _p11Attempts >= 30) {
+                                clearInterval(_p11Poll);
+                                _initPhase11();
+                            }
+                        }, 500);
+                    }, 7000);
 
                     // ── FIX-P12: Removed duplicate inline status expiry cron.
                     // _installStatusExpiryCron() IIFE at module level handles this.
                     // The inline version was running simultaneously causing double DB writes.
 
                     // ── PHASE 10: Full Production Hardening ───────────────────────────────
-                    global.__phase10 = _bootPhase('Phase10', () => {
-                        const { initPhase10 } = require('./services/phase10/phase10.bootstrap');
-                        const r = initPhase10(this.io, this.app, {
-                            phase1: global.__phase1, phase2: global.__phase2,
-                            phase3: global.__phase3, phase4: global.__phase4,
-                            phase5: global.__phase5, phase6: global.__phase6,
-                            wsService: this.websocket, logger: console,
-                        });
-                        console.log('[Server] ✅ Phase 10 Production Hardening active');
-                        return r;
-                    });
-
-                    // ── PHASE 11: Unified Runtime Orchestrator ────────────────────────────
-                    // Depends on Phase 10 (already complete above — synchronous, no guessing)
-                    // and optionally global.__HybridTransportRuntime, which Phase 2/10 may set
-                    // synchronously or asynchronously depending on transport mode. We give it
-                    // a short bounded poll (not the previous 7s blind wait) purely to cover the
-                    // async case, then init regardless so Phase 11 never silently never-runs.
-                    (() => {
-                        let _p11Attempts = 0;
-                        const _p11Poll = setInterval(() => {
-                            _p11Attempts++;
-                            if (global.__HybridTransportRuntime || _p11Attempts >= 10) {
-                                clearInterval(_p11Poll);
-                                global.__phase11 = _bootPhase('Phase11', () => {
-                                    const { initPhase11 } = require('./services/phase11/phase11.bootstrap');
-                                    const r = initPhase11(this.io, this.app, {
-                                        logger: console, phase10: global.__phase10,
-                                    });
-                                    console.log('[Server] ✅ Phase 11 Unified Runtime Orchestrator active');
-                                    return r;
-                                });
-                                console.log('[Server] Phase boot summary:', JSON.stringify(_phaseBootStatus));
-                            }
-                        }, 250);
-                    })();
+                    setTimeout(() => {
+                        try {
+                            const { initPhase10 } = require('./services/phase10/phase10.bootstrap');
+                            global.__phase10 = initPhase10(this.io, this.app, {
+                                phase1: global.__phase1, phase2: global.__phase2,
+                                phase3: global.__phase3, phase4: global.__phase4,
+                                phase5: global.__phase5, phase6: global.__phase6,
+                                wsService: this.websocket, logger: console,
+                            });
+                            console.log('[Server] ✅ Phase 10 Production Hardening active');
+                        } catch (err) {
+                            console.warn('[Phase10] Init failed (non-fatal):', err.message, err.stack);
+                            global.__phase10 = {};
+                        }
+                    }, 6000);
 
                     // ═══════════════════════════════════════════════════════════════════════
 
