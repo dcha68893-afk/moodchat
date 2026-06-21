@@ -1,5 +1,12 @@
 const { Op } = require('sequelize');
-const sequelize = require('../config/database'); // ADDED: Sequelize instance
+// FIX-DB-SINGLE-INSTANCE: previously required '../config/database', which
+// lazily instantiates its OWN separate Sequelize connection (with its own,
+// different DB-name fallback) used nowhere else in the app. sequelize.fn/
+// sequelize.col are static query-builder helpers, not per-connection state,
+// so there's no functional reason to keep a second connection alive just
+// for them. Pointing at the same instance models/index.js exports removes
+// the redundant connection and the inconsistent fallback name with it.
+const { sequelize } = require('../models');
 const Note = require('../models/Notes');
 const User = require('../models/Users');
 const File = require('../models/File');

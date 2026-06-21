@@ -60,7 +60,12 @@ const config = {
     url: process.env.DATABASE_URL,
     
     // Individual connection parameters
-    name: process.env.DB_NAME || 'chat_app',
+    // FIX-DB-CONSISTENT-FALLBACK: previously defaulted to 'chat_app', a
+    // third different fallback name from the ones in models/index.js and
+    // config/database.js. This value is only ever read for the /api/transport
+    // diagnostics display (server.js config.get('DB_NAME')), not for opening
+    // a connection, but an inconsistent name there is still misleading.
+    name: process.env.DB_NAME || '(not set)',
     user: process.env.DB_USER || 'postgres',
     password: process.env.DB_PASSWORD || '',
     host: process.env.DB_HOST || 'localhost',

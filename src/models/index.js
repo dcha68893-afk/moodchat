@@ -31,10 +31,24 @@ const getDbConfig = () => {
   }
   
   console.log(`[Database] Using individual config for ${env} environment`);
+  // FIX-DB-NO-SILENT-FALLBACK: previously defaulted to a meaningless
+  // hardcoded database name ('denismoo') if DB_NAME was unset. That meant
+  // a missing/misconfigured env var on Render would silently try to
+  // connect to a database that doesn't exist, instead of failing with a
+  // clear, actionable error. Fail loudly here — this only triggers when
+  // BOTH DATABASE_URL and DB_NAME are absent, which should never happen
+  // in a correctly configured deployment.
+  if (!process.env.DB_NAME) {
+    throw new Error(
+      '[Database] No database configured: neither DATABASE_URL nor DB_NAME ' +
+      'environment variables are set. Set DATABASE_URL (preferred) or ' +
+      'DB_NAME + DB_HOST + DB_USER + DB_PASSWORD in your environment.'
+    );
+  }
   return {
     host: process.env.DB_HOST || '127.0.0.1',
     port: parseInt(process.env.DB_PORT) || 5432,
-    database: process.env.DB_NAME || 'denismoo',
+    database: process.env.DB_NAME,
     username: process.env.DB_USER || 'postgres',
     password: process.env.DB_PASSWORD || '',
     dialect: process.env.DB_DIALECT || 'postgres',
