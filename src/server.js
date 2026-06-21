@@ -2069,10 +2069,55 @@ class DatabaseService {
         this.missingForeignKeys = [];
         this.aliasConflicts = new Map();
         this.connectionAttempted = false;
-        
+
+        // FIX-DB-NO-RETRY: previously, initialize() was called exactly once
+        // at boot. If that single attempt failed for ANY reason — including
+        // a purely transient one (DB still spinning up, a momentary network
+        // blip, connection pool not ready yet) — the app deliberately kept
+        // running in "DEGRADED mode" forever with NOTHING ever retrying the
+        // connection. /health (and every DB-backed route) would then report
+        // 503 permanently, even though Render/Postgres themselves were fine
+        // moments later. This is exactly the "everything 503s but Render
+        // shows healthy" symptom. _retryTimer/_retryAttempts/_retrying back
+        // a background reconnect loop added below.
+        this._retryTimer = null;
+        this._retryAttempts = 0;
+        this._retrying = false;
+
         systemState.registerService('database', this);
     }
-    
+
+    // FIX-DB-NO-RETRY: background reconnection loop, mirroring the pattern
+    // RedisService already uses. Exponential backoff capped at 30s so a
+    // sleeping/slow-to-wake Postgres instance gets retried promptly without
+    // hammering it.
+    scheduleReconnect() {
+        if (this._retrying) return;
+        this._retrying = true;
+
+        const attempt = async () => {
+            this._retryAttempts++;
+            try {
+                const ok = await this.initialize();
+                if (ok) {
+                    logger.success(`Database reconnected after ${this._retryAttempts} attempt(s)`, 'DATABASE');
+                    this._retrying = false;
+                    this._retryAttempts = 0;
+                    return;
+                }
+            } catch (_) {
+                // initialize() already records the error via handleDatabaseError
+            }
+
+            const delay = Math.min(2000 * Math.pow(2, this._retryAttempts - 1), 30000);
+            this._retryTimer = setTimeout(attempt, delay);
+        };
+
+        // First retry shortly after the initial failure, not immediately —
+        // gives a genuinely-still-starting DB a moment before we hit it again.
+        this._retryTimer = setTimeout(attempt, 3000);
+    }
+
     async initialize() {
         systemState.recordStartupStep('database_init_start');
         
@@ -2161,6 +2206,13 @@ class DatabaseService {
             
         } catch (error) {
             this.handleDatabaseError(error);
+            // FIX-DB-NO-RETRY: kick off background reconnection instead of
+            // leaving the service permanently marked unhealthy. Skip this
+            // when called FROM scheduleReconnect's own retry loop (avoids a
+            // second concurrent loop scheduling itself on top of the first).
+            if (!this._retrying) {
+                this.scheduleReconnect();
+            }
             return false;
         }
     }
