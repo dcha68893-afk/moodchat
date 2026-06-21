@@ -1001,6 +1001,15 @@ class WebSocketService {
         // ── Multi-device sync: ALL of a user's devices are in these rooms ──────────
         // When a call is accepted on device A, device B (same user) receives the same
         // call:accepted event and can dismiss its incoming call UI automatically.
+        //
+        // FIX-DELIVERED-FALSE-POSITIVE: io.to(room).emit() never throws even when the
+        // room has zero members — Socket.IO broadcasts are fire-and-forget. The old code
+        // set delivered = true unconditionally inside the try block, so a fully offline
+        // recipient was reported as "delivered". Two real consequences: (1) the offline
+        // push-notification fallback in messages.js (POST /messages) never fired, because
+        // it only triggers when sendToUser resolves false; (2) message:delivery_failed /
+        // delivery-timeout bookkeeping never saw a true failure. We now check the room's
+        // actual member count via io.sockets.adapter.rooms before counting it as delivered.
         const strUid = String(uid);
         const rooms = [
             `user:${uid}`,    // integer coerced
@@ -1009,7 +1018,12 @@ class WebSocketService {
             `user_${strUid}`  // explicit string underscore
         ];
         for (const room of rooms) {
-            try { io.to(room).emit(event, payload); delivered = true; } catch (_) {}
+            try {
+                const roomSet = io.sockets?.adapter?.rooms?.get(room);
+                const hasMembers = !!(roomSet && roomSet.size > 0);
+                io.to(room).emit(event, payload);
+                if (hasMembers) delivered = true;
+            } catch (_) {}
         }
 
         if (delivered) {
