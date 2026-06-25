@@ -90,6 +90,7 @@ const ROUTE_MAPPING = {
   'messages.js': '/messages',
   'messagingFeatures.js': '/messaging',
   'encryption.js': '/encryption',
+  'groupEncryption.js': '/group-encryption',
   'push.js': '/push',
   'twoFactor.js': '/2fa',
   'devices.js': '/devices',

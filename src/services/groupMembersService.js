@@ -39,6 +39,51 @@ try {
 const memberServiceEvents = new EventEmitter();
 memberServiceEvents.setMaxListeners(20);
 
+// ── GROUP ENCRYPTION: rotation trigger ──────────────────────────────────────
+// Sender Keys (see migrations/20260621000001-create-group-sender-key-distributions.js
+// and src/routes/groupEncryption.js) must be rotated whenever a member is
+// removed/banned/leaves — otherwise that member could still decrypt future
+// group messages using a Sender Key they already received before departing.
+//
+// The SERVER cannot generate a new Sender Key on a member's behalf (it
+// never has their private key), so this listener's job is narrower: notify
+// every REMAINING active member in real time that a rotation is needed.
+// Each client that receives this event is responsible for generating a
+// fresh Sender Key and redistributing it via
+// POST /api/group-encryption/:groupId/distribute — the actual crypto work
+// happens entirely client-side, same as everywhere else in this app's E2E
+// design. If no member is online to receive the notification right now,
+// each client should also check on next group-open whether its locally
+// cached key generation is stale relative to what other members have
+// distributed, as a non-realtime fallback.
+memberServiceEvents.on('memberMutation', async ({ action, groupId, userId }) => {
+    if (!['remove', 'leave', 'ban'].includes(action)) return;
+    try {
+        const io = global.__socketIO;
+        if (!io || !GroupMembers) return;
+
+        const remainingMembers = await GroupMembers.findAll({
+            where: { groupId, leftAt: null },
+            attributes: ['userId'],
+        });
+
+        const payload = {
+            groupId,
+            reason: action,
+            departedUserId: userId,
+            timestamp: Date.now(),
+        };
+
+        for (const m of remainingMembers) {
+            io.to(`user:${m.userId}`).emit('group:rotation_required', payload);
+            io.to(`user_${m.userId}`).emit('group:rotation_required', payload);
+        }
+        console.log(`[GroupMembersService] 🔑 Notified ${remainingMembers.length} remaining member(s) to rotate sender key in group ${groupId} (reason: ${action})`);
+    } catch (e) {
+        console.warn('[GroupMembersService] Failed to notify members of required key rotation:', e.message);
+    }
+});
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const withTimeout = (promise, ms = 6000) => {
     let tid;
