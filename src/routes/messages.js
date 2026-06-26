@@ -1774,147 +1774,65 @@ router.post('/:messageId/forward', apiRateLimiter, asyncHandler(async (req, res)
   }
 }));
 
-// ─────────────────────────────────────────────────────────────────────────────
-// PHASE 1: View-once media  — POST /api/messages/:id/view-once
-// ─────────────────────────────────────────────────────────────────────────────
-//
-// Returns the real media URL once, then marks the message as viewed so
-// subsequent calls return 410 Gone. The media URL is stored in metadata.
-// Actual file deletion from storage is left to a scheduled cleanup job
-// (Render free-tier: just set metadata.viewOnceOpened=true and clear the URL
-//  from the Attachment record after the response).
-//
-router.post('/:id/view-once', apiRateLimiter, asyncHandler(async (req, res) => {
-  const messageId  = parseInt(req.params.id, 10);
-  const viewerId   = req.user.id;
-  const sequelize  = getSequelize();
-
-  // 1. Load message + validate recipient
-  const [rows] = await sequelize.query(
-    `SELECT m.id, m.metadata, m."chatId", m."senderId",
-            a.url AS "attachmentUrl", a.type AS "attachmentType", a.id AS "attachmentId"
-     FROM "Messages" m
-     LEFT JOIN "Attachments" a ON a."messageId" = m.id
-     WHERE m.id = :messageId
-     LIMIT 1`,
-    { replacements: { messageId }, type: sequelize.QueryTypes.SELECT }
-  );
-  if (!rows) return res.status(404).json({ success: false, message: 'Message not found' });
-
-  const meta = (typeof rows.metadata === 'string') ? JSON.parse(rows.metadata || '{}') : (rows.metadata || {});
-
-  // Must be a view-once message
-  if (!meta.viewOnce) return res.status(400).json({ success: false, message: 'Not a view-once message' });
-
-  // Already viewed
-  if (meta.viewOnceOpened) return res.status(410).json({ success: false, message: 'Already opened' });
-
-  // Must be the recipient (not the sender)
-  if (String(rows.senderId) === String(viewerId)) {
-    return res.status(403).json({ success: false, message: 'Senders cannot open their own view-once media' });
-  }
-
-  // Verify viewer is a participant of this chat
-  const [participant] = await sequelize.query(
-    `SELECT 1 FROM chat_participants WHERE "chatId" = :chatId AND "userId" = :viewerId LIMIT 1`,
-    { replacements: { chatId: rows.chatId, viewerId }, type: sequelize.QueryTypes.SELECT }
-  );
-  if (!participant) return res.status(403).json({ success: false, message: 'Not a participant' });
-
-  // 2. Mark as opened
-  const updatedMeta = { ...meta, viewOnceOpened: true, viewOnceOpenedAt: new Date().toISOString(), viewOnceOpenedBy: viewerId };
-  await sequelize.query(
-    `UPDATE "Messages" SET metadata = :meta WHERE id = :messageId`,
-    { replacements: { meta: JSON.stringify(updatedMeta), messageId } }
-  );
-
-  // 3. Emit socket event so sender sees "Opened"
-  try {
-    const wsService = req.app.locals.wsService || global.__wsService;
-    if (wsService?.sendToUser) {
-      await wsService.sendToUser(rows.senderId, 'message:viewOnceOpened', {
-        messageId,
-        chatId: rows.chatId,
-        openedBy: viewerId,
-      });
-    }
-  } catch (_) {}
-
-  // 4. Return URL (one time only)
-  const mediaUrl  = rows.attachmentUrl || meta.mediaUrl || null;
-  const mediaType = rows.attachmentType || meta.viewOnceType || 'image';
-
-  res.json({ success: true, url: mediaUrl, mediaType });
-
-  // 5. Schedule URL clearance (fire-and-forget after response sent)
-  setImmediate(async () => {
-    try {
-      if (rows.attachmentId) {
-        await sequelize.query(
-          `UPDATE "Attachments" SET url = '[view-once-opened]' WHERE id = :id`,
-          { replacements: { id: rows.attachmentId } }
-        );
-      }
-    } catch (_) {}
-  });
-}));
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PHASE 1: Poll votes in DMs  — POST /api/messages/:id/poll/vote
+// PHASE 2: Bulk delete  — DELETE /api/messages/bulk-delete
+// MUST be before /:id param routes to avoid route collision
 // ─────────────────────────────────────────────────────────────────────────────
-router.post('/:id/poll/vote', apiRateLimiter, asyncHandler(async (req, res) => {
-  const messageId = parseInt(req.params.id, 10);
-  const voterId   = req.user.id;
-  const optionId  = parseInt(req.body.optionId, 10);
+router.delete('/bulk-delete', apiRateLimiter, asyncHandler(async (req, res) => {
+  const userId     = req.user.id;
+  const messageIds = (req.body.messageIds || []).map(Number).filter(Boolean);
+  if (!messageIds.length) return res.status(400).json({ success: false, message: 'messageIds required' });
+  if (messageIds.length > 100) return res.status(400).json({ success: false, message: 'Max 100 per request' });
   const sequelize = getSequelize();
+  await sequelize.query(
+    `DELETE FROM "Messages" WHERE id = ANY(:ids) AND "senderId" = :userId`,
+    { replacements: { ids: messageIds, userId }, type: sequelize.QueryTypes.DELETE }
+  );
+  res.json({ success: true, deleted: messageIds.length });
+}));
 
-  if (isNaN(optionId)) return res.status(400).json({ success: false, message: 'optionId required' });
-
-  const [row] = await sequelize.query(
-    `SELECT id, metadata, "chatId", "senderId" FROM "Messages" WHERE id = :messageId LIMIT 1`,
+// ─────────────────────────────────────────────────────────────────────────────
+// PHASE 2: Message report  — POST /api/messages/:id/report
+// ─────────────────────────────────────────────────────────────────────────────
+router.post('/:id/report', apiRateLimiter, asyncHandler(async (req, res) => {
+  const messageId  = parseInt(req.params.id, 10);
+  const reporterId = req.user.id;
+  const { reason, details } = req.body;
+  const VALID = ['spam','harassment','hate_speech','violence','sexual_content','misinformation','other'];
+  const norm = (reason || '').toLowerCase().replace(/ /g,'_');
+  if (!VALID.includes(norm)) return res.status(400).json({ success: false, message: 'Invalid reason', valid: VALID });
+  const sequelize = getSequelize();
+  const [msg] = await sequelize.query(
+    `SELECT id,"chatId","senderId" FROM "Messages" WHERE id=:messageId LIMIT 1`,
     { replacements: { messageId }, type: sequelize.QueryTypes.SELECT }
   );
-  if (!row) return res.status(404).json({ success: false, message: 'Message not found' });
-
-  const meta = (typeof row.metadata === 'string') ? JSON.parse(row.metadata || '{}') : (row.metadata || {});
-  const poll = meta.poll;
-  if (!poll) return res.status(400).json({ success: false, message: 'Not a poll message' });
-  if (poll.closed) return res.status(400).json({ success: false, message: 'Poll is closed' });
-
-  const option = poll.options?.find(o => o.id === optionId);
-  if (!option) return res.status(400).json({ success: false, message: 'Invalid option' });
-
-  // Remove existing vote from all options (one vote per person)
-  poll.options = poll.options.map(o => ({
-    ...o,
-    votes: (o.votes || []).filter(v => String(v) !== String(voterId))
-  }));
-
-  // Add new vote
-  option.votes = [...(option.votes || []), String(voterId)];
-  poll.totalVotes = poll.options.reduce((s, o) => s + (o.votes?.length || 0), 0);
-
-  const updatedMeta = { ...meta, poll };
-  await sequelize.query(
-    `UPDATE "Messages" SET metadata = :meta WHERE id = :messageId`,
-    { replacements: { meta: JSON.stringify(updatedMeta), messageId } }
-  );
-
-  // Broadcast to all chat participants
+  if (!msg) return res.status(404).json({ success: false, message: 'Message not found' });
+  if (String(msg.senderId) === String(reporterId))
+    return res.status(400).json({ success: false, message: 'Cannot report your own message' });
   try {
-    const [participants] = await sequelize.query(
-      `SELECT "userId" FROM chat_participants WHERE "chatId" = :chatId`,
-      { replacements: { chatId: row.chatId } }
+    await sequelize.query(
+      `INSERT INTO message_reports ("reporterId","messageId","chatId","reason","details","status","createdAt","updatedAt")
+       VALUES (:r,:m,:c,:reason,:details,'pending',NOW(),NOW())
+       ON CONFLICT ("reporterId","messageId") DO NOTHING`,
+      { replacements: { r: reporterId, m: messageId, c: msg.chatId, reason: norm, details: (details||'').slice(0,500)||null } }
     );
-    const wsService = req.app.locals.wsService || global.__wsService;
-    if (wsService?.sendToUser) {
-      await Promise.allSettled(
-        participants.map(p => wsService.sendToUser(p.userId, 'poll:vote', { messageId, poll }))
-      );
-    }
-  } catch (_) {}
-
-  res.json({ success: true, poll });
+    res.json({ success: true, message: 'Report submitted. Thank you.' });
+  } catch(e) {
+    if (e.message.includes('unique') || e.message.includes('duplicate'))
+      return res.status(409).json({ success: false, message: 'Already reported' });
+    throw e;
+  }
 }));
+
+router.get('/:id/report', asyncHandler(async (req, res) => {
+  const sequelize = getSequelize();
+  const [row] = await sequelize.query(
+    `SELECT id,reason,status FROM message_reports WHERE "reporterId"=:r AND "messageId"=:m LIMIT 1`,
+    { replacements: { r: req.user.id, m: parseInt(req.params.id,10) }, type: sequelize.QueryTypes.SELECT }
+  );
+  res.json({ success: true, reported: !!row, data: row||null });
+}));
+
 
 module.exports = router;

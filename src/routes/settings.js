@@ -1237,14 +1237,59 @@ try {
     }
 } catch (e) { console.warn('[Settings] Message retention cron unavailable:', e.message); }
 
-// ─── 2FA alias routes (frontend hits /api/settings/2fa/* but canonical is /api/2fa/*) ──
-try {
-    const twoFactorRouter = require('./twoFactor');
-    router.use('/2fa', twoFactorRouter);
-    console.log('[Settings] ✅ 2FA alias routes mounted at /api/settings/2fa/*');
-} catch (e) {
-    console.warn('[Settings] 2FA alias mount failed:', e.message);
-}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PHASE 2: Two-step verification PIN
+// ─────────────────────────────────────────────────────────────────────────────
+router.get('/registration-pin/status', apiRateLimiter, asyncHandler(async (req, res) => {
+  const sequelize = getSequelize();
+  const [row] = await sequelize.query(
+    `SELECT "registrationPin" IS NOT NULL AS enabled FROM "Users" WHERE id=:userId LIMIT 1`,
+    { replacements: { userId: req.user.id }, type: sequelize.QueryTypes.SELECT }
+  );
+  res.json({ success: true, data: { enabled: !!(row?.enabled) } });
+}));
+
+router.post('/registration-pin', apiRateLimiter, asyncHandler(async (req, res) => {
+  const { pin } = req.body;
+  if (!pin || !/^\d{6}$/.test(pin))
+    return res.status(400).json({ success: false, message: 'PIN must be exactly 6 digits' });
+  if (/^(\d)\1{5}$/.test(pin) || ['123456','654321','000000'].includes(pin))
+    return res.status(400).json({ success: false, message: 'Choose a less obvious PIN' });
+  const hashed = await bcrypt.hash(pin, 10);
+  const sequelize = getSequelize();
+  await sequelize.query(
+    `UPDATE "Users" SET "registrationPin"=:pin,"updatedAt"=NOW() WHERE id=:userId`,
+    { replacements: { pin: hashed, userId: req.user.id } }
+  );
+  res.json({ success: true, message: 'Registration PIN saved' });
+}));
+
+router.delete('/registration-pin', apiRateLimiter, asyncHandler(async (req, res) => {
+  const sequelize = getSequelize();
+  await sequelize.query(
+    `UPDATE "Users" SET "registrationPin"=NULL,"updatedAt"=NOW() WHERE id=:userId`,
+    { replacements: { userId: req.user.id } }
+  );
+  res.json({ success: true, message: 'PIN removed' });
+}));
+
+// DELETE /api/settings/devices/revoke-all — revoke all other sessions
+router.delete('/devices/revoke-all', apiRateLimiter, asyncHandler(async (req, res) => {
+  const sequelize = getSequelize();
+  await sequelize.query(
+    `UPDATE linked_devices SET "isActive"=false,"updatedAt"=NOW() WHERE "userId"=:userId`,
+    { replacements: { userId: req.user.id } }
+  );
+  try {
+    await sequelize.query(
+      `UPDATE refresh_tokens SET revoked=true,"revokedAt"=NOW() WHERE "userId"=:userId`,
+      { replacements: { userId: req.user.id } }
+    );
+  } catch(_) {}
+  res.json({ success: true, message: 'All other sessions terminated' });
+}));
+
 
 module.exports = router;
 
