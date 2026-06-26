@@ -1237,5 +1237,14 @@ try {
     }
 } catch (e) { console.warn('[Settings] Message retention cron unavailable:', e.message); }
 
+// ─── 2FA alias routes (frontend hits /api/settings/2fa/* but canonical is /api/2fa/*) ──
+try {
+    const twoFactorRouter = require('./twoFactor');
+    router.use('/2fa', twoFactorRouter);
+    console.log('[Settings] ✅ 2FA alias routes mounted at /api/settings/2fa/*');
+} catch (e) {
+    console.warn('[Settings] 2FA alias mount failed:', e.message);
+}
+
 module.exports = router;
 

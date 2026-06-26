@@ -4493,17 +4493,17 @@ class Application {
             logger.logPublicRouteAccess(req.path, req.method);
             systemState.incrementMetric('publicRouteAccess');
             const health = systemState.getHealth();
-            
-            if (health.ready) {
-                return res.json(health);
-            } else {
-                return res.status(503).json({
-                    success: false,
-                    message: 'Service unavailable',
-                    code: 'SERVICE_UNAVAILABLE',
-                    ...health
-                });
-            }
+            // Always return 200 so Render's health checker never marks the instance
+            // unavailable during cold-start / DB wake-up. Use 'status' field to
+            // communicate actual readiness to the frontend.
+            return res.status(200).json({
+                success: true,
+                status: health.ready ? 'operational' : 'starting',
+                ready: !!health.ready,
+                timestamp: new Date().toISOString(),
+                uptime: Math.floor(process.uptime()),
+                ...health
+            });
         });
         
         // API health (public)

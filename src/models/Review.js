@@ -21,12 +21,12 @@ module.exports = (sequelize, DataTypes) => {
         field: 'order_id',
       },
       userId: {
-        type: DataTypes.UUID,
+        type: DataTypes.INTEGER,
         allowNull: false,
         field: 'user_id',
       },
       sellerId: {
-        type: DataTypes.UUID,
+        type: DataTypes.INTEGER,
         allowNull: false,
         field: 'seller_id',
       },

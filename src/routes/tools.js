@@ -193,6 +193,13 @@ router.get('/marketplace/leaderboard',apiRateLimiter, toolsController.getLeaderb
 router.post('/marketplace/tips',      apiRateLimiter, toolsController.sendTip.bind(toolsController));
 router.get('/marketplace/stats',      apiRateLimiter, toolsController.getMarketplaceStats.bind(toolsController));
 
+// ── Frontend alias routes ─────────────────────────────────────────────────────
+// Frontend calls /api/tools/marketplace/products and /marketplace/wishlist;
+// map these to the canonical listing/saved endpoints.
+router.get('/marketplace/products',        apiRateLimiter, toolsController.getListings.bind(toolsController));
+router.get('/marketplace/wishlist',        apiRateLimiter, toolsController.getSavedListings.bind(toolsController));
+router.get('/marketplace/recommendations', apiRateLimiter, toolsController.getSpotlightListings.bind(toolsController));
+
 // ── Orders ────────────────────────────────────────────────────────────────────
 router.get('/marketplace/orders/mine',               apiRateLimiter, toolsController.getMyOrders.bind(toolsController));
 router.get('/marketplace/orders/selling',            apiRateLimiter, toolsController.getSellerOrders.bind(toolsController));

@@ -1,20 +1,9 @@
 // src/jobs/keepAlive.js
 //
-// FIX (Report outstanding issue / forensic audit): Render's free tier spins the
-// service down after ~15 minutes with no inbound HTTP traffic. The next request
-// then pays a cold-start penalty and, worse, anything that fires concurrently on
-// wake (multiple iframes booting Phase6Bootstrap, friend/message fetches, socket
-// reconnects) all 503 or time out simultaneously, which is the "cascading 503s
-// and Socket.IO failures" symptom flagged after the websocket/auth pass.
-//
-// This job self-pings the service's own /health (or /api/friends/ping as a
-// fallback) every 10 minutes — comfortably inside Render's 15-minute idle
-// window — so the dyno never goes to sleep in the first place. It only runs
-// when RENDER_EXTERNAL_URL is present (i.e. actually deployed on Render);
-// it's a no-op locally.
-//
-// Wire this up in server.js next to the other phase bootstraps with:
-//   require('./jobs/keepAlive').start();
+// Self-ping every 5 minutes to keep Render free-tier dyno awake.
+// Render idles after ~15 min of no traffic; 5-min interval gives 3x safety margin.
+// Also fires an immediate ping on startup so the dyno's first real request isn't
+// also its cold-start wake call.
 
 const cron = require('node-cron');
 
@@ -25,23 +14,19 @@ function pingSelf() {
     if (!baseUrl) return;
 
     const url = `${baseUrl.replace(/\/$/, '')}/health`;
-    const https = url.startsWith('https') ? require('https') : require('http');
+    const transport = url.startsWith('https') ? require('https') : require('http');
 
-    const req = https.get(url, { timeout: 8000 }, (res) => {
-        // Drain the response so the socket can be reused/closed cleanly.
+    const req = transport.get(url, { timeout: 10000 }, (res) => {
         res.on('data', () => {});
         res.on('end', () => {
-            if (res.statusCode >= 200 && res.statusCode < 400) {
-                console.log(`[KeepAlive] ✅ Self-ping OK (${res.statusCode})`);
-            } else {
-                console.warn(`[KeepAlive] ⚠️ Self-ping returned ${res.statusCode}`);
-            }
+            const lvl = res.statusCode < 400 ? '✅' : '⚠️';
+            console.log(`[KeepAlive] ${lvl} Self-ping ${res.statusCode} — dyno awake`);
         });
     });
 
     req.on('timeout', () => {
         req.destroy();
-        console.warn('[KeepAlive] ⚠️ Self-ping timed out');
+        console.warn('[KeepAlive] ⚠️ Self-ping timed out (dyno may be waking)');
     });
 
     req.on('error', (err) => {
@@ -56,13 +41,16 @@ function start() {
     }
 
     if (!process.env.RENDER_EXTERNAL_URL) {
-        console.log('[KeepAlive] RENDER_EXTERNAL_URL not set — skipping (not on Render, or var not configured)');
+        console.log('[KeepAlive] RENDER_EXTERNAL_URL not set — no-op (local dev)');
         return null;
     }
 
-    // Every 10 minutes — safely under Render's 15-minute idle-sleep threshold.
-    task = cron.schedule('*/10 * * * *', pingSelf, { scheduled: true });
-    console.log('[KeepAlive] ✅ Started — self-pinging every 10 minutes to prevent Render idle sleep');
+    // Fire immediately so the dyno doesn't go cold between deploy and first cron tick
+    setTimeout(pingSelf, 5000);
+
+    // Every 5 minutes — safely under Render's 15-minute idle-sleep threshold
+    task = cron.schedule('*/5 * * * *', pingSelf, { scheduled: true });
+    console.log('[KeepAlive] ✅ Started — self-pinging every 5 minutes to prevent Render idle sleep');
     return task;
 }
 

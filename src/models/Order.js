@@ -17,12 +17,12 @@ module.exports = (sequelize, DataTypes) => {
         field: 'product_id',
       },
       buyerId: {
-        type: DataTypes.UUID,
+        type: DataTypes.INTEGER,
         allowNull: false,
         field: 'buyer_id',
       },
       sellerId: {
-        type: DataTypes.UUID,
+        type: DataTypes.INTEGER,
         allowNull: false,
         field: 'seller_id',
       },
