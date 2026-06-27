@@ -341,7 +341,13 @@ class NotificationService {
       new_message: {
         type: 'new_message',
         title: 'New Message',
-        body: `${data.senderName}: ${data.messagePreview}`,
+        body: (() => {
+          const pref = data.notifPreviewPref || 'full';
+          if (pref === 'none') return 'New Message';
+          if (pref === 'sender_only') return data.senderName || 'New Message';
+          const preview = String(data.messagePreview || '').slice(0, 40);
+          return data.senderName + ': ' + preview + ((data.messagePreview||'').length > 40 ? '…' : '');
+        })(),
         data: data,
         priority: 'high',
         actionUrl: `/chats/${data.chatId}`,

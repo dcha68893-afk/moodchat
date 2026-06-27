@@ -6,8 +6,8 @@ const readReceiptController = require('../controllers/readReceiptController');
 const { authenticate } = require('../middleware/auth');
 const { apiRateLimiter } = require('../middleware/rateLimiter');
 
-// Apply authentication to all routes
-
+// FIX-8: Apply authenticate middleware
+router.use(authenticate);
 
 // Mark message as read
 router.post('/mark-read', apiRateLimiter, readReceiptController.markAsRead);

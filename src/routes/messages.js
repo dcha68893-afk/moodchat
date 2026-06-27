@@ -1835,4 +1835,29 @@ router.get('/:id/report', asyncHandler(async (req, res) => {
 }));
 
 
+// FIX-9: POST /api/messages/disappearing
+router.post('/disappearing', apiRateLimiter, asyncHandler(async (req, res) => {
+  const senderId = req.user?.id;
+  if (!senderId) return res.status(401).json({ status: 'error', message: 'Unauthorized' });
+  const { chatId, duration } = req.body;
+  if (!chatId) return res.status(400).json({ status: 'error', message: 'chatId required' });
+  const valid = [0, 3600, 86400, 604800, 7776000];
+  const d = parseInt(duration, 10);
+  if (!valid.includes(d)) return res.status(400).json({ status: 'error', message: 'Invalid duration' });
+  const sequelize = require('../config/database');
+  try {
+    await sequelize.query(
+      `UPDATE chats SET "disappearingDuration"=:d,"updatedAt"=NOW() WHERE id=:chatId`,
+      { replacements: { d, chatId } }
+    );
+  } catch(e) { console.warn('[disappearing] column missing:', e.message); }
+  try {
+    const ws = require('../services/webSocketService');
+    const parts = await sequelize.query(`SELECT DISTINCT "userId" FROM chat_participants WHERE "chatId"=:chatId`,
+      { replacements:{chatId}, type: sequelize.QueryTypes.SELECT });
+    await Promise.allSettled((parts||[]).map(r => ws.sendToUser(r.userId,'disappearing:updated',{chatId,duration:d})));
+  } catch(e) {}
+  res.json({ status:'success', data:{chatId, duration:d, enabled:d>0} });
+}));
+
 module.exports = router;

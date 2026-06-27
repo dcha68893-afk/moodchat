@@ -4097,6 +4097,10 @@ class Application {
 
             if (mainRouter) {
                 this.app.use('/api', mainRouter);
+                // BATCH 3: new feature routes
+                try { this.app.use('/api/link-preview', require('./routes/linkPreview')); } catch(e){ console.warn('[Server] linkPreview:', e.message); }
+                try { this.app.use('/api/auth/two-step', require('./routes/twoStep')); } catch(e){ console.warn('[Server] twoStep:', e.message); }
+                try { this.app.use('/api/privacy', require('./routes/privacy')); } catch(e){ console.warn('[Server] privacy:', e.message); }
                 console.log('✅ Mounted main API router at /api');
             } else {
                 console.error('❌ Main API router NOT mounted — /api/* routes (including /api/auth/login) will 404 until routes/index.js error above is fixed');
@@ -4908,6 +4912,8 @@ class Application {
                 // service simultaneously on wake. No-op when not running on Render.
                 try {
                     require('./jobs/keepAlive').start();
+                // BATCH 3: disappearing messages auto-delete cron
+                try { require('./jobs/disappearingMessages').start(); } catch(e){ console.warn('[Server] disappearingMessages job:', e.message); }
                 } catch (err) {
                     console.warn('[Server] KeepAlive job failed to start (non-fatal):', err.message);
                 }
