@@ -135,4 +135,16 @@ router.get('/safety/:userId', asyncHandler(async (req, res) => {
   res.json({ status: 'success', data: { fingerprint: groups.join(' '), hex: hash.toUpperCase() } });
 }));
 
+
+// POST /api/encryption/verify/:userId
+router.post('/verify/:userId', asyncHandler(async (req, res) => {
+  const { fingerprint } = req.body;
+  const sequelize = getSequelize();
+  try {
+    await sequelize.query(`CREATE TABLE IF NOT EXISTS key_verifications (id SERIAL PRIMARY KEY,"verifierId" INTEGER NOT NULL,"verifiedId" INTEGER NOT NULL,fingerprint TEXT NOT NULL,"verifiedAt" TIMESTAMPTZ DEFAULT NOW(),"updatedAt" TIMESTAMPTZ DEFAULT NOW(),UNIQUE("verifierId","verifiedId"))`,{type:sequelize.QueryTypes.RAW});
+    await sequelize.query(`INSERT INTO key_verifications ("verifierId","verifiedId",fingerprint,"verifiedAt","updatedAt") VALUES (:vid,:rid,:fp,NOW(),NOW()) ON CONFLICT ("verifierId","verifiedId") DO UPDATE SET fingerprint=EXCLUDED.fingerprint,"updatedAt"=NOW()`,{replacements:{vid:req.user.id,rid:parseInt(req.params.userId,10),fp:fingerprint}});
+    res.json({status:'success'});
+  } catch(e) { res.status(500).json({status:'error'}); }
+}));
+
 module.exports = router;

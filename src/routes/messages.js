@@ -665,12 +665,20 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
     }
     
     try {
-      const msgResult = await sequelize.query(
-        `INSERT INTO "Messages" ("chatId","senderId",content,type,reactions,"replyToId",metadata,"sentAt","deliveredAt","createdAt","updatedAt")
+      const msgResult = // Phase 3: Compute expiresAt from chat disappearing timer
+      let msgExpiresAt = null;
+      try {
+        const { computeExpiresAt } = require('../jobs/disappearingMessages');
+        msgExpiresAt = await computeExpiresAt(sequelize, chatId, null);
+      } catch (_) {}
+
+
+      await sequelize.query(
+        `INSERT INTO "Messages" ("chatId","senderId",content,type,reactions,"replyToId",metadata,"expiresAt","sentAt","deliveredAt","createdAt","updatedAt")
          VALUES (:chatId,:senderId,:content,:type,'{}',:replyToId,:metadata,NOW(),NOW(),NOW(),NOW())
          RETURNING id,"chatId","senderId",content,type,"replyToId","createdAt"`,
         {
-          replacements: { chatId, senderId, content: content.trim(), type: messageType, replyToId: safeReplyToId, metadata: JSON.stringify(msgMetadata) },
+          replacements: { chatId, senderId, content: content.trim(), type: messageType, replyToId: safeReplyToId, metadata: JSON.stringify(msgMetadata), expiresAt: msgExpiresAt },
           type: sequelize.QueryTypes.INSERT,
           transaction: t,
         }
@@ -1858,6 +1866,149 @@ router.post('/disappearing', apiRateLimiter, asyncHandler(async (req, res) => {
     await Promise.allSettled((parts||[]).map(r => ws.sendToUser(r.userId,'disappearing:updated',{chatId,duration:d})));
   } catch(e) {}
   res.json({ status:'success', data:{chatId, duration:d, enabled:d>0} });
+}));
+
+// PHASE 1: View-once media  — POST /api/messages/:id/view-once
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Returns the real media URL once, then marks the message as viewed so
+// subsequent calls return 410 Gone. The media URL is stored in metadata.
+// Actual file deletion from storage is left to a scheduled cleanup job
+// (Render free-tier: just set metadata.viewOnceOpened=true and clear the URL
+//  from the Attachment record after the response).
+//
+router.post('/:id/view-once', apiRateLimiter, asyncHandler(async (req, res) => {
+  const messageId  = parseInt(req.params.id, 10);
+  const viewerId   = req.user.id;
+  const sequelize  = getSequelize();
+
+  // 1. Load message + validate recipient
+  const [rows] = await sequelize.query(
+    `SELECT m.id, m.metadata, m."chatId", m."senderId",
+            a.url AS "attachmentUrl", a.type AS "attachmentType", a.id AS "attachmentId"
+     FROM "Messages" m
+     LEFT JOIN "Attachments" a ON a."messageId" = m.id
+     WHERE m.id = :messageId
+     LIMIT 1`,
+    { replacements: { messageId }, type: sequelize.QueryTypes.SELECT }
+  );
+  if (!rows) return res.status(404).json({ success: false, message: 'Message not found' });
+
+  const meta = (typeof rows.metadata === 'string') ? JSON.parse(rows.metadata || '{}') : (rows.metadata || {});
+
+  // Must be a view-once message
+  if (!meta.viewOnce) return res.status(400).json({ success: false, message: 'Not a view-once message' });
+
+  // Already viewed
+  if (meta.viewOnceOpened) return res.status(410).json({ success: false, message: 'Already opened' });
+
+  // Must be the recipient (not the sender)
+  if (String(rows.senderId) === String(viewerId)) {
+    return res.status(403).json({ success: false, message: 'Senders cannot open their own view-once media' });
+  }
+
+  // Verify viewer is a participant of this chat
+  const [participant] = await sequelize.query(
+    `SELECT 1 FROM chat_participants WHERE "chatId" = :chatId AND "userId" = :viewerId LIMIT 1`,
+    { replacements: { chatId: rows.chatId, viewerId }, type: sequelize.QueryTypes.SELECT }
+  );
+  if (!participant) return res.status(403).json({ success: false, message: 'Not a participant' });
+
+  // 2. Mark as opened
+  const updatedMeta = { ...meta, viewOnceOpened: true, viewOnceOpenedAt: new Date().toISOString(), viewOnceOpenedBy: viewerId };
+  await sequelize.query(
+    `UPDATE "Messages" SET metadata = :meta WHERE id = :messageId`,
+    { replacements: { meta: JSON.stringify(updatedMeta), messageId } }
+  );
+
+  // 3. Emit socket event so sender sees "Opened"
+  try {
+    const wsService = req.app.locals.wsService || global.__wsService;
+    if (wsService?.sendToUser) {
+      await wsService.sendToUser(rows.senderId, 'message:viewOnceOpened', {
+        messageId,
+        chatId: rows.chatId,
+        openedBy: viewerId,
+      });
+    }
+  } catch (_) {}
+
+  // 4. Return URL (one time only)
+  const mediaUrl  = rows.attachmentUrl || meta.mediaUrl || null;
+  const mediaType = rows.attachmentType || meta.viewOnceType || 'image';
+
+  res.json({ success: true, url: mediaUrl, mediaType });
+
+  // 5. Schedule URL clearance (fire-and-forget after response sent)
+  setImmediate(async () => {
+    try {
+      if (rows.attachmentId) {
+        await sequelize.query(
+          `UPDATE "Attachments" SET url = '[view-once-opened]' WHERE id = :id`,
+          { replacements: { id: rows.attachmentId } }
+        );
+      }
+    } catch (_) {}
+  });
+}));
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+// PHASE 1: Poll votes in DMs  — POST /api/messages/:id/poll/vote
+// ─────────────────────────────────────────────────────────────────────────────
+router.post('/:id/poll/vote', apiRateLimiter, asyncHandler(async (req, res) => {
+  const messageId = parseInt(req.params.id, 10);
+  const voterId   = req.user.id;
+  const optionId  = parseInt(req.body.optionId, 10);
+  const sequelize = getSequelize();
+
+  if (isNaN(optionId)) return res.status(400).json({ success: false, message: 'optionId required' });
+
+  const [row] = await sequelize.query(
+    `SELECT id, metadata, "chatId", "senderId" FROM "Messages" WHERE id = :messageId LIMIT 1`,
+    { replacements: { messageId }, type: sequelize.QueryTypes.SELECT }
+  );
+  if (!row) return res.status(404).json({ success: false, message: 'Message not found' });
+
+  const meta = (typeof row.metadata === 'string') ? JSON.parse(row.metadata || '{}') : (row.metadata || {});
+  const poll = meta.poll;
+  if (!poll) return res.status(400).json({ success: false, message: 'Not a poll message' });
+  if (poll.closed) return res.status(400).json({ success: false, message: 'Poll is closed' });
+
+  const option = poll.options?.find(o => o.id === optionId);
+  if (!option) return res.status(400).json({ success: false, message: 'Invalid option' });
+
+  // Remove existing vote from all options (one vote per person)
+  poll.options = poll.options.map(o => ({
+    ...o,
+    votes: (o.votes || []).filter(v => String(v) !== String(voterId))
+  }));
+
+  // Add new vote
+  option.votes = [...(option.votes || []), String(voterId)];
+  poll.totalVotes = poll.options.reduce((s, o) => s + (o.votes?.length || 0), 0);
+
+  const updatedMeta = { ...meta, poll };
+  await sequelize.query(
+    `UPDATE "Messages" SET metadata = :meta WHERE id = :messageId`,
+    { replacements: { meta: JSON.stringify(updatedMeta), messageId } }
+  );
+
+  // Broadcast to all chat participants
+  try {
+    const [participants] = await sequelize.query(
+      `SELECT "userId" FROM chat_participants WHERE "chatId" = :chatId`,
+      { replacements: { chatId: row.chatId } }
+    );
+    const wsService = req.app.locals.wsService || global.__wsService;
+    if (wsService?.sendToUser) {
+      await Promise.allSettled(
+        participants.map(p => wsService.sendToUser(p.userId, 'poll:vote', { messageId, poll }))
+      );
+    }
+  } catch (_) {}
+
+  res.json({ success: true, poll });
 }));
 
 module.exports = router;
