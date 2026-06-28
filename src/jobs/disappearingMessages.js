@@ -1,95 +1,190 @@
-// src/jobs/disappearingMessages.js
-// ─────────────────────────────────────────────────────────────────────────────
-// FIX: Disappearing messages auto-delete worker
-//
-// The ScheduledMessage model and `disappearsAt` field on Message already exist.
-// This cron runs every minute, finds all messages whose `disappearsAt` is in
-// the past, deletes them from the DB, and notifies participants via WebSocket
-// so the message vanishes in real-time from every open chat window.
-//
-// Wire up in src/server.js:
-//   require('./jobs/disappearingMessages').start();
-// ─────────────────────────────────────────────────────────────────────────────
+/**
+ * disappearingMessages.js — Auto-delete expired messages cron job
+ *
+ * Phase 3 feature: Disappearing messages auto-delete worker
+ *
+ * Runs every 60 seconds, deletes Messages WHERE "expiresAt" < NOW().
+ * Also notifies affected users via Socket.IO so their chat UI removes
+ * the messages in real-time without a page refresh.
+ *
+ * The Message model already has:
+ *   - expiresAt  (DATE) — set at send time based on chat's disappearingTimer
+ *   - disappearingTimer (INTEGER seconds)
+ *
+ * This job completes the loop: the model has the field, the cron was missing.
+ *
+ * Usage: require('./jobs/disappearingMessages').start()
+ *        called from server.js after DB is ready (same pattern as keepAlive)
+ */
 
 'use strict';
 
 const cron = require('node-cron');
-const { Op } = require('sequelize');
 
-let _started = false;
+let task = null;
 
-async function deleteExpiredMessages() {
-  let Message, sequelize, wsService;
+/**
+ * Delete all expired messages and notify participants.
+ */
+async function runCleanup() {
+  let sequelize, wsService;
+
   try {
-    Message    = require('../models/Message');
-    sequelize  = require('../config/database');
-    wsService  = require('../services/webSocketService');
+    // Lazy-load to avoid circular deps at startup
+    const { getSequelize } = require('../config/database');
+    sequelize = getSequelize();
   } catch (e) {
-    // Dependencies not ready yet — skip this tick
+    console.warn('[DisappearingMessages] DB not ready:', e.message);
     return;
   }
 
+  // Get all expired messages + their chatIds + participant lists
+  let expired;
   try {
-    // Find all messages that have passed their disappear deadline
-    const expired = await Message.findAll({
-      where: {
-        disappearsAt: { [Op.lte]: new Date() },
-        deletedAt: null,          // not already soft-deleted
-      },
-      attributes: ['id', 'chatId', 'conversationId', 'senderId'],
-      limit: 200,                  // process in batches to avoid table locks
-      raw: true,
-    });
+    expired = await sequelize.query(
+      `SELECT m.id, m."chatId", m."senderId"
+       FROM "Messages" m
+       WHERE m."expiresAt" IS NOT NULL
+         AND m."expiresAt" <= NOW()
+         AND m."deletedAt" IS NULL
+       LIMIT 500`,
+      { type: sequelize.QueryTypes.SELECT }
+    );
+  } catch (e) {
+    console.error('[DisappearingMessages] Query error:', e.message);
+    return;
+  }
 
-    if (!expired.length) return;
+  if (!expired.length) return;
 
-    const ids    = expired.map(m => m.id);
-    const chatIds = [...new Set(expired.map(m => m.chatId || m.conversationId).filter(Boolean))];
+  const msgIds = expired.map(m => m.id);
 
-    // Hard-delete the expired messages
-    await Message.destroy({ where: { id: { [Op.in]: ids } } });
+  // Group by chatId for efficient participant lookup + socket emit
+  const byChatId = {};
+  for (const m of expired) {
+    if (!byChatId[m.chatId]) byChatId[m.chatId] = [];
+    byChatId[m.chatId].push(m.id);
+  }
 
-    console.log(`[disappearingMessages] Deleted ${ids.length} expired messages from ${chatIds.length} chats`);
+  // Soft-delete the messages (sets deletedAt, preserves audit trail)
+  try {
+    await sequelize.query(
+      `UPDATE "Messages"
+       SET "deletedAt" = NOW(),
+           content = '[This message has disappeared]',
+           "updatedAt" = NOW()
+       WHERE id = ANY(:ids)`,
+      { replacements: { ids: msgIds } }
+    );
+    console.log(`[DisappearingMessages] ✅ Deleted ${msgIds.length} expired messages`);
+  } catch (e) {
+    console.error('[DisappearingMessages] Delete error:', e.message);
+    return;
+  }
 
-    // Notify every chat that had messages deleted, so clients can remove
-    // the bubbles in real time without a reload.
-    for (const chatId of chatIds) {
-      const chatMessages = expired.filter(m => (m.chatId || m.conversationId) === chatId);
-      const payload = {
-        chatId,
-        deletedIds: chatMessages.map(m => m.id),
-        reason: 'disappearing',
-        timestamp: new Date().toISOString(),
-      };
-      try {
-        // Get participants for this chat
-        const participants = await sequelize.query(
-          `SELECT DISTINCT "userId" FROM chat_participants WHERE "chatId" = :chatId`,
-          { replacements: { chatId }, type: sequelize.QueryTypes.SELECT }
-        );
-        await Promise.allSettled(
-          (participants || []).map(row =>
-            wsService.sendToUser(row.userId, 'messages:deleted', payload)
-          )
-        );
-      } catch (_notifyErr) {
-        // Non-fatal — the messages are already deleted from DB
-        console.warn(`[disappearingMessages] WS notify failed for chat ${chatId}:`, _notifyErr.message);
+  // Notify participants via Socket.IO
+  try {
+    // Try to get wsService from app.locals or global
+    wsService = global.__wsService ||
+                global._wsService  ||
+                require('../app/index')?.wsService;
+  } catch (_) {}
+
+  if (!wsService?.sendToUser) {
+    // Try direct Socket.IO io reference
+    try {
+      const io = global.__io || global.io;
+      if (io) {
+        wsService = {
+          sendToUser: (userId, event, data) => {
+            io.to(`user:${userId}`).emit(event, data);
+          }
+        };
       }
+    } catch (_) {}
+  }
+
+  if (!wsService?.sendToUser) {
+    console.log('[DisappearingMessages] No wsService — clients will see deletions on next poll');
+    return;
+  }
+
+  for (const [chatId, ids] of Object.entries(byChatId)) {
+    let participants;
+    try {
+      participants = await sequelize.query(
+        `SELECT "userId" FROM chat_participants WHERE "chatId" = :chatId`,
+        { replacements: { chatId: parseInt(chatId) }, type: sequelize.QueryTypes.SELECT }
+      );
+    } catch (_) { continue; }
+
+    for (const p of participants) {
+      try {
+        await wsService.sendToUser(p.userId, 'messages:disappeared', {
+          chatId: parseInt(chatId),
+          messageIds: ids,
+        });
+      } catch (_) {}
     }
-  } catch (err) {
-    console.error('[disappearingMessages] Cron error:', err.message);
   }
 }
 
-function start() {
-  if (_started) return;
-  _started = true;
+/**
+ * Wire the expiresAt on message INSERT.
+ * Called from messages.js route when a chat has disappearingTimer set.
+ *
+ * @param {object} sequelize
+ * @param {number} chatId
+ * @param {number|null} disappearingTimerSeconds  — 0 or null = disabled
+ * @returns {Date|null}
+ */
+async function computeExpiresAt(sequelize, chatId, disappearingTimerSeconds) {
+  // If timer passed directly, use it
+  if (disappearingTimerSeconds && disappearingTimerSeconds > 0) {
+    return new Date(Date.now() + disappearingTimerSeconds * 1000);
+  }
 
-  // Run every minute — disappearing messages have second-level granularity
-  // but a 60-second window is fine for 24h/7d/90d timers.
-  cron.schedule('* * * * *', deleteExpiredMessages, { timezone: 'UTC' });
-  console.log('[disappearingMessages] ✅ Auto-delete cron started (every minute)');
+  // Otherwise, look up the chat's setting
+  if (!chatId) return null;
+
+  try {
+    const [chat] = await sequelize.query(
+      `SELECT "disappearingTimer" FROM "Chats" WHERE id = :chatId LIMIT 1`,
+      { replacements: { chatId }, type: sequelize.QueryTypes.SELECT }
+    );
+    const timer = chat?.disappearingTimer;
+    if (timer && timer > 0) {
+      return new Date(Date.now() + timer * 1000);
+    }
+  } catch (_) {}
+
+  return null;
 }
 
-module.exports = { start, deleteExpiredMessages };
+function start() {
+  if (task) {
+    console.log('[DisappearingMessages] Already running');
+    return task;
+  }
+
+  // Run immediately on start to clear any backlog from downtime
+  runCleanup().catch(e => console.warn('[DisappearingMessages] Initial cleanup error:', e.message));
+
+  // Then every 60 seconds
+  task = cron.schedule('* * * * *', () => {
+    runCleanup().catch(e => console.error('[DisappearingMessages] Cleanup error:', e.message));
+  }, { scheduled: true });
+
+  console.log('[DisappearingMessages] ✅ Started — checking for expired messages every 60s');
+  return task;
+}
+
+function stop() {
+  if (task) {
+    task.stop();
+    task = null;
+    console.log('[DisappearingMessages] Stopped');
+  }
+}
+
+module.exports = { start, stop, runCleanup, computeExpiresAt };

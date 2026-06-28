@@ -892,6 +892,65 @@ Object.keys(db.models).forEach(modelName => {
 console.log('[Database] ✅ Associations setup complete');
 
 // ===== MAIN MIGRATION FUNCTION =====
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// AUTO-MIGRATION: Phase 3-4 tables — runs automatically on every startup.
+// Uses CREATE TABLE IF NOT EXISTS so it is always safe to re-run.
+// ═══════════════════════════════════════════════════════════════════════════════
+async function ensurePhase34Tables() {
+  console.log('[Migration] 🔧 Ensuring Phase 3-4 tables...');
+  const Q = Sequelize.QueryTypes.RAW;
+  const ddl = [
+    // Safety numbers — key verification records
+    `CREATE TABLE IF NOT EXISTS key_verifications (
+       id SERIAL PRIMARY KEY, "verifierId" INTEGER NOT NULL,
+       "verifiedId" INTEGER NOT NULL, fingerprint TEXT NOT NULL,
+       "verifiedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+       "updatedAt"  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+       UNIQUE("verifierId","verifiedId"))`,
+    // Sealed group membership commitments
+    `CREATE TABLE IF NOT EXISTS group_commitments (
+       id SERIAL PRIMARY KEY, "groupId" INTEGER NOT NULL,
+       commitment TEXT NOT NULL, "memberCount" INTEGER NOT NULL DEFAULT 0,
+       "publishedBy" INTEGER NOT NULL,
+       "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+       "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
+    `CREATE INDEX IF NOT EXISTS idx_gc_group_ts ON group_commitments("groupId","createdAt" DESC)`,
+    // Per-member delivery tokens (message unlinkability)
+    `CREATE TABLE IF NOT EXISTS group_delivery_tokens (
+       id SERIAL PRIMARY KEY, "groupId" INTEGER NOT NULL, "userId" INTEGER NOT NULL,
+       token TEXT NOT NULL UNIQUE, active BOOLEAN NOT NULL DEFAULT TRUE,
+       "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+       UNIQUE("groupId","userId"))`,
+    // Encrypted invite blobs (server cannot read group info)
+    `CREATE TABLE IF NOT EXISTS group_sealed_invites (
+       id SERIAL PRIMARY KEY, "groupId" INTEGER NOT NULL,
+       token TEXT NOT NULL UNIQUE, "encryptedInvite" TEXT NOT NULL,
+       "createdBy" INTEGER NOT NULL, "expiresAt" TIMESTAMPTZ,
+       "useCount" INTEGER NOT NULL DEFAULT 0, "maxUses" INTEGER NOT NULL DEFAULT 1,
+       "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
+    // Message abuse reports
+    `CREATE TABLE IF NOT EXISTS message_reports (
+       id SERIAL PRIMARY KEY, "reporterId" INTEGER NOT NULL, "messageId" INTEGER NOT NULL,
+       "chatId" INTEGER, reason VARCHAR(50) NOT NULL DEFAULT 'other', details TEXT,
+       status VARCHAR(20) NOT NULL DEFAULT 'pending',
+       "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+       "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+       UNIQUE("reporterId","messageId"))`,
+    // Phase 2: two-step PIN on Users
+    `ALTER TABLE "Users" ADD COLUMN IF NOT EXISTS "registrationPin" VARCHAR(255)`,
+    // Phase 3: disappearing messages expiry on Messages
+    `ALTER TABLE "Messages" ADD COLUMN IF NOT EXISTS "expiresAt" TIMESTAMPTZ`,
+    // Phase 1-4: rich message metadata (gif, poll, sticker, view-once, sealed)
+    `ALTER TABLE "Messages" ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'`,
+  ];
+  for (const sql of ddl) {
+    try { await sequelize.query(sql, { type: Q }); }
+    catch(e) { console.warn('[Migration] Phase34 DDL warn:', e.message.split('\n')[0]); }
+  }
+  console.log('[Migration] ✅ Phase 3-4 tables ready');
+}
+
 async function runFullMigration() {
   console.log('\n[Migration] ===== STARTING FULL DATABASE MIGRATION =====');
   console.log(`[Migration] Environment: ${env}`);
@@ -908,6 +967,7 @@ async function runFullMigration() {
     // STEP 2: Ensure Tokens table exists (CRITICAL for auth)
     console.log('[Migration] STEP 2: Ensuring Tokens table exists...');
     const tokensOk = await ensureTokensTable();
+    await ensurePhase34Tables();
     if (!tokensOk) {
       console.log('[Migration] ⚠️ Tokens table creation had issues - auth may not work');
     }
