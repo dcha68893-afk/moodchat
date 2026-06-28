@@ -523,7 +523,7 @@ router.get('/', apiRateLimiter, asyncHandler(async (req, res) => {
 // ============================================================================
 router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
   try {
-    const { receiverId, content, type = 'text', chatId: existingChatId, replyToId, localId: clientLocalId, linkPreview } = req.body;
+    const { receiverId, content, type = 'text', chatId: existingChatId, replyToId, localId: clientLocalId, linkPreview, metadata: clientMetadata } = req.body;
     const senderId = req.user.id;
 
     // ── FORENSIC LOG: SEND_START ──────────────────────────────────────────────
@@ -653,7 +653,8 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
     const t = await sequelize.transaction();
     
     // Build initial metadata including linkPreview + disappearing timer from chat settings
-    const msgMetadata = {};
+    // FIX BUG-2: merge client metadata (gifUrl, poll options, sticker emoji, viewOnce flag)
+    const msgMetadata = (clientMetadata && typeof clientMetadata === 'object') ? { ...clientMetadata } : {};
     if (linkPreview && typeof linkPreview === 'object' && linkPreview.title) {
       msgMetadata.linkPreview = {
         title:       linkPreview.title,
@@ -665,20 +666,23 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
     }
     
     try {
-      const msgResult = // Phase 3: Compute expiresAt from chat disappearing timer
-      let msgExpiresAt = null;
-      try {
-        const { computeExpiresAt } = require('../jobs/disappearingMessages');
-        msgExpiresAt = await computeExpiresAt(sequelize, chatId, null);
-      } catch (_) {}
-
-
-      await sequelize.query(
+      const msgResult = await sequelize.query(
         `INSERT INTO "Messages" ("chatId","senderId",content,type,reactions,"replyToId",metadata,"expiresAt","sentAt","deliveredAt","createdAt","updatedAt")
-         VALUES (:chatId,:senderId,:content,:type,'{}',:replyToId,:metadata,NOW(),NOW(),NOW(),NOW())
+         VALUES (:chatId,:senderId,:content,:type,'{}',:replyToId,:metadata,:expiresAt,NOW(),NOW(),NOW(),NOW())
          RETURNING id,"chatId","senderId",content,type,"replyToId","createdAt"`,
         {
-          replacements: { chatId, senderId, content: content.trim(), type: messageType, replyToId: safeReplyToId, metadata: JSON.stringify(msgMetadata), expiresAt: msgExpiresAt },
+          // FIX BUG-4: compute expiresAt from chat disappearing timer
+          let _msgExpiresAt = null;
+          try {
+            const [_chat] = await sequelize.query(
+              `SELECT "disappearingTimer" FROM "Chats" WHERE id=:cid LIMIT 1`,
+              { replacements: { cid: chatId }, type: sequelize.QueryTypes.SELECT }
+            );
+            if (_chat?.disappearingTimer > 0) {
+              _msgExpiresAt = new Date(Date.now() + _chat.disappearingTimer * 1000);
+            }
+          } catch(_) {}
+          replacements: { chatId, senderId, content: content.trim(), type: messageType, replyToId: safeReplyToId, metadata: JSON.stringify(msgMetadata), expiresAt: _msgExpiresAt },
           type: sequelize.QueryTypes.INSERT,
           transaction: t,
         }

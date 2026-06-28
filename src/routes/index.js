@@ -84,7 +84,7 @@ const ROUTE_MAPPING = {
   'users.js': '/users',
   'profiles.js': '/profile',
   'group.js': '/groups',
-  'sealed-groups.routes.js': '/groups', // Phase 4: sealed group membership
+  'sealed-groups.routes.js': '/groups', // Phase 4
   'groupMembers.js': '/group-members',
   'friends.js': '/friends',
   'chats.js': '/chats',
