@@ -159,7 +159,7 @@ const uploadLimiter = rateLimit({
 const chatLimiter = rateLimit({
   store: redisStore,
   windowMs: 60 * 1000, // 1 minute
-  max: 60, // Limit each IP to 60 messages per minute
+  max: 60, // Limit each user to 60 messages per minute
   message: {
     success: false,
     message: 'Too many messages, please slow down',
@@ -168,8 +168,13 @@ const chatLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   skipSuccessfulRequests: false,
+  // FIX-AUDIT: Key by authenticated user ID, not IP. The old `${req.ip}:chat`
+  // key meant every user behind a shared IP (office NAT, mobile carrier-grade
+  // NAT, VPN) shared one bucket — one heavy sender could rate-limit everyone
+  // else on that IP. Falls back to IP only for unauthenticated requests.
   keyGenerator: (req) => {
-    return `${req.ip}:chat`;
+    const uid = req.user && (req.user.id || req.user.userId);
+    return uid ? `chat-user:${uid}` : `chat-ip:${req.ip}`;
   }
 });
 

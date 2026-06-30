@@ -36,6 +36,11 @@ const { Op: WsOp } = require('sequelize');
 const db   = require('../models');
 const User = db.Users || db.User;
 
+// FIX-AUDIT: Gated verbose logger for high-frequency forensic tracing, mirroring
+// the same pattern used in routes/messages.js. Defaults OFF in production.
+const _DEBUG_MESSAGES = process.env.DEBUG_MESSAGES === '1' || process.env.DEBUG_MESSAGES === 'true';
+const _flog = (...args) => { if (_DEBUG_MESSAGES) console.log(...args); };
+
 // ── FIX #2: Delegate token verification to tokenService (single source of truth) ──
 let _jwtVerify = null;
 try {
@@ -797,34 +802,29 @@ class WebSocketService {
         if (!this.onlineUsers.has(uid)) this.onlineUsers.set(uid, new Set());
         this.onlineUsers.get(uid).add(socketId);
 
-        // FIX: broadcast user:online to all connected users so contacts update presence indicator
-        try {
-            const io = this.getIO();
-            if (io) {
-                io.emit('user:online', { userId: uid, timestamp: Date.now() });
-            }
-        } catch(_) {}
+        // FIX-AUDIT: io.emit() broadcasts to EVERY connected socket on the server,
+        // not just this user's contacts. Two problems: (1) privacy — any stranger
+        // can observe this user's online status; (2) scalability — at 100M+
+        // concurrent users this is an O(N) fan-out per single connect event,
+        // which is catastrophic for throughput. Restrict delivery to the user's
+        // actual contacts/chat participants via targeted per-room emits instead.
+        this._broadcastPresenceToContacts(uid, 'user:online', { userId: uid, timestamp: Date.now() })
+            .catch(() => {});
 
         if (socketOrSocketId && typeof socketOrSocketId.join === 'function') {
             const joinRooms = () => {
-                // BUG 3 FIX: Join all four room name variants to survive integer/string
-                // coercion edge cases in Socket.IO room keys. The server may emit to
-                // user:2 (string) while the room was joined as user:2 (integer-coerced);
-                // in some Node.js/Socket.IO versions these don't match. Joining all four
-                // forms guarantees delivery regardless of how the emit key is formed.
-                const strUid = String(uid);
-                socketOrSocketId.join(`user:${uid}`);      // integer coerced (original)
-                socketOrSocketId.join(`user_${uid}`);      // underscore, integer coerced
-                socketOrSocketId.join(`user:${strUid}`);   // explicit string variant
-                socketOrSocketId.join(`user_${strUid}`);   // underscore, explicit string
+                // FIX-AUDIT: `${uid}` and `${String(uid)}` are the SAME string in a
+                // template literal — there were only ever 2 distinct room names here,
+                // each joined twice. Reduced to the 2 actually-distinct rooms.
+                socketOrSocketId.join(`user:${uid}`);
+                socketOrSocketId.join(`user_${uid}`);
 
-                // Log all rooms the socket is actually in so you can confirm in server
-                // logs that the right room names were registered during the next test.
+                // Gated: only log per-connect room detail when DEBUG_MESSAGES is on
                 try {
                     const actualRooms = Array.from(socketOrSocketId.rooms || []);
-                    console.log(`[WSService] registerUser uid=${uid} socket=${socketId} rooms joined ✅ — in rooms: [${actualRooms.join(', ')}]`);
+                    _flog(`[WSService] registerUser uid=${uid} socket=${socketId} rooms joined ✅ — in rooms: [${actualRooms.join(', ')}]`);
                 } catch (_) {
-                    console.log(`[WSService] registerUser uid=${uid} socket=${socketId} rooms joined ✅`);
+                    _flog(`[WSService] registerUser uid=${uid} socket=${socketId} rooms joined ✅`);
                 }
             };
             try {
@@ -855,13 +855,10 @@ class WebSocketService {
             if (socketId) set.delete(socketId);
             if (!socketId || set.size === 0) {
                 this.onlineUsers.delete(uid);
-                // FIX: broadcast user:offline only when last socket disconnects
-                try {
-                    const io = this.getIO();
-                    if (io) {
-                        io.emit('user:offline', { userId: uid, lastSeen: new Date().toISOString(), timestamp: Date.now() });
-                    }
-                } catch(_) {}
+                // FIX-AUDIT: scope offline broadcast to contacts only (see online fix above)
+                this._broadcastPresenceToContacts(uid, 'user:offline', {
+                    userId: uid, lastSeen: new Date().toISOString(), timestamp: Date.now()
+                }).catch(() => {});
             }
         }
 
@@ -957,7 +954,7 @@ class WebSocketService {
         if (!this._emitLogCache) this._emitLogCache = new Map();
         if (!this._emitLogCache.has(_emitLogKey) || _now - this._emitLogCache.get(_emitLogKey) > 5000) {
             this._emitLogCache.set(_emitLogKey, _now);
-            console.log(`[WSService] EMITTING TO: uid=${uid} event=${event}`);
+            _flog(`[WSService] EMITTING TO: uid=${uid} event=${event}`);
         }
 
         // PHASE10: Route through HybridTransportRuntime when available
@@ -1010,12 +1007,16 @@ class WebSocketService {
         // it only triggers when sendToUser resolves false; (2) message:delivery_failed /
         // delivery-timeout bookkeeping never saw a true failure. We now check the room's
         // actual member count via io.sockets.adapter.rooms before counting it as delivered.
-        const strUid = String(uid);
+        // FIX-AUDIT (MSG-WS-001): `uid` is already coerced via parseInt(userId, 10)
+        // at the top of this method. In a JS template literal, `${uid}` and
+        // `${String(uid)}` ALWAYS produce the identical string — there is no
+        // "integer room" vs "string room" distinction at the room-name level,
+        // since Socket.IO room names are always strings. The previous 4-entry
+        // array therefore emitted to only 2 actually-distinct room names, each
+        // twice — doubling socket I/O across the whole platform for zero benefit.
         const rooms = [
-            `user:${uid}`,    // integer coerced
-            `user_${uid}`,    // integer underscore
-            `user:${strUid}`, // explicit string
-            `user_${strUid}`  // explicit string underscore
+            `user:${uid}`,
+            `user_${uid}`,
         ];
         for (const room of rooms) {
             try {
@@ -1027,7 +1028,7 @@ class WebSocketService {
         }
 
         if (delivered) {
-            console.log(`[FORENSIC] RECEIVER_RECEIVED | uid=${uid} | event=${event} | rooms=[${rooms.join(',')}] | ts=${Date.now()}`);
+            _flog(`[FORENSIC] RECEIVER_RECEIVED | uid=${uid} | event=${event} | rooms=[${rooms.join(',')}] | ts=${Date.now()}`);
         }
 
         const socketIds = await this.getSocketIdsForUser(uid);
@@ -1250,6 +1251,39 @@ class WebSocketService {
         const io = this.getIO();
         if (!io) return false;
         try { io.emit(event, data); return true; } catch (_) { return false; }
+    }
+
+    /**
+     * FIX-AUDIT: Scoped presence broadcast — replaces the old io.emit() global
+     * fan-out for user:online / user:offline. Looks up the set of users who
+     * share a chat with `uid` (their actual contacts) and emits only to them.
+     * Falls back to a no-op (not a global broadcast) if the lookup fails, since
+     * silently degrading to "no presence update" is far safer than leaking
+     * presence to the entire user base.
+     */
+    async _broadcastPresenceToContacts(uid, event, payload) {
+        const io = this.getIO();
+        if (!io || !uid) return false;
+        try {
+            const db = require('../models');
+            const sequelize = db.sequelize || db;
+            const contacts = await sequelize.query(
+                `SELECT DISTINCT cp2."userId" FROM chat_participants cp1
+                 JOIN chat_participants cp2 ON cp2."chatId" = cp1."chatId" AND cp2."userId" != cp1."userId"
+                 WHERE cp1."userId" = :uid`,
+                { replacements: { uid }, type: sequelize.QueryTypes.SELECT }
+            );
+            for (const row of (contacts || [])) {
+                const cid = row.userId;
+                if (cid) {
+                    io.to(`user:${cid}`).emit(event, payload);
+                    io.to(`user_${cid}`).emit(event, payload);
+                }
+            }
+            return true;
+        } catch (_) {
+            return false;
+        }
     }
 
     broadcastToChat(chatId, event, payload = {}, participantIds = null) {

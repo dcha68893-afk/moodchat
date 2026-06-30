@@ -11,7 +11,31 @@ const {
   NotFoundError,
   ValidationError,
 } = require('../middleware/errorHandler');
-const { apiRateLimiter } = require('../middleware/rateLimiter');
+const { apiRateLimiter, chatLimiter } = require('../middleware/rateLimiter');
+
+// FIX-AUDIT: Forensic logging was unconditionally on in production, emitting
+// 5+ console.log lines per single message send. At scale (100M+ users) this
+// floods log aggregation and adds I/O overhead per request. Gate behind an
+// explicit env flag — defaults OFF unless DEBUG_MESSAGES=1 is set.
+const _DEBUG_MESSAGES = process.env.DEBUG_MESSAGES === '1' || process.env.DEBUG_MESSAGES === 'true';
+const _flog = (...args) => { if (_DEBUG_MESSAGES) console.log(...args); };
+
+// FIX-AUDIT: Server-side defense-in-depth against stored XSS. The frontend
+// (messages-core.js SecurityUtils.sanitizeString) already escapes HTML before
+// rendering, but relying solely on the client is unsafe — any other consumer
+// of this API (mobile app, third-party integration, admin panel) that renders
+// message content without escaping would be vulnerable to stored XSS. This
+// strips HTML tags at write time so the stored value can never contain markup,
+// while preserving plain text, emoji, and punctuation.
+function stripHtmlTags(str) {
+  if (!str || typeof str !== 'string') return str;
+  return str
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(/<[^>]*>/g, '')
+    .replace(/javascript:/gi, '')
+    .replace(/\bon\w+\s*=/gi, 'data-blocked=');
+}
 
 // All routes are protected by parent auth middleware in index.js
 
@@ -43,9 +67,9 @@ try {
     storage = multerS3({
       s3: s3Client,
       bucket: process.env.AWS_S3_BUCKET,
-      // FIX-AUDIT: Removed acl:'public-read' — media files must be private.
-      // Use pre-signed URLs to serve them. public-read exposes all uploads to anyone
-      // with the URL (no auth required), violating message privacy guarantees.
+      // FIX-AUDIT: Removed acl:'public-read'. Public ACL exposed every uploaded
+      // media file to anyone with the URL, with zero authentication. Files are
+      // now private by default; serve via pre-signed URLs (short TTL) instead.
       contentType: multerS3.AUTO_CONTENT_TYPE,
       key: (req, file, cb) => {
         const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
@@ -307,10 +331,8 @@ router.post('/mark-read/batch', apiRateLimiter, asyncHandler(async (req, res) =>
       return res.status(400).json({ success: false, message: 'No valid message IDs provided' });
     }
 
-    // Build values for bulk insert
-    // FIX-AUDIT: Use individual parameterized INSERTs — raw value interpolation above
-    // was a SQL injection risk if safeInt() ever returned a crafted integer-like string.
-    // ON CONFLICT DO NOTHING prevents duplicate receipt rows.
+    // FIX-AUDIT: Replaced raw value interpolation with parameterized per-row inserts
+    // to eliminate SQL injection risk, and added the missing updatedAt column.
     for (const msgId of safeIds) {
       await sequelize.query(
         `INSERT INTO "ReadReceipts" ("messageId", "userId", "readAt", "createdAt", "updatedAt")
@@ -521,13 +543,13 @@ router.get('/', apiRateLimiter, asyncHandler(async (req, res) => {
 // POST /api/messages - Send a message (finds or creates chat automatically)
 // Fully parameterized - no raw string interpolation of user input
 // ============================================================================
-router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
+router.post('/', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
   try {
     const { receiverId, content, type = 'text', chatId: existingChatId, replyToId, localId: clientLocalId, linkPreview } = req.body;
     const senderId = req.user.id;
 
     // ── FORENSIC LOG: SEND_START ──────────────────────────────────────────────
-    console.log(`[FORENSIC] SEND_START | senderId=${senderId} | chatId=${existingChatId||'?'} | receiverId=${receiverId||'?'} | localId=${clientLocalId||'?'} | contentLen=${(content||'').length} | ts=${Date.now()}`);
+    _flog(`[FORENSIC] SEND_START | senderId=${senderId} | chatId=${existingChatId||'?'} | receiverId=${receiverId||'?'} | localId=${clientLocalId||'?'} | contentLen=${(content||'').length} | ts=${Date.now()}`);
 
     // Validate content
     if (!content || content.trim().length === 0) {
@@ -536,6 +558,8 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
     if (content.length > 5000) {
       return res.status(400).json({ success: false, message: 'Message too long (max 5000 characters)' });
     }
+    // FIX-AUDIT: strip HTML tags server-side (defense in depth, see stripHtmlTags above)
+    const safeContent = stripHtmlTags(content);
 
     const messageType = ALLOWED_MSG_TYPES.includes(type) ? type : 'text';
     const sequelize = req.app.locals.db;
@@ -620,25 +644,25 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
     }
 
     // ── FORENSIC LOG: BACKEND_RECEIVED ───────────────────────────────────────
-    console.log(`[FORENSIC] BACKEND_RECEIVED | senderId=${senderId} | chatId=${chatId} | localId=${clientLocalId||'?'} | ts=${Date.now()}`);
+    _flog(`[FORENSIC] BACKEND_RECEIVED | senderId=${senderId} | chatId=${chatId} | localId=${clientLocalId||'?'} | ts=${Date.now()}`);
 
     // ── IDEMPOTENCY: If a localId was provided, check if this message was already saved.
-    // Prevents duplicate inserts when the client retries a failed/timed-out request.
-    // FIX-PHASE16: This is the correct place to check — after participant validation,
-    // before the transaction, so we can return early with the existing message.
+    // FIX-AUDIT: Old check used content-match which incorrectly dedupes two DIFFERENT
+    // messages that happen to share identical text within the window. Correct fix:
+    // store localId in metadata JSONB at insert time (below) and query by it here.
     if (clientLocalId) {
       try {
         const existing = await sequelize.query(
-          `SELECT id, \"chatId\", \"senderId\", content, type, \"createdAt\" FROM \"Messages\"
-           WHERE \"senderId\" = :senderId AND \"chatId\" = :chatId
-             AND content = :content
-             AND \"createdAt\" > NOW() - INTERVAL '5 minutes'
-           ORDER BY \"createdAt\" DESC LIMIT 1`,
-          { replacements: { senderId, chatId, content: content.trim() }, type: sequelize.QueryTypes.SELECT }
+          `SELECT id, "chatId", "senderId", content, type, "createdAt" FROM "Messages"
+           WHERE "senderId" = :senderId AND "chatId" = :chatId
+             AND metadata->>'localId' = :localId
+             AND "createdAt" > NOW() - INTERVAL '10 minutes'
+           ORDER BY "createdAt" DESC LIMIT 1`,
+          { replacements: { senderId, chatId, localId: String(clientLocalId) }, type: sequelize.QueryTypes.SELECT }
         );
         if (existing && existing.length > 0) {
           const dup = existing[0];
-          console.log(`[messages.js] 🔁 Idempotency hit — returning existing message id=${dup.id} for localId=${clientLocalId}`);
+          console.log(`[messages.js] Idempotency hit - returning existing message id=${dup.id} for localId=${clientLocalId}`);
           return res.status(201).json({
             success: true, message: 'Message sent successfully (idempotent)',
             data: { message: { ...dup, localId: clientLocalId } }
@@ -654,6 +678,8 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
     
     // Build initial metadata including linkPreview + disappearing timer from chat settings
     const msgMetadata = {};
+    // FIX-AUDIT: Persist clientLocalId so the idempotency check above can find it on retry
+    if (clientLocalId) msgMetadata.localId = String(clientLocalId);
     if (linkPreview && typeof linkPreview === 'object' && linkPreview.title) {
       msgMetadata.linkPreview = {
         title:       linkPreview.title,
@@ -664,8 +690,9 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
       };
     }
     
-    // FIX-AUDIT: Compute expiresAt from the chat's disappearing timer setting so
-    // the disappearingMessages cron job can delete them automatically.
+    // FIX-AUDIT: Compute expiresAt from the chat's disappearing-message timer setting so
+    // the disappearingMessages cron job (src/jobs/disappearingMessages.js) can find and
+    // delete expired messages. Previously this was never set, so the feature was a no-op.
     let _expiresAt = null;
     try {
       const { computeExpiresAt } = require('../src/jobs/disappearingMessages');
@@ -678,7 +705,7 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
          VALUES (:chatId,:senderId,:content,:type,'{}',:replyToId,:metadata,NOW(),NOW(),:expiresAt,NOW(),NOW())
          RETURNING id,"chatId","senderId",content,type,"replyToId","createdAt"`,
         {
-          replacements: { chatId, senderId, content: content.trim(), type: messageType, replyToId: safeReplyToId, metadata: JSON.stringify(msgMetadata), expiresAt: _expiresAt || null },
+          replacements: { chatId, senderId, content: safeContent.trim(), type: messageType, replyToId: safeReplyToId, metadata: JSON.stringify(msgMetadata), expiresAt: _expiresAt || null },
           type: sequelize.QueryTypes.INSERT,
           transaction: t,
         }
@@ -693,7 +720,7 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
       await t.commit();
 
       // ── FORENSIC LOG: DB_SAVED ──────────────────────────────────────────────
-      console.log(`[FORENSIC] DB_SAVED | messageId=${messageId} | chatId=${chatId} | senderId=${senderId} | ts=${Date.now()}`);
+      _flog(`[FORENSIC] DB_SAVED | messageId=${messageId} | chatId=${chatId} | senderId=${senderId} | ts=${Date.now()}`);
 
       senderRows = await sequelize.query(
         `SELECT id, username, avatar FROM "Users" WHERE id = :senderId`,
@@ -724,11 +751,7 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
       localId: clientLocalId || null,
       chatId,
       senderId,
-      content: content.trim(),
-      type: messageType,
-      reactions: {},
-      replyToId: safeReplyToId,
-      replyTo: replyToData,
+      content: safeContent.trim(),
       sentAt: new Date().toISOString(),
       deliveredAt: new Date().toISOString(),
       createdAt: new Date().toISOString(),
@@ -766,7 +789,7 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
 
         // ── FORENSIC LOG: TRANSPORT_SELECTED ─────────────────────────────────
         const _htrAvail = !!global.__HybridTransportRuntime;
-        console.log(`[FORENSIC] TRANSPORT_SELECTED | messageId=${messageId} | transport=${_htrAvail?'HTR+SocketIO':'SocketIO'} | recipients=${recipientIds.join(',')} | ts=${Date.now()}`);
+        _flog(`[FORENSIC] TRANSPORT_SELECTED | messageId=${messageId} | transport=${_htrAvail?'HTR+SocketIO':'SocketIO'} | recipients=${recipientIds.join(',')} | ts=${Date.now()}`);
 
         // Emit message:new to RECIPIENTS ONLY (not sender) — sender already has optimistic message
         // FIX: Sending message:new to the sender caused double-render and dedup collisions.
@@ -779,7 +802,7 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
         // ── FORENSIC LOG: BROADCASTED ─────────────────────────────────────────
         const _delivered = deliveryResults.filter(r => r.status === 'fulfilled' && r.value === true).length;
         const _failed    = deliveryResults.length - _delivered;
-        console.log(`[FORENSIC] BROADCASTED | messageId=${messageId} | chatId=${chatId} | recipients=${recipientIds.join(',')} | delivered=${_delivered}/${deliveryResults.length} | failed=${_failed} | ts=${Date.now()}`);
+        _flog(`[FORENSIC] BROADCASTED | messageId=${messageId} | chatId=${chatId} | recipients=${recipientIds.join(',')} | delivered=${_delivered}/${deliveryResults.length} | failed=${_failed} | ts=${Date.now()}`);
 
         // ── PUSH NOTIFICATIONS: send to offline recipients ────────────────────
         // For each recipient that didn't receive via WebSocket, send a push notification
@@ -889,16 +912,14 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
           console.warn(`[messages.js] ⚠️ sendToUser: ${_delivered}/${deliveryResults.length} delivered, ${_failed} failed for chatId=${chatId}`);
         }
 
-        // Also broadcast to the chat:<id> room — catches any socket that joined
-        // via _joinUserChatRooms but isn't tracked in onlineUsers yet
-        // FIX-AUDIT: sendToUser() above already delivers to all recipientIds via their
-        // user rooms. broadcastToChat emits to chat:X room which only catches sockets
-        // that explicitly joined that room — no overlap with user rooms — so it is kept
-        // ONLY for chat-room listeners (e.g. open chat windows that joined via room name).
-        // We pass an EMPTY participantIds to avoid the per-user re-emit in broadcastToChat
-        // that would duplicate the sendToUser deliveries above.
+        // FIX-AUDIT: sendToUser() above already delivered 'message:new' to every
+        // recipient's user:X / user_X rooms. broadcastToChat(chatId, event, payload, ids)
+        // ALSO re-emits to those same user:X rooms when given participantIds — causing
+        // every message to arrive twice client-side. We now pass [] so broadcastToChat
+        // only emits to the chat:<id> room (catches sockets that joined the chat room
+        // directly) without re-emitting to the per-user rooms already covered above.
         if (typeof wsService.broadcastToChat === 'function') {
-          wsService.broadcastToChat(chatId, 'message:new', populatedMessage, []); // room-only, no per-uid re-emit
+          wsService.broadcastToChat(chatId, 'message:new', populatedMessage, []);
         }
 
         // FIX-010: Single canonical 'message:sent' event — sendToUser() covers all room variants
@@ -1082,54 +1103,70 @@ router.post('/:chatId/upload', apiRateLimiter, upload.single('file'), asyncHandl
       return res.status(403).json({ success: false, message: 'Chat not found or access denied' });
     }
 
-    const caption = req.body.caption ? req.body.caption.substring(0, 500) : '';
+    const caption = req.body.caption ? stripHtmlTags(req.body.caption.substring(0, 500)) : '';
     const msgType = getMessageTypeFromMime(req.file.mimetype);
 
-    const msgResult = await sequelize.query(
-      `INSERT INTO "Messages" ("chatId","senderId",content,type,reactions,"sentAt","deliveredAt","createdAt","updatedAt")
-       VALUES (:chatId,:senderId,:content,:type,'{}',NOW(),NOW(),NOW(),NOW())
-       RETURNING id,"chatId","senderId",content,type,"createdAt"`,
-      {
-        replacements: { chatId, senderId: req.user.id, content: caption, type: msgType },
-        type: sequelize.QueryTypes.INSERT,
+    // FIX-AUDIT (MSG-BE-004): Wrap INSERT + both UPDATEs in a transaction.
+    // Previously these were 3 separate unguarded queries — a crash between
+    // them left an orphan Message row with no mediaUrl or a chat whose
+    // lastMessageId pointer was never updated.
+    const t = await sequelize.transaction();
+    let messageId;
+    try {
+      const msgResult = await sequelize.query(
+        `INSERT INTO "Messages" ("chatId","senderId",content,type,reactions,"sentAt","deliveredAt","createdAt","updatedAt")
+         VALUES (:chatId,:senderId,:content,:type,'{}',NOW(),NOW(),NOW(),NOW())
+         RETURNING id,"chatId","senderId",content,type,"createdAt"`,
+        {
+          replacements: { chatId, senderId: req.user.id, content: caption, type: msgType },
+          type: sequelize.QueryTypes.INSERT,
+          transaction: t,
+        }
+      );
+
+      messageId = msgResult[0][0].id;
+
+      // Build absolute URL — S3 returns req.file.location; disk uses relative path
+      let absUrl;
+      if (_storageBackend === 's3' && req.file && req.file.location) {
+        absUrl = req.file.location;
+      } else {
+        const baseUrl = process.env.RENDER_EXTERNAL_URL || process.env.BACKEND_URL || `${req.protocol}://${req.get('host')}`;
+        const subDir  = msgType === 'image' ? 'images' : msgType === 'audio' ? 'audio' : msgType === 'video' ? 'video' : 'files';
+        absUrl = `${baseUrl.replace(/\/+$/, '')}/uploads/${subDir}/${req.file.filename}`;
       }
-    );
 
-    const messageId = msgResult[0][0].id;
+      // Store mediaUrl in message metadata so GET messages can return it
+      // FIX-AUDIT: removed bogus "lastMessageId" = id reference — Messages has
+      // no such column (it belongs to chats); the old UPDATE silently failed
+      // every single time and was masked by .catch(() => {}).
+      await sequelize.query(
+        `UPDATE "Messages" SET metadata = jsonb_set(COALESCE(metadata,'{}'), '{mediaUrl}', :url::jsonb)
+         WHERE id = :messageId`,
+        { replacements: { messageId, url: JSON.stringify(absUrl) }, transaction: t }
+      );
 
-    // Build absolute URL — S3 returns req.file.location; disk uses relative path
-    let absUrl;
-    if (_storageBackend === 's3' && req.file && req.file.location) {
-      absUrl = req.file.location;
-    } else {
-      const baseUrl = process.env.RENDER_EXTERNAL_URL || process.env.BACKEND_URL || `${req.protocol}://${req.get('host')}`;
-      const subDir  = msgType === 'image' ? 'images' : msgType === 'audio' ? 'audio' : msgType === 'video' ? 'video' : 'files';
-      absUrl = `${baseUrl.replace(/\/+$/, '')}/uploads/${subDir}/${req.file.filename}`;
+      await sequelize.query(
+        `UPDATE chats SET "updatedAt" = NOW(), "lastMessageId" = :messageId WHERE id = :chatId`,
+        { replacements: { messageId, chatId }, transaction: t }
+      );
+
+      await t.commit();
+
+      res.status(201).json({
+        status: 'success',
+        message: 'File uploaded successfully',
+        data: {
+          message: { id: messageId, chatId, senderId: req.user.id, content: caption, type: msgType, mediaUrl: absUrl },
+          fileUrl: absUrl,
+          url: absUrl,
+          mediaUrl: absUrl,
+        },
+      });
+    } catch (txErr) {
+      await t.rollback().catch(() => {});
+      throw txErr;
     }
-
-    // Store mediaUrl in message metadata so GET messages can return it
-    await sequelize.query(
-      `UPDATE "Messages" SET metadata = jsonb_set(COALESCE(metadata,'{}'), '{mediaUrl}', :url::jsonb),
-                             "lastMessageId" = id
-       WHERE id = :messageId`,
-      { replacements: { messageId, url: JSON.stringify(absUrl) } }
-    ).catch(() => {});
-
-    await sequelize.query(
-      `UPDATE chats SET "updatedAt" = NOW(), "lastMessageId" = :messageId WHERE id = :chatId`,
-      { replacements: { messageId, chatId } }
-    );
-
-    res.status(201).json({
-      status: 'success',
-      message: 'File uploaded successfully',
-      data: {
-        message: { id: messageId, chatId, senderId: req.user.id, content: caption, type: msgType, mediaUrl: absUrl },
-        fileUrl: absUrl,
-        url: absUrl,
-        mediaUrl: absUrl,
-      },
-    });
   } catch (error) {
     console.error('Error uploading file:', error);
     if (req.file && req.file.path) await fs.unlink(req.file.path).catch(() => {});
@@ -1198,7 +1235,7 @@ router.get('/:chatId/search', apiRateLimiter, asyncHandler(async (req, res) => {
 // ============================================================================
 // POST /api/messages/bulk — Send one message to multiple conversations (Multi-Send)
 // ============================================================================
-router.post('/bulk', apiRateLimiter, asyncHandler(async (req, res) => {
+router.post('/bulk', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
   try {
     const { conversationIds, content, type = 'text', replyVisibility = 'public' } = req.body;
     const senderId = req.user.id;
@@ -1212,6 +1249,8 @@ router.post('/bulk', apiRateLimiter, asyncHandler(async (req, res) => {
     if (conversationIds.length > 50) {
       return res.status(400).json({ success: false, message: 'Cannot send to more than 50 conversations at once' });
     }
+    // FIX-AUDIT: server-side HTML strip, same as single-send route
+    const safeContent = stripHtmlTags(content);
 
     const safeChatIds = conversationIds.map(safeInt).filter(Boolean);
     if (safeChatIds.length === 0) {
@@ -1238,7 +1277,7 @@ router.post('/bulk', apiRateLimiter, asyncHandler(async (req, res) => {
            RETURNING id,"chatId","senderId",content,type,"createdAt"`,
           {
             replacements: {
-              chatId, senderId, content: content.trim(), type: messageType,
+              chatId, senderId, content: safeContent.trim(), type: messageType,
               metadata: JSON.stringify({ batchId, replyVisibility })
             },
             type: sequelize.QueryTypes.INSERT,
@@ -1257,7 +1296,7 @@ router.post('/bulk', apiRateLimiter, asyncHandler(async (req, res) => {
         );
 
         const populatedMessage = {
-          id: messageId, chatId, senderId, content: content.trim(), type: messageType,
+          id: messageId, chatId, senderId, content: safeContent.trim(), type: messageType,
           reactions: {}, batchId, replyVisibility,
           createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
           sentAt: new Date().toISOString(), deliveredAt: new Date().toISOString(),
@@ -1281,7 +1320,6 @@ router.post('/bulk', apiRateLimiter, asyncHandler(async (req, res) => {
           await Promise.allSettled(
             recipientIds.map(uid => wsService.sendToUser(uid, 'message:new', populatedMessage))
           );
-          // Room-only broadcast — pass [] to avoid per-uid re-emit duplicating sendToUser above
           if (typeof wsService.broadcastToChat === 'function') {
             wsService.broadcastToChat(chatId, 'message:new', populatedMessage, []);
           }
@@ -1433,6 +1471,8 @@ const _editMessageHandler = asyncHandler(async (req, res) => {
     if (!content || content.trim().length === 0) {
       return res.status(400).json({ success: false, message: 'Message content is required' });
     }
+    // FIX-AUDIT: server-side HTML strip on edit, same as create paths
+    const safeContent = stripHtmlTags(content).trim();
 
     const sequelize = req.app.locals.db;
 
@@ -1454,7 +1494,7 @@ const _editMessageHandler = asyncHandler(async (req, res) => {
     await sequelize.query(
       `UPDATE "Messages" SET content = :content, "isEdited" = true, "editedAt" = NOW(), "updatedAt" = NOW()
        WHERE id = :messageId`,
-      { replacements: { content: content.trim(), messageId } }
+      { replacements: { content: safeContent, messageId } }
     );
 
     // Broadcast edit to all chat participants
@@ -1463,7 +1503,7 @@ const _editMessageHandler = asyncHandler(async (req, res) => {
       wsService.broadcastToChat(msgRows[0].chatId, 'message:edited', {
         messageId,
         chatId: msgRows[0].chatId,
-        content: content.trim(),
+        content: safeContent,
         editedAt: new Date().toISOString(),
         editedBy: req.user.id
       });
@@ -1474,7 +1514,7 @@ const _editMessageHandler = asyncHandler(async (req, res) => {
     res.status(200).json({
       status: 'success',
       message: 'Message updated successfully',
-      data: { messageId, content: content.trim(), editedAt: new Date().toISOString() },
+      data: { messageId, content: safeContent, editedAt: new Date().toISOString() },
     });
   } catch (error) {
     console.error('Error editing message:', error);

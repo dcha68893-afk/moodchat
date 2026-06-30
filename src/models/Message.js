@@ -162,6 +162,13 @@ module.exports = (sequelize, DataTypes) => {
           fields: ['chatId', 'createdAt'],
         },
         {
+          // FIX-AUDIT (MSG-DB-001): covers the hottest query pattern —
+          // WHERE chatId = X AND isDeleted = false ORDER BY createdAt DESC.
+          // Kept in sync with migrations/2026999990001_add_messages_perf_indexes.js
+          fields: ['chatId', 'isDeleted', 'createdAt'],
+          name: 'idx_messages_chat_deleted_created',
+        },
+        {
           fields: ['isRead'],  // Add index for isRead
         },
       ],
