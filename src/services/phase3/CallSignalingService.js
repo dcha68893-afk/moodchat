@@ -360,13 +360,16 @@ class CallSignalingService extends EventEmitter {
     // ── FIX-CALL-DIRECT: webrtc:offer relay via Socket.IO (bypass postMessage) ─
     socket.off('call:webrtc_offer').on('call:webrtc_offer', async ({ callId, targetUserId: tgt, offer } = {}) => {
       if (!callId || !tgt || !offer) return;
+      // FIX-DUP-SIGNAL: previously this both sent directly to the target user
+      // AND re-broadcast to the call room (which the target is also a member
+      // of), so the target received the same offer twice. A second
+      // setRemoteDescription('offer') call on an already-stable connection
+      // throws InvalidStateError and can break the handshake. Deliver via a
+      // single path only — sendToUser already fans out to all of the
+      // target's connected devices/sockets.
       await this._wsService.sendToUser(tgt, 'call:webrtc_offer', {
         callId, offer, callerId: userId, timestamp: Date.now(),
       }).catch(() => {});
-      // Also broadcast to call room for redundancy
-      this._io.to(`call:${callId}`).except(socket.id).emit('call:webrtc_offer', {
-        callId, offer, callerId: userId, timestamp: Date.now(),
-      });
       this._logger.log(`[CallSignaling] 📡 webrtc:offer relayed for call ${callId}`);
     });
 
@@ -417,11 +420,13 @@ class CallSignalingService extends EventEmitter {
 
       const participants = this._rooms.getParticipants(callId);
 
-      this._io.to(`call:${callId}`).emit('call:ended', {
-        callId, endedBy: userId, reason, timestamp: Date.now(),
-      });
-
-      // Notify all participants via user rooms too
+      // FIX-DUP-SIGNAL: previously this both broadcast 'call:ended' to the
+      // whole call room AND looped over participants sending it again via
+      // sendToUser, so every other participant's client received two
+      // call-ended events (harmless for UI state, but doubles socket
+      // traffic and can race the room-cleanup teardown). Use a single
+      // delivery path: sendToUser per participant, which also reaches
+      // devices that may not currently hold a socket in the call room.
       for (const p of participants) {
         if (String(p.userId) !== String(userId)) {
           await this._wsService.sendToUser(p.userId, 'call:ended', {
@@ -450,9 +455,15 @@ class CallSignalingService extends EventEmitter {
 
       const signalPayload = { ...data, senderId: userId, timestamp: Date.now() };
 
-      // Relay via user room (existing approach) + call room
+      // FIX-DUP-SIGNAL: only relay via the target's personal user-room.
+      // The previous implementation ALSO broadcast to the call room
+      // (`except(socket.id)`), and since the target's socket already joins
+      // that room on call:initiate/call:accept, every offer/answer/ICE
+      // candidate was delivered twice — causing duplicate
+      // setRemoteDescription calls (InvalidStateError) and duplicate ICE
+      // candidates, which manifested as calls failing to connect or audio
+      // glitching mid-call.
       await this._wsService.sendToUser(targetUserId, 'webrtc:signal', signalPayload);
-      this._io.to(`call:${callId}`).except(socket.id).emit('webrtc:signal', signalPayload);
     });
 
     // ── Group call events ────────────────────────────────────────────────────
