@@ -43,7 +43,9 @@ try {
     storage = multerS3({
       s3: s3Client,
       bucket: process.env.AWS_S3_BUCKET,
-      acl: 'public-read',
+      // FIX-AUDIT: Removed acl:'public-read' — media files must be private.
+      // Use pre-signed URLs to serve them. public-read exposes all uploads to anyone
+      // with the URL (no auth required), violating message privacy guarantees.
       contentType: multerS3.AUTO_CONTENT_TYPE,
       key: (req, file, cb) => {
         const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
@@ -306,15 +308,17 @@ router.post('/mark-read/batch', apiRateLimiter, asyncHandler(async (req, res) =>
     }
 
     // Build values for bulk insert
-    const values = safeIds.map(id => `(${id}, ${userId}, NOW(), NOW())`).join(',');
-    
-    // Insert read receipts with ON CONFLICT DO NOTHING to avoid duplicates
-    await sequelize.query(
-      `INSERT INTO "ReadReceipts" ("messageId", "userId", "readAt", "createdAt")
-       VALUES ${values}
-       ON CONFLICT ("messageId", "userId") DO NOTHING`,
-      { type: sequelize.QueryTypes.INSERT }
-    );
+    // FIX-AUDIT: Use individual parameterized INSERTs — raw value interpolation above
+    // was a SQL injection risk if safeInt() ever returned a crafted integer-like string.
+    // ON CONFLICT DO NOTHING prevents duplicate receipt rows.
+    for (const msgId of safeIds) {
+      await sequelize.query(
+        `INSERT INTO "ReadReceipts" ("messageId", "userId", "readAt", "createdAt", "updatedAt")
+         VALUES (:msgId, :userId, NOW(), NOW(), NOW())
+         ON CONFLICT ("messageId", "userId") DO NOTHING`,
+        { replacements: { msgId, userId }, type: sequelize.QueryTypes.INSERT }
+      ).catch(() => {});
+    }
 
     try {
       const wsService = require('../services/webSocketService');
@@ -479,8 +483,8 @@ router.get('/', apiRateLimiter, asyncHandler(async (req, res) => {
        LEFT JOIN "Users" ru ON ru.id = rm."senderId"
        WHERE m."chatId" = :chatId AND m."isDeleted" = false ${beforeClause} ${afterClause}
          AND NOT COALESCE((m.metadata->'deletedFor') @> to_jsonb(:userId::int), false)
-       ORDER BY m."createdAt" DESC LIMIT ${limit} OFFSET ${offset}`,
-      { replacements: { ...replacements, userId: req.user.id }, type: sequelize.QueryTypes.SELECT }
+       ORDER BY m."createdAt" DESC LIMIT :_limit OFFSET :_offset`,
+      { replacements: { ...replacements, userId: req.user.id, _limit: limit, _offset: offset }, type: sequelize.QueryTypes.SELECT }
     );
 
     const countResult = await sequelize.query(
@@ -660,13 +664,21 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
       };
     }
     
+    // FIX-AUDIT: Compute expiresAt from the chat's disappearing timer setting so
+    // the disappearingMessages cron job can delete them automatically.
+    let _expiresAt = null;
+    try {
+      const { computeExpiresAt } = require('../src/jobs/disappearingMessages');
+      _expiresAt = await computeExpiresAt(sequelize, chatId, null);
+    } catch (_) { /* non-fatal if job module unavailable */ }
+
     try {
       const msgResult = await sequelize.query(
-        `INSERT INTO "Messages" ("chatId","senderId",content,type,reactions,"replyToId",metadata,"sentAt","deliveredAt","createdAt","updatedAt")
-         VALUES (:chatId,:senderId,:content,:type,'{}',:replyToId,:metadata,NOW(),NOW(),NOW(),NOW())
+        `INSERT INTO "Messages" ("chatId","senderId",content,type,reactions,"replyToId",metadata,"sentAt","deliveredAt","expiresAt","createdAt","updatedAt")
+         VALUES (:chatId,:senderId,:content,:type,'{}',:replyToId,:metadata,NOW(),NOW(),:expiresAt,NOW(),NOW())
          RETURNING id,"chatId","senderId",content,type,"replyToId","createdAt"`,
         {
-          replacements: { chatId, senderId, content: content.trim(), type: messageType, replyToId: safeReplyToId, metadata: JSON.stringify(msgMetadata) },
+          replacements: { chatId, senderId, content: content.trim(), type: messageType, replyToId: safeReplyToId, metadata: JSON.stringify(msgMetadata), expiresAt: _expiresAt || null },
           type: sequelize.QueryTypes.INSERT,
           transaction: t,
         }
@@ -879,12 +891,14 @@ router.post('/', apiRateLimiter, asyncHandler(async (req, res) => {
 
         // Also broadcast to the chat:<id> room — catches any socket that joined
         // via _joinUserChatRooms but isn't tracked in onlineUsers yet
-        // FIX-010: Single event name for broadcastToChat
-        // FIX: Use except(senderSocketId) pattern — sender should NOT receive message:new
-        // via the room broadcast either (they have the optimistic message already).
+        // FIX-AUDIT: sendToUser() above already delivers to all recipientIds via their
+        // user rooms. broadcastToChat emits to chat:X room which only catches sockets
+        // that explicitly joined that room — no overlap with user rooms — so it is kept
+        // ONLY for chat-room listeners (e.g. open chat windows that joined via room name).
+        // We pass an EMPTY participantIds to avoid the per-user re-emit in broadcastToChat
+        // that would duplicate the sendToUser deliveries above.
         if (typeof wsService.broadcastToChat === 'function') {
-          // broadcastToChat with recipientIds only (excludes senderId)
-          wsService.broadcastToChat(chatId, 'message:new', populatedMessage, recipientIds);
+          wsService.broadcastToChat(chatId, 'message:new', populatedMessage, []); // room-only, no per-uid re-emit
         }
 
         // FIX-010: Single canonical 'message:sent' event — sendToUser() covers all room variants
@@ -1014,8 +1028,8 @@ router.get('/:chatId', apiRateLimiter, asyncHandler(async (req, res) => {
        LEFT JOIN "Messages" rm ON rm.id = m."replyToId" AND rm."isDeleted" = false
        LEFT JOIN "Users" ru ON ru.id = rm."senderId"
        WHERE m."chatId" = :chatId AND m."isDeleted" = false ${beforeClause} ${afterClause}
-       ORDER BY m."createdAt" DESC LIMIT ${limit} OFFSET ${offset}`,
-      { replacements, type: sequelize.QueryTypes.SELECT }
+       ORDER BY m."createdAt" DESC LIMIT :_limit OFFSET :_offset`,
+      { replacements: { ...replacements, _limit: limit, _offset: offset }, type: sequelize.QueryTypes.SELECT }
     );
 
     const countResult = await sequelize.query(
@@ -1156,8 +1170,8 @@ router.get('/:chatId/search', apiRateLimiter, asyncHandler(async (req, res) => {
        FROM "Messages" m
        LEFT JOIN "Users" u ON u.id = m."senderId"
        WHERE m."chatId" = :chatId AND m."isDeleted" = false AND m.content ILIKE :pattern
-       ORDER BY m."createdAt" DESC LIMIT ${limitNum} OFFSET ${offset}`,
-      { replacements: { chatId, pattern: `%${searchQuery.trim()}%` }, type: sequelize.QueryTypes.SELECT }
+       ORDER BY m."createdAt" DESC LIMIT :_limit OFFSET :_offset`,
+      { replacements: { chatId, pattern: `%${searchQuery.trim()}%`, _limit: limitNum, _offset: offset }, type: sequelize.QueryTypes.SELECT }
     );
 
     const countResult = await sequelize.query(
@@ -1267,8 +1281,9 @@ router.post('/bulk', apiRateLimiter, asyncHandler(async (req, res) => {
           await Promise.allSettled(
             recipientIds.map(uid => wsService.sendToUser(uid, 'message:new', populatedMessage))
           );
+          // Room-only broadcast — pass [] to avoid per-uid re-emit duplicating sendToUser above
           if (typeof wsService.broadcastToChat === 'function') {
-            wsService.broadcastToChat(chatId, 'message:new', populatedMessage);
+            wsService.broadcastToChat(chatId, 'message:new', populatedMessage, []);
           }
         } catch (notifyErr) {
           console.warn('[bulk] Realtime delivery failed for chatId=' + chatId + ':', notifyErr.message);
