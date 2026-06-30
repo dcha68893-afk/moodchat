@@ -90,6 +90,22 @@ router.get('/preview', asyncHandler(async (req, res) => {
     return res.status(400).json({ status: 'error', message: 'Invalid URL' });
   }
 
+  // FIX-SSRF: Block private/internal IP ranges and localhost to prevent SSRF attacks
+  try {
+    const _parsedUrl = new URL(url);
+    const _host = _parsedUrl.hostname.toLowerCase();
+    const _SSRF_BLOCKED = /^(localhost|127\.|0\.0\.0\.0|::1|10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|169\.254\.|fc00:|fd[0-9a-f]{2}:|fe80:)/i;
+    if (_SSRF_BLOCKED.test(_host)) {
+      return res.status(400).json({ status: 'error', message: 'URL not allowed' });
+    }
+    // Block .internal and .local TLDs (cloud metadata, mDNS)
+    if (_host.endsWith('.internal') || _host.endsWith('.local') || _host === 'metadata.google.internal') {
+      return res.status(400).json({ status: 'error', message: 'URL not allowed' });
+    }
+  } catch (_ssrfErr) {
+    return res.status(400).json({ status: 'error', message: 'Invalid URL' });
+  }
+
   // 1. In-memory cache
   const cached = _previewCache.get(url);
   if (cached && Date.now() - cached.ts < PREVIEW_TTL) {

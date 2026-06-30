@@ -27,7 +27,7 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: true,
       },
       type: {
-        type: DataTypes.ENUM('text', 'image', 'video', 'audio', 'file', 'sticker', 'location', 'contact', 'system', 'status_reply'),
+        type: DataTypes.ENUM('text', 'image', 'video', 'audio', 'file', 'sticker', 'location', 'contact', 'system', 'status_reply', 'poll', 'view_once'),
         defaultValue: 'text',
         allowNull: false,
       },
