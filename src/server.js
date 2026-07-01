@@ -4914,6 +4914,12 @@ class Application {
                     require('./jobs/keepAlive').start();
                 // BATCH 3: disappearing messages auto-delete cron
                 try { require('./jobs/disappearingMessages').start(); } catch(e){ console.warn('[Server] disappearingMessages job:', e.message); }
+                // NEW FEATURE: live location expiry sweep
+                try {
+                    const db = require('./models');
+                    const seq = db.sequelize || db;
+                    require('./jobs/liveLocationExpiry').startExpirySweep(seq);
+                } catch(e){ console.warn('[Server] liveLocationExpiry job:', e.message); }
                 } catch (err) {
                     console.warn('[Server] KeepAlive job failed to start (non-fatal):', err.message);
                 }

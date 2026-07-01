@@ -91,6 +91,8 @@ const ROUTE_MAPPING = {
   'messages.js': '/messages',
   'messagingFeatures.js': '/messaging',
   'polls.js': '/polls',
+  'liveLocation.js': '/live-location',
+  'contactSharing.js': '/contact-sharing',
   'encryption.js': '/encryption',
   'groupEncryption.js': '/group-encryption',
   'push.js': '/push',

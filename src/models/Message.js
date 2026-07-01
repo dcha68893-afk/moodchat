@@ -109,6 +109,17 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: true,
         comment: 'Timer in seconds: 86400=24h, 604800=7d, 2592000=30d, 7776000=90d',
       },
+      // NEW FEATURE: View Once media tracking (see migration 2026999990004)
+      viewOnceViewedAt: {
+        type: DataTypes.DATE,
+        allowNull: true,
+        comment: 'Timestamp the view-once media was first opened. NULL = not yet viewed.',
+      },
+      viewOnceViewedBy: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+        comment: 'userId of whoever first viewed the view-once media.',
+      },
       isPinned: {
         type: DataTypes.BOOLEAN,
         defaultValue: false,

@@ -52,6 +52,7 @@ const UPLOAD_PATH = process.env.UPLOAD_PATH || 'uploads/messages';
 // Without either, files land on local disk (fine for dev; Render erases on deploy).
 let _storageBackend = 'disk';
 let storage;
+let _s3Client = null; // hoisted so routes beyond the upload handler (e.g. view-once delete) can reuse it
 
 try {
   if (process.env.AWS_S3_BUCKET && process.env.AWS_ACCESS_KEY_ID) {
@@ -64,6 +65,7 @@ try {
         secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
       },
     });
+    _s3Client = s3Client;
     storage = multerS3({
       s3: s3Client,
       bucket: process.env.AWS_S3_BUCKET,
@@ -487,7 +489,7 @@ router.get('/', apiRateLimiter, asyncHandler(async (req, res) => {
       `SELECT m.id, m."chatId", m."senderId", m.content,
               m.type as "messageType", m.reactions, m."isEdited",
               m."editedAt", m."isDeleted", m."createdAt", m."updatedAt",
-              m."replyToId", m.metadata,
+              m."replyToId", m.metadata, m."viewOnceViewedAt", m."viewOnceViewedBy",
               jsonb_build_object('id', u.id, 'username', u.username, 'avatar', u.avatar) as sender,
               CASE WHEN m."replyToId" IS NOT NULL THEN
                 jsonb_build_object(
@@ -521,15 +523,32 @@ router.get('/', apiRateLimiter, asyncHandler(async (req, res) => {
     res.status(200).json({
       success: true,
       data: {
-        messages: messages.reverse().map(m => ({
-          ...m,
-          // FIX: expose both "type" and "messageType" so any client field lookup works
-          type: m.messageType || m.type || 'text',
-          messageType: m.messageType || m.type || 'text',
-          // FIX: expose mediaUrl from metadata so media messages render correctly
-          mediaUrl: m.metadata?.mediaUrl || m.mediaUrl || null,
-          fileUrl:  m.metadata?.mediaUrl || m.fileUrl  || null,
-        })),
+        messages: messages.reverse().map(m => {
+          const rawMediaUrl = m.metadata?.mediaUrl || m.mediaUrl || null;
+          // NEW FEATURE: View Once gating. Once viewed (viewOnceViewedAt set),
+          // strip the media URL from EVERYONE's response including the
+          // viewer — once is once, re-fetching the chat history must not
+          // resurrect access. The sender gets a "viewed" indicator instead
+          // of the URL too, matching WhatsApp (sender can see IF it was
+          // viewed and by whom, but cannot re-open the media either).
+          const isViewOnce = (m.messageType || m.type) === 'view_once';
+          const alreadyViewed = !!m.viewOnceViewedAt;
+          const viewOnceGatedMediaUrl = isViewOnce && alreadyViewed ? null : rawMediaUrl;
+          return {
+            ...m,
+            // FIX: expose both "type" and "messageType" so any client field lookup works
+            type: m.messageType || m.type || 'text',
+            messageType: m.messageType || m.type || 'text',
+            // FIX: expose mediaUrl from metadata so media messages render correctly
+            mediaUrl: viewOnceGatedMediaUrl,
+            fileUrl:  viewOnceGatedMediaUrl,
+            ...(isViewOnce ? {
+              viewOnceViewed: alreadyViewed,
+              viewOnceViewedAt: m.viewOnceViewedAt || null,
+              viewOnceViewedBy: m.viewOnceViewedBy || null,
+            } : {}),
+          };
+        }),
         pagination: { total, page, limit, pages: Math.ceil(total / limit) },
       },
     });
@@ -1034,7 +1053,7 @@ router.get('/:chatId', apiRateLimiter, asyncHandler(async (req, res) => {
       `SELECT m.id, m."chatId", m."senderId", m.content,
               m.type as "messageType", m.reactions, m."isEdited",
               m."editedAt", m."isDeleted", m."createdAt", m."updatedAt",
-              m."replyToId",
+              m."replyToId", m.metadata, m."viewOnceViewedAt", m."viewOnceViewedBy",
               jsonb_build_object('id', u.id, 'username', u.username, 'avatar', u.avatar) as sender,
               CASE WHEN m."replyToId" IS NOT NULL THEN
                 jsonb_build_object(
@@ -1066,7 +1085,24 @@ router.get('/:chatId', apiRateLimiter, asyncHandler(async (req, res) => {
     res.status(200).json({
       status: 'success',
       data: {
-        messages: messages.reverse(),
+        messages: messages.reverse().map(m => {
+          const rawMediaUrl = m.metadata?.mediaUrl || null;
+          // NEW FEATURE: View Once gating — see matching comment in GET / above.
+          const isViewOnce = (m.messageType || m.type) === 'view_once';
+          const alreadyViewed = !!m.viewOnceViewedAt;
+          const viewOnceGatedMediaUrl = isViewOnce && alreadyViewed ? null : rawMediaUrl;
+          return {
+            ...m,
+            type: m.messageType || m.type || 'text',
+            mediaUrl: viewOnceGatedMediaUrl,
+            fileUrl: viewOnceGatedMediaUrl,
+            ...(isViewOnce ? {
+              viewOnceViewed: alreadyViewed,
+              viewOnceViewedAt: m.viewOnceViewedAt || null,
+              viewOnceViewedBy: m.viewOnceViewedBy || null,
+            } : {}),
+          };
+        }),
         pagination: { total, page, limit, pages: Math.ceil(total / limit) },
         chatInfo: { id: chat[0].id, chatType: chat[0].chatType, chatName: chat[0].chatName },
       },
@@ -1106,7 +1142,15 @@ router.post('/:chatId/upload', apiRateLimiter, upload.single('file'), asyncHandl
     }
 
     const caption = req.body.caption ? stripHtmlTags(req.body.caption.substring(0, 500)) : '';
-    const msgType = getMessageTypeFromMime(req.file.mimetype);
+    let msgType = getMessageTypeFromMime(req.file.mimetype);
+
+    // NEW FEATURE: View Once media. Only image/video make sense as view-once
+    // (matching WhatsApp/Signal); audio/file/document uploads ignore the flag.
+    const isViewOnceRequested = req.body.viewOnce === 'true' || req.body.viewOnce === true;
+    const isViewOnceEligible = msgType === 'image' || msgType === 'video';
+    if (isViewOnceRequested && isViewOnceEligible) {
+      msgType = 'view_once';
+    }
 
     // FIX-AUDIT (MSG-BE-004): Wrap INSERT + both UPDATEs in a transaction.
     // Previously these were 3 separate unguarded queries — a crash between
@@ -1134,18 +1178,23 @@ router.post('/:chatId/upload', apiRateLimiter, upload.single('file'), asyncHandl
         absUrl = req.file.location;
       } else {
         const baseUrl = process.env.RENDER_EXTERNAL_URL || process.env.BACKEND_URL || `${req.protocol}://${req.get('host')}`;
-        const subDir  = msgType === 'image' ? 'images' : msgType === 'audio' ? 'audio' : msgType === 'video' ? 'video' : 'files';
+        const subDir  = msgType === 'image' ? 'images' : msgType === 'audio' ? 'audio' : msgType === 'video' ? 'video' : msgType === 'view_once' ? 'view-once' : 'files';
         absUrl = `${baseUrl.replace(/\/+$/, '')}/uploads/${subDir}/${req.file.filename}`;
       }
 
-      // Store mediaUrl in message metadata so GET messages can return it
+      // Store mediaUrl in message metadata so GET messages can return it.
+      // For view-once, also tag the original media type (image/video) since
+      // the GET route gates raw mediaUrl visibility based on viewOnceViewedAt.
       // FIX-AUDIT: removed bogus "lastMessageId" = id reference — Messages has
       // no such column (it belongs to chats); the old UPDATE silently failed
       // every single time and was masked by .catch(() => {}).
+      const metadataPatch = msgType === 'view_once'
+        ? { mediaUrl: absUrl, viewOnceMediaType: getMessageTypeFromMime(req.file.mimetype) }
+        : { mediaUrl: absUrl };
       await sequelize.query(
-        `UPDATE "Messages" SET metadata = jsonb_set(COALESCE(metadata,'{}'), '{mediaUrl}', :url::jsonb)
+        `UPDATE "Messages" SET metadata = COALESCE(metadata,'{}'::jsonb) || :patch::jsonb
          WHERE id = :messageId`,
-        { replacements: { messageId, url: JSON.stringify(absUrl) }, transaction: t }
+        { replacements: { messageId, patch: JSON.stringify(metadataPatch) }, transaction: t }
       );
 
       await sequelize.query(
@@ -1159,7 +1208,7 @@ router.post('/:chatId/upload', apiRateLimiter, upload.single('file'), asyncHandl
         status: 'success',
         message: 'File uploaded successfully',
         data: {
-          message: { id: messageId, chatId, senderId: req.user.id, content: caption, type: msgType, mediaUrl: absUrl },
+          message: { id: messageId, chatId, senderId: req.user.id, content: caption, type: msgType, mediaUrl: absUrl, viewOnce: msgType === 'view_once' },
           fileUrl: absUrl,
           url: absUrl,
           mediaUrl: absUrl,
@@ -1633,6 +1682,123 @@ router.delete('/:messageId', apiRateLimiter, asyncHandler(async (req, res) => {
 // ============================================================================
 // POST /api/messages/:messageId/react - Add or remove a reaction
 // ============================================================================
+// ============================================================================
+// NEW FEATURE: View Once media
+// POST /api/messages/:messageId/view-once/view — mark a view-once message as
+// viewed (consuming it) and delete the underlying media file from storage.
+// ============================================================================
+router.post('/:messageId/view-once/view', apiRateLimiter, asyncHandler(async (req, res) => {
+  try {
+    const messageId = safeInt(req.params.messageId);
+    if (!messageId) return res.status(400).json({ success: false, message: 'Invalid messageId' });
+
+    const sequelize = req.app.locals.db;
+    const userId = req.user.id;
+
+    const msgRows = await sequelize.query(
+      `SELECT id, "chatId", "senderId", type, metadata, "viewOnceViewedAt", "viewOnceViewedBy"
+       FROM "Messages" WHERE id = :messageId AND "isDeleted" = false LIMIT 1`,
+      { replacements: { messageId }, type: sequelize.QueryTypes.SELECT }
+    );
+    if (!msgRows || msgRows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Message not found' });
+    }
+    const msg = msgRows[0];
+
+    if (msg.type !== 'view_once') {
+      return res.status(400).json({ success: false, message: 'This message is not a view-once message' });
+    }
+
+    const isParticipant = await sequelize.query(
+      `SELECT 1 FROM chat_participants WHERE "chatId" = :chatId AND "userId" = :userId LIMIT 1`,
+      { replacements: { chatId: msg.chatId, userId }, type: sequelize.QueryTypes.SELECT }
+    );
+    if (!isParticipant || isParticipant.length === 0) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+
+    // Senders never "view" their own view-once message through this endpoint —
+    // they already have it; this prevents the sender accidentally consuming
+    // their own send by previewing their own chat history.
+    if (msg.senderId === userId) {
+      return res.status(400).json({ success: false, message: 'Senders cannot consume their own view-once message' });
+    }
+
+    // Already viewed by someone (first-viewer-wins, matches WhatsApp group
+    // behavior where the first person to open it uses up the single view).
+    if (msg.viewOnceViewedAt) {
+      return res.status(410).json({
+        success: false,
+        message: 'This media has already been viewed and is no longer available',
+        data: { viewedAt: msg.viewOnceViewedAt, viewedBy: msg.viewOnceViewedBy },
+      });
+    }
+
+    const mediaUrl = msg.metadata?.mediaUrl || null;
+    const mediaType = msg.metadata?.viewOnceMediaType || 'image';
+
+    // Mark as viewed FIRST (atomically, with a WHERE guard on viewOnceViewedAt
+    // IS NULL) so two simultaneous view requests from a race can't both
+    // "win" — only one UPDATE will actually affect a row.
+    const [, updateMeta] = await sequelize.query(
+      `UPDATE "Messages" SET "viewOnceViewedAt" = NOW(), "viewOnceViewedBy" = :userId, "updatedAt" = NOW()
+       WHERE id = :messageId AND "viewOnceViewedAt" IS NULL`,
+      { replacements: { messageId, userId }, type: sequelize.QueryTypes.UPDATE }
+    );
+    const rowsAffected = updateMeta?.rowCount ?? updateMeta;
+    if (!rowsAffected) {
+      // Someone else won the race between our SELECT and this UPDATE.
+      return res.status(410).json({ success: false, message: 'This media has already been viewed and is no longer available' });
+    }
+
+    // Delete the underlying media file from storage — once viewed, the file
+    // itself must not remain retrievable even via a direct/cached URL.
+    if (mediaUrl) {
+      try {
+        if (_storageBackend === 's3') {
+          const s3Key = mediaUrl.split('.amazonaws.com/')[1] || mediaUrl.split('/').slice(-2).join('/');
+          if (s3Key && _s3Client) {
+            const { DeleteObjectCommand } = require('@aws-sdk/client-s3');
+            await _s3Client.send(new DeleteObjectCommand({ Bucket: process.env.AWS_S3_BUCKET, Key: s3Key }));
+          }
+        } else {
+          const localPath = path.join(__dirname, '..', '..', 'uploads', mediaUrl.split('/uploads/')[1] || '');
+          if (mediaUrl.includes('/uploads/')) await fsSync.promises.unlink(localPath).catch(() => {});
+        }
+      } catch (deleteErr) {
+        console.warn('[messages.js] view-once media delete failed (non-fatal):', deleteErr.message);
+      }
+    }
+
+    // Strip mediaUrl from metadata now that the file is gone, so even a
+    // direct re-read of this row never exposes a dead/stale URL.
+    await sequelize.query(
+      `UPDATE "Messages" SET metadata = metadata - 'mediaUrl' WHERE id = :messageId`,
+      { replacements: { messageId } }
+    ).catch(() => {});
+
+    const viewedAt = new Date().toISOString();
+
+    // Broadcast live so the sender's open chat window shows "viewed" status
+    // immediately, and any other open client stops offering the media.
+    try {
+      const wsService = require('../services/webSocketService');
+      wsService.broadcastToChat(msg.chatId, 'message:view-once-viewed', {
+        messageId, chatId: msg.chatId, viewedBy: userId, viewedAt,
+      }, []);
+    } catch (_) { /* non-fatal */ }
+
+    res.json({
+      success: true,
+      message: 'Media unlocked',
+      data: { messageId, mediaUrl, mediaType, viewedAt, viewedBy: userId },
+    });
+  } catch (error) {
+    console.error('[messages.js] view-once view error:', error);
+    res.status(500).json({ success: false, message: 'Failed to view media' });
+  }
+}));
+
 router.post('/:messageId/react', apiRateLimiter, asyncHandler(async (req, res) => {
   try {
     const messageId = safeInt(req.params.messageId);
