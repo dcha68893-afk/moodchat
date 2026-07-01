@@ -302,6 +302,21 @@ class CallSignalingService extends EventEmitter {
         const key = `initiate:${userId}:${targetUserId}`;
         if (this._dedup.isDuplicate(key)) {
           this._logger.warn('[CallSignaling] Duplicate call:initiate suppressed');
+          // C-09 FIX: previously this silently dropped the event with no
+          // feedback, so the caller's UI stayed stuck on the outgoing screen
+          // even though the call was refused. A legitimate "call back
+          // immediately after they declined" within the 5-second window hits
+          // this branch and the caller sees nothing. Now we emit
+          // 'call:dedup_rejected' back to the caller's socket so the frontend
+          // can show "Please wait a moment before calling again" and reset
+          // the outgoing call UI to idle — the same way a normal rejection
+          // would.
+          socket.emit('call:dedup_rejected', {
+            targetUserId,
+            reason: 'rate_limited',
+            retryAfterMs: this._dedup._windowMs,
+            timestamp: Date.now(),
+          });
           return;
         }
 
@@ -519,6 +534,100 @@ class CallSignalingService extends EventEmitter {
       if (!callId) return;
       socket.to(`call:${callId}`).emit('group:call:participant_update', {
         ...data, userId, timestamp: Date.now(),
+      });
+    });
+
+    // ── Host moderation: mute participant ────────────────────────────────────
+    // H-02 FIX: these handlers were completely missing. The frontend had
+    // 'group:call:mute_participant' and 'group:call:remove_participant' wired
+    // to socket.emit() and registered in the event list (Round 3), but the
+    // server never handled them — so the events arrived and were silently
+    // dropped. Added here with isHost() authorization so only the call creator
+    // can mute or remove other participants.
+    socket.off('group:call:mute_participant').on('group:call:mute_participant', data => {
+      const { callId, targetUserId: targetId, muted } = data || {};
+      if (!callId || !targetId) return;
+
+      // Authorization: only the host may mute others
+      if (!this._rooms.isHost(callId, userId)) {
+        socket.emit('group:call:error', {
+          callId,
+          code: 'NOT_HOST',
+          message: 'Only the call host can mute participants',
+          timestamp: Date.now(),
+        });
+        this._logger.warn(`[CallSignaling] Non-host uid=${userId} tried to mute uid=${targetId} in call ${callId}`);
+        return;
+      }
+
+      // Relay the mute command to the target participant via their user room
+      this._wsService.sendToUser(targetId, 'group:call:muted_by_host', {
+        callId,
+        muted: !!muted,
+        by: userId,
+        timestamp: Date.now(),
+      }).catch(() => {});
+
+      // Notify all other participants so their UI reflects the change
+      socket.to(`call:${callId}`).emit('group:call:participant_update', {
+        callId,
+        userId: targetId,
+        muted: !!muted,
+        mutedBy: userId,
+        timestamp: Date.now(),
+      });
+    });
+
+    // ── Host moderation: remove participant ──────────────────────────────────
+    socket.off('group:call:remove_participant').on('group:call:remove_participant', data => {
+      const { callId, targetUserId: targetId } = data || {};
+      if (!callId || !targetId) return;
+
+      // Authorization: only the host may remove others
+      if (!this._rooms.isHost(callId, userId)) {
+        socket.emit('group:call:error', {
+          callId,
+          code: 'NOT_HOST',
+          message: 'Only the call host can remove participants',
+          timestamp: Date.now(),
+        });
+        this._logger.warn(`[CallSignaling] Non-host uid=${userId} tried to remove uid=${targetId} from call ${callId}`);
+        return;
+      }
+
+      // Remove from room state so they don't receive further call events
+      this._rooms.removeParticipant(callId, targetId);
+
+      // Tell the target they've been removed
+      this._wsService.sendToUser(targetId, 'group:call:removed_by_host', {
+        callId,
+        by: userId,
+        timestamp: Date.now(),
+      }).catch(() => {});
+
+      // Notify remaining participants
+      this._io.to(`call:${callId}`).emit('group:call:participant_left', {
+        callId,
+        userId: targetId,
+        reason: 'removed_by_host',
+        timestamp: Date.now(),
+      });
+    });
+
+    // ── Hand raise / lower ───────────────────────────────────────────────────
+    socket.off('group:call:hand_raised').on('group:call:hand_raised', data => {
+      const { callId } = data || {};
+      if (!callId) return;
+      socket.to(`call:${callId}`).emit('group:call:hand_raised', {
+        callId, userId, timestamp: Date.now(),
+      });
+    });
+
+    socket.off('group:call:lower_hand').on('group:call:lower_hand', data => {
+      const { callId } = data || {};
+      if (!callId) return;
+      socket.to(`call:${callId}`).emit('group:call:hand_lowered', {
+        callId, userId, timestamp: Date.now(),
       });
     });
 

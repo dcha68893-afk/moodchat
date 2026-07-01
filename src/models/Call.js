@@ -193,7 +193,21 @@ module.exports = (sequelize, DataTypes) => {
         { fields: ['receiverId'] },
         { fields: ['status'] },
         { fields: ['createdAt'] },
-        { fields: ['receiverId', 'status'], name: 'calls_receiver_status_idx' }
+        { fields: ['receiverId', 'status'], name: 'calls_receiver_status_idx' },
+        // H-06 FIX: _cleanupTimedOut() runs WHERE status IN (...) AND
+        // createdAt < ? on every call — full table scan with only
+        // single-column indexes. A composite index makes this O(log n)
+        // regardless of table size. Second composite covers the history
+        // query: WHERE participants @> [userId] AND endedAt IS NOT NULL
+        // ORDER BY endedAt DESC — the GIN index makes the array contains
+        // check fast; the (endedAt) index covers the sort.
+        { fields: ['status', 'createdAt'], name: 'calls_status_created_idx' },
+        { fields: ['status', 'endedAt'],   name: 'calls_status_ended_idx' },
+        {
+          fields: ['participants'],
+          using:  'gin',
+          name:   'calls_participants_gin_idx',
+        },
       ],
     }
   );
