@@ -469,8 +469,19 @@ class CallSignalingService extends EventEmitter {
     // ── Group call events ────────────────────────────────────────────────────
 
     socket.off('group:call:join').on('group:call:join', async data => {
-      const { groupId, callId } = data || {};
-      if (!groupId || !callId) return;
+      const { callId } = data || {};
+      // FIX-ADHOC-GROUP-CALL: this previously required BOTH groupId and
+      // callId and silently no-op'd otherwise. But the REST ad-hoc
+      // group-call flow (POST /calls with isGroupCall:true + participantIds
+      // — see callController.js / callService.initiateGroupCall) creates a
+      // group call from a plain list of selected contacts with no chat
+      // 'groupId' at all; it only ever has a callId. Requiring groupId made
+      // it impossible for that flow's invited participants to ever join the
+      // call room — 'group:call:join' would just silently return. groupId
+      // is now optional and only used for display/analytics, not as a
+      // join gate; callId is the actual room key.
+      const groupId = data?.groupId || null;
+      if (!callId) return;
 
       if (!this._rooms.has(callId)) {
         this._rooms.create(callId, data.callType || 'group', userId);
