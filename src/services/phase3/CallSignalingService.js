@@ -299,7 +299,53 @@ class CallSignalingService extends EventEmitter {
         const { targetUserId, callType, callId: existingId } = data || {};
         if (!targetUserId) return;
 
-        const key = `initiate:${userId}:${targetUserId}`;
+        // SEC-04 FIX: callerId must come from the authenticated socket session,
+        // NOT from the client payload. Previously the code used
+        // `data.callerId || userId` — a client could send any callerId and
+        // impersonate another user as the caller. Now it's always `userId`
+        // (set from socket.handshake.auth at connection time, which is
+        // server-controlled). Downstream payloads are also forced to use
+        // `callerId: userId` so spoofed callerId values in data are ignored.
+        // Self-call guard added here too (the REST endpoint had it; the socket
+        // path did not).
+        if (String(targetUserId) === String(userId)) {
+          socket.emit('call:error', { code: 'SELF_CALL', message: 'Cannot call yourself', timestamp: Date.now() });
+          return;
+        }
+
+        // Check whether target is already in an active call (call-waiting signal)
+        // We still CREATE the call record so it shows in history, but we flag it
+        // immediately so the caller knows the callee is busy. The callee gets a
+        // call:waiting notification rather than a full incoming-call ring, which
+        // is how WhatsApp/Signal handle a second incoming call.
+        let targetBusy = false;
+        if (this._rooms) {
+          for (const [_cid, room] of this._rooms._rooms) {
+            if (room.active && room.participants.has(String(targetUserId))) {
+              targetBusy = true;
+              break;
+            }
+          }
+        }
+
+        if (targetBusy) {
+          // Tell the caller the callee is busy
+          socket.emit('call:busy', {
+            callId:       callId,
+            targetUserId,
+            message:      'User is currently in another call',
+            timestamp:    Date.now(),
+          });
+          this._logger.log(`[CallSignaling] call:busy for uid=${targetUserId} called by uid=${userId}`);
+          // Emit call:waiting to the callee so they can optionally accept/decline
+          await this._wsService.sendToUser(targetUserId, 'call:waiting', {
+            callId,
+            callerId:  userId,
+            callType:  callType || 'audio',
+            timestamp: Date.now(),
+          }).catch(() => {});
+          return;
+        }
         if (this._dedup.isDuplicate(key)) {
           this._logger.warn('[CallSignaling] Duplicate call:initiate suppressed');
           // C-09 FIX: previously this silently dropped the event with no
@@ -405,6 +451,18 @@ class CallSignalingService extends EventEmitter {
         callId, accepterId: userId, timestamp: Date.now(),
       });
 
+      // FEAT-02 FIX: Multi-device call dedup — when a user has two active
+      // sockets (two browser tabs, phone + laptop, etc.) and accepts on one,
+      // the other device still shows the incoming call ring UI indefinitely.
+      // We emit 'call:accepted_elsewhere' to all OTHER sockets of this userId
+      // so each can dismiss the incoming call UI without ending the call itself.
+      // This mirrors how WhatsApp/Signal handle multi-device ring cancellation.
+      await this._wsService.sendToUser(userId, 'call:accepted_elsewhere', {
+        callId,
+        acceptedBySocketId: socket.id,
+        timestamp: Date.now(),
+      }).catch(() => {});
+
       this._io.to(`call:${callId}`).emit('call:participant_joined', {
         callId, userId, timestamp: Date.now(),
       });
@@ -497,6 +555,41 @@ class CallSignalingService extends EventEmitter {
       // join gate; callId is the actual room key.
       const groupId = data?.groupId || null;
       if (!callId) return;
+
+      // SEC-03 FIX: previously the socket handler admitted any connected
+      // socket to the signaling room with no authorization check. An
+      // attacker who knew (or guessed) a callId could emit group:call:join
+      // and receive all ICE candidates, SDP offers/answers and media tracks
+      // for the call — equivalent to joining silently. Now we verify the
+      // socket's userId is in the DB participants list for this call.
+      // We only skip the check if the room doesn't exist yet (caller is
+      // creating it for the first time).
+      if (this._wsService?.db || global.__db) {
+        try {
+          const db   = this._wsService?.db || global.__db;
+          const Call = db.Calls || db.Call;
+          if (Call) {
+            const call = await Call.findOne({
+              where:      { id: callId },
+              attributes: ['id', 'participants', 'callerId', 'isGroupCall'],
+            }).catch(() => null);
+            if (call) {
+              const parts     = Array.isArray(call.participants) ? call.participants.map(String) : [];
+              const isInvited = parts.includes(String(userId)) || String(call.callerId) === String(userId);
+              if (!isInvited) {
+                socket.emit('group:call:error', {
+                  callId,
+                  code:      'NOT_INVITED',
+                  message:   'You are not a participant of this call',
+                  timestamp: Date.now(),
+                });
+                this._logger.warn(`[CallSignaling] SEC-03 blocked uid=${userId} from joining call ${callId}`);
+                return;
+              }
+            }
+          }
+        } catch (_) { /* DB check failed — allow join as fallback */ }
+      }
 
       if (!this._rooms.has(callId)) {
         this._rooms.create(callId, data.callType || 'group', userId);

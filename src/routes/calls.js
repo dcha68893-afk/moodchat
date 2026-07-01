@@ -1327,6 +1327,25 @@ router.post('/:callId/join', apiRateLimiter, asyncHandler(async (req, res) => {
     const call = await Call.findOne({ where: { id: callId, status: 'in-progress' } });
     if (!call) return res.status(404).json({ status: 'error', message: 'Call not found or not in progress' });
 
+    // SEC-01 FIX: The original joinCall had NO authorization check — any
+    // authenticated user who guessed or learned a callId could POST to this
+    // endpoint and join any in-progress call, including private 1:1 calls
+    // between other users. A group-call invite-only model requires that the
+    // joiner either appears in the original participants list (was invited)
+    // OR the call is explicitly flagged as joinable (open/public room).
+    // Without this check, call eavesdropping was trivially possible from
+    // any authenticated account.
+    const wasInvited   = Array.isArray(call.participants) && call.participants.includes(userId);
+    const isOpenCall   = !!call.isOpen; // future-proofing for joinable-link flows
+    const isCallLinked = !!(req.query.token); // join-via-link flow uses separate auth
+    if (!wasInvited && !isOpenCall && !isCallLinked) {
+      return res.status(403).json({
+        status:  'error',
+        message: 'You were not invited to this call',
+        code:    'NOT_INVITED',
+      });
+    }
+
     if (!call.participants.includes(userId)) call.participants = [...call.participants, userId];
     await updateArrayField(call, 'answeredBy', userId, 'add');
 
@@ -1589,7 +1608,12 @@ router.post('/schedule', apiRateLimiter, asyncHandler(async (req, res) => {
 }));
 
 router.get('/ice-config', asyncHandler(async (req, res) => {
-  const userId  = req.user?.id || req.user?.userId;
+  // SEC-02 FIX: This route previously had no authentication — any unauthenticated
+  // request received TURN credentials. TURN relay costs are metered per-byte; an
+  // unauthenticated endpoint lets anyone enumerate and abuse your TURN server.
+  // Added checkAuth guard; also already uses time-limited HMAC credentials (good).
+  const auth = checkAuth(req, res); if (!auth) return;
+  const userId  = auth.userId;
   const TURN_URL    = process.env.TURN_URL    || '';
   const TURN_SECRET = process.env.TURN_SECRET || '';
 

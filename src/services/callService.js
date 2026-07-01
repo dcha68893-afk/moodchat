@@ -114,7 +114,7 @@ class CallService {
     if (!['audio', 'video'].includes(callType)) throw new Error('Invalid call type');
     
     // ── FORENSIC LOG: CALL_START ──────────────────────────────────────────────
-    console.log(`[FORENSIC] CALL_START | callerId=${callerId} | calleeId=${calleeId} | type=${callType} | ts=${Date.now()}`);
+    console.log(`[CALL] CALL_START | callerId=${callerId} | calleeId=[REDACTED] | type=${callType} | ts=${Date.now()}`);
     
     // CRITICAL SECURITY: Prevent self-calls
     if (callerId === calleeId) {
@@ -207,12 +207,12 @@ class CallService {
     const svc = ws();
     if (svc) {
       // ── FORENSIC LOG: CALL_SIGNAL_SENT ──────────────────────────────────────
-      console.log(`[FORENSIC] CALL_SIGNAL_SENT | callId=${call.id} | callerId=${callerId} | calleeId=${calleeId} | ts=${Date.now()}`);
+      console.log(`[CALL] SIGNAL_SENT | callId=${call.id} | ts=${Date.now()}`);
       // FIX: emit only 2 events — canonical colon-style (primary) + one legacy underscore (backward compat)
       // Triple-emit was causing double-ring and black screen on 2nd call.
       await svc.sendToUser(parseInt(calleeId), 'call:incoming',  callPayload);
       await svc.sendToUser(parseInt(calleeId), 'call_incoming',  callPayload);
-      console.log(`[FORENSIC] CALL_SIGNAL_SENT complete | calleeId=${calleeId} | ts=${Date.now()}`);
+      console.log(`[CALL] SIGNAL_SENT_COMPLETE | ts=${Date.now()}`);
       // Confirmation to caller
       await svc.sendToUser(parseInt(callerId), 'call:initiated', callPayload);
       await svc.sendToUser(parseInt(callerId), 'call_initiated', callPayload);
@@ -258,7 +258,7 @@ class CallService {
     if (sdpAnswer) call.sdpAnswer = sdpAnswer;
 
     // ── FORENSIC LOG: WEBRTC_CONNECTED ───────────────────────────────────────
-    console.log(`[FORENSIC] WEBRTC_CONNECTED | callId=${callId} | answeredBy=${userId} | sdpAnswer=${sdpAnswer?'present':'none'} | ts=${Date.now()}`);
+    console.log(`[CALL] WEBRTC_CONNECTED | callId=${callId} | sdpAnswer=${sdpAnswer?'present':'none'} | ts=${Date.now()}`);
     await call.save();
 
     // FIX 7/8: Re-fetch with user associations so callerName/calleeName are available
