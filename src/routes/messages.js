@@ -620,10 +620,13 @@ router.post('/', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
       }
 
       const existing = await sequelize.query(
+        // BUG-002 FIX: Added c.isActive = true filter. Without it, a soft-deleted
+        // or inactive direct chat (isActive=false) could be returned here, causing
+        // all new messages to route into a dead conversation that GET /chats excludes.
         `SELECT c.id FROM chats c
          JOIN chat_participants cp1 ON cp1."chatId" = c.id AND cp1."userId" = :senderId
          JOIN chat_participants cp2 ON cp2."chatId" = c.id AND cp2."userId" = :receiverId
-         WHERE c.type = 'direct' LIMIT 1`,
+         WHERE c.type = 'direct' AND c."isActive" = true LIMIT 1`,
         { replacements: { senderId, receiverId: safeReceiverId }, type: sequelize.QueryTypes.SELECT }
       );
 
@@ -631,8 +634,12 @@ router.post('/', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
         chatId = existing[0].id;
       } else {
         const newChat = await sequelize.query(
-          `INSERT INTO chats (type, "createdBy", "createdAt", "updatedAt")
-           VALUES ('direct', :senderId, NOW(), NOW()) RETURNING id`,
+          // BUG-001 FIX: Explicitly set isActive=true and isArchived=false.
+          // Previously omitted — DB column had no DEFAULT so they stored as NULL,
+          // and GET /chats filters WHERE "isArchived" = false (NULL != false in SQL),
+          // making non-friend chats invisible in the sidebar immediately after creation.
+          `INSERT INTO chats (type, "createdBy", "isActive", "isArchived", "createdAt", "updatedAt")
+           VALUES ('direct', :senderId, true, false, NOW(), NOW()) RETURNING id`,
           { replacements: { senderId }, type: sequelize.QueryTypes.INSERT }
         );
         chatId = newChat[0][0].id;
