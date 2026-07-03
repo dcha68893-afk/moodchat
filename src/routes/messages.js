@@ -738,8 +738,12 @@ router.post('/', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
 
     try {
       const msgResult = await sequelize.query(
-        `INSERT INTO "Messages" ("chatId","senderId",content,type,reactions,"replyToId",metadata,"expiresAt","sentAt","deliveredAt","createdAt","updatedAt")
-         VALUES (:chatId,:senderId,:content,:type,'{}',:replyToId,:metadata,:expiresAt,NOW(),NOW(),NOW(),NOW())
+        // BUG-012 FIX: Explicitly include isRead, isDeleted, isEdited boolean fields.
+        // Without these, raw INSERT leaves NULLs at DB level (model defaultValues only
+        // apply to ORM inserts, not raw SQL). GET /chats counts WHERE isRead = false —
+        // NULL != false — so unread counts were always 0 for all new messages.
+        `INSERT INTO "Messages" ("chatId","senderId",content,type,reactions,"replyToId",metadata,"expiresAt","isRead","isDeleted","isEdited","sentAt","deliveredAt","createdAt","updatedAt")
+         VALUES (:chatId,:senderId,:content,:type,'{}',:replyToId,:metadata,:expiresAt,false,false,false,NOW(),NOW(),NOW(),NOW())
          RETURNING id,"chatId","senderId",content,type,"replyToId","createdAt"`,
         {
           replacements: { chatId, senderId, content: safeContent, type: messageType, replyToId: safeReplyToId, metadata: JSON.stringify(msgMetadata), expiresAt: _msgExpiresAt },
@@ -784,16 +788,25 @@ router.post('/', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
     }
 
     const populatedMessage = {
-      id: messageId,
-      localId: clientLocalId || null,
+      id:          messageId,
+      localId:     clientLocalId || null,
       chatId,
       senderId,
-      content: safeContent,
-      sentAt: new Date().toISOString(),
+      content:     safeContent,
+      type:        messageType,
+      reactions:   {},
+      replyToId:   safeReplyToId || null,
+      replyTo:     replyToData || null,
+      metadata:    msgMetadata || {},
+      status:      'sent',
+      isEdited:    false,
+      isDeleted:   false,
+      isRead:      false,
+      sentAt:      new Date().toISOString(),
       deliveredAt: new Date().toISOString(),
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      sender: senderRows[0] || null,
+      createdAt:   new Date().toISOString(),
+      updatedAt:   new Date().toISOString(),
+      sender:      senderRows[0] || null,
     };
 
     // ── REALTIME DELIVERY ─────────────────────────────────────────────────────
@@ -940,15 +953,24 @@ router.post('/', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
           console.warn(`[messages.js] ⚠️ sendToUser: ${_delivered}/${deliveryResults.length} delivered, ${_failed} failed for chatId=${chatId}`);
         }
 
-        // FIX-AUDIT: sendToUser() above already delivered 'message:new' to every
-        // recipient's user:X / user_X rooms. broadcastToChat(chatId, event, payload, ids)
-        // ALSO re-emits to those same user:X rooms when given participantIds — causing
-        // every message to arrive twice client-side. Pass [] so broadcastToChat only
-        // emits to the chat:<id> room (catches sockets that joined the chat room
-        // directly) without re-emitting to the per-user rooms already covered above.
-        if (typeof wsService.broadcastToChat === 'function') {
-          wsService.broadcastToChat(chatId, 'message:new', populatedMessage, []);
-        }
+        // FIX-ROOT-CAUSE-DUPLICATE: Removed broadcastToChat(chatId, 'message:new').
+        // Reason: broadcastToChat emits to chat:<chatId> and chat_<chatId> rooms.
+        // The sender's socket joins ALL their chat rooms on authentication (see
+        // webSocketService.js _joinUserChatRooms). This means the sender receives
+        // message:new from the room broadcast even though sendToUser() above only
+        // targeted recipientIds (excluding sender). Since the socket payload may
+        // have localId=null, addMessage() can't match it to the existing optimistic
+        // copy — it appends a second bubble, creating the visible duplicate.
+        //
+        // Recipients are fully covered by sendToUser() above. The broadcastToChat
+        // was a safety net for sockets that joined via chat room but missed the
+        // user room — but those are the same sockets, and we emit to both user:X
+        // and user_X variants in sendToUser, so all reachable sockets are covered.
+        //
+        // If (in future) you need chat-room delivery for non-participant sockets
+        // (e.g. observers), exclude the sender explicitly:
+        //   io.to(`chat:${chatId}`).except(senderSocketId).emit('message:new', ...)
+        // But that requires passing senderSocketId through the delivery path.
 
         // FIX-010: Single canonical 'message:sent' event — sendToUser() covers all room variants
         await wsService.sendToUser(senderId, 'message:sent', {
@@ -1167,8 +1189,8 @@ router.post('/:chatId/upload', apiRateLimiter, upload.single('file'), asyncHandl
     let messageId;
     try {
       const msgResult = await sequelize.query(
-        `INSERT INTO "Messages" ("chatId","senderId",content,type,reactions,"sentAt","deliveredAt","createdAt","updatedAt")
-         VALUES (:chatId,:senderId,:content,:type,'{}',NOW(),NOW(),NOW(),NOW())
+        `INSERT INTO "Messages" ("chatId","senderId",content,type,reactions,"isRead","isDeleted","isEdited","sentAt","deliveredAt","createdAt","updatedAt")
+         VALUES (:chatId,:senderId,:content,:type,'{}',false,false,false,NOW(),NOW(),NOW(),NOW())
          RETURNING id,"chatId","senderId",content,type,"createdAt"`,
         {
           replacements: { chatId, senderId: req.user.id, content: caption, type: msgType },
@@ -1330,8 +1352,8 @@ router.post('/bulk', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) 
         if (!isParticipant || isParticipant.length === 0) continue;
 
         const msgResult = await sequelize.query(
-          `INSERT INTO "Messages" ("chatId","senderId",content,type,reactions,"sentAt","deliveredAt","createdAt","updatedAt",metadata)
-           VALUES (:chatId,:senderId,:content,:type,'{}',NOW(),NOW(),NOW(),NOW(),:metadata)
+          `INSERT INTO "Messages" ("chatId","senderId",content,type,reactions,"isRead","isDeleted","isEdited","sentAt","deliveredAt","createdAt","updatedAt",metadata)
+           VALUES (:chatId,:senderId,:content,:type,'{}',false,false,false,NOW(),NOW(),NOW(),NOW(),:metadata)
            RETURNING id,"chatId","senderId",content,type,"createdAt"`,
           {
             replacements: {
@@ -1967,8 +1989,8 @@ router.post('/:messageId/forward', apiRateLimiter, asyncHandler(async (req, res)
       if (!isParticipant || isParticipant.length === 0) continue;
 
       const result = await sequelize.query(
-        `INSERT INTO "Messages" ("chatId","senderId",content,type,reactions,"sentAt","deliveredAt","createdAt","updatedAt")
-         VALUES (:chatId,:senderId,:content,:type,'{}',NOW(),NOW(),NOW(),NOW())
+        `INSERT INTO "Messages" ("chatId","senderId",content,type,reactions,"isRead","isDeleted","isEdited","sentAt","deliveredAt","createdAt","updatedAt")
+         VALUES (:chatId,:senderId,:content,:type,'{}',false,false,false,NOW(),NOW(),NOW(),NOW())
          RETURNING id,"chatId","senderId",content,type,"createdAt"`,
         {
           replacements: { chatId: targetChatId, senderId, content: original.content, type: original.type },
