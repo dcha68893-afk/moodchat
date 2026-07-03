@@ -748,6 +748,37 @@ class CallSignalingService extends EventEmitter {
 
     // ── Disconnect cleanup ───────────────────────────────────────────────────
 
+
+    // ── Call heartbeat ───────────────────────────────────────────────────────
+    socket.off('call:heartbeat').on('call:heartbeat', data => {
+      const { callId } = data || {};
+      if (!callId) return;
+      if (this._rooms.isParticipant(callId, userId)) {
+        socket.emit('call:heartbeat_ack', { callId, ts: Date.now() });
+        const room = this._rooms.get(callId);
+        if (room) { const p = room.participants.get(String(userId)); if (p) p.lastHeartbeat = Date.now(); }
+      }
+    });
+
+    // ── Presence ─────────────────────────────────────────────────────────────
+    socket.off('call:presence').on('call:presence', async data => {
+      const { targetUserId: target, status } = data || {};
+      if (!target || !status) return;
+      await this._wsService.sendToUser(target, 'call:presence_update', {
+        fromUserId: userId, status, timestamp: Date.now(),
+      }).catch(() => {});
+    });
+
+    // ── Offline recovery resync ───────────────────────────────────────────────
+    socket.off('call:resync').on('call:resync', data => {
+      const { callId } = data || {};
+      if (!callId || !this._rooms.isParticipant(callId, userId)) return;
+      socket.emit('call:resync_response', {
+        callId, participants: this._rooms.getParticipants(callId),
+        roomState: { active: this._rooms.get(callId)?.active }, timestamp: Date.now(),
+      });
+    });
+
     socket.on('disconnect', () => {
       // Find any calls this user was in and notify participants
       for (const [callId, room] of this._rooms._rooms) {
