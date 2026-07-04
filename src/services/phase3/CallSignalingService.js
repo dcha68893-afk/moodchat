@@ -749,7 +749,52 @@ class CallSignalingService extends EventEmitter {
     // ── Disconnect cleanup ───────────────────────────────────────────────────
 
 
-    // ── Call heartbeat ───────────────────────────────────────────────────────
+    // ── In-call chat ─────────────────────────────────────────────────────────
+    // Relay chat messages to all other participants in the call.
+    // FIX: this event was emitted by calls-core.js sendChatMessage() but had
+    // no server handler — messages were silently dropped and never reached
+    // any other participant. Added relay here via the call room.
+    socket.off('call:chat_message').on('call:chat_message', data => {
+      const { callId, message, timestamp, senderId } = data || {};
+      if (!callId || !message) return;
+      if (!this._rooms.isParticipant(callId, userId)) {
+        socket.emit('call:error', { code: 'NOT_IN_CALL', callId });
+        return;
+      }
+      const payload = {
+        callId,
+        message:   String(message).slice(0, 2000), // 2k char limit
+        senderId:  userId, // always use server-authoritative userId, ignore client senderId
+        timestamp: timestamp || Date.now(),
+      };
+      // Broadcast to all other participants in the call
+      this._io.to(`call:${callId}`).except(socket.id).emit('call:chat_message', payload);
+      // Echo back to sender with server timestamp for ordering
+      socket.emit('call:chat_message_ack', { ...payload, ack: true });
+      this._logger.log(`[CallSignaling] Chat in call ${callId} from uid=${userId}`);
+    });
+
+    // ── Screen share notification ─────────────────────────────────────────────
+    // Notify all other participants that someone started or stopped screen sharing.
+    // FIX: screen share track was sent via WebRTC (replaceTrack) but remote
+    // participants had no way to know it was a screen share vs a camera — they
+    // needed to switch their UI from avatar view to full-screen display.
+    socket.off('call:screen_share_started').on('call:screen_share_started', data => {
+      const { callId } = data || {};
+      if (!callId || !this._rooms.isParticipant(callId, userId)) return;
+      this._io.to(`call:${callId}`).except(socket.id).emit('call:screen_share_started', {
+        callId, userId, timestamp: Date.now(),
+      });
+      this._logger.log(`[CallSignaling] Screen share started by uid=${userId} in call ${callId}`);
+    });
+
+    socket.off('call:screen_share_stopped').on('call:screen_share_stopped', data => {
+      const { callId } = data || {};
+      if (!callId || !this._rooms.isParticipant(callId, userId)) return;
+      this._io.to(`call:${callId}`).except(socket.id).emit('call:screen_share_stopped', {
+        callId, userId, timestamp: Date.now(),
+      });
+    });
     socket.off('call:heartbeat').on('call:heartbeat', data => {
       const { callId } = data || {};
       if (!callId) return;
