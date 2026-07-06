@@ -1,3 +1,4 @@
+const _slog = (...a) => { if (process.env.DEBUG_SERVER) _slog(...a); };
 ﻿// src/routes/auth.js - CORRECTED VERSION
 require('dotenv').config();
 const express = require('express');
@@ -36,11 +37,11 @@ const { authenticateToken } = require('../middleware/auth');
 // avoiding inconsistent verification if JWT_SECRET and JWT_ACCESS_SECRET differ.
 const JWT_SECRET = process.env.JWT_ACCESS_SECRET || process.env.JWT_SECRET;
 
-console.log('✅ AUTH ROUTER LOADED - FIXED VERSION');
+_slog('✅ AUTH ROUTER LOADED - FIXED VERSION');
 
 // REGISTER ENDPOINT
 router.post('/register', asyncHandler(async (req, res) => {
-    console.log('📝 REGISTER called');
+    _slog('📝 REGISTER called');
     const { email, username, password, name, acceptPrivacyPolicy } = req.body;
 
     // Validate required fields
@@ -137,7 +138,7 @@ router.post('/register', asyncHandler(async (req, res) => {
             ipAddress: req.ip || null
         });
 
-        console.log('✅ User registered:', newUser.id, newUser.username);
+        _slog('✅ User registered:', newUser.id, newUser.username);
         // P3 FIX (Forensic Audit): seed password history with the initial password
         passwordHistoryService.recordPasswordHash(newUser.id, hashedPassword)
             .catch(e => console.warn('[Auth] Failed to record initial password history:', e.message));
@@ -157,7 +158,7 @@ router.post('/register', asyncHandler(async (req, res) => {
                 resetToken: verificationToken,
                 resetTokenExpiry: new Date(Date.now() + 24 * 60 * 60 * 1000)
             });
-            console.log(`📧 [VERIFY TOKEN] For ${newUser.email}: ${verificationToken}`);
+            _slog(`📧 [VERIFY TOKEN] For ${newUser.email}: ${verificationToken}`);
             emailService.verificationEmail(newUser.email, { verificationToken })
                 .catch(e => console.warn('[Auth] Failed to send verification email:', e.message));
         } catch (verifyErr) {
@@ -192,7 +193,7 @@ router.post('/register', asyncHandler(async (req, res) => {
 
 // LOGIN ENDPOINT
 router.post('/login', asyncHandler(async (req, res) => {
-    console.log('🔐 LOGIN called');
+    _slog('🔐 LOGIN called');
     const { identifier, password } = req.body;
     
     if (!identifier || !password) {
@@ -347,7 +348,7 @@ router.get('/me', authenticateToken, asyncHandler(async (req, res) => {
     try {
         const userId = req.user.userId || req.user.id;
         
-        console.log('[AUTH] /me called for user:', userId);
+        _slog('[AUTH] /me called for user:', userId);
         
         const user = await _getUsers().findByPk(userId, {
             attributes: ['id', 'username', 'email', 'avatar', 'firstName', 'lastName', 'bio', 'role', 'status', 'lastSeen']
@@ -398,7 +399,7 @@ router.get('/me', authenticateToken, asyncHandler(async (req, res) => {
 
 // POST /validate-token
 router.post('/validate-token', async (req, res) => {
-    console.log('🔍 VALIDATE TOKEN CALLED');
+    _slog('🔍 VALIDATE TOKEN CALLED');
     
     let token = req.headers.authorization?.split(' ')[1] || req.body.token;
     
@@ -414,7 +415,7 @@ router.post('/validate-token', async (req, res) => {
         const result = tokenService.verifyAccessToken(token);
         
         if (result.valid) {
-            console.log('✅ Token valid for user:', result.decoded.userId);
+            _slog('✅ Token valid for user:', result.decoded.userId);
             
             res.json({
                 success: true,
@@ -449,7 +450,7 @@ router.post('/validate-token', async (req, res) => {
 
 // POST /refresh
 router.post('/refresh', asyncHandler(async (req, res) => {
-    console.log('🔄 Refresh token called');
+    _slog('🔄 Refresh token called');
     
     const refreshToken = req.body.refreshToken || req.headers['x-refresh-token'];
     
@@ -561,7 +562,7 @@ router.post('/logout', authenticateToken, asyncHandler(async (req, res) => {
 // POST /forgot-password
 // FIX: This route was missing — frontend calls /auth/forgot-password but it was never registered
 router.post('/forgot-password', asyncHandler(async (req, res) => {
-    console.log('📧 FORGOT PASSWORD called');
+    _slog('📧 FORGOT PASSWORD called');
     const { email } = req.body;
 
     if (!email || !email.includes('@')) {
@@ -602,7 +603,7 @@ router.post('/forgot-password', asyncHandler(async (req, res) => {
 
         // P1 FIX (Forensic Audit): actually send the password reset email.
         // Falls back to console logging if SMTP is not configured (dev mode).
-        console.log(`📧 [RESET TOKEN] For ${email}: ${resetToken}`);
+        _slog(`📧 [RESET TOKEN] For ${email}: ${resetToken}`);
         emailService.passwordResetEmail(user.email, { resetToken })
             .catch(e => console.warn('[Auth] Failed to send password reset email:', e.message));
 
@@ -661,7 +662,7 @@ router.get('/verify-email', asyncHandler(async (req, res) => {
             resetTokenExpiry: null
         });
 
-        console.log('✅ Email verified for user:', user.id);
+        _slog('✅ Email verified for user:', user.id);
 
         return res.status(200).json({
             success: true,
@@ -703,7 +704,7 @@ router.post('/resend-verification', asyncHandler(async (req, res) => {
             resetTokenExpiry: new Date(Date.now() + 24 * 60 * 60 * 1000)
         });
 
-        console.log(`📧 [VERIFY TOKEN] For ${email}: ${verificationToken}`);
+        _slog(`📧 [VERIFY TOKEN] For ${email}: ${verificationToken}`);
         emailService.verificationEmail(user.email, { verificationToken })
             .catch(e => console.warn('[Auth] Failed to send verification email:', e.message));
 
@@ -720,7 +721,7 @@ router.post('/resend-verification', asyncHandler(async (req, res) => {
 // POST /reset-password
 // FIX: This route was missing — frontend calls /auth/reset-password but it was never registered
 router.post('/reset-password', asyncHandler(async (req, res) => {
-    console.log('🔑 RESET PASSWORD called');
+    _slog('🔑 RESET PASSWORD called');
     const { token, newPassword, password } = req.body;
     const resetToken = token;
     const passwordToSet = newPassword || password;
@@ -782,7 +783,7 @@ router.post('/reset-password', asyncHandler(async (req, res) => {
         });
         await passwordHistoryService.recordPasswordHash(user.id, hashedPassword);
 
-        console.log('✅ Password reset successful for user:', user.id);
+        _slog('✅ Password reset successful for user:', user.id);
 
         // P2 FIX (Forensic Audit): notify the user their password changed,
         // so they can react quickly if it wasn't them.
@@ -806,7 +807,7 @@ router.get('/sessions', authenticateToken, asyncHandler(async (req, res) => {
     try {
         const userId = req.user.userId || req.user.id;
         
-        console.log('[AUTH] /sessions called for user:', userId);
+        _slog('[AUTH] /sessions called for user:', userId);
         
         const sessions = await tokenService.listUserRefreshSessions(userId);
         res.status(200).json({

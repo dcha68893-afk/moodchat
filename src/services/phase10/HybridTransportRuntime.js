@@ -252,25 +252,31 @@ class HybridTransportRuntime extends EventEmitter {
   _sendViaInternet(uid, event, data) {
     try {
       if (!this.io) return false;
-      // FIX BUG #1: Removed bare `uid` room (e.g. "2") — that targets Socket.IO's
-      // per-socket ID room, NOT the user's presence room. Standardized to 4 canonical
-      // variants that registerUser() always joins.
       const strUid = String(uid);
-      const numUid = String(Number(uid)); // normalize to numeric string if applicable
-      const rooms = [
+      const numUid = String(Number(uid));
+      const rooms = [...new Set([
         `user:${strUid}`,
         `user_${strUid}`,
         `user:${numUid}`,
         `user_${numUid}`,
-      ];
-      // Deduplicate (strUid === numUid for numeric user IDs)
-      const uniqueRooms = [...new Set(rooms)];
+      ])];
       let sent = false;
-      for (const room of uniqueRooms) {
-        try { this.io.to(room).emit(event, data); sent = true; } catch (_) {}
-      }
-      if (sent) {
-        this.log.log(`[FORENSIC] RECEIVER_RECEIVED | uid=${uid} | event=${event} | via=HTR-Internet | rooms=[${uniqueRooms.join(',')}] | ts=${Date.now()}`);
+      for (const room of rooms) {
+        try {
+          // FIX-ROOT-CAUSE: Check actual room membership BEFORE marking as sent.
+          // io.to(room).emit() is fire-and-forget and NEVER throws, even when the
+          // room has zero members. The old code set sent=true unconditionally, so
+          // HTR always returned { ok: true } — causing sendToUser to return early
+          // without ever reaching the per-socket-ID fallback delivery. Receivers
+          // that were online but whose room join was slightly delayed (race on
+          // connect) silently missed messages. Now we only count as delivered when
+          // at least one socket is actually in the room.
+          const roomSockets = this.io.sockets?.adapter?.rooms?.get(room);
+          if (roomSockets && roomSockets.size > 0) {
+            this.io.to(room).emit(event, data);
+            sent = true;
+          }
+        } catch (_) {}
       }
       return sent;
     } catch (err) {

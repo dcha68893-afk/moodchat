@@ -101,13 +101,16 @@ function _wireWebSocketService(runtime, entityStore, hydration, logger) {
   try {
     const wsService = require('../webSocketService');
 
-    // Override sendToUser to route through HybridTransportRuntime
+    // Override sendToUser to route through HybridTransportRuntime with fallback
     const _origSendToUser = wsService.sendToUser?.bind(wsService);
     wsService.sendToUser = async function(userId, event, data) {
-      // Try runtime first (handles LAN + offline queue)
+      // Try HTR first — it checks actual room membership now (not fire-and-forget)
       const result = await runtime.deliver(userId, event, data).catch(() => null);
       if (result?.ok) return true;
-      // Fallback to original (pure Socket.IO)
+      // ALWAYS fall through to original sendToUser as authoritative fallback.
+      // The original checks per-socket-ID delivery and handles offline queuing.
+      // HTR returning ok:false means no room members were found — user may still
+      // be reachable via their tracked socket ID in wsService.onlineUsers.
       if (_origSendToUser) return _origSendToUser(userId, event, data);
       return false;
     };

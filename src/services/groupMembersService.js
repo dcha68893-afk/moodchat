@@ -1,3 +1,4 @@
+const _slog = (...a) => { if (process.env.DEBUG_SERVER) _slog(...a); };
 // groupMembersService.js
 // ============================================================
 // FIXED: This file was completely missing, causing groupMembersController.js
@@ -78,7 +79,7 @@ memberServiceEvents.on('memberMutation', async ({ action, groupId, userId }) => 
             io.to(`user:${m.userId}`).emit('group:rotation_required', payload);
             io.to(`user_${m.userId}`).emit('group:rotation_required', payload);
         }
-        console.log(`[GroupMembersService] 🔑 Notified ${remainingMembers.length} remaining member(s) to rotate sender key in group ${groupId} (reason: ${action})`);
+        _slog(`[GroupMembersService] 🔑 Notified ${remainingMembers.length} remaining member(s) to rotate sender key in group ${groupId} (reason: ${action})`);
     } catch (e) {
         console.warn('[GroupMembersService] Failed to notify members of required key rotation:', e.message);
     }
@@ -225,7 +226,7 @@ class GroupMembersService {
             }
 
             const formatted = formatMember(member);
-            console.log(`[GroupMembersService] ✅ Member ${memberId} added to group ${groupId}`);
+            _slog(`[GroupMembersService] ✅ Member ${memberId} added to group ${groupId}`);
             memberServiceEvents.emit('memberMutation', { action: 'add', groupId, member: formatted, requestedBy: requestingUserId });
             return formatted;
         } catch (e) {
@@ -248,7 +249,7 @@ class GroupMembersService {
 
             await target.update({ leftAt: new Date() });
 
-            console.log(`[GroupMembersService] ✅ Member ${memberId} removed from group ${groupId}`);
+            _slog(`[GroupMembersService] ✅ Member ${memberId} removed from group ${groupId}`);
             memberServiceEvents.emit('memberMutation', { action: 'remove', groupId, userId: memberId, requestedBy: requestingUserId, reason });
             return { removed: true, groupId, userId: memberId };
         } catch (e) {
@@ -271,7 +272,7 @@ class GroupMembersService {
 
             await target.update({ role });
             const formatted = formatMember(target);
-            console.log(`[GroupMembersService] ✅ Role updated: member ${memberId} → ${role} in group ${groupId}`);
+            _slog(`[GroupMembersService] ✅ Role updated: member ${memberId} → ${role} in group ${groupId}`);
             memberServiceEvents.emit('memberMutation', { action: 'role_update', groupId, member: formatted, requestedBy: requestingUserId });
             return formatted;
         } catch (e) {
@@ -416,7 +417,7 @@ class GroupMembersService {
             });
 
             const reason = userBlocksDirectAdd ? 'user_privacy' : requiresApproval ? 'group_approval' : 'not_contact';
-            console.log(`[GroupMembersService] ✅ Invitation sent (reason=${reason}): user ${inviteeId} → group ${groupId}`);
+            _slog(`[GroupMembersService] ✅ Invitation sent (reason=${reason}): user ${inviteeId} → group ${groupId}`);
             return { action: 'invite_sent', invitation, reason };
         } catch (e) {
             if (['not found','banned','already','permission'].some(s => e.message.includes(s))) throw e;
@@ -453,7 +454,7 @@ class GroupMembersService {
 
             await invite.update({ status: 'accepted' });
             const formatted = formatMember(member);
-            console.log(`[GroupMembersService] ✅ Invitation ${invitationId} accepted by user ${userId}`);
+            _slog(`[GroupMembersService] ✅ Invitation ${invitationId} accepted by user ${userId}`);
             memberServiceEvents.emit('memberMutation', { action: 'add', groupId: invite.groupId, member: formatted, requestedBy: userId });
             return { accepted: true, groupId: invite.groupId, invitedBy: invite.inviterId, member: formatted };
         } catch (e) {
@@ -470,7 +471,7 @@ class GroupMembersService {
             const invite = await Invites.findOne({ where: { id: invitationId, targetUserId: userId, status: 'pending' } });
             if (!invite) throw new Error('Invitation not found or already responded to');
             await invite.update({ status: 'rejected' });
-            console.log(`[GroupMembersService] ✅ Invitation ${invitationId} rejected`);
+            _slog(`[GroupMembersService] ✅ Invitation ${invitationId} rejected`);
             return { rejected: true, groupId: invite.groupId, invitedBy: invite.inviterId };
         } catch (e) {
             if (['not found','responded'].some(s => e.message.includes(s))) throw e;
@@ -496,7 +497,7 @@ class GroupMembersService {
             const inviteeId = invite.targetUserId;
             const groupId   = invite.groupId;
             await invite.destroy();
-            console.log(`[GroupMembersService] ✅ Invitation ${invitationId} cancelled`);
+            _slog(`[GroupMembersService] ✅ Invitation ${invitationId} cancelled`);
             return { cancelled: true, groupId, inviteeId };
         } catch (e) {
             if (['not found','permission'].some(s => e.message.includes(s))) throw e;
@@ -513,7 +514,7 @@ class GroupMembersService {
             if (!m) throw new Error('You are not a member of this group');
             if (m.role === 'owner') throw new Error('Group owner cannot leave. Transfer ownership first.');
             await m.update({ leftAt: new Date() });
-            console.log(`[GroupMembersService] ✅ User ${userId} left group ${groupId}`);
+            _slog(`[GroupMembersService] ✅ User ${userId} left group ${groupId}`);
             memberServiceEvents.emit('memberMutation', { action: 'leave', groupId, userId });
             return { left: true, groupId };
         } catch (e) {
@@ -536,7 +537,7 @@ class GroupMembersService {
             await newOwner.update({ role: 'owner' });
             if (Groups) await Groups.update({ createdBy: newOwnerId }, { where: { id: groupId } });
 
-            console.log(`[GroupMembersService] ✅ Ownership of group ${groupId} transferred to ${newOwnerId}`);
+            _slog(`[GroupMembersService] ✅ Ownership of group ${groupId} transferred to ${newOwnerId}`);
             memberServiceEvents.emit('memberMutation', { action: 'ownership_transfer', groupId, newOwnerId, previousOwnerId: currentOwnerId });
             return { transferred: true, groupId, newOwnerId, previousOwnerId: currentOwnerId };
         } catch (e) {
@@ -616,7 +617,7 @@ class GroupMembersService {
             const mutedUntil = duration ? new Date(Date.now() + duration * 60 * 1000) : null;
             const settings = { ...target.customSettings, mutedAt: nowIso(), mutedUntil, muteReason: reason };
             await target.update({ notificationsMuted: true, customSettings: settings });
-            console.log(`[GroupMembersService] ✅ Member ${memberId} muted in group ${groupId}`);
+            _slog(`[GroupMembersService] ✅ Member ${memberId} muted in group ${groupId}`);
             return { muted: true, mutedUntil, userId: memberId, groupId };
         } catch (e) {
             if (['not found','permission'].some(s => e.message.includes(s))) throw e;
@@ -634,7 +635,7 @@ class GroupMembersService {
             if (!target) throw new Error('Member not found in this group');
             const settings = { ...target.customSettings, mutedAt: null, mutedUntil: null, muteReason: null };
             await target.update({ notificationsMuted: false, customSettings: settings });
-            console.log(`[GroupMembersService] ✅ Member ${memberId} unmuted in group ${groupId}`);
+            _slog(`[GroupMembersService] ✅ Member ${memberId} unmuted in group ${groupId}`);
             return { unmuted: true, userId: memberId, groupId };
         } catch (e) {
             if (['not found','permission'].some(s => e.message.includes(s))) throw e;
@@ -661,7 +662,7 @@ class GroupMembersService {
                 await GroupMembers.create({ groupId, userId: memberId, role: 'member', joinedAt: new Date(), leftAt: new Date(), customSettings: settings });
             }
 
-            console.log(`[GroupMembersService] ✅ Member ${memberId} banned from group ${groupId}`);
+            _slog(`[GroupMembersService] ✅ Member ${memberId} banned from group ${groupId}`);
             memberServiceEvents.emit('memberMutation', { action: 'ban', groupId, userId: memberId, requestedBy: requestingUserId, reason, banExpiry });
             return { banned: true, userId: memberId, groupId, expiresAt: banExpiry };
         } catch (e) {
@@ -680,7 +681,7 @@ class GroupMembersService {
             if (!target?.customSettings?.bannedAt) throw new Error('Member is not banned');
             const settings = { ...target.customSettings, bannedAt: null, banReason: null, banExpiry: null };
             await target.update({ customSettings: settings });
-            console.log(`[GroupMembersService] ✅ Member ${memberId} unbanned from group ${groupId}`);
+            _slog(`[GroupMembersService] ✅ Member ${memberId} unbanned from group ${groupId}`);
             return { unbanned: true, userId: memberId, groupId };
         } catch (e) {
             if (['not banned','permission'].some(s => e.message.includes(s))) throw e;

@@ -59,7 +59,7 @@ try {
             return { valid: false, userId: null, reason: err.message };
         }
     };
-    console.log('[WSService] Token verification delegated to tokenService ✅');
+    _flog('[WSService] Token verification delegated to tokenService ✅');
 } catch (err) {
     // FIX: Hard fail — do NOT allow connections when tokenService is missing.
     // The old bypass (valid: true) was a security hole that let unauthenticated
@@ -89,7 +89,7 @@ class WebSocketService {
             global.__socketIO = io;
             global.__io = io;
             global.io = io;
-            console.log('[WSService] Socket.IO instance exposed globally');
+            _flog('[WSService] Socket.IO instance exposed globally');
         }
         return this;
     }
@@ -134,7 +134,7 @@ class WebSocketService {
 
             // Register new socket
             this.registerUser(userId, socket);
-            console.log(`[WSService] ✅ socket connected uid=${userId} sid=${socket.id}`);
+                 _flog(`[WSService] ✅ socket connected uid=${userId} sid=${socket.id}`);
 
             // Tell client auth succeeded
             socket.emit('authenticated', { userId, authenticated: true, timestamp: Date.now() });
@@ -161,7 +161,7 @@ class WebSocketService {
             socket.off('join').on('join', ({ room } = {}) => {
                 if (room && typeof room === 'string') {
                     socket.join(room);
-                    console.log(`[WSService] uid=${userId} joined room: ${room}`);
+                         _flog(`[WSService] uid=${userId} joined room: ${room}`);
                 }
             });
 
@@ -169,7 +169,7 @@ class WebSocketService {
 
             socket.off('disconnect').on('disconnect', async (reason) => {
                 this.removeUser(userId, socket);
-                console.log(`[WSService] socket disconnected uid=${userId} sid=${socket.id} reason=${reason}`);
+                     _flog(`[WSService] socket disconnected uid=${userId} sid=${socket.id} reason=${reason}`);
 
                 // ── STALE CALL FIX: When a user disconnects, end any DB call where
                 // they are a participant and the call is still in a non-terminal
@@ -219,7 +219,7 @@ class WebSocketService {
                                     await this.sendToUser(otherUserId, 'call:ended', payload).catch(() => {});
                                     await this.sendToUser(otherUserId, 'call_ended', payload).catch(() => {});
                                 }
-                                console.log(`[WSService] Stale call ${call.id} ended on disconnect uid=${userId}`);
+                                     _flog(`[WSService] Stale call ${call.id} ended on disconnect uid=${userId}`);
                             }
                         }
                     }
@@ -280,7 +280,7 @@ class WebSocketService {
                         callId, receiverId: userId, timestamp: Date.now(),
                     }).catch(() => {});
                 }
-                console.log(`[WSService] ✅ call:received ack — callId=${callId} uid=${userId}`);
+                     _flog(`[WSService] ✅ call:received ack — callId=${callId} uid=${userId}`);
             });
 
             // ── FIX-CALL-ROOM: join_user_room — verify both users reachable ──
@@ -293,7 +293,7 @@ class WebSocketService {
                 socket.join(`user:${strRid}`);
                 socket.join(`user_${strRid}`);
                 const rooms = Array.from(socket.rooms || []);
-                console.log(`[WSService] uid=${userId} rooms: [${rooms.join(', ')}]`);
+                     _flog(`[WSService] uid=${userId} rooms: [${rooms.join(', ')}]`);
                 // If peerId is provided (call setup), confirm peer is reachable
                 if (peerId) {
                     Promise.resolve(this.isUserOnline(peerId)).then(online => {
@@ -310,7 +310,7 @@ class WebSocketService {
                 await this.sendToUser(senderId, 'message:delivered', {
                     messageId, chatId, deliveredTo: userId, timestamp: Date.now(),
                 }).catch(() => {});
-                console.log(`[WSService] 📨 Delivered mid=${messageId} to uid=${userId}`);
+                     _flog(`[WSService] 📨 Delivered mid=${messageId} to uid=${userId}`);
             });
 
             // ── FIX-ONLINE-STATUS: Let sender check if receiver is online ─────
@@ -455,7 +455,7 @@ class WebSocketService {
                         socket.join(`group:${groupId}`);
                         socket.join(`group_${groupId}`);
                         socket.emit('group:joined', { groupId, success: true });
-                        console.log(`[WSService] uid=${userId} joined group:${groupId}`);
+                             _flog(`[WSService] uid=${userId} joined group:${groupId}`);
                     }
                 } catch (err) {
                     console.warn('[WSService] group:join error:', err.message);
@@ -527,7 +527,7 @@ class WebSocketService {
                             io.to(room).emit('webrtc:signal', { ...coRelay, type: 'offer', sdp: coOffer });
                         } catch (_) {}
                     });
-                    console.log(`[WSService] ☁️  call:webrtc_offer relayed callId=${coCallId} from=${userId} to=${coTarget}`);
+                         _flog(`[WSService] ☁️  call:webrtc_offer relayed callId=${coCallId} from=${userId} to=${coTarget}`);
                 } catch (err) {
                     console.warn('[WSService] call:webrtc_offer relay error:', err.message);
                 }
@@ -709,7 +709,7 @@ class WebSocketService {
             });
         });
 
-        console.log('[WSService] Connection handler registered ✅');
+        _flog('[WSService] Connection handler registered ✅');
         return this;
     }
 
@@ -781,7 +781,7 @@ class WebSocketService {
             if (sid === newSocket.id) continue;
             const oldSocket = io.sockets.sockets.get(sid);
             if (oldSocket) {
-                console.log(`[WSService] Evicting oldest socket ${sid} for uid=${uid} (limit ${MAX_SOCKETS_PER_USER})`);
+                     _flog(`[WSService] Evicting oldest socket ${sid} for uid=${uid} (limit ${MAX_SOCKETS_PER_USER})`);
                 try {
                     oldSocket.emit('session_replaced', { reason: 'New connection from same account (limit reached)' });
                     oldSocket.disconnect(true);
@@ -862,7 +862,7 @@ class WebSocketService {
             }
         }
 
-        console.log(`[WSService] removeUser uid=${uid} socket=${socketId}`);
+             _flog(`[WSService] removeUser uid=${uid} socket=${socketId}`);
         return true;
     }
 
@@ -957,18 +957,9 @@ class WebSocketService {
             _flog(`[WSService] EMITTING TO: uid=${uid} event=${event}`);
         }
 
-        // PHASE10: Route through HybridTransportRuntime when available
-        // This gives us LAN routing + offline queue + mesh fallback
-        const htr = global.__HybridTransportRuntime;
-        if (htr) {
-            const result = await htr.deliver(String(uid), event, data).catch(() => null);
-            if (result?.ok) return true;
-            // FIX BUG #4: Do NOT early-return on result?.queued.
-            // HTR queues when it believes user is offline, but the user may actually
-            // be online in Socket.IO (rooms joined) and HTR just doesn't know yet.
-            // Fall through to the direct Socket.IO room emit below as a belt-and-suspenders.
-            // If both succeed, client deduplicates; if only Socket.IO succeeds, message delivered.
-        }
+        // NOTE: HTR routing is handled by the phase10.bootstrap.js wrapper that overrides
+        // this function. When called directly (as fallback from that wrapper), we do pure
+        // Socket.IO delivery here — no HTR to avoid double-delivery and recursion.
 
         const payload = { ...data, timestamp: data.timestamp || new Date().toISOString() };
         let delivered = false;
@@ -1031,14 +1022,19 @@ class WebSocketService {
             _flog(`[FORENSIC] RECEIVER_RECEIVED | uid=${uid} | event=${event} | rooms=[${rooms.join(',')}] | ts=${Date.now()}`);
         }
 
-        const socketIds = await this.getSocketIdsForUser(uid);
-        for (const sid of socketIds) {
-            if (!this._isSocketAliveInAdapter(io, sid)) {
-                const set = this.onlineUsers.get(uid);
-                if (set) set.delete(sid);
-                continue;
+        // Per-socket-ID fallback — ONLY when room emit missed (receiver not in any room yet).
+        // This handles the race where the socket connected but hasn't joined user:X rooms yet.
+        // When delivered=true (room emit worked), skip this block to prevent duplicate delivery.
+        if (!delivered) {
+            const socketIds = await this.getSocketIdsForUser(uid);
+            for (const sid of socketIds) {
+                if (!this._isSocketAliveInAdapter(io, sid)) {
+                    const set = this.onlineUsers.get(uid);
+                    if (set) set.delete(sid);
+                    continue;
+                }
+                try { io.to(sid).emit(event, payload); delivered = true; } catch (_) {}
             }
-            try { io.to(sid).emit(event, payload); delivered = true; } catch (_) {}
         }
 
         // FIX-OFFLINE-QUEUE: If not delivered and it's a message event, enqueue for retry
@@ -1102,7 +1098,7 @@ class WebSocketService {
                     await this.sendToUser(callerId, 'call:no_answer', {
                         callId, reason: 'user_didnt_answer', timestamp: Date.now(),
                     }).catch(() => {});
-                    console.log(`[WSService] 📵 Call ${callId} — no answer after 20s`);
+                         _flog(`[WSService] 📵 Call ${callId} — no answer after 20s`);
                 }
             }, 20_000);
         }
@@ -1168,7 +1164,7 @@ class WebSocketService {
         if (!this._offlineQueue.has(uid)) this._offlineQueue.set(uid, []);
         const q = this._offlineQueue.get(uid);
         if (q.length < 200) q.push({ event, payload, queuedAt: Date.now() });
-        console.log(`[WSService] 📦 Queued offline msg for uid=${uid} (total: ${q.length})`);
+             _flog(`[WSService] 📦 Queued offline msg for uid=${uid} (total: ${q.length})`);
     }
 
     async flushOfflineMessages(userId) {
@@ -1177,7 +1173,7 @@ class WebSocketService {
         const queue = this._offlineQueue.get(uid);
         if (!queue || queue.length === 0) return;
         this._offlineQueue.delete(uid);
-        console.log(`[WSService] 🚀 Flushing ${queue.length} queued msgs to uid=${uid}`);
+             _flog(`[WSService] 🚀 Flushing ${queue.length} queued msgs to uid=${uid}`);
         for (const item of queue) {
             await this.sendToUser(userId, item.event, item.payload).catch(() => {});
         }
@@ -1482,7 +1478,7 @@ class WebSocketService {
             if (sids.size === 0) this.onlineUsers.delete(uid);
         }
         if (pruned > 0) {
-            console.log(`[WSService] Stale reaper removed ${pruned} dead socket(s).`);
+                 _flog(`[WSService] Stale reaper removed ${pruned} dead socket(s).`);
         }
     }
 
@@ -1496,7 +1492,7 @@ class WebSocketService {
         socket.join(`user_${uid}`);
         socket.join(`user:${strUid}`);
         socket.join(`user_${strUid}`);
-        console.log(`[WSService] uid=${userId} joined personal user rooms: user:${uid}, user_${uid}`);
+             _flog(`[WSService] uid=${userId} joined personal user rooms: user:${uid}, user_${uid}`);
 
         try {
             const db = require('../models');
@@ -1551,7 +1547,7 @@ class WebSocketService {
 
             const totalRooms = (chatRows || []).length + (groupRows || []).length;
             if (totalRooms > 0) {
-                console.log(`[WSService] uid=${userId} auto-joined ${(chatRows||[]).length} chat room(s) + ${(groupRows||[]).length} group room(s)`);
+                     _flog(`[WSService] uid=${userId} auto-joined ${(chatRows||[]).length} chat room(s) + ${(groupRows||[]).length} group room(s)`);
             }
         } catch (err) {
             console.warn(`[WSService] _joinUserChatRooms failed for uid=${userId}:`, err.message);
@@ -1573,7 +1569,7 @@ class WebSocketService {
                 }
             } catch (_) {}
         }
-        console.log(`[WSService] uid=${userId} rejoined group:${groupId}`);
+             _flog(`[WSService] uid=${userId} rejoined group:${groupId}`);
     }
 }
 

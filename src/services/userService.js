@@ -1,3 +1,4 @@
+const _slog = (...a) => { if (process.env.DEBUG_SERVER) _slog(...a); };
 
 const { Op } = require('sequelize');
 const { User, Profile, Friend, Chat, Message, Status } = require('../models');
@@ -5,7 +6,7 @@ const logger = require('../utils/logger');
 
 class UserService {
   constructor() {
-    console.log('🔧 [UserService] Initialized');
+    _slog('🔧 [UserService] Initialized');
   }
 
   /**
@@ -14,7 +15,7 @@ class UserService {
    */
   async createUser(userData) {
     try {
-      console.log("🔧 [UserService] Creating user with:", {
+      _slog("🔧 [UserService] Creating user with:", {
         username: userData.username,
         email: userData.email,
         hasFirstName: !!userData.firstName,
@@ -41,7 +42,7 @@ class UserService {
         const errorMsg = existingUser.email === userData.email.toLowerCase().trim()
           ? 'Email already registered'
           : 'Username already taken';
-        console.log("❌ [UserService] User exists:", errorMsg);
+        _slog("❌ [UserService] User exists:", errorMsg);
         throw new Error(errorMsg);
       }
 
@@ -74,7 +75,7 @@ class UserService {
         }
       });
 
-      console.log("✅ [UserService] User created with ID:", user.id);
+      _slog("✅ [UserService] User created with ID:", user.id);
 
       // Try to create profile if profile data provided
       if (userData.profile) {
@@ -83,9 +84,9 @@ class UserService {
             userId: user.id,
             ...userData.profile,
           });
-          console.log("✅ [UserService] Profile created");
+          _slog("✅ [UserService] Profile created");
         } catch (profileError) {
-          console.log("⚠️ [UserService] Profile not created:", profileError.message);
+          _slog("⚠️ [UserService] Profile not created:", profileError.message);
           // Continue without profile - it's optional
         }
       }
@@ -117,7 +118,7 @@ class UserService {
    */
   async getUserById(userId, options = {}) {
     try {
-      console.log("🔧 [UserService] Getting user by ID:", userId);
+      _slog("🔧 [UserService] Getting user by ID:", userId);
 
       const include = [];
 
@@ -169,7 +170,7 @@ class UserService {
         userData.online = this.isUserOnline(userData.lastSeen);
       }
 
-      console.log("✅ [UserService] Retrieved user:", user.id);
+      _slog("✅ [UserService] Retrieved user:", user.id);
       return userData;
     } catch (error) {
       console.error('❌ [UserService] Get user error:', error.message);
@@ -182,7 +183,7 @@ class UserService {
    */
   async getUserByEmail(email, options = {}) {
     try {
-      console.log("🔧 [UserService] Getting user by email:", email);
+      _slog("🔧 [UserService] Getting user by email:", email);
 
       const user = await User.findOne({
         where: { email: email.toLowerCase().trim() },
@@ -199,7 +200,7 @@ class UserService {
         userData.online = this.isUserOnline(user.lastSeen);
       }
 
-      console.log("✅ [UserService] Retrieved user by email:", user.id);
+      _slog("✅ [UserService] Retrieved user by email:", user.id);
       return userData;
     } catch (error) {
       console.error('❌ [UserService] Get user by email error:', error.message);
@@ -212,7 +213,7 @@ class UserService {
    */
   async getUserByUsername(username, currentUserId = null) {
     try {
-      console.log("🔧 [UserService] Getting user by username:", username);
+      _slog("🔧 [UserService] Getting user by username:", username);
 
       const user = await User.findOne({
         where: { username: username.trim() },
@@ -236,7 +237,7 @@ class UserService {
         friends: await this.getFriendCount(user.id)
       };
 
-      console.log("✅ [UserService] Retrieved user by username:", user.id);
+      _slog("✅ [UserService] Retrieved user by username:", user.id);
       return userData;
     } catch (error) {
       console.error('❌ [UserService] Get user by username error:', error.message);
@@ -249,7 +250,7 @@ class UserService {
    */
   async findByUsernameOrEmail(username, email) {
     try {
-      console.log("🔧 [UserService] Finding user by username or email:", { username, email });
+      _slog("🔧 [UserService] Finding user by username or email:", { username, email });
 
       if (!username && !email) {
         return null;
@@ -276,9 +277,9 @@ class UserService {
       });
 
       if (user) {
-        console.log("✅ [UserService] Found user:", user.id);
+        _slog("✅ [UserService] Found user:", user.id);
       } else {
-        console.log("🔍 [UserService] User not found");
+        _slog("🔍 [UserService] User not found");
       }
 
       return user;
@@ -293,7 +294,7 @@ class UserService {
    */
   async updateUser(userId, updateData) {
     try {
-      console.log("🔧 [UserService] Updating user:", userId);
+      _slog("🔧 [UserService] Updating user:", userId);
 
       // Get existing user
       const user = await User.findByPk(userId);
@@ -340,7 +341,7 @@ class UserService {
       // Update user
       await user.update(filteredData);
 
-      console.log("✅ [UserService] User updated:", userId);
+      _slog("✅ [UserService] User updated:", userId);
 
       // Return updated user without password
       return await this.getUserById(userId, {
@@ -364,7 +365,7 @@ class UserService {
    */
   async deleteUser(userId) {
     try {
-      console.log("🔧 [UserService] Deleting user:", userId);
+      _slog("🔧 [UserService] Deleting user:", userId);
 
       const user = await User.findByPk(userId);
       if (!user) {
@@ -378,7 +379,7 @@ class UserService {
         lastSeen: new Date()
       });
 
-      console.log("✅ [UserService] User deactivated:", userId);
+      _slog("✅ [UserService] User deactivated:", userId);
       return { success: true, message: 'User deactivated successfully' };
     } catch (error) {
       console.error('❌ [UserService] Delete user error:', error.message);
@@ -391,7 +392,7 @@ class UserService {
    */
   async updateUserSettings(userId, settings) {
     try {
-      console.log("🔧 [UserService] Updating settings for user:", userId);
+      _slog("🔧 [UserService] Updating settings for user:", userId);
 
       const user = await User.findByPk(userId);
       if (!user) {
@@ -407,7 +408,7 @@ class UserService {
 
       await user.update({ settings: updatedSettings });
 
-      console.log("✅ [UserService] Settings updated for user:", userId);
+      _slog("✅ [UserService] Settings updated for user:", userId);
       return updatedSettings;
     } catch (error) {
       console.error('❌ [UserService] Update settings error:', error.message);
@@ -420,7 +421,7 @@ class UserService {
    */
   async searchUsers(query, currentUserId = null, limit = 20) {
     try {
-      console.log("🔧 [UserService] Searching users with query:", query);
+      _slog("🔧 [UserService] Searching users with query:", query);
 
       if (!query || query.trim().length < 2) {
         return [];
@@ -458,7 +459,7 @@ class UserService {
         })
       );
 
-      console.log("✅ [UserService] Found", results.length, "users");
+      _slog("✅ [UserService] Found", results.length, "users");
       return results;
     } catch (error) {
       console.error('❌ [UserService] Search users error:', error.message);
@@ -471,7 +472,7 @@ class UserService {
    */
   async getUserFriends(userId, options = {}) {
     try {
-      console.log("🔧 [UserService] Getting friends for user:", userId);
+      _slog("🔧 [UserService] Getting friends for user:", userId);
 
       const user = await User.findByPk(userId, {
         include: [{
@@ -499,7 +500,7 @@ class UserService {
         return friendData;
       });
 
-      console.log("✅ [UserService] Retrieved", friendsWithStatus.length, "friends");
+      _slog("✅ [UserService] Retrieved", friendsWithStatus.length, "friends");
       return friendsWithStatus;
     } catch (error) {
       console.error('❌ [UserService] Get friends error:', error.message);
@@ -512,7 +513,7 @@ class UserService {
    */
   async getFriendRequests(userId) {
     try {
-      console.log("🔧 [UserService] Getting friend requests for user:", userId);
+      _slog("🔧 [UserService] Getting friend requests for user:", userId);
 
       const user = await User.findByPk(userId, {
         include: [{
@@ -531,7 +532,7 @@ class UserService {
       }
 
       const requests = user.friendRequests || [];
-      console.log("✅ [UserService] Retrieved", requests.length, "friend requests");
+      _slog("✅ [UserService] Retrieved", requests.length, "friend requests");
       return requests;
     } catch (error) {
       console.error('❌ [UserService] Get friend requests error:', error.message);
@@ -544,7 +545,7 @@ class UserService {
    */
   async getUserStats(userId) {
     try {
-      console.log("🔧 [UserService] Getting stats for user:", userId);
+      _slog("🔧 [UserService] Getting stats for user:", userId);
 
       const [
         friendCount,
@@ -571,7 +572,7 @@ class UserService {
         online: this.isUserOnline(await this.getLastSeen(userId))
       };
 
-      console.log("✅ [UserService] Retrieved stats for user:", userId);
+      _slog("✅ [UserService] Retrieved stats for user:", userId);
       return stats;
     } catch (error) {
       console.error('❌ [UserService] Get stats error:', error.message);
@@ -584,7 +585,7 @@ class UserService {
    */
   async updateLastSeen(userId) {
     try {
-      console.log("🔧 [UserService] Updating last seen for user:", userId);
+      _slog("🔧 [UserService] Updating last seen for user:", userId);
 
       const user = await User.findByPk(userId);
       if (!user) {
@@ -594,7 +595,7 @@ class UserService {
       user.lastSeen = new Date();
       await user.save();
 
-      console.log("✅ [UserService] Last seen updated:", userId);
+      _slog("✅ [UserService] Last seen updated:", userId);
       return user.lastSeen;
     } catch (error) {
       console.error('❌ [UserService] Update last seen error:', error.message);
@@ -607,12 +608,12 @@ class UserService {
    */
   async getOnlineFriends(userId) {
     try {
-      console.log("🔧 [UserService] Getting online friends for user:", userId);
+      _slog("🔧 [UserService] Getting online friends for user:", userId);
 
       const friends = await this.getUserFriends(userId);
       const onlineFriends = friends.filter(friend => this.isUserOnline(friend.lastSeen));
 
-      console.log("✅ [UserService] Found", onlineFriends.length, "online friends");
+      _slog("✅ [UserService] Found", onlineFriends.length, "online friends");
       return onlineFriends;
     } catch (error) {
       console.error('❌ [UserService] Get online friends error:', error.message);
@@ -625,7 +626,7 @@ class UserService {
    */
   async getUserActivity(userId, limit = 10) {
     try {
-      console.log("🔧 [UserService] Getting activity for user:", userId);
+      _slog("🔧 [UserService] Getting activity for user:", userId);
 
       const recentStatuses = await Status.findAll({
         where: { userId },
@@ -675,7 +676,7 @@ class UserService {
       ].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
         .slice(0, limit);
 
-      console.log("✅ [UserService] Retrieved", activity.length, "activity items");
+      _slog("✅ [UserService] Retrieved", activity.length, "activity items");
       return activity;
     } catch (error) {
       console.error('❌ [UserService] Get activity error:', error.message);

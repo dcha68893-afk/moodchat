@@ -1,3 +1,4 @@
+const _slog = (...a) => { if (process.env.DEBUG_SERVER) _slog(...a); };
 // models/index.js - COMPLETE AUTO-MIGRATION WITH TABLE CREATION
 // Version: 3.0.0 - Creates missing tables and columns automatically
 const { Sequelize, Op } = require('sequelize');
@@ -10,7 +11,7 @@ const env = process.env.NODE_ENV || 'development';
 
 const getDbConfig = () => {
   if (process.env.DATABASE_URL) {
-    console.log(`[Database] Using DATABASE_URL for ${env} environment`);
+    _slog(`[Database] Using DATABASE_URL for ${env} environment`);
     return {
       url: process.env.DATABASE_URL,
       dialect: 'postgres',
@@ -30,7 +31,7 @@ const getDbConfig = () => {
     };
   }
   
-  console.log(`[Database] Using individual config for ${env} environment`);
+  _slog(`[Database] Using individual config for ${env} environment`);
   // FIX-DB-NO-SILENT-FALLBACK: previously defaulted to a meaningless
   // hardcoded database name ('denismoo') if DB_NAME was unset. That meant
   // a missing/misconfigured env var on Render would silently try to
@@ -109,14 +110,14 @@ global.__dbReadyPromise = new Promise(r => { global.__dbReadyResolve = r; });
 setTimeout(() => { if (global.__dbReadyResolve && !global.__dbReady) {} }, 60000);
 sequelize.authenticate()
   .then(() => {
-    console.log(`[Database] ✅ Connection to ${dbConfig.database || 'database'} (${env}) established successfully`);
+    _slog(`[Database] ✅ Connection to ${dbConfig.database || 'database'} (${env}) established successfully`);
   })
   .catch(err => {
     console.error(`[Database] ❌ Unable to connect to database (${env}):`, err.message);
   });
 
 // ===== STRICT MODEL LOADING =====
-console.log('[Database] 🛡️ Initializing STRICT model loader...');
+_slog('[Database] 🛡️ Initializing STRICT model loader...');
 
 const db = {
   sequelize,
@@ -183,7 +184,7 @@ const NON_MODEL_PATTERNS = [
 ];
 
 // ===== MODEL FILE VALIDATION =====
-console.log('[Database] Scanning for REAL Sequelize models only...');
+_slog('[Database] Scanning for REAL Sequelize models only...');
 
 const modelFiles = fs.readdirSync(__dirname)
   .filter(file => {
@@ -191,19 +192,19 @@ const modelFiles = fs.readdirSync(__dirname)
     const stat = fs.statSync(filePath);
     
     if (stat.isDirectory()) {
-      console.log(`[Database] 📁 Skipping directory: ${file}`);
+      _slog(`[Database] 📁 Skipping directory: ${file}`);
       db.skippedFiles[file] = 'Directory (not a model file)';
       return false;
     }
     
     if (!file.endsWith('.js')) {
-      console.log(`[Database] 📄 Skipping non-JS file: ${file}`);
+      _slog(`[Database] 📄 Skipping non-JS file: ${file}`);
       db.skippedFiles[file] = 'Not a JavaScript file';
       return false;
     }
     
     if (file === 'index.js') {
-      console.log(`[Database] 🔧 Skipping model index file: ${file}`);
+      _slog(`[Database] 🔧 Skipping model index file: ${file}`);
       db.skippedFiles[file] = 'Model index file';
       return false;
     }
@@ -215,7 +216,7 @@ const modelFiles = fs.readdirSync(__dirname)
     );
     
     if (isWhitelisted) {
-      console.log(`[Database] ✅ Whitelisted model detected: ${file}`);
+      _slog(`[Database] ✅ Whitelisted model detected: ${file}`);
       return true;
     }
     
@@ -224,16 +225,16 @@ const modelFiles = fs.readdirSync(__dirname)
     );
     
     if (isNonModel) {
-      console.log(`[Database] 🛡️ Strict Guard: Skipping ${file} - matches non-model pattern`);
+      _slog(`[Database] 🛡️ Strict Guard: Skipping ${file} - matches non-model pattern`);
       db.skippedFiles[file] = 'Matches non-model pattern (router/controller)';
       return false;
     }
     
-    console.log(`[Database] ⚠️ File not in whitelist but not blocked: ${file}. Will check content.`);
+    _slog(`[Database] ⚠️ File not in whitelist but not blocked: ${file}. Will check content.`);
     return true;
   });
 
-console.log(`[Database] Found ${modelFiles.length} potential model files after filtering`);
+_slog(`[Database] Found ${modelFiles.length} potential model files after filtering`);
 
 // ===== LOAD MODELS =====
 modelFiles.forEach(file => {
@@ -266,7 +267,7 @@ modelFiles.forEach(file => {
       (fileContent.includes('Router') && fileContent.includes('require'));
     
     if (isRouterOrController) {
-      console.log(`[Database] 🛡️ HARD SAFETY: Skipping ${file} - Detected as router/controller`);
+      _slog(`[Database] 🛡️ HARD SAFETY: Skipping ${file} - Detected as router/controller`);
       db.failedModels[modelName] = {
         file: file,
         error: 'File is a router/controller, not a Sequelize model',
@@ -277,7 +278,7 @@ modelFiles.forEach(file => {
     }
     
     if (!isSequelizeModel) {
-      console.log(`[Database] 🛡️ HARD SAFETY: Skipping ${file} - Not a Sequelize model structure`);
+      _slog(`[Database] 🛡️ HARD SAFETY: Skipping ${file} - Not a Sequelize model structure`);
       db.failedModels[modelName] = {
         file: file,
         error: 'File does not export a valid Sequelize model structure',
@@ -287,7 +288,7 @@ modelFiles.forEach(file => {
       return;
     }
     
-    console.log(`[Database] Loading model: ${modelName} from ${file}`);
+    _slog(`[Database] Loading model: ${modelName} from ${file}`);
     
     const modelModule = require(filePath);
     
@@ -328,7 +329,7 @@ modelFiles.forEach(file => {
     
     db.models[actualModelName] = modelInstance;
     
-    console.log(`[Database] ✅ Loaded model: ${actualModelName}`);
+    _slog(`[Database] ✅ Loaded model: ${actualModelName}`);
     
   } catch (error) {
     console.error(`[Database] ❌ Failed to load model ${modelName}:`, error.message);
@@ -345,7 +346,7 @@ modelFiles.forEach(file => {
 
 // ===== FUNCTION 1: CREATE MISSING TABLES =====
 async function createMissingTables() {
-  console.log('[Migration] 🔧 Checking for missing tables...');
+  _slog('[Migration] 🔧 Checking for missing tables...');
   
   const queryInterface = sequelize.getQueryInterface();
   const tables = await queryInterface.showAllTables();
@@ -382,20 +383,20 @@ async function createMissingTables() {
       
       if (modelExists) {
         missingTables.push(tableName);
-        console.log(`[Migration] ⚠️ Missing table: ${tableName} - will create via sync`);
+        _slog(`[Migration] ⚠️ Missing table: ${tableName} - will create via sync`);
       } else {
-        console.log(`[Migration] ℹ️ No model found for: ${tableName} - skipping`);
+        _slog(`[Migration] ℹ️ No model found for: ${tableName} - skipping`);
       }
     }
   }
   
   if (missingTables.length > 0) {
-    console.log(`[Migration] 🔨 Creating ${missingTables.length} missing tables via sync...`);
+    _slog(`[Migration] 🔨 Creating ${missingTables.length} missing tables via sync...`);
     
     try {
       // First sync without alter to create tables
       await sequelize.sync({ force: false, alter: false });
-      console.log(`[Migration] ✅ Initial sync complete - tables created`);
+      _slog(`[Migration] ✅ Initial sync complete - tables created`);
       
       // Verify tables were created
       const newTables = await queryInterface.showAllTables();
@@ -403,8 +404,8 @@ async function createMissingTables() {
       
       const stillMissing = missingTables.filter(t => !newTableSet.has(t.toLowerCase()));
       if (stillMissing.length > 0) {
-        console.log(`[Migration] ⚠️ Still missing after sync: ${stillMissing.join(', ')}`);
-        console.log(`[Migration] 🔨 Attempting force sync for remaining tables...`);
+        _slog(`[Migration] ⚠️ Still missing after sync: ${stillMissing.join(', ')}`);
+        _slog(`[Migration] 🔨 Attempting force sync for remaining tables...`);
         
         // Force sync for specific models
         for (const tableName of stillMissing) {
@@ -412,43 +413,43 @@ async function createMissingTables() {
           if (model) {
             try {
               await model.sync({ force: false });
-              console.log(`[Migration] ✅ Created table for model: ${model.name}`);
+              _slog(`[Migration] ✅ Created table for model: ${model.name}`);
             } catch (modelError) {
-              console.log(`[Migration] ❌ Failed to create table for ${tableName}:`, modelError.message);
+              _slog(`[Migration] ❌ Failed to create table for ${tableName}:`, modelError.message);
             }
           }
         }
       }
       
-      console.log(`[Migration] ✅ Table creation complete`);
+      _slog(`[Migration] ✅ Table creation complete`);
       return missingTables;
     } catch (syncError) {
       console.error(`[Migration] ❌ Sync failed:`, syncError.message);
       
       // Fallback: Try individual model sync
-      console.log(`[Migration] 🔨 Attempting individual model sync...`);
+      _slog(`[Migration] 🔨 Attempting individual model sync...`);
       for (const tableName of missingTables) {
         const model = tableNameMapping[tableName];
         if (model) {
           try {
             await model.sync({ force: false });
-            console.log(`[Migration] ✅ Created table for: ${tableName}`);
+            _slog(`[Migration] ✅ Created table for: ${tableName}`);
           } catch (modelError) {
-            console.log(`[Migration] ❌ Failed to create ${tableName}:`, modelError.message);
+            _slog(`[Migration] ❌ Failed to create ${tableName}:`, modelError.message);
           }
         }
       }
       return missingTables;
     }
   } else {
-    console.log(`[Migration] ✅ All required tables exist`);
+    _slog(`[Migration] ✅ All required tables exist`);
     return [];
   }
 }
 
 // ===== FUNCTION 2: ADD MISSING COLUMNS =====
 async function addMissingColumns() {
-  console.log('[Migration] 🔧 Checking for missing columns...');
+  _slog('[Migration] 🔧 Checking for missing columns...');
   
   const queryInterface = sequelize.getQueryInterface();
   const addedColumns = [];
@@ -652,11 +653,11 @@ async function addMissingColumns() {
   
   try {
     const tables = await queryInterface.showAllTables();
-    console.log(`[Migration] Found ${tables.length} existing tables`);
+    _slog(`[Migration] Found ${tables.length} existing tables`);
     
     for (const [tableName, columns] of Object.entries(requiredColumns)) {
       if (!tables.includes(tableName)) {
-        console.log(`[Migration] ⚠️ Table ${tableName} not found, skipping column check (will be created by table creation)`);
+        _slog(`[Migration] ⚠️ Table ${tableName} not found, skipping column check (will be created by table creation)`);
         continue;
       }
       
@@ -666,7 +667,7 @@ async function addMissingColumns() {
         
         for (const column of columns) {
           if (!existingColumnNames.includes(column.name)) {
-            console.log(`[Migration] ➕ Adding column ${column.name} to table ${tableName}`);
+            _slog(`[Migration] ➕ Adding column ${column.name} to table ${tableName}`);
             
             try {
               await queryInterface.addColumn(tableName, column.name, {
@@ -675,9 +676,9 @@ async function addMissingColumns() {
                 defaultValue: column.defaultValue
               });
               addedColumns.push(`${tableName}.${column.name}`);
-              console.log(`[Migration] ✅ Added column ${column.name} to ${tableName}`);
+              _slog(`[Migration] ✅ Added column ${column.name} to ${tableName}`);
             } catch (addError) {
-              console.log(`[Migration] ⚠️ Could not add column ${column.name}: ${addError.message}`);
+              _slog(`[Migration] ⚠️ Could not add column ${column.name}: ${addError.message}`);
             }
           }
         }
@@ -687,11 +688,11 @@ async function addMissingColumns() {
             UPDATE "Groups" SET "name" = 'Group ' || "id" 
             WHERE "name" IS NULL OR "name" = ''
           `);
-          console.log(`[Migration] ✅ Updated Groups table with default names`);
+          _slog(`[Migration] ✅ Updated Groups table with default names`);
         }
         
       } catch (tableError) {
-        console.log(`[Migration] ⚠️ Error checking table ${tableName}: ${tableError.message}`);
+        _slog(`[Migration] ⚠️ Error checking table ${tableName}: ${tableError.message}`);
       }
     }
     
@@ -702,9 +703,9 @@ async function addMissingColumns() {
           CREATE INDEX IF NOT EXISTS idx_friends_receiver ON friends(receiver_id);
           CREATE INDEX IF NOT EXISTS idx_friends_status ON friends(status);
         `);
-        console.log(`[Migration] ✅ Added indexes to friends table`);
+        _slog(`[Migration] ✅ Added indexes to friends table`);
       } catch (indexError) {
-        console.log(`[Migration] ⚠️ Could not add indexes: ${indexError.message}`);
+        _slog(`[Migration] ⚠️ Could not add indexes: ${indexError.message}`);
       }
 
       // PERFORMANCE FIX: Add critical missing indexes for the most common queries
@@ -723,9 +724,9 @@ async function addMissingColumns() {
           CREATE INDEX IF NOT EXISTS idx_status_views_status     ON "StatusViews"("statusId");
           CREATE INDEX IF NOT EXISTS idx_notifications_user      ON "Notifications"("userId", "isRead");
         `);
-        console.log(`[Migration] ✅ Added critical performance indexes`);
+        _slog(`[Migration] ✅ Added critical performance indexes`);
       } catch (indexError) {
-        console.log(`[Migration] ⚠️ Could not add performance indexes: ${indexError.message}`);
+        _slog(`[Migration] ⚠️ Could not add performance indexes: ${indexError.message}`);
       }
     }
     
@@ -735,16 +736,16 @@ async function addMissingColumns() {
         await sequelize.query(`CREATE INDEX IF NOT EXISTS tokens_token_idx ON "Tokens" ("token");`);
         await sequelize.query(`CREATE INDEX IF NOT EXISTS tokens_expires_at_idx ON "Tokens" ("expires_at");`);
         await sequelize.query(`CREATE INDEX IF NOT EXISTS tokens_user_revoked_idx ON "Tokens" ("user_id", "is_revoked");`);
-        console.log(`[Migration] ✅ Added indexes to Tokens table`);
+        _slog(`[Migration] ✅ Added indexes to Tokens table`);
       } catch (indexError) {
-        console.log(`[Migration] ⚠️ Could not add token indexes: ${indexError.message}`);
+        _slog(`[Migration] ⚠️ Could not add token indexes: ${indexError.message}`);
       }
     }
     
     if (addedColumns.length > 0) {
-      console.log(`[Migration] ✅ Added ${addedColumns.length} missing columns:`, addedColumns);
+      _slog(`[Migration] ✅ Added ${addedColumns.length} missing columns:`, addedColumns);
     } else {
-      console.log(`[Migration] ✅ No missing columns found - database is up to date`);
+      _slog(`[Migration] ✅ No missing columns found - database is up to date`);
     }
     
   } catch (error) {
@@ -756,7 +757,7 @@ async function addMissingColumns() {
 
 // ===== FUNCTION 3: FIX COLUMN NAMES =====
 async function fixColumnNames() {
-  console.log('[Migration] 🔧 Fixing column names for compatibility...');
+  _slog('[Migration] 🔧 Fixing column names for compatibility...');
   
   const queryInterface = sequelize.getQueryInterface();
   const fixedColumns = [];
@@ -770,30 +771,30 @@ async function fixColumnNames() {
       if (columns.created_at && !columns.createdAt) {
         await queryInterface.renameColumn('friends', 'created_at', 'createdAt');
         fixedColumns.push('friends.created_at → createdAt');
-        console.log('[Migration] ✅ Renamed friends.created_at to createdAt');
+        _slog('[Migration] ✅ Renamed friends.created_at to createdAt');
       }
       
       if (columns.updated_at && !columns.updatedAt) {
         await queryInterface.renameColumn('friends', 'updated_at', 'updatedAt');
         fixedColumns.push('friends.updated_at → updatedAt');
-        console.log('[Migration] ✅ Renamed friends.updated_at to updatedAt');
+        _slog('[Migration] ✅ Renamed friends.updated_at to updatedAt');
       }
     }
     
     if (fixedColumns.length > 0) {
-      console.log(`[Migration] ✅ Fixed ${fixedColumns.length} column names:`, fixedColumns);
+      _slog(`[Migration] ✅ Fixed ${fixedColumns.length} column names:`, fixedColumns);
     } else {
-      console.log('[Migration] ✅ No column name fixes needed');
+      _slog('[Migration] ✅ No column name fixes needed');
     }
     
   } catch (error) {
-    console.log('[Migration] ⚠️ Error fixing column names:', error.message);
+    _slog('[Migration] ⚠️ Error fixing column names:', error.message);
   }
 }
 
 // ===== FUNCTION 4: ENSURE TOKENS TABLE EXISTS (CRITICAL FOR AUTH) =====
 async function ensureTokensTable() {
-  console.log('[Migration] 🔐 Ensuring Tokens table exists for authentication...');
+  _slog('[Migration] 🔐 Ensuring Tokens table exists for authentication...');
   
   const queryInterface = sequelize.getQueryInterface();
   const tables = await queryInterface.showAllTables();
@@ -802,7 +803,7 @@ async function ensureTokensTable() {
   const hasTokensTable = tables.some(t => t.toLowerCase() === 'tokens');
   
   if (!hasTokensTable) {
-    console.log('[Migration] 🔨 Creating Tokens table...');
+    _slog('[Migration] 🔨 Creating Tokens table...');
     
     try {
       // Check if Token model exists
@@ -810,7 +811,7 @@ async function ensureTokensTable() {
       
       if (TokenModel) {
         await TokenModel.sync({ force: false });
-        console.log('[Migration] ✅ Tokens table created via Token model sync');
+        _slog('[Migration] ✅ Tokens table created via Token model sync');
       } else {
         // Create table manually if model doesn't exist
         await sequelize.query(`
@@ -828,7 +829,7 @@ async function ensureTokensTable() {
             "updatedAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
           );
         `);
-        console.log('[Migration] ✅ Tokens table created manually');
+        _slog('[Migration] ✅ Tokens table created manually');
       }
       
       // Verify creation
@@ -836,9 +837,9 @@ async function ensureTokensTable() {
       const verified = newTables.some(t => t.toLowerCase() === 'tokens');
       
       if (verified) {
-        console.log('[Migration] ✅ Tokens table verified');
+        _slog('[Migration] ✅ Tokens table verified');
       } else {
-        console.log('[Migration] ⚠️ Tokens table creation could not be verified');
+        _slog('[Migration] ⚠️ Tokens table creation could not be verified');
       }
       
       return true;
@@ -847,13 +848,13 @@ async function ensureTokensTable() {
       return false;
     }
   } else {
-    console.log('[Migration] ✅ Tokens table already exists');
+    _slog('[Migration] ✅ Tokens table already exists');
     return true;
   }
 }
 
 // ===== SAFE ASSOCIATION SETUP =====
-console.log('[Database] Setting up associations (constraints: false)...');
+_slog('[Database] Setting up associations (constraints: false)...');
 
 const associatedModels = new Set();
 
@@ -862,16 +863,16 @@ Object.keys(db.models).forEach(modelName => {
   if (model && typeof model.associate === 'function') {
     try {
       if (associatedModels.has(modelName)) {
-        console.log(`[Database] ⏭️ Skipping already associated model: ${modelName}`);
+        _slog(`[Database] ⏭️ Skipping already associated model: ${modelName}`);
         return;
       }
       
       model.associate(db.models);
       associatedModels.add(modelName);
-      console.log(`[Database] ✅ Associated model: ${modelName}`);
+      _slog(`[Database] ✅ Associated model: ${modelName}`);
     } catch (error) {
       if (error.message && error.message.includes('used the alias')) {
-        console.log(`[Database] ⚠️ Alias conflict in ${modelName}: ${error.message.split(' in')[0]}`);
+        _slog(`[Database] ⚠️ Alias conflict in ${modelName}: ${error.message.split(' in')[0]}`);
         db.associationErrors[modelName] = {
           error: error.message,
           timestamp: new Date().toISOString(),
@@ -889,7 +890,7 @@ Object.keys(db.models).forEach(modelName => {
   }
 });
 
-console.log('[Database] ✅ Associations setup complete');
+_slog('[Database] ✅ Associations setup complete');
 
 // ===== MAIN MIGRATION FUNCTION =====
 
@@ -898,7 +899,7 @@ console.log('[Database] ✅ Associations setup complete');
 // Uses CREATE TABLE IF NOT EXISTS so it is always safe to re-run.
 // ═══════════════════════════════════════════════════════════════════════════════
 async function ensurePhase34Tables() {
-  console.log('[Migration] 🔧 Ensuring Phase 3-4 tables...');
+  _slog('[Migration] 🔧 Ensuring Phase 3-4 tables...');
   const Q = Sequelize.QueryTypes.RAW;
   const ddl = [
     // Safety numbers — key verification records
@@ -948,57 +949,57 @@ async function ensurePhase34Tables() {
     try { await sequelize.query(sql, { type: Q }); }
     catch(e) { console.warn('[Migration] Phase34 DDL warn:', e.message.split('\n')[0]); }
   }
-  console.log('[Migration] ✅ Phase 3-4 tables ready');
+  _slog('[Migration] ✅ Phase 3-4 tables ready');
 }
 
 async function runFullMigration() {
-  console.log('\n[Migration] ===== STARTING FULL DATABASE MIGRATION =====');
-  console.log(`[Migration] Environment: ${env}`);
-  console.log(`[Migration] Database: ${dbConfig.database || 'DATABASE_URL'}\n`);
+  _slog('\n[Migration] ===== STARTING FULL DATABASE MIGRATION =====');
+  _slog(`[Migration] Environment: ${env}`);
+  _slog(`[Migration] Database: ${dbConfig.database || 'DATABASE_URL'}\n`);
   
   let hasErrors = false;
   
   try {
     // STEP 1: Create missing tables (MOST IMPORTANT)
-    console.log('[Migration] STEP 1: Creating missing tables...');
+    _slog('[Migration] STEP 1: Creating missing tables...');
     const createdTables = await createMissingTables();
-    console.log(`[Migration] Created ${createdTables.length} missing tables\n`);
+    _slog(`[Migration] Created ${createdTables.length} missing tables\n`);
     
     // STEP 2: Ensure Tokens table exists (CRITICAL for auth)
-    console.log('[Migration] STEP 2: Ensuring Tokens table exists...');
+    _slog('[Migration] STEP 2: Ensuring Tokens table exists...');
     const tokensOk = await ensureTokensTable();
     await ensurePhase34Tables();
     if (!tokensOk) {
-      console.log('[Migration] ⚠️ Tokens table creation had issues - auth may not work');
+      _slog('[Migration] ⚠️ Tokens table creation had issues - auth may not work');
     }
-    console.log('');
+    _slog('');
     
     // STEP 3: Add missing columns
-    console.log('[Migration] STEP 3: Adding missing columns...');
+    _slog('[Migration] STEP 3: Adding missing columns...');
     const addedColumns = await addMissingColumns();
-    console.log(`[Migration] Added ${addedColumns.length} missing columns\n`);
+    _slog(`[Migration] Added ${addedColumns.length} missing columns\n`);
     
     // STEP 4: Fix column names
-    console.log('[Migration] STEP 4: Fixing column names...');
+    _slog('[Migration] STEP 4: Fixing column names...');
     await fixColumnNames();
-    console.log('');
+    _slog('');
     
     // STEP 5: Final verification
-    console.log('[Migration] STEP 5: Final verification...');
+    _slog('[Migration] STEP 5: Final verification...');
     const finalTables = await sequelize.getQueryInterface().showAllTables();
-    console.log(`[Migration] Total tables after migration: ${finalTables.length}`);
+    _slog(`[Migration] Total tables after migration: ${finalTables.length}`);
     
     // Verify Tokens table specifically
     const hasTokensFinal = finalTables.some(t => t.toLowerCase() === 'tokens');
     if (hasTokensFinal) {
-      console.log('[Migration] ✅ Tokens table is present - authentication will work');
+      _slog('[Migration] ✅ Tokens table is present - authentication will work');
     } else {
       console.error('[Migration] ❌ Tokens table is STILL missing - CRITICAL ERROR!');
       hasErrors = true;
     }
 
     // STEP 6: Ensure marketplace tables exist (non-destructive raw SQL)
-    console.log('[Migration] STEP 6: Ensuring marketplace tables exist...');
+    _slog('[Migration] STEP 6: Ensuring marketplace tables exist...');
     try {
       await sequelize.query(`
         CREATE TABLE IF NOT EXISTS "tools" (
@@ -1081,7 +1082,7 @@ async function runFullMigration() {
         CREATE INDEX IF NOT EXISTS idx_reviews_user    ON "marketplace_reviews" ("user_id");
         CREATE INDEX IF NOT EXISTS idx_reviews_seller  ON "marketplace_reviews" ("seller_id");
       `);
-      console.log('[Migration] ✅ Marketplace tables (tools, marketplace_orders, marketplace_reviews) ensured');
+      _slog('[Migration] ✅ Marketplace tables (tools, marketplace_orders, marketplace_reviews) ensured');
 
       // ── P1/P2 FIX: Add missing marketplace columns to tools table ────────
       await sequelize.query(`
@@ -1097,7 +1098,7 @@ async function runFullMigration() {
         CREATE INDEX IF NOT EXISTS idx_tools_approval ON "tools" ("approval_status");
         CREATE INDEX IF NOT EXISTS idx_tools_flash_sale ON "tools" ("is_flash_sale", "available");
         CREATE UNIQUE INDEX IF NOT EXISTS idx_carts_user_unique ON "marketplace_carts" ("user_id");
-      `).catch(e => console.log('[Migration] ⚠️ tools column patch (non-fatal):', e.message));
+      `).catch(e => _slog('[Migration] ⚠️ tools column patch (non-fatal):', e.message));
 
       // ── Dedicated wishlists table (replaces savedBy UUID array on Tool) ───
       await sequelize.query(`
@@ -1116,7 +1117,7 @@ async function runFullMigration() {
         -- seller_verified field on seller_profiles (for badge display)
         ALTER TABLE "seller_profiles" ADD COLUMN IF NOT EXISTS "verified" BOOLEAN DEFAULT false;
         ALTER TABLE "seller_profiles" ADD COLUMN IF NOT EXISTS "verified_at" TIMESTAMPTZ;
-      `).catch(e => console.log('[Migration] ⚠️ wishlists/seller_verified (non-fatal):', e.message));
+      `).catch(e => _slog('[Migration] ⚠️ wishlists/seller_verified (non-fatal):', e.message));
 
       // ── P2 FIX: Full-text search index on tools ───────────────────────────
       await sequelize.query(`
@@ -1124,7 +1125,7 @@ async function runFullMigration() {
         CREATE INDEX IF NOT EXISTS idx_tools_search_vector ON "tools" USING GIN("search_vector");
         UPDATE "tools" SET "search_vector" = to_tsvector('english', coalesce("title",'') || ' ' || coalesce("description",''))
         WHERE "search_vector" IS NULL;
-      `).catch(e => console.log('[Migration] ⚠️ search_vector (non-fatal):', e.message));
+      `).catch(e => _slog('[Migration] ⚠️ search_vector (non-fatal):', e.message));
 
       // ── P1 FIX: Wallet tables ─────────────────────────────────────────────
       await sequelize.query(`
@@ -1157,7 +1158,7 @@ async function runFullMigration() {
         );
         CREATE INDEX IF NOT EXISTS idx_wallet_tx_wallet ON "wallet_transactions" ("wallet_id");
         CREATE INDEX IF NOT EXISTS idx_wallet_tx_user ON "wallet_transactions" ("user_id");
-      `).catch(e => console.log('[Migration] ⚠️ wallets (non-fatal):', e.message));
+      `).catch(e => _slog('[Migration] ⚠️ wallets (non-fatal):', e.message));
 
       // ── P1 FIX: Refund table ──────────────────────────────────────────────
       await sequelize.query(`
@@ -1183,7 +1184,7 @@ async function runFullMigration() {
         CREATE UNIQUE INDEX IF NOT EXISTS idx_refunds_order_unique ON "refunds" ("order_id");
         CREATE INDEX IF NOT EXISTS idx_refunds_buyer ON "refunds" ("buyer_id");
         CREATE INDEX IF NOT EXISTS idx_refunds_status ON "refunds" ("status");
-      `).catch(e => console.log('[Migration] ⚠️ refunds (non-fatal):', e.message));
+      `).catch(e => _slog('[Migration] ⚠️ refunds (non-fatal):', e.message));
 
       // ── P1 FIX: Payout / settlement table ────────────────────────────────
       await sequelize.query(`
@@ -1208,7 +1209,7 @@ async function runFullMigration() {
         );
         CREATE INDEX IF NOT EXISTS idx_payouts_seller ON "payouts" ("seller_id");
         CREATE INDEX IF NOT EXISTS idx_payouts_status ON "payouts" ("status");
-      `).catch(e => console.log('[Migration] ⚠️ payouts (non-fatal):', e.message));
+      `).catch(e => _slog('[Migration] ⚠️ payouts (non-fatal):', e.message));
 
       // ── P2 FIX: Seller profile / KYC table ───────────────────────────────
       await sequelize.query(`
@@ -1236,7 +1237,7 @@ async function runFullMigration() {
         );
         CREATE INDEX IF NOT EXISTS idx_seller_profiles_user ON "seller_profiles" ("user_id");
         CREATE INDEX IF NOT EXISTS idx_seller_profiles_kyc ON "seller_profiles" ("kyc_status");
-      `).catch(e => console.log('[Migration] ⚠️ seller_profiles (non-fatal):', e.message));
+      `).catch(e => _slog('[Migration] ⚠️ seller_profiles (non-fatal):', e.message));
 
       // ── P2 FIX: Coupons table (model existed but no DDL) ─────────────────
       // FIX (forensic audit 2026-06-21): CREATE TABLE IF NOT EXISTS silently
@@ -1288,7 +1289,7 @@ async function runFullMigration() {
         ALTER TABLE "coupons" ADD COLUMN IF NOT EXISTS "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW();
         CREATE UNIQUE INDEX IF NOT EXISTS idx_coupons_code ON "coupons" ("code");
         CREATE INDEX IF NOT EXISTS idx_coupons_active ON "coupons" ("is_active", "expires_at");
-      `).catch(e => console.log('[Migration] ⚠️ coupons (non-fatal):', e.message));
+      `).catch(e => _slog('[Migration] ⚠️ coupons (non-fatal):', e.message));
 
       // ── P2 FIX: Audit log table ───────────────────────────────────────────
       // Same pre-existing-table issue: old "audit_logs" tables were missing
@@ -1315,14 +1316,14 @@ async function runFullMigration() {
         CREATE INDEX IF NOT EXISTS idx_audit_logs_user ON "audit_logs" ("user_id");
         CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON "audit_logs" ("action");
         CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON "audit_logs" ("createdAt" DESC);
-      `).catch(e => console.log('[Migration] ⚠️ audit_logs (non-fatal):', e.message));
+      `).catch(e => _slog('[Migration] ⚠️ audit_logs (non-fatal):', e.message));
 
-      console.log('[Migration] ✅ All P1/P2 marketplace tables and columns ensured');
+      _slog('[Migration] ✅ All P1/P2 marketplace tables and columns ensured');
     } catch (mpErr) {
       console.error('[Migration] ⚠️ Marketplace table creation error (non-fatal):', mpErr.message);
     }
     
-    console.log('\n[Migration] ===== MIGRATION COMPLETE =====\n');
+    _slog('\n[Migration] ===== MIGRATION COMPLETE =====\n');
     
   } catch (error) {
     console.error('[Migration] ❌ Migration error:', error.message);
@@ -1334,7 +1335,7 @@ async function runFullMigration() {
 
 // ===== RUN MIGRATION ON STARTUP =====
 (async function runMigrationAndContinue() {
-  console.log('[Database] Starting database initialization...');
+  _slog('[Database] Starting database initialization...');
   
   try {
     // Run the full migration
@@ -1345,18 +1346,18 @@ async function runFullMigration() {
     }
     
     // Additional sync to ensure everything is consistent
-    console.log('[Database] Syncing models for consistency...');
+    _slog('[Database] Syncing models for consistency...');
     await sequelize.sync({ force: false, alter: false });
-    console.log('[Database] ✅ Final sync complete');
+    _slog('[Database] ✅ Final sync complete');
     
   } catch (error) {
     console.error('[Database] ❌ Migration error (non-critical):', error.message);
     
     // Try fallback sync
     try {
-      console.log('[Database] 🔧 Trying fallback sync without alter...');
+      _slog('[Database] 🔧 Trying fallback sync without alter...');
       await sequelize.sync({ force: false, alter: false });
-      console.log('[Database] ✅ Fallback sync complete');
+      _slog('[Database] ✅ Fallback sync complete');
     } catch (fallbackErr) {
       console.error('[Database] ❌ Fallback sync also failed:', fallbackErr.message);
     }
@@ -1364,7 +1365,7 @@ async function runFullMigration() {
 })();
 
 // ===== CORE MODEL VALIDATION =====
-console.log('\n[Database] ===== CORE MODEL VALIDATION =====');
+_slog('\n[Database] ===== CORE MODEL VALIDATION =====');
 
 const hasUserModel = !!(db.models.Users);
 const hasFriendModel = !!(db.models.Friend);
@@ -1381,58 +1382,58 @@ if (!hasUserModel) {
   console.error('[Database] ❌ CRITICAL: User model not found!');
   console.error('[Database] Available models:', Object.keys(db.models));
 } else {
-  console.log('[Database] ✅ User model loaded successfully');
+  _slog('[Database] ✅ User model loaded successfully');
 }
 
 if (!hasTokenModel) {
   console.warn('[Database] ⚠️ Token model not found - will be created by migration');
 } else {
-  console.log('[Database] ✅ Token model loaded successfully');
+  _slog('[Database] ✅ Token model loaded successfully');
 }
 
 if (!hasFriendModel) {
   console.warn('[Database] ⚠️ Friend model not found - friend features may be limited');
 } else {
-  console.log('[Database] ✅ Friend model loaded successfully');
+  _slog('[Database] ✅ Friend model loaded successfully');
 }
 
 if (!hasChatModel) {
   console.warn('[Database] ⚠️ Chats model not found - chat features may be limited');
 } else {
-  console.log('[Database] ✅ Chats model loaded successfully');
+  _slog('[Database] ✅ Chats model loaded successfully');
 }
 
 if (!hasMessageModel) {
   console.warn('[Database] ⚠️ Messages model not found - messaging features may be limited');
 } else {
-  console.log('[Database] ✅ Messages model loaded successfully');
+  _slog('[Database] ✅ Messages model loaded successfully');
 }
 
 // ── Marketplace model validation ─────────────────────────────────────────────
 if (!hasToolModel) {
   console.warn('[Database] ⚠️ Tool model not found - marketplace listings unavailable');
 } else {
-  console.log('[Database] ✅ Tool model loaded (marketplace listings)');
+  _slog('[Database] ✅ Tool model loaded (marketplace listings)');
 }
 
 if (!hasOrderModel) {
   console.warn('[Database] ⚠️ Order model not found - marketplace orders unavailable');
 } else {
-  console.log('[Database] ✅ Order model loaded (marketplace orders)');
+  _slog('[Database] ✅ Order model loaded (marketplace orders)');
 }
 
 if (!hasReviewModel) {
   console.warn('[Database] ⚠️ Review model not found - marketplace reviews unavailable');
 } else {
-  console.log('[Database] ✅ Review model loaded (marketplace reviews)');
+  _slog('[Database] ✅ Review model loaded (marketplace reviews)');
 }
 
-console.log(`[Database] Total models loaded: ${Object.keys(db.models).length}`);
+_slog(`[Database] Total models loaded: ${Object.keys(db.models).length}`);
 
 // ===== UTILITY FUNCTIONS =====
 db.showCurrentTables = async function() {
   try {
-    console.log('[Database] ===== CURRENT DATABASE TABLES =====');
+    _slog('[Database] ===== CURRENT DATABASE TABLES =====');
     
     const queryResult = await sequelize.query(
       `SELECT 
@@ -1446,12 +1447,12 @@ db.showCurrentTables = async function() {
       { type: sequelize.QueryTypes.SELECT }
     );
     
-    console.log(`[Database] Total tables: ${queryResult.length}`);
+    _slog(`[Database] Total tables: ${queryResult.length}`);
     queryResult.forEach((table, index) => {
-      console.log(`  ${index + 1}. ${table.table_name} (${table.column_count} columns, ${table.table_size})`);
+      _slog(`  ${index + 1}. ${table.table_name} (${table.column_count} columns, ${table.table_size})`);
     });
     
-    console.log('[Database] ============================');
+    _slog('[Database] ============================');
   } catch (error) {
     console.error('[Database] Error listing tables:', error.message);
   }
@@ -1460,7 +1461,7 @@ db.showCurrentTables = async function() {
 db.testConnection = async function() {
   try {
     await sequelize.authenticate();
-    console.log('[Database] Connection test: ✅ SUCCESS');
+    _slog('[Database] Connection test: ✅ SUCCESS');
     return true;
   } catch (error) {
     console.error('[Database] Connection test: ❌ FAILED', error.message);
@@ -1525,16 +1526,16 @@ db.initializeWebSocket = function(server) {
   }
   
   try {
-    console.log('[WebSocket] 🔌 Initializing WebSocket server...');
+    _slog('[WebSocket] 🔌 Initializing WebSocket server...');
     
     const wss = new WebSocket.Server({ server });
     
     wss.on('connection', (socket) => {
-      console.log('[WebSocket] ✅ New client connected');
+      _slog('[WebSocket] ✅ New client connected');
       
       socket.on('message', (msg) => {
         try {
-          console.log('[WebSocket] 📨 Received:', msg.toString());
+          _slog('[WebSocket] 📨 Received:', msg.toString());
           const data = JSON.parse(msg.toString());
         } catch (error) {
           console.error('[WebSocket] ❌ Error processing message:', error.message);
@@ -1542,7 +1543,7 @@ db.initializeWebSocket = function(server) {
       });
       
       socket.on('close', () => {
-        console.log('[WebSocket] 👋 Client disconnected');
+        _slog('[WebSocket] 👋 Client disconnected');
       });
       
       socket.on('error', (error) => {
@@ -1557,7 +1558,7 @@ db.initializeWebSocket = function(server) {
     });
     
     db.wss = wss;
-    console.log('[WebSocket] ✅ WebSocket server initialized successfully');
+    _slog('[WebSocket] ✅ WebSocket server initialized successfully');
     return wss;
     
   } catch (error) {
@@ -1567,63 +1568,63 @@ db.initializeWebSocket = function(server) {
 };
 
 // ===== STARTUP REPORT =====
-console.log('\n[Database] ===== STARTUP REPORT =====');
-console.log(`[Database] Environment: ${env}`);
-console.log(`[Database] Database: ${dbConfig.database || 'DATABASE_URL'}`);
-console.log(`[Database] Mode: ${db.getOperationalStatus().mode}`);
-console.log('');
+_slog('\n[Database] ===== STARTUP REPORT =====');
+_slog(`[Database] Environment: ${env}`);
+_slog(`[Database] Database: ${dbConfig.database || 'DATABASE_URL'}`);
+_slog(`[Database] Mode: ${db.getOperationalStatus().mode}`);
+_slog('');
 
-console.log(`[Database] ✅ SUCCESSFULLY LOADED (${Object.keys(db.models).length}):`);
+_slog(`[Database] ✅ SUCCESSFULLY LOADED (${Object.keys(db.models).length}):`);
 db.getLoadedModels().forEach((model, index) => {
-  console.log(`  ${index + 1}. ${model.name} (table: ${model.tableName})`);
+  _slog(`  ${index + 1}. ${model.name} (table: ${model.tableName})`);
 });
 
-console.log('');
+_slog('');
 
 if (Object.keys(db.failedModels).length > 0) {
-  console.log(`[Database] ❌ FAILED TO LOAD (${Object.keys(db.failedModels).length}):`);
+  _slog(`[Database] ❌ FAILED TO LOAD (${Object.keys(db.failedModels).length}):`);
   db.getFailedModels().forEach((failed, index) => {
-    console.log(`  ${index + 1}. ${failed.name} (${failed.file})`);
-    console.log(`     Error: ${failed.error}`);
+    _slog(`  ${index + 1}. ${failed.name} (${failed.file})`);
+    _slog(`     Error: ${failed.error}`);
   });
 }
 
-console.log('');
+_slog('');
 
 if (Object.keys(db.skippedFiles).length > 0) {
-  console.log(`[Database] ⏭️  SKIPPED FILES (${Object.keys(db.skippedFiles).length}):`);
+  _slog(`[Database] ⏭️  SKIPPED FILES (${Object.keys(db.skippedFiles).length}):`);
   Object.entries(db.skippedFiles).forEach(([fileName, reason], index) => {
-    console.log(`  ${index + 1}. ${fileName} - ${reason}`);
+    _slog(`  ${index + 1}. ${fileName} - ${reason}`);
   });
 }
 
-console.log('\n[Database] ===== OPERATIONAL STATUS =====');
+_slog('\n[Database] ===== OPERATIONAL STATUS =====');
 const status = db.getOperationalStatus();
 if (status.mode === 'HALTED') {
-  console.log('[Database] ❌ SYSTEM HALTED: User model missing');
+  _slog('[Database] ❌ SYSTEM HALTED: User model missing');
 } else if (status.mode === 'PARTIAL') {
-  console.log('[Database] ⚠️ PARTIAL MODE: Some features unavailable');
+  _slog('[Database] ⚠️ PARTIAL MODE: Some features unavailable');
 } else {
-  console.log('[Database] ✅ FULL OPERATION: All core models loaded');
+  _slog('[Database] ✅ FULL OPERATION: All core models loaded');
 }
 
-console.log('\n[Migration] ===== MIGRATION FEATURES =====');
-console.log('[Migration] ✅ Auto-create missing tables on startup');
-console.log('[Migration] ✅ Auto-add missing columns on startup');
-console.log('[Migration] ✅ Auto-fix column name inconsistencies');
-console.log('[Migration] ✅ Tokens table verification and creation');
-console.log('[Migration] ✅ Database sync with force:false, alter:false');
-console.log('[Migration] ✅ Non-destructive migrations only\n');
+_slog('\n[Migration] ===== MIGRATION FEATURES =====');
+_slog('[Migration] ✅ Auto-create missing tables on startup');
+_slog('[Migration] ✅ Auto-add missing columns on startup');
+_slog('[Migration] ✅ Auto-fix column name inconsistencies');
+_slog('[Migration] ✅ Tokens table verification and creation');
+_slog('[Migration] ✅ Database sync with force:false, alter:false');
+_slog('[Migration] ✅ Non-destructive migrations only\n');
 
-console.log('[Database] =================================\n');
+_slog('[Database] =================================\n');
 
 if (status.coreOperational) {
-  console.log('[Database] 🚀 Database ready');
+  _slog('[Database] 🚀 Database ready');
     global.__dbReady = true;
     if (global.__dbReadyResolve) { global.__dbReadyResolve(); }
-  console.log('[Database] ✅ No destructive operations');
-  console.log('[Database] ✅ Associations loaded');
-  console.log('[Database] ✅ Auto-migration enabled');
+  _slog('[Database] ✅ No destructive operations');
+  _slog('[Database] ✅ Associations loaded');
+  _slog('[Database] ✅ Auto-migration enabled');
 }
 
 // ===== EXPORT =====

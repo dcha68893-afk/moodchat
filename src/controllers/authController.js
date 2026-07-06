@@ -1,3 +1,4 @@
+const _slog = (...a) => { if (process.env.DEBUG_SERVER) _slog(...a); };
 // controllers/authController.js - COMPLETE FIXED VERSION
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
@@ -50,7 +51,7 @@ class AuthController {
 
   async register(req, res, next) {
     try {
-      console.log("📝 [AuthController] Registration request received");
+      _slog("📝 [AuthController] Registration request received");
       
       const { username, email, password, firstName, lastName } = req.body;
 
@@ -81,7 +82,7 @@ class AuthController {
         });
       }
 
-      console.log("🔧 [AuthController] Checking for existing user...");
+      _slog("🔧 [AuthController] Checking for existing user...");
 
       // Check if user already exists in database
       let existingUser = null;
@@ -145,7 +146,7 @@ class AuthController {
             isActive: true,
             isVerified: false
           });
-          console.log("✅ User saved to database");
+          _slog("✅ User saved to database");
         } catch (dbError) {
           console.error('Database save error:', dbError);
           return res.status(500).json({
@@ -173,7 +174,7 @@ class AuthController {
           updatedAt: new Date().toISOString()
         };
         req.app.locals.users.push(user);
-        console.log("✅ User saved to in-memory storage");
+        _slog("✅ User saved to in-memory storage");
       }
 
       if (!user) {
@@ -209,7 +210,7 @@ class AuthController {
         }
       }
 
-      console.log("✅ [AuthController] Registration successful for user:", user.id);
+      _slog("✅ [AuthController] Registration successful for user:", user.id);
 
       // CRITICAL FIX: Return consistent token format that frontend expects
       return res.status(201).json({
@@ -245,7 +246,7 @@ class AuthController {
 
   async login(req, res, next) {
     try {
-      console.log("📝 [AuthController] Login request received");
+      _slog("📝 [AuthController] Login request received");
       
       const { identifier, password } = req.body;
 
@@ -283,7 +284,7 @@ class AuthController {
         }
       }
 
-      console.log("🔧 [AuthController] Looking up user...");
+      _slog("🔧 [AuthController] Looking up user...");
 
       let user = null;
       
@@ -388,7 +389,7 @@ class AuthController {
         }
       }
 
-      console.log("✅ [AuthController] Login successful for user:", user.id);
+      _slog("✅ [AuthController] Login successful for user:", user.id);
 
       // CRITICAL FIX: Return consistent token format that frontend expects
       return res.status(200).json({
@@ -424,7 +425,7 @@ class AuthController {
 
   async refreshToken(req, res, next) {
     try {
-      console.log("📝 [AuthController] Refresh token request received");
+      _slog("📝 [AuthController] Refresh token request received");
       
       const refreshToken = tokenService.extractRefreshTokenFromRequest(req);
       
@@ -491,7 +492,7 @@ class AuthController {
         ipAddress: req.ip || null
       });
       
-      console.log("✅ [AuthController] Refresh token successful for user:", userId);
+      _slog("✅ [AuthController] Refresh token successful for user:", userId);
       
       return res.status(200).json({
         success: true,
@@ -513,9 +514,9 @@ class AuthController {
 
   // CRITICAL FIX: Updated validateToken to match the format that frontend expects
   async validateToken(req, res, next) {
-    console.log('=' .repeat(60));
-    console.log('🔵🔵🔵 AUTHCONTROLLER.JS validateToken method CALLED 🔵🔵🔵');
-    console.log('=' .repeat(60));
+    _slog('=' .repeat(60));
+    _slog('🔵🔵🔵 AUTHCONTROLLER.JS validateToken method CALLED 🔵🔵🔵');
+    _slog('=' .repeat(60));
     
     try {
       // Extract token from request
@@ -525,17 +526,17 @@ class AuthController {
         const parts = req.headers.authorization.split(' ');
         if (parts.length === 2 && parts[0].toLowerCase() === 'bearer') {
           token = parts[1];
-          console.log('[CONTROLLER] Token from Authorization header');
+          _slog('[CONTROLLER] Token from Authorization header');
         }
       }
       
       if (!token && req.body.token) {
         token = req.body.token;
-        console.log('[CONTROLLER] Token from body');
+        _slog('[CONTROLLER] Token from body');
       }
       
       if (!token) {
-        console.log('[CONTROLLER] ❌ No token');
+        _slog('[CONTROLLER] ❌ No token');
         return res.status(401).json({
           success: false,
           valid: false,
@@ -548,7 +549,7 @@ class AuthController {
       const verification = tokenService.verifyAccessToken(token);
       
       if (!verification.valid) {
-        console.log('[CONTROLLER] ❌ Token verification failed:', verification.error);
+        _slog('[CONTROLLER] ❌ Token verification failed:', verification.error);
         return res.status(401).json({
           success: false,
           valid: false,
@@ -561,7 +562,7 @@ class AuthController {
       const decoded = verification.decoded;
       const userId = decoded.userId || decoded.id;
       
-      console.log('[CONTROLLER] ✅ Token verified for user:', userId);
+      _slog('[CONTROLLER] ✅ Token verified for user:', userId);
       
       // CRITICAL FIX: Fetch user from database if available
       let user = null;
@@ -813,7 +814,7 @@ class AuthController {
           }
         }
         
-        console.log(`📧 Password reset token for ${email}: ${resetToken}`);
+        _slog(`📧 Password reset token for ${email}: ${resetToken}`);
       }
       
       // Always return success for security (don't reveal if user exists)
@@ -955,7 +956,7 @@ class AuthController {
       }
     }
     
-    console.log(`🧹 [AuthController] Cleaned up old login attempts. Remaining: ${loginAttemptsStore.size}`);
+    _slog(`🧹 [AuthController] Cleaned up old login attempts. Remaining: ${loginAttemptsStore.size}`);
   }
 }
 

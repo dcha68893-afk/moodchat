@@ -17,9 +17,11 @@ dotenv.config({ path: process.env.ENV_PATH || DEFAULT_ENV_PATH });
 
 // Set UV_THREADPOOL_SIZE for better concurrent operations
 process.env.UV_THREADPOOL_SIZE = process.env.UV_THREADPOOL_SIZE || '16';
-console.log(`⚡ UV_THREADPOOL_SIZE set to: ${process.env.UV_THREADPOOL_SIZE}`);
 
-// Environment loaded - JWT and DB validation handled by ConfigurationManager
+// Production logging guard — gate verbose per-request logs behind DEBUG_SERVER=1
+// In production, only startup, errors, and security events should log unconditionally.
+const _DEBUG_SERVER = process.env.DEBUG_SERVER === '1' || process.env.NODE_ENV === 'development';
+const _slog = (...args) => { if (_DEBUG_SERVER) console.log(...args); };
 
 // ========== BOOTSTRAP & ENVIRONMENT ==========
 const jwt = require('jsonwebtoken');
@@ -125,18 +127,18 @@ if (this.environment === 'production' || this.isRender) {
     }
     
    loadProductionOrigins() {
-    console.log('🛡️ CORS: Configuring for PRODUCTION environment');
+    _slog('🛡️ CORS: Configuring for PRODUCTION environment');
     
     // Primary Render frontend URL
     const renderFrontend = 'https://moodfronted.onrender.com';
     this.allowedOrigins.add(renderFrontend);
     this.allowedOrigins.add(renderFrontend + '/'); // With trailing slash
-    console.log(`✅ CORS: Allowed production frontend: ${renderFrontend}`);
+    _slog(`✅ CORS: Allowed production frontend: ${renderFrontend}`);
     
     // Also allow Render backend URL if running on Render
     if (this.isRender && process.env.RENDER_EXTERNAL_URL) {
         this.allowedOrigins.add(process.env.RENDER_EXTERNAL_URL);
-        console.log(`✅ CORS: Allowed Render backend URL: ${process.env.RENDER_EXTERNAL_URL}`);
+        _slog(`✅ CORS: Allowed Render backend URL: ${process.env.RENDER_EXTERNAL_URL}`);
     }
     
     // Allow custom frontend URL from environment if specified
@@ -145,14 +147,14 @@ if (this.environment === 'production' || this.isRender) {
         urls.forEach(url => {
             this.allowedOrigins.add(url);
             this.allowedOrigins.add(url + '/'); // With trailing slash
-            console.log(`✅ CORS: Allowed custom frontend: ${url}`);
+            _slog(`✅ CORS: Allowed custom frontend: ${url}`);
         });
     }
     
     // CRITICAL: Ensure moodfronted.onrender.com is always allowed
     if (!this.allowedOrigins.has('https://moodfronted.onrender.com')) {
         this.allowedOrigins.add('https://moodfronted.onrender.com');
-        console.log(`✅ CORS: Explicitly added moodfronted.onrender.com`);
+        _slog(`✅ CORS: Explicitly added moodfronted.onrender.com`);
     }
     
     // Additional security for production: Remove any insecure origins
@@ -161,7 +163,7 @@ if (this.environment === 'production' || this.isRender) {
 
     // Load development origins - flexible policy
     loadDevelopmentOrigins() {
-        console.log('🔧 CORS: Configuring for DEVELOPMENT environment');
+        _slog('🔧 CORS: Configuring for DEVELOPMENT environment');
         
         // Local development frontend origins - COMPLETE LIST
         const localOrigins = [
@@ -234,18 +236,18 @@ if (this.environment === 'production' || this.isRender) {
             this.allowedOrigins.add(origin);
         });
         
-        console.log(`✅ CORS: Added ${localOrigins.length} development origins`);
+        _slog(`✅ CORS: Added ${localOrigins.length} development origins`);
         
         // Also allow production frontend in development for testing
         if (process.env.ALLOW_PRODUCTION_IN_DEV === 'true') {
             this.allowedOrigins.add('https://moodfronted.onrender.com');
-            console.log('⚠️  CORS: Allowing production frontend in development (ALLOW_PRODUCTION_IN_DEV=true)');
+            _slog('⚠️  CORS: Allowing production frontend in development (ALLOW_PRODUCTION_IN_DEV=true)');
         }
         
         // Allow Render backend if running locally but connecting to Render
         if (process.env.RENDER_EXTERNAL_URL) {
             this.allowedOrigins.add(process.env.RENDER_EXTERNAL_URL);
-            console.log(`✅ CORS: Allowed Render backend for local testing: ${process.env.RENDER_EXTERNAL_URL}`);
+            _slog(`✅ CORS: Allowed Render backend for local testing: ${process.env.RENDER_EXTERNAL_URL}`);
         }
     }
     
@@ -259,7 +261,7 @@ if (this.environment === 'production' || this.isRender) {
             
             additionalOrigins.forEach(origin => {
                 this.allowedOrigins.add(origin);
-                console.log(`✅ CORS: Added additional origin: ${origin}`);
+                _slog(`✅ CORS: Added additional origin: ${origin}`);
             });
         }
         
@@ -269,7 +271,7 @@ if (this.environment === 'production' || this.isRender) {
             urls.forEach(url => {
                 if (!this.allowedOrigins.has(url)) {
                     this.allowedOrigins.add(url);
-                    console.log(`✅ CORS: Added frontend URL: ${url}`);
+                    _slog(`✅ CORS: Added frontend URL: ${url}`);
                 }
             });
         }
@@ -304,27 +306,27 @@ if (this.environment === 'production' || this.isRender) {
             
             originsToRemove.forEach(origin => {
                 this.allowedOrigins.delete(origin);
-                console.log(`🔒 CORS: Removed insecure origin in production: ${origin}`);
+                _slog(`🔒 CORS: Removed insecure origin in production: ${origin}`);
             });
         }
     }
     
     // Log the CORS configuration
     logConfiguration() {
-        console.log('\n' + '='.repeat(80));
-        console.log('🌐 DYNAMIC CORS CONFIGURATION');
-        console.log('='.repeat(80));
-        console.log(`Environment: ${this.environment.toUpperCase()}`);
-        console.log(`Running on Render: ${this.isRender ? 'Yes' : 'No'}`);
-        console.log(`Total allowed origins: ${this.allowedOrigins.size}`);
-        console.log('-'.repeat(80));
+        _slog('\n' + '='.repeat(80));
+        _slog('🌐 DYNAMIC CORS CONFIGURATION');
+        _slog('='.repeat(80));
+        _slog(`Environment: ${this.environment.toUpperCase()}`);
+        _slog(`Running on Render: ${this.isRender ? 'Yes' : 'No'}`);
+        _slog(`Total allowed origins: ${this.allowedOrigins.size}`);
+        _slog('-'.repeat(80));
         
         // List all allowed origins
         Array.from(this.allowedOrigins).forEach((origin, index) => {
-            console.log(`${index + 1}. ${origin}`);
+            _slog(`${index + 1}. ${origin}`);
         });
         
-        console.log('='.repeat(80) + '\n');
+        _slog('='.repeat(80) + '\n');
     }
     
     // Get CORS options for Express middleware - CRITICAL FIX: Properly handle Authorization header
@@ -405,7 +407,7 @@ if (this.environment === 'production' || this.isRender) {
     checkPatternMatch(origin) {
         // AFTER — works regardless of NODE_ENV, uses isRender flag as backup
 if (origin.includes('.onrender.com') && (this.environment === 'production' || this.isRender)) {
-    console.log(`🌐 CORS: Allowing Render subdomain: ${origin}`);
+    _slog(`🌐 CORS: Allowing Render subdomain: ${origin}`);
     return true;
 }
         
@@ -415,7 +417,7 @@ if (origin.includes('.onrender.com') && (this.environment === 'production' || th
                 origin.startsWith('https://localhost:') ||
                 origin.startsWith('http://127.0.0.1:') ||
                 origin.startsWith('https://127.0.0.1:')) {
-                console.log(`🌐 CORS: Allowing localhost with dynamic port: ${origin}`);
+                _slog(`🌐 CORS: Allowing localhost with dynamic port: ${origin}`);
                 return true;
             }
         }
@@ -430,9 +432,9 @@ if (origin.includes('.onrender.com') && (this.environment === 'production' || th
         const reasonText = reason ? ` (${reason})` : '';
         
         if (origin) {
-            console.log(`🌐 CORS: ${status} ${origin}${reasonText} - ${timestamp}`);
+            _slog(`🌐 CORS: ${status} ${origin}${reasonText} - ${timestamp}`);
         } else {
-            console.log(`🌐 CORS: ${status} No origin${reasonText} - ${timestamp}`);
+            _slog(`🌐 CORS: ${status} No origin${reasonText} - ${timestamp}`);
         }
     }
     
@@ -463,7 +465,7 @@ class LoginResponseCache {
         // Start cleanup interval every minute
         this.cleanupInterval = setInterval(() => this.cleanup(), 60000);
         
-        console.log(`🚀 LoginResponseCache initialized with ${ttlSeconds}s TTL`);
+        _slog(`🚀 LoginResponseCache initialized with ${ttlSeconds}s TTL`);
     }
     
     // Generate cache key from identifier and device
@@ -524,7 +526,7 @@ class LoginResponseCache {
     // Clear all cache
     clear() {
         this.cache.clear();
-        console.log('🗑️ Login cache cleared');
+        _slog('🗑️ Login cache cleared');
     }
     
     // Cleanup expired entries
@@ -540,7 +542,7 @@ class LoginResponseCache {
         }
         
         if (expiredCount > 0) {
-            console.log(`🧹 Login cache cleanup: removed ${expiredCount} expired entries`);
+            _slog(`🧹 Login cache cleanup: removed ${expiredCount} expired entries`);
         }
     }
     
@@ -635,7 +637,7 @@ class QueryTimeoutMiddleware {
             // Set timeout for this request
             req.setTimeout(this.timeout, () => {
                 if (!res.headersSent) {
-                    console.log(`⏱️ Query timeout for ${req.method} ${req.path}`);
+                    _slog(`⏱️ Query timeout for ${req.method} ${req.path}`);
                     res.status(504).json({
                         success: false,
                         message: 'Request timeout',
@@ -1339,9 +1341,9 @@ class ProfessionalLogger {
         
         systemState.incrementMetric('errors');
         
-        console.log(`${this.colors.red}✗ ERROR [${context}] ${message}${this.colors.reset}`);
+        _slog(`${this.colors.red}✗ ERROR [${context}] ${message}${this.colors.reset}`);
         if (error && process.env.NODE_ENV !== 'production') {
-            console.log(`${this.colors.gray}  ${error.message || error}${this.colors.reset}`);
+            _slog(`${this.colors.gray}  ${error.message || error}${this.colors.reset}`);
         }
     }
     
@@ -1350,44 +1352,44 @@ class ProfessionalLogger {
         
         systemState.incrementMetric('warnings');
         
-        console.log(`${this.colors.yellow}⚠ WARN  [${context}] ${message}${this.colors.reset}`);
+        _slog(`${this.colors.yellow}⚠ WARN  [${context}] ${message}${this.colors.reset}`);
     }
     
     info(message, context = 'SYSTEM') {
         if (!this.shouldLog('INFO', context, message)) return;
         
-        console.log(`${this.colors.cyan}ℹ INFO  [${context}] ${message}${this.colors.reset}`);
+        _slog(`${this.colors.cyan}ℹ INFO  [${context}] ${message}${this.colors.reset}`);
     }
     
     success(message, context = 'SYSTEM') {
         if (!this.shouldLog('INFO', context, message)) return;
         
-        console.log(`${this.colors.green}✓ OK    [${context}] ${message}${this.colors.reset}`);
+        _slog(`${this.colors.green}✓ OK    [${context}] ${message}${this.colors.reset}`);
     }
     
     debug(message, context = 'SYSTEM') {
         if (!this.shouldLog('DEBUG', context, message)) return;
         
-        console.log(`${this.colors.gray}🔍 DEBUG [${context}] ${message}${this.colors.reset}`);
+        _slog(`${this.colors.gray}🔍 DEBUG [${context}] ${message}${this.colors.reset}`);
     }
     
     // Explicit readiness declaration
     declareReadiness(port, host, report) {
-        console.log(`\n${this.colors.green}══════════════════════════════════════════════════════════════════════════════${this.colors.reset}`);
-        console.log(`${this.colors.green}                    🚀 SERVER READY - ACCEPTING REQUESTS                          ${this.colors.reset}`);
-        console.log(`${this.colors.green}══════════════════════════════════════════════════════════════════════════════${this.colors.reset}`);
+        _slog(`\n${this.colors.green}══════════════════════════════════════════════════════════════════════════════${this.colors.reset}`);
+        _slog(`${this.colors.green}                    🚀 SERVER READY - ACCEPTING REQUESTS                          ${this.colors.reset}`);
+        _slog(`${this.colors.green}══════════════════════════════════════════════════════════════════════════════${this.colors.reset}`);
         
         // Display startup report
         this.displayStartupReport(report);
         
-        console.log(`${this.colors.green}══════════════════════════════════════════════════════════════════════════════${this.colors.reset}`);
-        console.log(`${this.colors.cyan}   Local:    http://localhost:${port}${this.colors.reset}`);
-        console.log(`${this.colors.cyan}   Network:  http://${host}:${port}${this.colors.reset}`);
-        console.log(`${this.colors.cyan}   Health:   http://localhost:${port}/health${this.colors.reset}`);
-        console.log(`${this.colors.cyan}   API Docs: http://localhost:${port}/api/health${this.colors.reset}`);
-        console.log(`${this.colors.cyan}   WebSocket: ws://localhost:${port}/ws${this.colors.reset}`);
-        console.log(`${this.colors.green}══════════════════════════════════════════════════════════════════════════════${this.colors.reset}`);
-        console.log(`${this.colors.yellow}   Press Ctrl+C to shutdown gracefully${this.colors.reset}\n`);
+        _slog(`${this.colors.green}══════════════════════════════════════════════════════════════════════════════${this.colors.reset}`);
+        _slog(`${this.colors.cyan}   Local:    http://localhost:${port}${this.colors.reset}`);
+        _slog(`${this.colors.cyan}   Network:  http://${host}:${port}${this.colors.reset}`);
+        _slog(`${this.colors.cyan}   Health:   http://localhost:${port}/health${this.colors.reset}`);
+        _slog(`${this.colors.cyan}   API Docs: http://localhost:${port}/api/health${this.colors.reset}`);
+        _slog(`${this.colors.cyan}   WebSocket: ws://localhost:${port}/ws${this.colors.reset}`);
+        _slog(`${this.colors.green}══════════════════════════════════════════════════════════════════════════════${this.colors.reset}`);
+        _slog(`${this.colors.yellow}   Press Ctrl+C to shutdown gracefully${this.colors.reset}\n`);
     }
     
     // Table display methods
@@ -1396,12 +1398,12 @@ class ProfessionalLogger {
         
         // Ensure rows is an array
         if (!rows || !Array.isArray(rows)) {
-            console.log(`${this.colors.yellow}⚠ Cannot display table: rows is not an array${this.colors.reset}`);
+            _slog(`${this.colors.yellow}⚠ Cannot display table: rows is not an array${this.colors.reset}`);
             return;
         }
         
-        console.log(`\n${this.colors.blue}${title}${this.colors.reset}`);
-        console.log(`${this.colors.blue}${'─'.repeat(80)}${this.colors.reset}`);
+        _slog(`\n${this.colors.blue}${title}${this.colors.reset}`);
+        _slog(`${this.colors.blue}${'─'.repeat(80)}${this.colors.reset}`);
         
         // Headers
         let headerStr = '';
@@ -1409,15 +1411,15 @@ class ProfessionalLogger {
             const width = options.columnWidths?.[i] || 20;
             headerStr += header.padEnd(width) + '  ';
         });
-        console.log(`${this.colors.cyan}${headerStr}${this.colors.reset}`);
-        console.log(`${this.colors.blue}${'─'.repeat(80)}${this.colors.reset}`);
+        _slog(`${this.colors.cyan}${headerStr}${this.colors.reset}`);
+        _slog(`${this.colors.blue}${'─'.repeat(80)}${this.colors.reset}`);
         
         // Rows - with safe iteration
         try {
             rows.forEach(row => {
                 // Ensure row is an array
                 if (!Array.isArray(row)) {
-                    console.log(`${this.colors.yellow}⚠ Skipping invalid row: ${JSON.stringify(row)}${this.colors.reset}`);
+                    _slog(`${this.colors.yellow}⚠ Skipping invalid row: ${JSON.stringify(row)}${this.colors.reset}`);
                     return;
                 }
                 
@@ -1428,10 +1430,10 @@ class ProfessionalLogger {
                     const color = this.getCellColor(cell, i, headers[i]);
                     rowStr += color + cellText.padEnd(width) + this.colors.reset + '  ';
                 });
-                console.log(rowStr);
+                _slog(rowStr);
             });
         } catch (error) {
-            console.log(`${this.colors.yellow}⚠ Error displaying table: ${error.message}${this.colors.reset}`);
+            _slog(`${this.colors.yellow}⚠ Error displaying table: ${error.message}${this.colors.reset}`);
         }
     }
     
@@ -1477,25 +1479,25 @@ class ProfessionalLogger {
     
     // ENHANCED: Display detailed model information with column details
     displayModelDetails(models) {
-        console.log(`\n${this.colors.blue}══════════════════════════════════════════════════════════════════════════════${this.colors.reset}`);
-        console.log(`${this.colors.cyan}                    📊 MODEL SCHEMA DIAGNOSTICS                              ${this.colors.reset}`);
-        console.log(`${this.colors.blue}══════════════════════════════════════════════════════════════════════════════${this.colors.reset}`);
+        _slog(`\n${this.colors.blue}══════════════════════════════════════════════════════════════════════════════${this.colors.reset}`);
+        _slog(`${this.colors.cyan}                    📊 MODEL SCHEMA DIAGNOSTICS                              ${this.colors.reset}`);
+        _slog(`${this.colors.blue}══════════════════════════════════════════════════════════════════════════════${this.colors.reset}`);
         
         for (const model of models) {
-            console.log(`\n${this.colors.green}📁 Model: ${model.name}${this.colors.reset}`);
-            console.log(`${this.colors.gray}   Table: ${model.tableName}${this.colors.reset}`);
-            console.log(`${this.colors.gray}   Status: ${model.loaded ? '✓ LOADED' : '✗ FAILED'}${this.colors.reset}`);
-            console.log(`${this.colors.gray}   Columns: ${model.columnCount}${this.colors.reset}`);
-            console.log(`${this.colors.gray}   Associations: ${model.associations?.length || 0}${this.colors.reset}`);
-            console.log(`${this.colors.gray}   Alias Conflicts: ${model.aliasConflicts?.length || 0}${this.colors.reset}`);
+            _slog(`\n${this.colors.green}📁 Model: ${model.name}${this.colors.reset}`);
+            _slog(`${this.colors.gray}   Table: ${model.tableName}${this.colors.reset}`);
+            _slog(`${this.colors.gray}   Status: ${model.loaded ? '✓ LOADED' : '✗ FAILED'}${this.colors.reset}`);
+            _slog(`${this.colors.gray}   Columns: ${model.columnCount}${this.colors.reset}`);
+            _slog(`${this.colors.gray}   Associations: ${model.associations?.length || 0}${this.colors.reset}`);
+            _slog(`${this.colors.gray}   Alias Conflicts: ${model.aliasConflicts?.length || 0}${this.colors.reset}`);
             
             // Display columns in a formatted table
             if (model.columns && model.columns.length > 0) {
-                console.log(`${this.colors.cyan}   ┌─────────────────────────────────────────────────────────────────────────┐${this.colors.reset}`);
-                console.log(`${this.colors.cyan}   │ COLUMN DETAILS                                                          │${this.colors.reset}`);
-                console.log(`${this.colors.cyan}   ├───────────────┬─────────────────────────────────────────────────────────┤${this.colors.reset}`);
-                console.log(`${this.colors.cyan}   │ Column Name   │ Type & Constraints                                      │${this.colors.reset}`);
-                console.log(`${this.colors.cyan}   ├───────────────┼─────────────────────────────────────────────────────────┤${this.colors.reset}`);
+                _slog(`${this.colors.cyan}   ┌─────────────────────────────────────────────────────────────────────────┐${this.colors.reset}`);
+                _slog(`${this.colors.cyan}   │ COLUMN DETAILS                                                          │${this.colors.reset}`);
+                _slog(`${this.colors.cyan}   ├───────────────┬─────────────────────────────────────────────────────────┤${this.colors.reset}`);
+                _slog(`${this.colors.cyan}   │ Column Name   │ Type & Constraints                                      │${this.colors.reset}`);
+                _slog(`${this.colors.cyan}   ├───────────────┼─────────────────────────────────────────────────────────┤${this.colors.reset}`);
                 
                 const displayColumns = model.columns.slice(0, 20);
                 displayColumns.forEach(col => {
@@ -1506,46 +1508,46 @@ class ProfessionalLogger {
                     if (col.autoIncrement) typeInfo += ' AUTO_INCREMENT';
                     if (col.defaultValue !== undefined) typeInfo += ` DEFAULT ${col.defaultValue}`;
                     
-                    console.log(`${this.colors.cyan}   │ ${colName} │ ${typeInfo.substring(0, 55).padEnd(55)}${this.colors.reset}`);
+                    _slog(`${this.colors.cyan}   │ ${colName} │ ${typeInfo.substring(0, 55).padEnd(55)}${this.colors.reset}`);
                 });
                 
                 if (model.columns.length > 20) {
-                    console.log(`${this.colors.cyan}   │ ...           │ ${model.columns.length - 20} more columns...                         │${this.colors.reset}`);
+                    _slog(`${this.colors.cyan}   │ ...           │ ${model.columns.length - 20} more columns...                         │${this.colors.reset}`);
                 }
                 
-                console.log(`${this.colors.cyan}   └───────────────┴─────────────────────────────────────────────────────────┘${this.colors.reset}`);
+                _slog(`${this.colors.cyan}   └───────────────┴─────────────────────────────────────────────────────────┘${this.colors.reset}`);
             }
             
             // Display primary keys
             if (model.primaryKeys && model.primaryKeys.length > 0) {
-                console.log(`${this.colors.green}   🔑 Primary Keys: ${model.primaryKeys.join(', ')}${this.colors.reset}`);
+                _slog(`${this.colors.green}   🔑 Primary Keys: ${model.primaryKeys.join(', ')}${this.colors.reset}`);
             }
             
             // Display foreign keys
             if (model.foreignKeys && model.foreignKeys.length > 0) {
-                console.log(`${this.colors.magenta}   🔗 Foreign Keys: ${model.foreignKeys.map(fk => `${fk.column} → ${fk.references?.table}.${fk.references?.column}`).join(', ')}${this.colors.reset}`);
+                _slog(`${this.colors.magenta}   🔗 Foreign Keys: ${model.foreignKeys.map(fk => `${fk.column} → ${fk.references?.table}.${fk.references?.column}`).join(', ')}${this.colors.reset}`);
             }
             
             // Display warnings
             if (model.warnings && model.warnings.length > 0) {
-                console.log(`${this.colors.yellow}   ⚠ Warnings: ${model.warnings.length}${this.colors.reset}`);
+                _slog(`${this.colors.yellow}   ⚠ Warnings: ${model.warnings.length}${this.colors.reset}`);
                 model.warnings.slice(0, 3).forEach(warning => {
-                    console.log(`${this.colors.yellow}      - ${warning.substring(0, 70)}${this.colors.reset}`);
+                    _slog(`${this.colors.yellow}      - ${warning.substring(0, 70)}${this.colors.reset}`);
                 });
             }
             
             // Display alias conflicts
             if (model.aliasConflicts && model.aliasConflicts.length > 0) {
-                console.log(`${this.colors.red}   ❌ Alias Conflicts: ${model.aliasConflicts.length}${this.colors.reset}`);
+                _slog(`${this.colors.red}   ❌ Alias Conflicts: ${model.aliasConflicts.length}${this.colors.reset}`);
                 model.aliasConflicts.slice(0, 3).forEach(conflict => {
-                    console.log(`${this.colors.red}      - ${conflict.substring(0, 70)}${this.colors.reset}`);
+                    _slog(`${this.colors.red}      - ${conflict.substring(0, 70)}${this.colors.reset}`);
                 });
             }
             
-            console.log(`${this.colors.gray}   ${'─'.repeat(80)}${this.colors.reset}`);
+            _slog(`${this.colors.gray}   ${'─'.repeat(80)}${this.colors.reset}`);
         }
         
-        console.log(`\n${this.colors.blue}══════════════════════════════════════════════════════════════════════════════${this.colors.reset}`);
+        _slog(`\n${this.colors.blue}══════════════════════════════════════════════════════════════════════════════${this.colors.reset}`);
     }
     
     displaySystemHealth() {
@@ -1698,39 +1700,39 @@ class ProfessionalLogger {
     }
     
     startupBanner(port, host) {
-        console.log(`\n${this.colors.green}══════════════════════════════════════════════════════════════════════════════${this.colors.reset}`);
-        console.log(`${this.colors.green}                    🚀 MoodChat Server Initializing                              ${this.colors.reset}`);
-        console.log(`${this.colors.green}══════════════════════════════════════════════════════════════════════════════${this.colors.reset}`);
-        console.log(`${this.colors.cyan}   Optimizations Enabled:${this.colors.reset}`);
-        console.log(`${this.colors.cyan}   • UV_THREADPOOL_SIZE: ${process.env.UV_THREADPOOL_SIZE}${this.colors.reset}`);
-        console.log(`${this.colors.cyan}   • Connection Pool: max=20, min=5${this.colors.reset}`);
-        console.log(`${this.colors.cyan}   • Login Cache TTL: 30 seconds${this.colors.reset}`);
-        console.log(`${this.colors.cyan}   • Query Timeout: 30 seconds${this.colors.reset}`);
-        console.log(`${this.colors.cyan}   • Response Compression: Enabled${this.colors.reset}`);
-        console.log(`${this.colors.cyan}   • Duplicate Request Filter: 500ms${this.colors.reset}`);
-        console.log(`${this.colors.green}══════════════════════════════════════════════════════════════════════════════${this.colors.reset}`);
+        _slog(`\n${this.colors.green}══════════════════════════════════════════════════════════════════════════════${this.colors.reset}`);
+        _slog(`${this.colors.green}                    🚀 MoodChat Server Initializing                              ${this.colors.reset}`);
+        _slog(`${this.colors.green}══════════════════════════════════════════════════════════════════════════════${this.colors.reset}`);
+        _slog(`${this.colors.cyan}   Optimizations Enabled:${this.colors.reset}`);
+        _slog(`${this.colors.cyan}   • UV_THREADPOOL_SIZE: ${process.env.UV_THREADPOOL_SIZE}${this.colors.reset}`);
+        _slog(`${this.colors.cyan}   • Connection Pool: max=20, min=5${this.colors.reset}`);
+        _slog(`${this.colors.cyan}   • Login Cache TTL: 30 seconds${this.colors.reset}`);
+        _slog(`${this.colors.cyan}   • Query Timeout: 30 seconds${this.colors.reset}`);
+        _slog(`${this.colors.cyan}   • Response Compression: Enabled${this.colors.reset}`);
+        _slog(`${this.colors.cyan}   • Duplicate Request Filter: 500ms${this.colors.reset}`);
+        _slog(`${this.colors.green}══════════════════════════════════════════════════════════════════════════════${this.colors.reset}`);
     }
     
     logLoginAttempt(email, success, device = 'unknown') {
         const status = success ? 'SUCCESS' : 'FAILED';
         const icon = success ? '✓' : '✗';
-        console.log(`${this.colors.cyan}${icon} LOGIN  [AUTH] ${status} for ${email} from ${device}${this.colors.reset}`);
+        _slog(`${this.colors.cyan}${icon} LOGIN  [AUTH] ${status} for ${email} from ${device}${this.colors.reset}`);
     }
     
     logJWTToken(userId, tokenLength) {
-        console.log(`${this.colors.gray}🔐 JWT    [AUTH] Generated for user ${userId}, token length: ${tokenLength}${this.colors.reset}`);
+        _slog(`${this.colors.gray}🔐 JWT    [AUTH] Generated for user ${userId}, token length: ${tokenLength}${this.colors.reset}`);
     }
     
     logAliasConflict(modelName, conflict) {
-        console.log(`${this.colors.yellow}⚠ ALIAS  [MODEL] ${modelName}: ${conflict}${this.colors.reset}`);
+        _slog(`${this.colors.yellow}⚠ ALIAS  [MODEL] ${modelName}: ${conflict}${this.colors.reset}`);
     }
     
     logCorsAccess(origin, allowed) {
         if (allowed) {
-            console.log(`${this.colors.gray}🌐 CORS   [HTTP] Allowed: ${origin}${this.colors.reset}`);
+            _slog(`${this.colors.gray}🌐 CORS   [HTTP] Allowed: ${origin}${this.colors.reset}`);
             systemState.incrementMetric('corsAllowed');
         } else {
-            console.log(`${this.colors.yellow}🌐 CORS   [HTTP] Blocked: ${origin}${this.colors.reset}`);
+            _slog(`${this.colors.yellow}🌐 CORS   [HTTP] Blocked: ${origin}${this.colors.reset}`);
             systemState.incrementMetric('corsBlocked');
         }
     }
@@ -1742,41 +1744,41 @@ class ProfessionalLogger {
                            method === 'PUT' ? this.colors.blue : 
                            method === 'DELETE' ? this.colors.red : this.colors.white;
         
-        console.log(`${methodColor}${method}${this.colors.reset} ${path} [${authStatus}]`);
+        _slog(`${methodColor}${method}${this.colors.reset} ${path} [${authStatus}]`);
     }
     
     // NEW: Log public route access
     logPublicRouteAccess(path, method) {
         if (config.get('NODE_ENV') === 'development') {
-            console.log(`${this.colors.green}${method}${this.colors.reset} ${path} ${this.colors.cyan}[PUBLIC]${this.colors.reset}`);
+            _slog(`${this.colors.green}${method}${this.colors.reset} ${path} ${this.colors.cyan}[PUBLIC]${this.colors.reset}`);
         }
     }
     
     // NEW: Log auth failure only for protected routes
     logAuthFailure(path, method, reason = 'No token') {
         if (config.get('NODE_ENV') === 'development') {
-            console.log(`${this.colors.red}${method}${this.colors.reset} ${path} ${this.colors.yellow}[AUTH FAILED: ${reason}]${this.colors.reset}`);
+            _slog(`${this.colors.red}${method}${this.colors.reset} ${path} ${this.colors.yellow}[AUTH FAILED: ${reason}]${this.colors.reset}`);
         }
     }
     
     // NEW: Log cache hit/miss
     logCacheHit(identifier) {
-        console.log(`${this.colors.green}⚡ CACHE  [LOGIN] Hit for ${identifier}${this.colors.reset}`);
+        _slog(`${this.colors.green}⚡ CACHE  [LOGIN] Hit for ${identifier}${this.colors.reset}`);
         systemState.incrementMetric('cacheHits');
     }
     
     logCacheMiss(identifier) {
-        console.log(`${this.colors.gray}💾 CACHE  [LOGIN] Miss for ${identifier}${this.colors.reset}`);
+        _slog(`${this.colors.gray}💾 CACHE  [LOGIN] Miss for ${identifier}${this.colors.reset}`);
         systemState.incrementMetric('cacheMisses');
     }
     
     logDuplicateBlocked(identifier, path) {
-        console.log(`${this.colors.yellow}🛡️ DUPLICATE [REQUEST] Blocked duplicate: ${identifier} to ${path}${this.colors.reset}`);
+        _slog(`${this.colors.yellow}🛡️ DUPLICATE [REQUEST] Blocked duplicate: ${identifier} to ${path}${this.colors.reset}`);
         systemState.incrementMetric('duplicateRequestsBlocked');
     }
     
     logQueryTimeout(path, method) {
-        console.log(`${this.colors.red}⏱️ TIMEOUT [QUERY] ${method} ${path} exceeded 30s limit${this.colors.reset}`);
+        _slog(`${this.colors.red}⏱️ TIMEOUT [QUERY] ${method} ${path} exceeded 30s limit${this.colors.reset}`);
         systemState.incrementMetric('queryTimeouts');
     }
 }
@@ -1826,10 +1828,10 @@ class ConfigurationManager {
         this.set('JWT_REFRESH_SECRET', process.env.JWT_REFRESH_SECRET || jwtSecret);
         
         // CRITICAL: Log which secrets are being used (without exposing values)
-        console.log('✅ [Config] JWT Configuration:');
-        console.log(`   JWT_SECRET: ${jwtSecret ? 'SET' : 'MISSING'} (length: ${jwtSecret?.length || 0})`);
-        console.log(`   JWT_ACCESS_SECRET: ${process.env.JWT_ACCESS_SECRET ? 'SET (custom)' : 'Using JWT_SECRET'}`);
-        console.log(`   JWT_REFRESH_SECRET: ${process.env.JWT_REFRESH_SECRET ? 'SET (custom)' : 'Using JWT_SECRET'}`);
+        _slog('✅ [Config] JWT Configuration:');
+        _slog(`   JWT_SECRET: ${jwtSecret ? 'SET' : 'MISSING'} (length: ${jwtSecret?.length || 0})`);
+        _slog(`   JWT_ACCESS_SECRET: ${process.env.JWT_ACCESS_SECRET ? 'SET (custom)' : 'Using JWT_SECRET'}`);
+        _slog(`   JWT_REFRESH_SECRET: ${process.env.JWT_REFRESH_SECRET ? 'SET (custom)' : 'Using JWT_SECRET'}`);
         
         // Ensure consistency - log warning if custom access secret differs from primary
         if (process.env.JWT_ACCESS_SECRET && process.env.JWT_ACCESS_SECRET !== jwtSecret) {
@@ -1845,7 +1847,7 @@ class ConfigurationManager {
             process.exit(1);
         }
         
-        console.log('🔧 [Config] DATABASE_URL found, fixing if needed...');
+        _slog('🔧 [Config] DATABASE_URL found, fixing if needed...');
         
         // Fix URL if it's missing the port
         let fixedUrl = dbUrl;
@@ -1857,13 +1859,13 @@ class ConfigurationManager {
                 const host = dbUrl.substring(atIndex + 1, slashIndex);
                 if (!host.includes(':')) {
                     fixedUrl = dbUrl.substring(0, slashIndex) + ':5432' + dbUrl.substring(slashIndex);
-                    console.log('🔧 [Config] Added default port 5432 to DATABASE_URL');
+                    _slog('🔧 [Config] Added default port 5432 to DATABASE_URL');
                 }
             }
         }
         
         this.set('DATABASE_URL', fixedUrl);
-        console.log('✅ [Config] DATABASE_URL configured');
+        _slog('✅ [Config] DATABASE_URL configured');
         
         // Clear individual DB configs (we're using URL)
         this.set('DB_HOST', null);
@@ -1891,7 +1893,7 @@ class ConfigurationManager {
             origins.forEach(origin => {
                 corsManager.allowedOrigins.add(origin);
             });
-            console.log(`✅ Added ${origins.length} CORS origins from .env`);
+            _slog(`✅ Added ${origins.length} CORS origins from .env`);
         }
         
         this.set('CORS_ORIGINS', corsManager.getAllowedOrigins());
@@ -1927,8 +1929,8 @@ class ConfigurationManager {
         }
         
         // Log final configuration summary (without sensitive data)
-        console.log('✅ [Config] Configuration loaded successfully');
-        console.log('📋 Config summary:', {
+        _slog('✅ [Config] Configuration loaded successfully');
+        _slog('📋 Config summary:', {
             environment: this.get('NODE_ENV'),
             port: this.get('PORT'),
             host: this.get('HOST'),
@@ -1954,7 +1956,7 @@ class ConfigurationManager {
     }
     
     validateProduction() {
-        console.log('🔒 Validating production configuration...');
+        _slog('🔒 Validating production configuration...');
         
         // Check JWT_SECRET is set
         const jwtSecret = this.get('JWT_SECRET');
@@ -2026,7 +2028,7 @@ if (!normalizedOrigins.includes(frontendUrl)) {
             process.exit(1);
         }
         
-        console.log('✅ Production configuration validation complete');
+        _slog('✅ Production configuration validation complete');
     }
     
     // Get database connection URL
@@ -2182,9 +2184,9 @@ class DatabaseService {
             }
             
             // Log all available models
-            console.log('🔍 DATABASE MODELS LOADED:');
+            _slog('🔍 DATABASE MODELS LOADED:');
             Object.keys(this.models).forEach((modelName, index) => {
-                console.log(`  ${index + 1}. ${modelName}`);
+                _slog(`  ${index + 1}. ${modelName}`);
             });
             
             // Initialize associations
@@ -2302,7 +2304,7 @@ class DatabaseService {
             throw new Error('DATABASE_URL not configured');
         }
         
-        console.log('🔧 [Database] Configuring connection with OPTIMIZED pool...');
+        _slog('🔧 [Database] Configuring connection with OPTIMIZED pool...');
         
         // Use the URL directly - let Sequelize handle parsing
         this.sequelize.config.url = dbUrl;
@@ -2312,7 +2314,7 @@ class DatabaseService {
         const poolConfig = config.getDatabasePoolConfig();
         this.sequelize.config.pool = poolConfig;
         
-        console.log(`   Pool: max=${poolConfig.max}, min=${poolConfig.min}, acquire=${poolConfig.acquire}ms, idle=${poolConfig.idle}ms`);
+        _slog(`   Pool: max=${poolConfig.max}, min=${poolConfig.min}, acquire=${poolConfig.acquire}ms, idle=${poolConfig.idle}ms`);
         
         // Add SSL settings for production
         if (config.get('NODE_ENV') === 'production') {
@@ -2329,7 +2331,7 @@ class DatabaseService {
             timeout: config.get('QUERY_TIMEOUT_MS', 30000)
         };
         
-        console.log('✅ [Database] Connection configured with OPTIMIZED pool settings');
+        _slog('✅ [Database] Connection configured with OPTIMIZED pool settings');
     }
     
     async initializeAssociations() {
@@ -2599,13 +2601,13 @@ class DatabaseService {
         const possibleNames = ['Users', 'User', 'users', 'user'];
         for (const name of possibleNames) {
             if (this.models[name]) {
-                console.log(`✅ Found user model: ${name}`);
+                _slog(`✅ Found user model: ${name}`);
                 return this.models[name];
             }
         }
         
         // If no user model found, log available models
-        console.log('❌ No user model found. Available models:', Object.keys(this.models || {}));
+        _slog('❌ No user model found. Available models:', Object.keys(this.models || {}));
         return null;
     }
     
@@ -3149,7 +3151,7 @@ this.publicRoutes = [
             '/api/media', '/api/notifications', '/api/typingIndicator', '/api/status/user'
         ];
         
-        console.log('🔄 RouterManager initialized with PROTECTED ROUTES ONLY auth');
+        _slog('🔄 RouterManager initialized with PROTECTED ROUTES ONLY auth');
     }
     
     async initialize(databaseService) {
@@ -3158,7 +3160,7 @@ this.publicRoutes = [
         // Initialize auth service - USE THE IMPORTED ONE
         this.authService = authService;
         const jwtSecret = config.get('JWT_SECRET');
-        console.log('🔧 [RouterManager] Setting JWT_SECRET for authService:', jwtSecret ? jwtSecret.substring(0, 10) + '...' : 'NOT SET');
+        _slog('🔧 [RouterManager] Setting JWT_SECRET for authService:', jwtSecret ? jwtSecret.substring(0, 10) + '...' : 'NOT SET');
         this.authService.JWT_SECRET = jwtSecret;
         
         // Create auth middleware manager
@@ -3167,7 +3169,7 @@ this.publicRoutes = [
         // CRITICAL: Pass database service to authService
         if (databaseService) {
             this.authService.setDatabase(databaseService);
-            console.log('✅ Database passed to authService');
+            _slog('✅ Database passed to authService');
         }
         
         // Validate JWT config
@@ -3217,7 +3219,7 @@ this.publicRoutes = [
     }
     
     async mountAuthRoutes() {
-        console.log('🔧 [RouterManager] mountAuthRoutes START');
+        _slog('🔧 [RouterManager] mountAuthRoutes START');
         
         try {
             // Define core auth routes with proper public/protected classification
@@ -3288,7 +3290,7 @@ this.publicRoutes = [
                 }
             ];
             
-            console.log(`🔧 [RouterManager] Mounting ${authRoutes.length} auth routes...`);
+            _slog(`🔧 [RouterManager] Mounting ${authRoutes.length} auth routes...`);
             
             // Mount each auth route directly with proper middleware
             authRoutes.forEach(route => {
@@ -3305,7 +3307,7 @@ this.publicRoutes = [
                 routeHandlers.push(route.handler);
                 
                 this.app[route.method.toLowerCase()](route.path, ...routeHandlers);
-                console.log(`✅ Mounted: ${route.method} ${route.path}`);
+                _slog(`✅ Mounted: ${route.method} ${route.path}`);
                 
                 const routeName = `auth_${route.path.split('/').pop()}`;
                 systemState.registerRoute(routeName, {
@@ -3329,7 +3331,7 @@ this.publicRoutes = [
                 });
             });
             
-            console.log('✅ [RouterManager] All auth routes mounted successfully');
+            _slog('✅ [RouterManager] All auth routes mounted successfully');
             return true;
             
         } catch (error) {
@@ -3341,13 +3343,13 @@ this.publicRoutes = [
     // OPTIMIZED LOGIN HANDLER WITH CACHING AND DUPLICATE FILTERING
     createOptimizedLoginHandler() {
         return async (req, res) => {
-            console.log('🔐 LOGIN REQUEST received');
+            _slog('🔐 LOGIN REQUEST received');
             
             try {
                 const { identifier, password, device } = req.body;
                 
                 if (!identifier || !password) {
-                    console.log('❌ Missing identifier or password');
+                    _slog('❌ Missing identifier or password');
                     return res.status(400).json({
                         success: false,
                         message: 'Identifier and password required',
@@ -3393,11 +3395,11 @@ this.publicRoutes = [
                 
                 logger.logCacheMiss(identifier);
                 
-                console.log(`🔐 Calling authService.login for: ${identifier}`);
+                _slog(`🔐 Calling authService.login for: ${identifier}`);
                 const result = await this.authService.login(identifier, password, deviceInfo);
                 
                 if (result.success) {
-                    console.log(`✅ Login successful for: ${identifier}`);
+                    _slog(`✅ Login successful for: ${identifier}`);
                     // Handle both response formats
                     const accessToken = result.tokens?.accessToken || result.accessToken;
                     const refreshToken = result.tokens?.refreshToken || result.refreshToken;
@@ -3424,7 +3426,7 @@ this.publicRoutes = [
                         cached: false
                     });
                 } else {
-                    console.log(`❌ Login failed for: ${identifier}`);
+                    _slog(`❌ Login failed for: ${identifier}`);
                     logger.logLoginAttempt(identifier, false, deviceInfo.device);
                     return res.status(401).json({
                         success: false,
@@ -3446,13 +3448,13 @@ this.publicRoutes = [
     // OPTIMIZED REGISTER HANDLER
     createOptimizedRegisterHandler() {
         return async (req, res) => {
-            console.log('📝 REGISTER REQUEST received');
+            _slog('📝 REGISTER REQUEST received');
             
             try {
                 const { email, password, username, name, device } = req.body;
                 
                 if (!email || !password) {
-                    console.log('❌ Missing email or password');
+                    _slog('❌ Missing email or password');
                     return res.status(400).json({
                         success: false,
                         message: 'Email and password required',
@@ -3497,7 +3499,7 @@ this.publicRoutes = [
                     timestamp: new Date().toISOString()
                 };
                 
-                console.log(`📝 Calling authService.register for: ${email}`);
+                _slog(`📝 Calling authService.register for: ${email}`);
                 const result = await this.authService.register({
                     email,
                     password,
@@ -3506,7 +3508,7 @@ this.publicRoutes = [
                 }, deviceInfo);
                 
                 if (result.success) {
-                    console.log(`✅ Registration successful for: ${email}`);
+                    _slog(`✅ Registration successful for: ${email}`);
                     // Handle both response formats
                     const accessToken = result.tokens?.accessToken || result.accessToken;
                     const refreshToken = result.tokens?.refreshToken || result.refreshToken;
@@ -3522,7 +3524,7 @@ this.publicRoutes = [
                         expiresIn: result.tokens?.expiresIn || result.expiresIn
                     });
                 } else {
-                    console.log(`❌ Registration failed for: ${email}`);
+                    _slog(`❌ Registration failed for: ${email}`);
                     return res.status(400).json({
                         success: false,
                         message: result.message,
@@ -3636,7 +3638,7 @@ this.publicRoutes = [
         return async (req, res) => {
             try {
                 const userId = req.user.userId;
-                console.log(`👤 GET /api/auth/me for user: ${userId}`);
+                _slog(`👤 GET /api/auth/me for user: ${userId}`);
                 
                 const result = await this.authService.getCurrentUser(userId);
                 
@@ -3897,9 +3899,9 @@ async mountRoutersSelective(loadedRouters) {
         // For now, let's make sure auth is applied correctly
         const { authenticateToken } = require('./middleware/auth');
         handlers.push(authenticateToken);
-        console.log(`🔒 ${mountPath} - PROTECTED (JWT required)`);
+        _slog(`🔒 ${mountPath} - PROTECTED (JWT required)`);
       } else {
-        console.log(`🔓 ${mountPath} - PUBLIC (No auth)`);
+        _slog(`🔓 ${mountPath} - PUBLIC (No auth)`);
       }
       
       // Add rate limiting for all routes
@@ -3929,7 +3931,7 @@ async mountRoutersSelective(loadedRouters) {
         }
       });
       
-      console.log(`✅ Mounted: ${mountPath} (Auth: ${requiresAuth ? 'PROTECTED' : 'PUBLIC'})`);
+      _slog(`✅ Mounted: ${mountPath} (Auth: ${requiresAuth ? 'PROTECTED' : 'PUBLIC'})`);
       
     } catch (error) {
       logger.error(`Failed to mount router ${filename}: ${error.message}`, error, 'ROUTER');
@@ -3959,7 +3961,7 @@ class Application {
         this.routerManager = null;
         this.websocket = null;
         
-        console.log('🔄 Application constructor: PROTECTED ROUTES ONLY auth');
+        _slog('🔄 Application constructor: PROTECTED ROUTES ONLY auth');
     }
     
     async initialize() {
@@ -4011,7 +4013,7 @@ class Application {
             // await this.routerManager.initialize(this.database);
 
             // Skip RouterManager - use index.js for all routes
-            console.log('✅ RouterManager DISABLED - using index.js for all routes');
+            _slog('✅ RouterManager DISABLED - using index.js for all routes');
             
             // 5. CRITICAL: Mount the main API router
             systemState.recordStartupStep('api_routes_mount');
@@ -4101,7 +4103,7 @@ class Application {
                 try { this.app.use('/api/link-preview', require('./routes/linkPreview')); } catch(e){ console.warn('[Server] linkPreview:', e.message); }
                 try { this.app.use('/api/auth/two-step', require('./routes/twoStep')); } catch(e){ console.warn('[Server] twoStep:', e.message); }
                 try { this.app.use('/api/privacy', require('./routes/privacy')); } catch(e){ console.warn('[Server] privacy:', e.message); }
-                console.log('✅ Mounted main API router at /api');
+                _slog('✅ Mounted main API router at /api');
             } else {
                 console.error('❌ Main API router NOT mounted — /api/* routes (including /api/auth/login) will 404 until routes/index.js error above is fixed');
             }
@@ -4125,25 +4127,25 @@ class Application {
             });
 
             // Routes are automatically mounted by the main router from routes/index.js
-            console.log('?? Routes will be mounted by main router from routes/index.js');
+            _slog('?? Routes will be mounted by main router from routes/index.js');
 
             // Debug: Verify auth routes are registered
-            console.log('🔍 Verifying auth routes registration...');
+            _slog('🔍 Verifying auth routes registration...');
             this.app._router.stack.forEach(middleware => {
                 if (middleware.route && middleware.route.path.includes('auth')) {
-                    console.log(`   ✅ Route registered: ${middleware.route.path}`);
+                    _slog(`   ✅ Route registered: ${middleware.route.path}`);
                 } else if (middleware.name === 'router' && middleware.handle.stack) {
                     middleware.handle.stack.forEach(handler => {
                         if (handler.route && handler.route.path) {
-                            console.log(`   ✅ Router handler: ${handler.route.path}`);
+                            _slog(`   ✅ Router handler: ${handler.route.path}`);
                         }
                     });
                 }
             });
 
             // Debug: Log all mounted routes
-            console.log('\n🔍 Checking mounted routes...');
-            console.log('Available routes will be handled by RouterManager');
+            _slog('\n🔍 Checking mounted routes...');
+            _slog('Available routes will be handled by RouterManager');
             
             // 6. Health/status endpoints were already registered in step 2.5
             // (right after middleware setup) so they remain reachable even
@@ -4252,7 +4254,7 @@ class Application {
     
     // CRITICAL FIX: Setup middleware WITH CORRECT ORDER and OPTIMIZATIONS
     setupMiddleware() {
-        console.log('🔄 Setting up middleware with correct order...');
+        _slog('🔄 Setting up middleware with correct order...');
         
         // 0. Add query timeout middleware (highest priority for slow queries)
         this.app.use(queryTimeout.create());
@@ -4260,7 +4262,7 @@ class Application {
         // 1. Add response compression middleware
         if (config.get('COMPRESSION_ENABLED')) {
             this.app.use(responseCompression.getMiddleware());
-            console.log('📦 Response compression enabled');
+            _slog('📦 Response compression enabled');
         }
         
         // Handle preflight requests - FIXED CORS for all origins
@@ -4270,7 +4272,7 @@ class Application {
                 const origin = req.headers.origin;
                 
                 // Log for debugging
-                console.log(`🌐 OPTIONS preflight for: ${req.path} from origin: ${origin}`);
+                _slog(`🌐 OPTIONS preflight for: ${req.path} from origin: ${origin}`);
                 
                 // Check if origin is allowed
                 let isAllowed = false;
@@ -4297,10 +4299,10 @@ class Application {
                     res.header('Access-Control-Allow-Credentials', 'true');
                     res.header('Access-Control-Max-Age', '86400');
                     
-                    console.log(`✅ OPTIONS allowed for: ${origin}`);
+                    _slog(`✅ OPTIONS allowed for: ${origin}`);
                     return res.status(204).end();
                 } else {
-                    console.log(`❌ OPTIONS blocked for: ${origin}`);
+                    _slog(`❌ OPTIONS blocked for: ${origin}`);
                     return res.status(204).end(); // Still return 204 but without CORS headers
                 }
             }
@@ -4414,7 +4416,7 @@ class Application {
             if (config.get('NODE_ENV') === 'development') {
                 const isPublic = this.routerManager?.authMiddlewareManager?.isPublicRoute(req.path) || false;
                 const authType = isPublic ? 'PUBLIC' : 'PROTECTED';
-                console.log(`${req.method} ${req.path} [${authType}] - ${req.headers['user-agent']}`);
+                _slog(`${req.method} ${req.path} [${authType}] - ${req.headers['user-agent']}`);
             }
             
             next();
@@ -4453,11 +4455,11 @@ class Application {
             });
         }
         
-        console.log('✅ Middleware setup complete with correct order and optimizations');
+        _slog('✅ Middleware setup complete with correct order and optimizations');
     }
     
     setupHealthEndpoints() {
-        console.log('🔄 Setting up health endpoints with proper public access...');
+        _slog('🔄 Setting up health endpoints with proper public access...');
         
         // Root endpoint - public (ALWAYS)
         this.app.get('/', (req, res) => {
@@ -4771,7 +4773,7 @@ class Application {
 </html>`;
                 return res.send(html);
             });
-            console.log('✅ WebSocket test page available at /ws-test.html');
+            _slog('✅ WebSocket test page available at /ws-test.html');
         }
         
         // Ready endpoint for load balancers (public)
@@ -4799,7 +4801,7 @@ class Application {
             return res.status(200).json({ live: true });
         });
         
-        console.log('✅ Health endpoints setup complete with proper public access');
+        _slog('✅ Health endpoints setup complete with proper public access');
     }
     
     setupErrorHandling() {
@@ -4855,9 +4857,9 @@ class Application {
     }
     
     displayDiagnostics() {
-        console.log('\n' + '='.repeat(80));
-        console.log(' SYSTEM DIAGNOSTICS');
-        console.log('='.repeat(80));
+        _slog('\n' + '='.repeat(80));
+        _slog(' SYSTEM DIAGNOSTICS');
+        _slog('='.repeat(80));
         
         // System health
         logger.displaySystemHealth();
@@ -4887,10 +4889,10 @@ class Application {
         }
         
         // Cache stats
-        console.log(`\n${logger.colors.cyan}📊 CACHE STATISTICS:${logger.colors.reset}`);
+        _slog(`\n${logger.colors.cyan}📊 CACHE STATISTICS:${logger.colors.reset}`);
         const cacheStats = loginCache.getStats();
-        console.log(`   Login Cache: ${cacheStats.size} entries, ${cacheStats.hitRate} hit rate`);
-        console.log(`   Duplicate Filter: ${duplicateFilter.pendingRequests?.size || 0} active entries`);
+        _slog(`   Login Cache: ${cacheStats.size} entries, ${cacheStats.hitRate} hit rate`);
+        _slog(`   Duplicate Filter: ${duplicateFilter.pendingRequests?.size || 0} active entries`);
     }
     
     async start() {
@@ -4949,7 +4951,7 @@ class Application {
                                 || null;
 
                             // Debug log — remove after confirming fix
-                            console.log('[Socket.IO] Auth attempt, token present:', !!token,
+                            _slog('[Socket.IO] Auth attempt, token present:', !!token,
                                 token ? ('length=' + token.length) : '');
 
                             if (!token || token.length < 10) {
@@ -4974,7 +4976,7 @@ class Application {
                                 return next(new Error('auth/no-userId-in-token'));
                             }
 
-                            console.log(`[Socket.IO] ✅ Auth accepted for userId=${userId}`);
+                            _slog(`[Socket.IO] ✅ Auth accepted for userId=${userId}`);
 
                             // Attach for downstream handlers
                             // FIX-CRITICAL: webSocketService.setupConnectionHandler reads
@@ -5157,7 +5159,7 @@ class Application {
                             global.__phase11 = initPhase11(this.io, this.app, {
                                 logger: console, phase10: global.__phase10,
                             });
-                            console.log('[Server] ✅ Phase 11 Unified Runtime Orchestrator active');
+                            _slog('[Server] ✅ Phase 11 Unified Runtime Orchestrator active');
                         } catch (err) {
                             console.warn('[Phase11] Init failed (non-fatal):', err.message);
                         }
@@ -5188,7 +5190,7 @@ class Application {
                                 phase5: global.__phase5, phase6: global.__phase6,
                                 wsService: this.websocket, logger: console,
                             });
-                            console.log('[Server] ✅ Phase 10 Production Hardening active');
+                            _slog('[Server] ✅ Phase 10 Production Hardening active');
                         } catch (err) {
                             console.warn('[Phase10] Init failed (non-fatal):', err.message, err.stack);
                             global.__phase10 = {};
@@ -5288,7 +5290,7 @@ class Application {
 
                         rawWss.on('connection', (ws) => {
                             const userId = ws._userId;
-                            console.log(`[RawWS] ✅ Client connected uid=${userId}`);
+                            _slog(`[RawWS] ✅ Client connected uid=${userId}`);
                             WebSocketService.registerWebSocketClient(userId, ws);
 
                             // Confirm auth to client
@@ -5315,7 +5317,7 @@ class Application {
                             ws.on('close', () => {
                                 clearInterval(pingInterval);
                                 WebSocketService.unregisterWebSocketClient(userId, ws);
-                                console.log(`[RawWS] Client disconnected uid=${userId}`);
+                                _slog(`[RawWS] Client disconnected uid=${userId}`);
                             });
 
                             ws.on('error', (err) => {
@@ -5339,66 +5341,66 @@ class Application {
                 logger.declareReadiness(port, host, startupReport);
                 
                 // Log URLs for easy access with auth info
-                console.log('\n' + '='.repeat(80));
-                console.log(' QUICK ACCESS URLS (PROTECTED ROUTES ONLY AUTH)');
-                console.log('='.repeat(80));
-                console.log(`🌐 API Base:     http://${host}:${port}/api`);
-                console.log(`🔓 PUBLIC ROUTES (No JWT required):`);
-                console.log(`   • /                          - App info`);
-                console.log(`   • /health                    - Health check`);
-                console.log(`   • /api/health                - API health`);
-                console.log(`   • /api/status                - Server status ✅`);
-                console.log(`   • /api/info                  - System info`);
-                console.log(`   • /api/cors-info             - CORS configuration`);
-                console.log(`   • /api/cache-stats           - Cache statistics`);
-                console.log(`   • /api/auth/login            - User login ✅ (cached 30s)`);
-                console.log(`   • /api/auth/register         - User registration ✅`);
-                console.log(`   • /api/auth/refresh          - Token refresh`);
-                console.log(`   • /api/auth/forgot-password  - Password reset request`);
-                console.log(`   • /api/auth/reset-password   - Password reset`);
-                console.log(`   • /api/auth/validate-token   - Token validation`);
-                console.log(`   • /ws-test.html              - WebSocket test page`);
-                console.log(`🔒 PROTECTED ROUTES (JWT required):`);
-                console.log(`   • /api/auth/me               - Current user info ✅`);
-                console.log(`   • /api/auth/logout           - User logout`);
-                console.log(`   • /api/users/*               - User management`);
-                console.log(`   • /api/messages/*            - Message handling`);
-                console.log(`   • /api/chats/*               - Chat management`);
-                console.log(`   • /api/friends/*             - Friend system`);
-                console.log(`   • /api/media/*               - Media handling`);
-                console.log(`   • /api/notifications/*       - Notifications`);
-                console.log(`   • /api/typingIndicator/*     - Typing indicators`);
-                console.log('='.repeat(80));
+                _slog('\n' + '='.repeat(80));
+                _slog(' QUICK ACCESS URLS (PROTECTED ROUTES ONLY AUTH)');
+                _slog('='.repeat(80));
+                _slog(`🌐 API Base:     http://${host}:${port}/api`);
+                _slog(`🔓 PUBLIC ROUTES (No JWT required):`);
+                _slog(`   • /                          - App info`);
+                _slog(`   • /health                    - Health check`);
+                _slog(`   • /api/health                - API health`);
+                _slog(`   • /api/status                - Server status ✅`);
+                _slog(`   • /api/info                  - System info`);
+                _slog(`   • /api/cors-info             - CORS configuration`);
+                _slog(`   • /api/cache-stats           - Cache statistics`);
+                _slog(`   • /api/auth/login            - User login ✅ (cached 30s)`);
+                _slog(`   • /api/auth/register         - User registration ✅`);
+                _slog(`   • /api/auth/refresh          - Token refresh`);
+                _slog(`   • /api/auth/forgot-password  - Password reset request`);
+                _slog(`   • /api/auth/reset-password   - Password reset`);
+                _slog(`   • /api/auth/validate-token   - Token validation`);
+                _slog(`   • /ws-test.html              - WebSocket test page`);
+                _slog(`🔒 PROTECTED ROUTES (JWT required):`);
+                _slog(`   • /api/auth/me               - Current user info ✅`);
+                _slog(`   • /api/auth/logout           - User logout`);
+                _slog(`   • /api/users/*               - User management`);
+                _slog(`   • /api/messages/*            - Message handling`);
+                _slog(`   • /api/chats/*               - Chat management`);
+                _slog(`   • /api/friends/*             - Friend system`);
+                _slog(`   • /api/media/*               - Media handling`);
+                _slog(`   • /api/notifications/*       - Notifications`);
+                _slog(`   • /api/typingIndicator/*     - Typing indicators`);
+                _slog('='.repeat(80));
                 
-                console.log('\n⚡ OPTIMIZATIONS STATUS:');
-                console.log(`   • UV_THREADPOOL_SIZE: ${process.env.UV_THREADPOOL_SIZE} (${parseInt(process.env.UV_THREADPOOL_SIZE, 10) > 4 ? '✅ OPTIMIZED' : '⚠️ DEFAULT'})`);
-                console.log(`   • Connection Pool: max=${config.get('DB_POOL_MAX')}, min=${config.get('DB_POOL_MIN')} (${config.get('DB_POOL_MAX') >= 20 ? '✅ OPTIMIZED' : '⚠️ SMALL'})`);
-                console.log(`   • Login Cache: ${config.get('LOGIN_CACHE_TTL')}s TTL (${loginCache.getStats().hitRate} hit rate)`);
-                console.log(`   • Query Timeout: ${config.get('QUERY_TIMEOUT_MS')}ms`);
-                console.log(`   • Response Compression: ${config.get('COMPRESSION_ENABLED') ? '✅ ENABLED' : '❌ DISABLED'}`);
-                console.log(`   • Duplicate Request Filter: 500ms`);
-                console.log('='.repeat(80));
+                _slog('\n⚡ OPTIMIZATIONS STATUS:');
+                _slog(`   • UV_THREADPOOL_SIZE: ${process.env.UV_THREADPOOL_SIZE} (${parseInt(process.env.UV_THREADPOOL_SIZE, 10) > 4 ? '✅ OPTIMIZED' : '⚠️ DEFAULT'})`);
+                _slog(`   • Connection Pool: max=${config.get('DB_POOL_MAX')}, min=${config.get('DB_POOL_MIN')} (${config.get('DB_POOL_MAX') >= 20 ? '✅ OPTIMIZED' : '⚠️ SMALL'})`);
+                _slog(`   • Login Cache: ${config.get('LOGIN_CACHE_TTL')}s TTL (${loginCache.getStats().hitRate} hit rate)`);
+                _slog(`   • Query Timeout: ${config.get('QUERY_TIMEOUT_MS')}ms`);
+                _slog(`   • Response Compression: ${config.get('COMPRESSION_ENABLED') ? '✅ ENABLED' : '❌ DISABLED'}`);
+                _slog(`   • Duplicate Request Filter: 500ms`);
+                _slog('='.repeat(80));
                 
-                console.log('\n✅ AUTH ENDPOINTS STATUS:');
-                console.log(`🔓 PUBLIC (No Auth):`);
-                console.log(`   • POST /api/auth/login        - ✅ WORKING (NO 401, CACHED 30s)`);
-                console.log(`   • POST /api/auth/register     - ✅ WORKING (NO 401)`);
-                console.log(`   • POST /api/auth/refresh      - ✅ WORKING (NO 401)`);
-                console.log(`   • POST /api/auth/forgot-password - ✅ WORKING (NO 401)`);
-                console.log(`   • POST /api/auth/reset-password  - ✅ WORKING (NO 401)`);
-                console.log(`   • POST /api/auth/validate-token - ✅ WORKING (NO 401)`);
-                console.log(`   • GET  /api/status            - ✅ WORKING (NO 401)`);
-                console.log(`   • GET  /api/health            - ✅ WORKING (NO 401)`);
-                console.log(`🔒 PROTECTED (Requires JWT):`);
-                console.log(`   • GET  /api/auth/me           - ✅ WORKING (401 if no token)`);
-                console.log(`   • POST /api/auth/logout       - ✅ WORKING (401 if no token)`);
-                console.log('='.repeat(80));
+                _slog('\n✅ AUTH ENDPOINTS STATUS:');
+                _slog(`🔓 PUBLIC (No Auth):`);
+                _slog(`   • POST /api/auth/login        - ✅ WORKING (NO 401, CACHED 30s)`);
+                _slog(`   • POST /api/auth/register     - ✅ WORKING (NO 401)`);
+                _slog(`   • POST /api/auth/refresh      - ✅ WORKING (NO 401)`);
+                _slog(`   • POST /api/auth/forgot-password - ✅ WORKING (NO 401)`);
+                _slog(`   • POST /api/auth/reset-password  - ✅ WORKING (NO 401)`);
+                _slog(`   • POST /api/auth/validate-token - ✅ WORKING (NO 401)`);
+                _slog(`   • GET  /api/status            - ✅ WORKING (NO 401)`);
+                _slog(`   • GET  /api/health            - ✅ WORKING (NO 401)`);
+                _slog(`🔒 PROTECTED (Requires JWT):`);
+                _slog(`   • GET  /api/auth/me           - ✅ WORKING (401 if no token)`);
+                _slog(`   • POST /api/auth/logout       - ✅ WORKING (401 if no token)`);
+                _slog('='.repeat(80));
                 
-                console.log('\n✅ WEBSOCKET STATUS:');
-                console.log(`   • Path: /ws`);
-                console.log(`   • Feature Enabled: ${config.get('FEATURE_WEBSOCKETS')}`);
-                console.log(`   • Test Page: /ws-test.html`);
-                console.log('='.repeat(80));
+                _slog('\n✅ WEBSOCKET STATUS:');
+                _slog(`   • Path: /ws`);
+                _slog(`   • Feature Enabled: ${config.get('FEATURE_WEBSOCKETS')}`);
+                _slog(`   • Test Page: /ws-test.html`);
+                _slog('='.repeat(80));
                 
                 resolve(this.server);
             });
@@ -5500,58 +5502,58 @@ async function main() {
         
         if (isReady) {
             logger.success('Server is READY and accepting requests with PROTECTED ROUTES ONLY auth', 'MAIN');
-            console.log('\n🎯 PROTECTED ROUTES ONLY AUTH VALIDATION CHECKLIST:');
-            console.log('='.repeat(80));
-            console.log('✅ CORS middleware first');
-            console.log('✅ JSON parser second');
-            console.log('✅ Auth middleware only applied to protected routes');
-            console.log('✅ /, /health, /api/status accessible without auth');
-            console.log('✅ /api/auth/login accessible without auth');
-            console.log('✅ /api/auth/register accessible without auth');
-            console.log('✅ Service worker compatible');
-            console.log('✅ Iframe requests supported');
-            console.log('✅ Proper error handling for auth failures');
-            console.log('✅ Invalid tokens handled correctly');
-            console.log('✅ Server errors handled gracefully');
-            console.log('✅ CORS configured correctly');
-            console.log('✅ No server reinitialization issues');
-            console.log('✅ Environment variables accessed safely');
-            console.log('✅ Render/VPS hosting compatible');
-            console.log('✅ All existing routes preserved');
-            console.log('✅ All models/services preserved');
-            console.log('✅ Redis fallback logic preserved');
-            console.log('✅ /api/status returns 200 (NO 401)');
-            console.log('✅ /api/auth/login returns 200 (NO 401)');
-            console.log('✅ /api/auth/register returns 200 (NO 401)');
-            console.log('='.repeat(80));
+            _slog('\n🎯 PROTECTED ROUTES ONLY AUTH VALIDATION CHECKLIST:');
+            _slog('='.repeat(80));
+            _slog('✅ CORS middleware first');
+            _slog('✅ JSON parser second');
+            _slog('✅ Auth middleware only applied to protected routes');
+            _slog('✅ /, /health, /api/status accessible without auth');
+            _slog('✅ /api/auth/login accessible without auth');
+            _slog('✅ /api/auth/register accessible without auth');
+            _slog('✅ Service worker compatible');
+            _slog('✅ Iframe requests supported');
+            _slog('✅ Proper error handling for auth failures');
+            _slog('✅ Invalid tokens handled correctly');
+            _slog('✅ Server errors handled gracefully');
+            _slog('✅ CORS configured correctly');
+            _slog('✅ No server reinitialization issues');
+            _slog('✅ Environment variables accessed safely');
+            _slog('✅ Render/VPS hosting compatible');
+            _slog('✅ All existing routes preserved');
+            _slog('✅ All models/services preserved');
+            _slog('✅ Redis fallback logic preserved');
+            _slog('✅ /api/status returns 200 (NO 401)');
+            _slog('✅ /api/auth/login returns 200 (NO 401)');
+            _slog('✅ /api/auth/register returns 200 (NO 401)');
+            _slog('='.repeat(80));
             
-            console.log('\n⚡ OPTIMIZATION VALIDATION:');
-            console.log('='.repeat(80));
-            console.log(`✅ UV_THREADPOOL_SIZE=${process.env.UV_THREADPOOL_SIZE} (More threads = better concurrency)`);
-            console.log(`✅ Connection Pool: max=20, min=5 (Faster database access)`);
-            console.log(`✅ Login Cache: 30s TTL (Repeat logins: 1-5ms vs 200-500ms)`);
-            console.log(`✅ Query Timeout: 8s (Prevents hanging queries)`);
-            console.log(`✅ Response Compression: Enabled (Smaller payloads)`);
-            console.log(`✅ Duplicate Request Filter: 500ms (Prevents spam)`);
-            console.log('='.repeat(80));
+            _slog('\n⚡ OPTIMIZATION VALIDATION:');
+            _slog('='.repeat(80));
+            _slog(`✅ UV_THREADPOOL_SIZE=${process.env.UV_THREADPOOL_SIZE} (More threads = better concurrency)`);
+            _slog(`✅ Connection Pool: max=20, min=5 (Faster database access)`);
+            _slog(`✅ Login Cache: 30s TTL (Repeat logins: 1-5ms vs 200-500ms)`);
+            _slog(`✅ Query Timeout: 8s (Prevents hanging queries)`);
+            _slog(`✅ Response Compression: Enabled (Smaller payloads)`);
+            _slog(`✅ Duplicate Request Filter: 500ms (Prevents spam)`);
+            _slog('='.repeat(80));
             
             // Test the critical endpoints
-            console.log('\n🧪 CRITICAL ENDPOINT TEST (Should all return 200):');
-            console.log('GET  /                 - Should return 200 ✅');
-            console.log('GET  /api/status       - Should return 200 ✅');
-            console.log('GET  /api/health       - Should return 200 ✅');
-            console.log('POST /api/auth/login   - Should return 200 with credentials ✅');
-            console.log('POST /api/auth/register- Should return 201 with valid data ✅');
-            console.log('GET  /api/auth/me      - Should return 401 without token ✅');
-            console.log('='.repeat(80));
+            _slog('\n🧪 CRITICAL ENDPOINT TEST (Should all return 200):');
+            _slog('GET  /                 - Should return 200 ✅');
+            _slog('GET  /api/status       - Should return 200 ✅');
+            _slog('GET  /api/health       - Should return 200 ✅');
+            _slog('POST /api/auth/login   - Should return 200 with credentials ✅');
+            _slog('POST /api/auth/register- Should return 201 with valid data ✅');
+            _slog('GET  /api/auth/me      - Should return 401 without token ✅');
+            _slog('='.repeat(80));
             
             // Performance tips
-            console.log('\n📈 PERFORMANCE TIPS:');
-            console.log('   • First login: 200-500ms (database + token)');
-            console.log('   • Repeat login (30s): 1-5ms (cache hit)');
-            console.log('   • Concurrent users: Handled by 20 connection pool');
-            console.log('   • Timeout protection: 8s query timeout prevents hangs');
-            console.log('='.repeat(80));
+            _slog('\n📈 PERFORMANCE TIPS:');
+            _slog('   • First login: 200-500ms (database + token)');
+            _slog('   • Repeat login (30s): 1-5ms (cache hit)');
+            _slog('   • Concurrent users: Handled by 20 connection pool');
+            _slog('   • Timeout protection: 8s query timeout prevents hangs');
+            _slog('='.repeat(80));
         } else {
             logger.warn('Server is running in DEGRADED mode - auth routes available', 'MAIN');
         }
@@ -5621,7 +5623,7 @@ async function main() {
                 }
             }
 
-            console.log(`[StatusExpiryCron] Pruned ${ids.length} expired status(es)`);
+            _slog(`[StatusExpiryCron] Pruned ${ids.length} expired status(es)`);
         } catch (err) {
             // Non-fatal — just log
             console.warn('[StatusExpiryCron] Error:', err.message);
@@ -5631,7 +5633,7 @@ async function main() {
     // Run after 30s startup delay, then every 5 minutes
     setTimeout(_pruneExpiredStatuses, 30000);
     setInterval(_pruneExpiredStatuses, 5 * 60 * 1000);
-    console.log('[StatusExpiryCron] ✅ Installed (runs every 5 minutes)');
+    _slog('[StatusExpiryCron] ✅ Installed (runs every 5 minutes)');
 })();
 
 // AUTH-X FIX: Smart Group routes are mounted by src/routes/index.js via
@@ -5642,7 +5644,7 @@ async function main() {
 // The IIFE is now a no-op; leave the comment so reviewers know why.
 (function _mountSmartGroupRoutes() {
     // Intentionally disabled — handled by src/routes/index.js
-    console.log('[SmartGroups] Routes already mounted by src/routes/index.js (IIFE disabled)');
+    _slog('[SmartGroups] Routes already mounted by src/routes/index.js (IIFE disabled)');
 })();
 
 // ── SMART GROUPS ANALYTICS CRON ──────────────────────────────────────────────
@@ -5663,7 +5665,7 @@ async function main() {
             }
         } catch(_) {}
     }, 60 * 60_000); // every hour
-    console.log('[GroupAnalyticsCron] ✅ Installed');
+    _slog('[GroupAnalyticsCron] ✅ Installed');
 })();
 
 // ── MESH RELAY INSTALLATION ─────────────────────────────────────────────────
@@ -5678,7 +5680,7 @@ async function main() {
             if (!io) { setTimeout(_tryMount, 1000); return; }
             const relayInfo = meshRelay(io, null);
             if (relayInfo) {
-                console.log('[MeshRelay] ✅ Mounted on Socket.IO');
+                _slog('[MeshRelay] ✅ Mounted on Socket.IO');
                 global.__meshRelay = relayInfo;
             }
         };
@@ -5698,7 +5700,7 @@ async function main() {
             const lanService = new LANDiscoveryService(io, { logger: console });
             lanService.attach();
             global.__lanDiscoveryService = lanService;
-            console.log('[LANDiscovery] ✅ Mounted on Socket.IO');
+            _slog('[LANDiscovery] ✅ Mounted on Socket.IO');
 
             // Also handle server-relay for AP-isolated subnets
             // When direct LAN WS fails, relay the message via server
@@ -5781,7 +5783,7 @@ async function main() {
                 { type: db.sequelize.QueryTypes.UPDATE }
             );
             if (affected > 0) {
-                console.log(`[StatusCron] ✅ Expired ${affected} status(es)`);
+                _slog(`[StatusCron] ✅ Expired ${affected} status(es)`);
             }
         } catch (e) {
             // Never crash server - log and continue
@@ -5792,7 +5794,7 @@ async function main() {
     setTimeout(_cleanExpiredStatuses, 10000);
     const _cronTimer = setInterval(_cleanExpiredStatuses, INTERVAL_MS);
     if (_cronTimer.unref) _cronTimer.unref(); // Don't block process exit
-    console.log('⏰ Status expiry cron started (15-minute interval)');
+    _slog('⏰ Status expiry cron started (15-minute interval)');
 })();
 
 // ── Scheduled Message Worker ─────────────────────────────────────────────────

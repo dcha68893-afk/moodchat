@@ -1,3 +1,4 @@
+const _slog = (...a) => { if (process.env.DEBUG_SERVER) _slog(...a); };
 // src/routes/index.js - MAIN ROUTER AGGREGATION
 // FIXED: Auth routes are now properly mounted (removed from ignored files)
 // FIXED: All routes are correctly mounted with proper auth
@@ -9,7 +10,7 @@ const path = require('path');
 const { authenticateToken } = require('../middleware/auth');
 const router = express.Router();
 
-console.log('🔄 Loading all application routers...');
+_slog('🔄 Loading all application routers...');
 
 // ===== CONFIGURATION =====
 const ROUTES_DIR = path.join(__dirname);
@@ -90,9 +91,6 @@ const ROUTE_MAPPING = {
   'chats.js': '/chats',
   'messages.js': '/messages',
   'messagingFeatures.js': '/messaging',
-  'polls.js': '/polls',
-  'liveLocation.js': '/live-location',
-  'contactSharing.js': '/contact-sharing',
   'encryption.js': '/encryption',
   'groupEncryption.js': '/group-encryption',
   'push.js': '/push',
@@ -242,7 +240,7 @@ function scanAndMountRouters() {
     const files = fs.readdirSync(ROUTES_DIR);
     const routeFiles = files.filter(shouldProcessFile);
     
-    console.log(`📁 Found ${routeFiles.length} route file(s)`);
+    _slog(`📁 Found ${routeFiles.length} route file(s)`);
     
     const results = {
       total: routeFiles.length,
@@ -281,7 +279,7 @@ function scanAndMountRouters() {
         
         // Auth routes - mount without auth middleware (always public)
         if (filename === 'auth.js') {
-          console.log(`🔓 ${mountPath} - PUBLIC (Auth routes - no auth required)`);
+          _slog(`🔓 ${mountPath} - PUBLIC (Auth routes - no auth required)`);
           router.use(mountPath, routerInstance);
           results.publicRoutes.push({ 
             filename, 
@@ -291,7 +289,7 @@ function scanAndMountRouters() {
         }
         // Status routes - mount WITHOUT auth middleware (handles its own auth internally)
         else if (filename === 'status.js') {
-          console.log(`🔓 ${mountPath} - HYBRID (Status router handles its own auth - see breakdown below)`);
+          _slog(`🔓 ${mountPath} - HYBRID (Status router handles its own auth - see breakdown below)`);
           router.use(mountPath, routerInstance);
           results.publicRoutes.push({ 
             filename, 
@@ -301,7 +299,7 @@ function scanAndMountRouters() {
         }
         // Other routes - apply auth middleware for protected routes
         else if (!isPublic) {
-          console.log(`🔒 ${mountPath} - PROTECTED (JWT required)`);
+          _slog(`🔒 ${mountPath} - PROTECTED (JWT required)`);
           // Create a new router that applies auth middleware first
           const protectedRouter = express.Router();
           protectedRouter.use(authenticateToken);
@@ -311,7 +309,7 @@ function scanAndMountRouters() {
         } 
         // Public routes (non-auth)
         else {
-          console.log(`🔓 ${mountPath} - PUBLIC (No auth required)`);
+          _slog(`🔓 ${mountPath} - PUBLIC (No auth required)`);
           router.use(mountPath, routerInstance);
           results.publicRoutes.push({ filename, path: mountPath });
         }
@@ -325,7 +323,7 @@ function scanAndMountRouters() {
           isPublic: isPublic || filename === 'auth.js'
         });
         
-        console.log(`✅ Mounted: ${mountPath} from ${filename}`);
+        _slog(`✅ Mounted: ${mountPath} from ${filename}`);
         
       } catch (error) {
         results.failed++;
@@ -350,64 +348,64 @@ function scanAndMountRouters() {
 const mountResults = scanAndMountRouters();
 
 // ===== PRINT SUMMARY =====
-console.log('\n' + '='.repeat(80));
-console.log('📊 ROUTER MOUNT SUMMARY');
-console.log('='.repeat(80));
-console.log(`✅ Successfully mounted: ${mountResults.mounted}`);
-console.log(`❌ Failed: ${mountResults.failed}`);
-console.log('='.repeat(80) + '\n');
+_slog('\n' + '='.repeat(80));
+_slog('📊 ROUTER MOUNT SUMMARY');
+_slog('='.repeat(80));
+_slog(`✅ Successfully mounted: ${mountResults.mounted}`);
+_slog(`❌ Failed: ${mountResults.failed}`);
+_slog('='.repeat(80) + '\n');
 
 if (mountResults.failedRoutes.length > 0) {
-  console.log('❌ Failed routes:');
+  _slog('❌ Failed routes:');
   mountResults.failedRoutes.forEach(f => {
-    console.log(`   - ${f.filename} -> ${f.path}: ${f.error}`);
+    _slog(`   - ${f.filename} -> ${f.path}: ${f.error}`);
   });
-  console.log('');
+  _slog('');
 }
 
 // Print protected vs public routes
-console.log('🔐 ROUTE AUTHENTICATION STATUS:');
-console.log('-'.repeat(80));
-console.log('   🔓 PUBLIC ROUTES (No auth required):');
+_slog('🔐 ROUTE AUTHENTICATION STATUS:');
+_slog('-'.repeat(80));
+_slog('   🔓 PUBLIC ROUTES (No auth required):');
 mountResults.publicRoutes.forEach(route => {
-  console.log(`      - ${route.path}${route.note ? ` (${route.note})` : ''}`);
+  _slog(`      - ${route.path}${route.note ? ` (${route.note})` : ''}`);
 });
-console.log('');
-console.log('   🔒 PROTECTED ROUTES (JWT required):');
+_slog('');
+_slog('   🔒 PROTECTED ROUTES (JWT required):');
 mountResults.protectedRoutes.forEach(route => {
-  console.log(`      - ${route.path}`);
+  _slog(`      - ${route.path}`);
 });
-console.log('');
+_slog('');
 
 // Print detailed status route breakdown
-console.log('📋 DETAILED STATUS ROUTE AUTH BREAKDOWN:');
-console.log('-'.repeat(80));
-console.log('   🔓 PUBLIC Status Endpoints (no auth required):');
-console.log('      GET    /api/status/health');
-console.log('      GET    /api/status/');
-console.log('      GET    /api/status/public');
-console.log('      GET    /api/status/trending');
-console.log('      GET    /api/status/search');
-console.log('      GET    /api/status/mood/:moodType');
-console.log('      GET    /api/status/:statusId');
-console.log('      GET    /api/status/:statusId/comments');
-console.log('      GET    /api/status/:statusId/likes');
-console.log('      POST   /api/status/view');
-console.log('      POST   /api/status/:statusId/view');
-console.log('');
-console.log('   🔒 PROTECTED Status Endpoints (JWT required):');
-console.log('      POST   /api/status/');
-console.log('      GET    /api/status/my');
-console.log('      GET    /api/status/friends');
-console.log('      GET    /api/status/stats');
-console.log('      GET    /api/status/user/:userId');
-console.log('      PUT    /api/status/:statusId');
-console.log('      DELETE /api/status/:statusId');
-console.log('      POST   /api/status/:statusId/like');
-console.log('      DELETE /api/status/:statusId/like');
-console.log('      POST   /api/status/:statusId/comment');
-console.log('      DELETE /api/status/:statusId/comment/:commentId');
-console.log('='.repeat(80) + '\n');
+_slog('📋 DETAILED STATUS ROUTE AUTH BREAKDOWN:');
+_slog('-'.repeat(80));
+_slog('   🔓 PUBLIC Status Endpoints (no auth required):');
+_slog('      GET    /api/status/health');
+_slog('      GET    /api/status/');
+_slog('      GET    /api/status/public');
+_slog('      GET    /api/status/trending');
+_slog('      GET    /api/status/search');
+_slog('      GET    /api/status/mood/:moodType');
+_slog('      GET    /api/status/:statusId');
+_slog('      GET    /api/status/:statusId/comments');
+_slog('      GET    /api/status/:statusId/likes');
+_slog('      POST   /api/status/view');
+_slog('      POST   /api/status/:statusId/view');
+_slog('');
+_slog('   🔒 PROTECTED Status Endpoints (JWT required):');
+_slog('      POST   /api/status/');
+_slog('      GET    /api/status/my');
+_slog('      GET    /api/status/friends');
+_slog('      GET    /api/status/stats');
+_slog('      GET    /api/status/user/:userId');
+_slog('      PUT    /api/status/:statusId');
+_slog('      DELETE /api/status/:statusId');
+_slog('      POST   /api/status/:statusId/like');
+_slog('      DELETE /api/status/:statusId/like');
+_slog('      POST   /api/status/:statusId/comment');
+_slog('      DELETE /api/status/:statusId/comment/:commentId');
+_slog('='.repeat(80) + '\n');
 
 // ===== STATUS AUTH INFO ENDPOINT =====
 router.get('/status/auth-info', (req, res) => {

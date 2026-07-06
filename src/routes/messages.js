@@ -79,7 +79,7 @@ try {
       },
     });
     _storageBackend = 's3';
-    console.log('✅ Media storage: AWS S3 (persistent CDN)');
+    _flog('✅ Media storage: AWS S3 (persistent CDN)');
   } else {
     throw new Error('S3 not configured');
   }
@@ -153,7 +153,7 @@ const safeInt = (val) => {
 
 const ALLOWED_MSG_TYPES = ['text', 'image', 'file', 'audio', 'video', 'document', 'poll', 'view_once', 'location', 'contact', 'sticker'];
 
-console.log('✅ Messages routes initialized');
+_flog('✅ Messages routes initialized');
 
 // ============================================================================
 // GET /api/messages/unread-counts - Get unread counts for all user's chats
@@ -999,10 +999,10 @@ router.post('/', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
         //   receiver emits 'message:delivery_ack' → server emits 'message:delivered' to sender.
         // The old eager emit here is removed to prevent false "delivered" status.
         if (recipientIds.length > 0) {
-          console.log(`[messages.js] 📨 Delivery tracking started for messageId=${messageId} recipients=${recipientIds.join(',')}`);
+          _flog(`[messages.js] 📨 Delivery tracking started for messageId=${messageId} recipients=${recipientIds.join(',')}`);
         }
 
-        console.log(
+        _flog(
           `[messages.js] ✅ Realtime delivery: chatId=${chatId} messageId=${messageId}` +
           ` participants=${allParticipantIds.length} recipients=${recipientIds.length}`
         );
