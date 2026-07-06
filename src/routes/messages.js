@@ -742,8 +742,16 @@ router.post('/', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
         // Without these, raw INSERT leaves NULLs at DB level (model defaultValues only
         // apply to ORM inserts, not raw SQL). GET /chats counts WHERE isRead = false —
         // NULL != false — so unread counts were always 0 for all new messages.
+        //
+        // FIX-DELIVERY-GUARANTEE (Part 11): deliveredAt used to be stamped NOW()
+        // here too, same instant as sentAt — meaning every message was marked
+        // "delivered" the moment it hit the DB, regardless of whether the
+        // recipient was even online. This silently defeated the real ack flow
+        // in POST /api/messages/mark-delivered/batch (which requires
+        // "deliveredAt" IS NULL to update anything). Leave it NULL; the
+        // client's ackMessageDelivered() sets it for real on actual receipt.
         `INSERT INTO "Messages" ("chatId","senderId",content,type,reactions,"replyToId",metadata,"expiresAt","isRead","isDeleted","isEdited","sentAt","deliveredAt","createdAt","updatedAt")
-         VALUES (:chatId,:senderId,:content,:type,'{}',:replyToId,:metadata,:expiresAt,false,false,false,NOW(),NOW(),NOW(),NOW())
+         VALUES (:chatId,:senderId,:content,:type,'{}',:replyToId,:metadata,:expiresAt,false,false,false,NOW(),NULL,NOW(),NOW())
          RETURNING id,"chatId","senderId",content,type,"replyToId","createdAt"`,
         {
           replacements: { chatId, senderId, content: safeContent, type: messageType, replyToId: safeReplyToId, metadata: JSON.stringify(msgMetadata), expiresAt: _msgExpiresAt },
@@ -803,7 +811,7 @@ router.post('/', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
       isDeleted:   false,
       isRead:      false,
       sentAt:      new Date().toISOString(),
-      deliveredAt: new Date().toISOString(),
+      deliveredAt: null, // FIX-DELIVERY-GUARANTEE: real value set by mark-delivered/batch on actual ack
       createdAt:   new Date().toISOString(),
       updatedAt:   new Date().toISOString(),
       sender:      senderRows[0] || null,

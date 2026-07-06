@@ -64,10 +64,27 @@ class MessageService {
         if (!participant) throw new ValidationError('Sender is not a participant in this chat');
 
         // CRITICAL SECURITY: Use parameterized query to prevent SQL injection
+        //
+        // FIX-DELIVERY-GUARANTEE (Part 11): deliveredAt used to be stamped NOW()
+        // right here, at the same instant as sentAt/createdAt — i.e. every
+        // message was marked "delivered" the moment it was written to the DB,
+        // regardless of whether any recipient was even online to receive it.
+        //
+        // This silently broke the real acknowledgment loop that already exists:
+        // the client's ackMessageDelivered() (messages-core.js) correctly POSTs
+        // to /api/messages/mark-delivered/batch when a message is actually
+        // received, and that route correctly guards with
+        // `WHERE ... AND "deliveredAt" IS NULL` — but deliveredAt was never
+        // NULL to begin with, so that real ack could never update anything.
+        // Net effect: "delivered" status shown to the sender was meaningless —
+        // it said "delivered" even to an offline recipient who never got it.
+        //
+        // Fix: leave deliveredAt NULL at creation; the existing ack endpoint
+        // sets it for real once the recipient's client actually confirms receipt.
         const [rows] = await sequelize.query(
             `INSERT INTO "Messages"
                ("chatId","senderId",content,type,reactions,"isEdited","isDeleted","replyToId","sentAt","deliveredAt","createdAt","updatedAt")
-             VALUES (:chatId,:senderId,:content,:type,'{}',false,false,:replyToId,NOW(),NOW(),NOW(),NOW())
+             VALUES (:chatId,:senderId,:content,:type,'{}',false,false,:replyToId,NOW(),NULL,NOW(),NOW())
              RETURNING *`,
             { replacements: { chatId, senderId, content: sanitizedContent, type, replyToId: replyToId || null },
               type: sequelize.QueryTypes.INSERT }
@@ -165,7 +182,7 @@ class MessageService {
                 replyTo:      message.replyTo   || null,
                 createdAt:    message.createdAt,
                 sentAt:       message.sentAt,
-                deliveredAt:  new Date().toISOString()
+                deliveredAt:  null // FIX-DELIVERY-GUARANTEE: set for real by mark-delivered/batch on actual ack, not at broadcast time
             };
             
             // CRITICAL SECURITY: Validate payload integrity
