@@ -1,4 +1,17 @@
 // config/index.js - FIXED
+// FIX-HARDCODED-JWT-SECRET: fail loudly at process startup if no real JWT
+// secret is configured, rather than letting jwt.accessSecret below silently
+// fall back to a hardcoded value. Without this, a misconfigured deployment
+// (missing env var) would run looking healthy while silently signing every
+// token — including admin sessions — with a secret visible to anyone
+// reading this repository.
+if (!(process.env.JWT_ACCESS_SECRET || process.env.JWT_SECRET)) {
+  // eslint-disable-next-line no-console
+  console.error('[FATAL CONFIG] JWT_ACCESS_SECRET / JWT_SECRET is not set in the environment. ' +
+    'Refusing to fall back to a hardcoded secret. Set it in your .env / hosting provider\'s ' +
+    'environment variables before starting the server.');
+}
+
 // Helper function to parse boolean from environment variables
 const parseBool = (value, defaultValue = false) => {
   if (value === undefined || value === null) return defaultValue;
@@ -36,8 +49,16 @@ const config = {
   // falls back to JWT_SECRET for backwards compatibility with older deployments.
   // tokenService.js and auth.js both read from this config — no more secret mismatches.
   jwt: {
-    accessSecret: process.env.JWT_ACCESS_SECRET || process.env.JWT_SECRET || 'change-this-in-production-min-32-chars!!',
-    refreshSecret: process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET || 'change-this-in-production-min-32-chars!!',
+    // FIX-HARDCODED-JWT-SECRET: removed the 'change-this-in-production...'
+    // string fallback that used to sit here. If JWT_ACCESS_SECRET/
+    // JWT_REFRESH_SECRET/JWT_SECRET are all unset, accessSecret/refreshSecret
+    // must resolve to undefined — NOT a value visible to anyone reading this
+    // repo — so that tokenService.js's own `if (!this.accessSecret) throw`
+    // check actually catches the misconfiguration at startup instead of the
+    // server silently signing every JWT (including admin sessions) with a
+    // publicly-known secret that lets anyone forge a valid token.
+    accessSecret: process.env.JWT_ACCESS_SECRET || process.env.JWT_SECRET || undefined,
+    refreshSecret: process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET || undefined,
     // Alias 'secret' kept for legacy modules that read config.jwt.secret
     get secret() { return this.accessSecret; },
     accessExpiresIn: process.env.JWT_ACCESS_EXPIRES_IN || '24h',

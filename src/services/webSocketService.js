@@ -76,7 +76,9 @@ class WebSocketService {
         this.onlineUsers = new Map(); // userId(int) → Set<socketId(string)>
         this.userSockets = this.onlineUsers; // legacy alias
         this.wsClients   = new Map(); // userId(int) → Set<WebSocket>
-
+        // FIX-NETWORK-BLIP: userId(int) → Timeout, pending stale-call cleanup
+        // scheduled from a disconnect, cancelled if the user reconnects in time.
+        this._pendingCallCleanupTimers = new Map();
         this._reaperTimer = setInterval(() => this._pruneAllStale(), STALE_REAPER_INTERVAL);
         if (this._reaperTimer.unref) this._reaperTimer.unref();
     }
@@ -193,39 +195,61 @@ class WebSocketService {
                 // has disconnected (truly offline), not on every individual
                 // socket drop — otherwise a user with two open tabs would have
                 // their call ended just from closing one of them.
-                try {
-                    const stillOnline = this.onlineUsers && this.onlineUsers.has(parseInt(userId, 10));
-                    if (!stillOnline) {
-                        const Call = db.models?.Calls || db.models?.Call || db.Calls || db.Call;
-                        if (Call) {
-                            const staleCalls = await Call.findAll({
-                                where: {
-                                    status: { [WsOp.in]: ['initiated', 'ringing', 'in-progress'] },
-                                    [WsOp.or]: [{ callerId: userId }, { receiverId: userId }],
-                                }
-                            }).catch(() => []);
-                            for (const call of staleCalls) {
-                                call.status = 'completed';
-                                call.endedAt = new Date();
-                                if (call.startedAt) {
-                                    call.duration = Math.floor((call.endedAt - call.startedAt) / 1000);
-                                }
-                                call.errorReason = call.errorReason || 'peer_disconnected';
-                                await call.save().catch(() => {});
+                //
+                // FIX-NETWORK-BLIP: this cleanup used to run IMMEDIATELY and
+                // synchronously on disconnect. On a weak/unstable connection the
+                // Socket.IO client disconnects and reconnects within a second or
+                // two on its own (transport hiccup, brief signal loss) — but this
+                // handler was ending any in-progress call the instant the socket
+                // dropped, before the client had any chance to reconnect. That is
+                // the "low network disconnects the call instead of letting it
+                // recover" bug. Fix: wait CALL_DISCONNECT_GRACE_MS before acting,
+                // and re-check both "still offline" AND "call still non-terminal"
+                // at that point. If the user reconnects (registerUser cancels this
+                // timer) or the call was already ended/answered by then, we do
+                // nothing.
+                const uidInt = parseInt(userId, 10);
+                if (this._pendingCallCleanupTimers.has(uidInt)) {
+                    clearTimeout(this._pendingCallCleanupTimers.get(uidInt));
+                }
+                const CALL_DISCONNECT_GRACE_MS = 8000;
+                const cleanupTimer = setTimeout(async () => {
+                    this._pendingCallCleanupTimers.delete(uidInt);
+                    try {
+                        const stillOnline = this.onlineUsers && this.onlineUsers.has(uidInt);
+                        if (!stillOnline) {
+                            const Call = db.models?.Calls || db.models?.Call || db.Calls || db.Call;
+                            if (Call) {
+                                const staleCalls = await Call.findAll({
+                                    where: {
+                                        status: { [WsOp.in]: ['initiated', 'ringing', 'in-progress'] },
+                                        [WsOp.or]: [{ callerId: userId }, { receiverId: userId }],
+                                    }
+                                }).catch(() => []);
+                                for (const call of staleCalls) {
+                                    call.status = 'completed';
+                                    call.endedAt = new Date();
+                                    if (call.startedAt) {
+                                        call.duration = Math.floor((call.endedAt - call.startedAt) / 1000);
+                                    }
+                                    call.errorReason = call.errorReason || 'peer_disconnected';
+                                    await call.save().catch(() => {});
 
-                                const otherUserId = String(call.callerId) === String(userId) ? call.receiverId : call.callerId;
-                                if (otherUserId) {
-                                    const payload = { callId: call.id, reason: 'peer_disconnected', endedAt: call.endedAt.toISOString(), timestamp: Date.now() };
-                                    await this.sendToUser(otherUserId, 'call:ended', payload).catch(() => {});
-                                    await this.sendToUser(otherUserId, 'call_ended', payload).catch(() => {});
+                                    const otherUserId = String(call.callerId) === String(userId) ? call.receiverId : call.callerId;
+                                    if (otherUserId) {
+                                        const payload = { callId: call.id, reason: 'peer_disconnected', endedAt: call.endedAt.toISOString(), timestamp: Date.now() };
+                                        await this.sendToUser(otherUserId, 'call:ended', payload).catch(() => {});
+                                        await this.sendToUser(otherUserId, 'call_ended', payload).catch(() => {});
+                                    }
+                                         _flog(`[WSService] Stale call ${call.id} ended after grace period, uid=${userId} still offline`);
                                 }
-                                     _flog(`[WSService] Stale call ${call.id} ended on disconnect uid=${userId}`);
                             }
                         }
+                    } catch (e) {
+                        console.warn('[WSService] stale-call cleanup error on disconnect:', e.message);
                     }
-                } catch (e) {
-                    console.warn('[WSService] stale-call cleanup error on disconnect:', e.message);
-                }
+                }, CALL_DISCONNECT_GRACE_MS);
+                this._pendingCallCleanupTimers.set(uidInt, cleanupTimer);
             });
 
             // ── TYPING INDICATORS — FIX: were completely missing ──────────────
@@ -798,6 +822,15 @@ class WebSocketService {
             : (socketOrSocketId && socketOrSocketId.id);
 
         if (!uid || !socketId) return false;
+
+        // FIX-NETWORK-BLIP: If this user had a call-cleanup timer pending from a
+        // recent disconnect (see the 'disconnect' handler below), cancel it — they
+        // reconnected within the grace period, so the call should NOT be ended.
+        if (this._pendingCallCleanupTimers && this._pendingCallCleanupTimers.has(uid)) {
+            clearTimeout(this._pendingCallCleanupTimers.get(uid));
+            this._pendingCallCleanupTimers.delete(uid);
+             _flog(`[WSService] uid=${uid} reconnected within grace period — cancelled pending call cleanup`);
+        }
 
         if (!this.onlineUsers.has(uid)) this.onlineUsers.set(uid, new Set());
         this.onlineUsers.get(uid).add(socketId);

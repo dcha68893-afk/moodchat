@@ -329,7 +329,7 @@ router.post('/:groupId/call', async (req, res, next) => {
         if (!callerId) return res.status(401).json({ success: false, message: 'Authentication required' });
         if (isNaN(groupId)) return res.status(400).json({ success: false, message: 'Invalid group ID' });
         if (GroupMember) {
-            const membership = await GroupMember.findOne({ where: { groupId, userId: callerId } });
+            const membership = await GroupMember.findOne({ where: { groupId, userId: callerId, leftAt: null } });
             if (!membership) return res.status(403).json({ success: false, message: 'You are not a member of this group' });
         }
         
@@ -337,7 +337,7 @@ router.post('/:groupId/call', async (req, res, next) => {
         if (!group) return res.status(404).json({ success: false, message: 'Group not found' });
         
         const members = await GroupMember.findAll({
-            where: { groupId },
+            where: { groupId, leftAt: null },
             attributes: ['userId']
         });
         const participantIds = members

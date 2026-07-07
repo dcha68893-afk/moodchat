@@ -419,7 +419,8 @@ class GroupService {
             // FIX: update stats.totalMembers so count is always real
             try {
                 const liveCount = await GroupMembers.count({ where: { groupId, leftAt: null } });
-                await Groups?.update({ stats: { totalMembers: liveCount } }, { where: { id: groupId } });
+                const currentGroup = await Groups?.findByPk(groupId);
+                await Groups?.update({ stats: { ...(currentGroup?.stats || {}), totalMembers: liveCount } }, { where: { id: groupId } });
             } catch (_) {}
             console.log(`[GroupService] ✅ User ${userId} left group ${groupId}`);
             groupServiceEvents.emit('groupMutation', { action: 'member_leave', groupId, userId });

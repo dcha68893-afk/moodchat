@@ -746,6 +746,16 @@ class MarketplaceController {
             const { phone, amount, order_id, description, callback_url } = req.body;
             if (!phone || !amount || !order_id) return next(new AppError('phone, amount, order_id required', 400));
 
+            // FIX-ORDER-OWNERSHIP: verify the order belongs to the initiating
+            // user before attaching a payment reference to it — same gap as
+            // walletPayment/cardPayment above. Without this, a successful STK
+            // push paid from someone else's phone/money could still get
+            // attached to (and later mark paid) an order that isn't theirs.
+            const OrderCheck = Model.Order;
+            const orderRecord = OrderCheck ? await OrderCheck.findByPk(order_id) : null;
+            if (!orderRecord) return next(new AppError('Order not found', 404));
+            if (orderRecord.buyerId !== req.user?.id) return next(new AppError('Not authorized', 403));
+
             // FIX (Forensic Audit P2): Validate/derive callbackUrl.
             // If caller doesn't supply one, auto-derive from BACKEND_URL env var.
             // Without a valid callbackUrl, M-Pesa never delivers payment confirmation.
@@ -827,6 +837,14 @@ class MarketplaceController {
             const { order_id, amount, currency='KES', card_token, email } = req.body;
             if (!order_id || !amount) return next(new AppError('order_id and amount required', 400));
 
+            // FIX-ORDER-OWNERSHIP: same missing check as walletPayment above —
+            // verify the order belongs to the paying user before charging a
+            // card and marking it paid.
+            const OrderCheck = Model.Order;
+            const orderRecord = OrderCheck ? await OrderCheck.findByPk(order_id) : null;
+            if (!orderRecord) return next(new AppError('Order not found', 404));
+            if (orderRecord.buyerId !== req.user?.id) return next(new AppError('Not authorized', 403));
+
             const flwKey = process.env.FLW_SECRET_KEY;
             if (!flwKey) {
                 return res.status(503).json({
@@ -877,6 +895,16 @@ class MarketplaceController {
             if (!Wallet) {
                 return res.status(503).json({ success: false, message: 'Wallet system not available.', code: 'WALLET_UNAVAILABLE' });
             }
+
+            // FIX-ORDER-OWNERSHIP: verify this order actually belongs to the
+            // paying user before debiting their wallet and marking it paid —
+            // getOrder/updateOrderStatus in this same file already do this
+            // check; it was missing here, letting any user pay for (and thus
+            // corrupt the payment state of) an order that isn't theirs.
+            const OrderCheck = Model.Order;
+            const orderRecord = OrderCheck ? await OrderCheck.findByPk(order_id) : null;
+            if (!orderRecord) return next(new AppError('Order not found', 404));
+            if (orderRecord.buyerId !== userId) return next(new AppError('Not authorized', 403));
 
             const sequelize = getSequelize();
             const t = sequelize ? await sequelize.transaction() : null;
@@ -1564,6 +1592,27 @@ class MarketplaceController {
             // Check for pending payout
             const pending = await Payout.findOne({ where: { sellerId: userId, status: 'pending' } });
             if (pending) return next(new AppError('You have a pending payout request. Wait for it to be processed.', 409));
+
+            // FIX-PAYOUT-BALANCE-CHECK: this used to accept any requested amount
+            // with zero validation against what the seller actually earned — any
+            // authenticated user (not even necessarily a real seller with sales)
+            // could request a payout unrelated to their actual earnings. Compute
+            // available balance (total earned minus payouts already paid or
+            // pending) and reject requests that exceed it.
+            const O = Model.Order;
+            const totalEarned = O ? (await O.sum('totalPrice', {
+                where: { sellerId: userId, status: { [Op.in]: ['paid', 'delivered'] } }
+            })) || 0 : 0;
+            const alreadyDisbursedOrPending = (await Payout.sum('amount', {
+                where: { sellerId: userId, status: { [Op.in]: ['paid', 'pending'] } }
+            })) || 0;
+            const available = parseFloat(totalEarned) - parseFloat(alreadyDisbursedOrPending);
+            const requested = parseFloat(amount);
+            if (requested > available) {
+                return next(new AppError(
+                    `Requested amount exceeds available balance. Available: KES ${available.toFixed(2)}`, 400
+                ));
+            }
 
             const payout = await Payout.create({
                 sellerId: userId, amount: parseFloat(amount), currency: 'KES',

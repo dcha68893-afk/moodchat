@@ -188,6 +188,16 @@ class CallService {
     const callerDisplayName = (caller.firstName
       ? `${caller.firstName}${caller.lastName ? ' ' + caller.lastName : ''}`.trim()
       : null) || caller.username || 'Unknown';
+    // FIX-CALLER-NAME-FLIP: calleeName/calleeAvatar were missing from this payload.
+    // This same payload is sent BACK to the caller as the 'call:initiated' confirmation.
+    // The caller-side UI (calls.html CALL_INITIATED handler) picks the first of
+    // userName/calleeName/receiverName/callerName it finds — with calleeName absent it
+    // fell through to callerName (the caller's OWN name), so the "who am I calling"
+    // name flipped from the real callee name to the caller's own name/"User" right
+    // after the call was placed. Adding calleeName/calleeAvatar here fixes that.
+    const calleeDisplayName = (callee.firstName
+      ? `${callee.firstName}${callee.lastName ? ' ' + callee.lastName : ''}`.trim()
+      : null) || callee.username || 'User';
     const callPayload = {
       callId:       call.id,
       callerId:     parseInt(callerId),
@@ -197,8 +207,10 @@ class CallService {
       status:       'ringing',
       callerName:   callerDisplayName,     // ← top-level critical for UI
       callerAvatar: caller.avatar || null, // ← top-level critical for UI
+      calleeName:   calleeDisplayName,     // ← FIX: needed by caller's own "calling..." screen
+      calleeAvatar: callee.avatar || null, // ← FIX: same reason
       caller:       { id: caller.id, username: caller.username, avatar: caller.avatar, displayName: callerDisplayName },
-      callee:       { id: callee.id, username: callee.username, avatar: callee.avatar },
+      callee:       { id: callee.id, username: callee.username, avatar: callee.avatar, displayName: calleeDisplayName },
       chatId:       call.chatId,
       isGroupCall:  false,
       timestamp:    Date.now(),

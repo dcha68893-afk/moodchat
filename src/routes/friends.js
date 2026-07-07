@@ -1574,7 +1574,23 @@ router.get('/:friendId/notes', apiRateLimiter, asyncHandler(async (req, res) => 
             where: { [Op.or]: [{ requesterId: userId, receiverId: friendId }, { requesterId: friendId, receiverId: userId }], status: 'accepted' },
             attributes: ['notes']
         }));
-        return res.json({ success: true, data: { notes: record?.notes || '' } });
+        // FIX-NOTES-PRIVACY: notes is a single shared column with no author field,
+        // so previously whoever last wrote a note, the OTHER friend could read it
+        // back verbatim through this same endpoint — a private "note to self about
+        // this friend" was actually visible to the friend it was about. New notes
+        // are written as {a: authorId, t: text} (see PUT below); only return the
+        // text if the current viewer is the recorded author. Legacy plain-text
+        // notes (written before this fix) have no author info to check, so they're
+        // withheld here rather than guessed at — they're still overwritten cleanly
+        // the next time either side saves a new note.
+        let noteText = '';
+        if (record?.notes) {
+            try {
+                const parsed = JSON.parse(record.notes);
+                if (parsed && String(parsed.a) === String(userId)) noteText = parsed.t || '';
+            } catch (_) { /* legacy plain-text note — withhold, can't verify author */ }
+        }
+        return res.json({ success: true, data: { notes: noteText } });
     } catch (e) {
         console.error('[Friends GET /:friendId/notes]', e.message);
         return res.status(500).json({ success: false, message: 'Failed to get notes' });
@@ -1587,7 +1603,7 @@ router.put('/:friendId/notes', apiRateLimiter, asyncHandler(async (req, res) => 
         if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
         const friendId = parseId(req.params.friendId);
         if (!friendId) return res.status(400).json({ success: false, message: 'Invalid friend ID' });
-        const notes = (req.body.notes || '').substring(0, 200);
+        const rawNotes = (req.body.notes || '').substring(0, 170);
         if (!Friend) return res.status(503).json({ success: false, message: 'Service unavailable' });
 
         const record = await withTimeout(Friend.findOne({
@@ -1595,10 +1611,13 @@ router.put('/:friendId/notes', apiRateLimiter, asyncHandler(async (req, res) => 
         }));
         if (!record) return res.status(404).json({ success: false, message: 'Friendship not found' });
 
-        record.notes = notes || null;
+        // FIX-NOTES-PRIVACY: store {a: authorId, t: text} instead of the raw
+        // string, so GET /:friendId/notes above can tell whose note this is and
+        // only return it to that same person — see the comment there.
+        record.notes = rawNotes ? JSON.stringify({ a: userId, t: rawNotes }) : null;
         record.updatedAt = new Date();
         await record.save();
-        return res.json({ success: true, data: { notes: record.notes } });
+        return res.json({ success: true, data: { notes: rawNotes } });
     } catch (e) {
         console.error('[Friends PUT /:friendId/notes]', e.message);
         return res.status(500).json({ success: false, message: 'Failed to save notes' });
@@ -1771,11 +1790,23 @@ router.get('/export/csv', apiRateLimiter, asyncHandler(async (req, res) => {
             const friendId = rid === parseInt(userId) ? parseInt(f.receiverId || f.receiver_id) : rid;
             const u = userMap.get(friendId);
             if (!u) return;
+            // FIX-NOTES-PRIVACY: this column is exported as "my own data", so only
+            // include the note text if this user is the recorded author (see the
+            // GET /:friendId/notes fix above for the {a, t} format). A raw legacy
+            // plain-text note has no author to verify, so it's omitted here too
+            // rather than assumed to belong to the exporting user.
+            let myNoteText = '';
+            if (f.notes) {
+                try {
+                    const parsed = JSON.parse(f.notes);
+                    if (parsed && String(parsed.a) === String(userId)) myNoteText = parsed.t || '';
+                } catch (_) { /* legacy plain-text note — omit, can't verify author */ }
+            }
             rows.push([
                 escape(u.username), escape(u.firstName), escape(u.lastName),
                 escape(f.category || 'friend'), escape(f.isBusiness ? 'Yes' : 'No'),
                 escape(f.acceptedAt ? new Date(f.acceptedAt).toISOString().split('T')[0] : ''),
-                escape(f.closenessLevel || 0), escape(f.notes || '')
+                escape(f.closenessLevel || 0), escape(myNoteText)
             ]);
         });
 
@@ -2049,7 +2080,13 @@ router.post('/:friendId/unblock', apiRateLimiter, asyncHandler(async (req, res) 
         if (!Friend) return res.status(503).json({ success: false, message: 'Friend service temporarily unavailable' });
 
         const friendship = await withTimeout(Friend.findOne({
-            where: { [Op.or]: [{ requesterId: userId, receiverId: targetId, status: 'blocked' }, { requesterId: targetId, receiverId: userId, status: 'blocked' }] }
+            // FIX-UNBLOCK-BYPASS: only the person who did the blocking (requesterId,
+            // per the "normalize so blocker is always requester" convention used in
+            // the block handler above) may undo it. This used to also match the
+            // reverse direction, letting a blocked user remove the block that was
+            // placed ON them by calling unblock with the blocker's id — completely
+            // bypassing the other person's block without their knowledge.
+            where: { requesterId: userId, receiverId: targetId, status: 'blocked' }
         }));
 
         if (!friendship) return res.status(404).json({ success: false, message: 'Blocked user not found' });

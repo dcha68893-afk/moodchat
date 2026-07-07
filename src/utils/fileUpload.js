@@ -30,8 +30,14 @@ class FileUpload {
       },
       filename: (req, file, cb) => {
         const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
-        const ext = path.extname(file.originalname);
-        const filename = `profile-${uniqueSuffix}${ext}`;
+        // FIX-XSS-EXT-SMUGGLING: never trust the client-supplied filename's
+        // extension — same issue and same fix as src/config/upload.js. A
+        // client could claim an allowed image mimetype while naming the file
+        // 'x.html', and express.static would later serve it back as
+        // Content-Type: text/html based on that extension.
+        const SAFE_EXT = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/gif': 'gif', 'image/webp': 'webp' };
+        const ext = SAFE_EXT[file.mimetype] || 'jpg';
+        const filename = `profile-${uniqueSuffix}.${ext}`;
         cb(null, filename);
       }
     });

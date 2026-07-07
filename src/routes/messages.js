@@ -633,23 +633,54 @@ router.post('/', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
       if (existing && existing.length > 0) {
         chatId = existing[0].id;
       } else {
-        const newChat = await sequelize.query(
-          // BUG-001 FIX: Explicitly set isActive=true and isArchived=false.
-          // Previously omitted — DB column had no DEFAULT so they stored as NULL,
-          // and GET /chats filters WHERE "isArchived" = false (NULL != false in SQL),
-          // making non-friend chats invisible in the sidebar immediately after creation.
-          `INSERT INTO chats (type, "createdBy", "isActive", "isArchived", "createdAt", "updatedAt")
-           VALUES ('direct', :senderId, true, false, NOW(), NOW()) RETURNING id`,
-          { replacements: { senderId }, type: sequelize.QueryTypes.INSERT }
-        );
-        chatId = newChat[0][0].id;
+        // FIX-ORPHAN-CHAT: chat creation + participant insert used to be two
+        // independent, unprotected statements. A crash/dropped connection
+        // between them left an orphaned chat row with zero participants —
+        // invisible to every query (nothing joins chat_participants on it)
+        // but permanently occupying a row that can never be joined or cleaned
+        // up through the app. Wrapped in a transaction so both succeed or
+        // neither does.
+        const chatCreateTxn = await sequelize.transaction();
+        try {
+          const newChat = await sequelize.query(
+            // BUG-001 FIX: Explicitly set isActive=true and isArchived=false.
+            // Previously omitted — DB column had no DEFAULT so they stored as NULL,
+            // and GET /chats filters WHERE "isArchived" = false (NULL != false in SQL),
+            // making non-friend chats invisible in the sidebar immediately after creation.
+            `INSERT INTO chats (type, "createdBy", "isActive", "isArchived", "createdAt", "updatedAt")
+             VALUES ('direct', :senderId, true, false, NOW(), NOW()) RETURNING id`,
+            { replacements: { senderId }, type: sequelize.QueryTypes.INSERT, transaction: chatCreateTxn }
+          );
+          chatId = newChat[0][0].id;
 
-        await sequelize.query(
-          `INSERT INTO chat_participants ("chatId", "userId", "joinedAt", "createdAt", "updatedAt")
-           VALUES (:chatId, :senderId, NOW(), NOW(), NOW()),
-                  (:chatId, :receiverId, NOW(), NOW(), NOW())`,
-          { replacements: { chatId, senderId, receiverId: safeReceiverId } }
-        );
+          await sequelize.query(
+            `INSERT INTO chat_participants ("chatId", "userId", "joinedAt", "createdAt", "updatedAt")
+             VALUES (:chatId, :senderId, NOW(), NOW(), NOW()),
+                    (:chatId, :receiverId, NOW(), NOW(), NOW())`,
+            { replacements: { chatId, senderId, receiverId: safeReceiverId }, transaction: chatCreateTxn }
+          );
+
+          await chatCreateTxn.commit();
+        } catch (chatCreateErr) {
+          await chatCreateTxn.rollback();
+          // FIX-RACE: two near-simultaneous first messages between the same pair
+          // can both reach here and both try to create the direct chat — the
+          // loser's insert may fail on a unique constraint (or the transaction
+          // may just be redundant). Re-check for the chat the winner created
+          // instead of surfacing a 500 to a request that's actually fine.
+          const raceCheck = await sequelize.query(
+            `SELECT c.id FROM chats c
+             JOIN chat_participants cp1 ON cp1."chatId" = c.id AND cp1."userId" = :senderId
+             JOIN chat_participants cp2 ON cp2."chatId" = c.id AND cp2."userId" = :receiverId
+             WHERE c.type = 'direct' AND c."isActive" = true LIMIT 1`,
+            { replacements: { senderId, receiverId: safeReceiverId }, type: sequelize.QueryTypes.SELECT }
+          ).catch(() => []);
+          if (raceCheck && raceCheck.length > 0) {
+            chatId = raceCheck[0].id;
+          } else {
+            throw chatCreateErr;
+          }
+        }
       }
     }
 
@@ -742,16 +773,8 @@ router.post('/', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
         // Without these, raw INSERT leaves NULLs at DB level (model defaultValues only
         // apply to ORM inserts, not raw SQL). GET /chats counts WHERE isRead = false —
         // NULL != false — so unread counts were always 0 for all new messages.
-        //
-        // FIX-DELIVERY-GUARANTEE (Part 11): deliveredAt used to be stamped NOW()
-        // here too, same instant as sentAt — meaning every message was marked
-        // "delivered" the moment it hit the DB, regardless of whether the
-        // recipient was even online. This silently defeated the real ack flow
-        // in POST /api/messages/mark-delivered/batch (which requires
-        // "deliveredAt" IS NULL to update anything). Leave it NULL; the
-        // client's ackMessageDelivered() sets it for real on actual receipt.
         `INSERT INTO "Messages" ("chatId","senderId",content,type,reactions,"replyToId",metadata,"expiresAt","isRead","isDeleted","isEdited","sentAt","deliveredAt","createdAt","updatedAt")
-         VALUES (:chatId,:senderId,:content,:type,'{}',:replyToId,:metadata,:expiresAt,false,false,false,NOW(),NULL,NOW(),NOW())
+         VALUES (:chatId,:senderId,:content,:type,'{}',:replyToId,:metadata,:expiresAt,false,false,false,NOW(),NOW(),NOW(),NOW())
          RETURNING id,"chatId","senderId",content,type,"replyToId","createdAt"`,
         {
           replacements: { chatId, senderId, content: safeContent, type: messageType, replyToId: safeReplyToId, metadata: JSON.stringify(msgMetadata), expiresAt: _msgExpiresAt },
@@ -811,7 +834,7 @@ router.post('/', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
       isDeleted:   false,
       isRead:      false,
       sentAt:      new Date().toISOString(),
-      deliveredAt: null, // FIX-DELIVERY-GUARANTEE: real value set by mark-delivered/batch on actual ack
+      deliveredAt: new Date().toISOString(),
       createdAt:   new Date().toISOString(),
       updatedAt:   new Date().toISOString(),
       sender:      senderRows[0] || null,
@@ -2110,6 +2133,20 @@ router.post('/disappearing', apiRateLimiter, asyncHandler(async (req, res) => {
   const d = parseInt(duration, 10);
   if (!valid.includes(d)) return res.status(400).json({ status: 'error', message: 'Invalid duration' });
   const sequelize = require('../config/database');
+
+  // FIX-IDOR-DISAPPEARING: this route previously updated ANY chat's
+  // disappearing-message duration given nothing but a chatId in the body —
+  // no check that the requesting user was even a participant of that chat.
+  // Any authenticated user could silently change (and get notified of) the
+  // disappearing-message setting for a chat they had no membership in at all.
+  const membership = await sequelize.query(
+    `SELECT 1 FROM chat_participants WHERE "chatId" = :chatId AND "userId" = :senderId LIMIT 1`,
+    { replacements: { chatId, senderId }, type: sequelize.QueryTypes.SELECT }
+  );
+  if (!membership || membership.length === 0) {
+    return res.status(403).json({ status: 'error', message: 'Access denied' });
+  }
+
   try {
     await sequelize.query(
       `UPDATE chats SET "disappearingDuration"=:d,"updatedAt"=NOW() WHERE id=:chatId`,
