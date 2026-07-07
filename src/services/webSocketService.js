@@ -160,7 +160,7 @@ class WebSocketService {
 
             // Allow client to join additional rooms
             // FIX-002: socket.off() before every socket.on() prevents listener accumulation on reconnect
-            socket.off('join').on('join', ({ room } = {}) => {
+            socket.removeAllListeners('join').on('join', ({ room } = {}) => {
                 if (room && typeof room === 'string') {
                     socket.join(room);
                          _flog(`[WSService] uid=${userId} joined room: ${room}`);
@@ -169,7 +169,7 @@ class WebSocketService {
 
             // join_user_room: moved below with call-room fix (see FIX-CALL-ROOM)
 
-            socket.off('disconnect').on('disconnect', async (reason) => {
+            socket.removeAllListeners('disconnect').on('disconnect', async (reason) => {
                 this.removeUser(userId, socket);
                      _flog(`[WSService] socket disconnected uid=${userId} sid=${socket.id} reason=${reason}`);
 
@@ -253,7 +253,7 @@ class WebSocketService {
             });
 
             // ── TYPING INDICATORS — FIX: were completely missing ──────────────
-            socket.off('typing:start').on('typing:start', ({ chatId } = {}) => {
+            socket.removeAllListeners('typing:start').on('typing:start', ({ chatId } = {}) => {
                 if (!chatId) return;
                 socket.to(`chat:${chatId}`).emit('typing:start', {
                     chatId,
@@ -262,7 +262,7 @@ class WebSocketService {
                 });
             });
 
-            socket.off('typing:stop').on('typing:stop', ({ chatId } = {}) => {
+            socket.removeAllListeners('typing:stop').on('typing:stop', ({ chatId } = {}) => {
                 if (!chatId) return;
                 socket.to(`chat:${chatId}`).emit('typing:stop', {
                     chatId,
@@ -272,7 +272,7 @@ class WebSocketService {
             });
 
             // SETTINGS: relay cross-device settings changes
-            socket.off('settings:update').on('settings:update', (payload) => {
+            socket.removeAllListeners('settings:update').on('settings:update', (payload) => {
                 try {
                     if (!payload || typeof payload !== 'object') return;
                     const settings = payload.settings || payload;
@@ -294,7 +294,7 @@ class WebSocketService {
             });
 
             // ── FIX-CALL-ACK: Receiver signals that ring UI is showing ────────
-            socket.off('call:received').on('call:received', async ({ callId, callerId } = {}) => {
+            socket.removeAllListeners('call:received').on('call:received', async ({ callId, callerId } = {}) => {
                 if (!callId) return;
                 // Clear the 20-second no-answer timer for this call
                 if (this._pendingCallAcks) this._pendingCallAcks.delete(callId);
@@ -308,7 +308,7 @@ class WebSocketService {
             });
 
             // ── FIX-CALL-ROOM: join_user_room — verify both users reachable ──
-            socket.off('join_user_room').on('join_user_room', ({ userId: uid, peerId } = {}) => {
+            socket.removeAllListeners('join_user_room').on('join_user_room', ({ userId: uid, peerId } = {}) => {
                 const rid    = parseInt(uid, 10);
                 const strRid = String(rid);
                 if (!rid || rid !== userId) return;
@@ -328,7 +328,7 @@ class WebSocketService {
             });
 
             // ── FIX-MSG-DELIVERY: Phase-2 ack — receiver confirms message got ─
-            socket.off('message:delivery_ack').on('message:delivery_ack', async ({ messageId, chatId, senderId } = {}) => {
+            socket.removeAllListeners('message:delivery_ack').on('message:delivery_ack', async ({ messageId, chatId, senderId } = {}) => {
                 if (!messageId || !senderId) return;
                 this.clearMessageDeliveryTimeout(messageId);
                 await this.sendToUser(senderId, 'message:delivered', {
@@ -338,7 +338,7 @@ class WebSocketService {
             });
 
             // ── FIX-ONLINE-STATUS: Let sender check if receiver is online ─────
-            socket.off('check_user_online').on('check_user_online', async ({ targetUserId } = {}) => {
+            socket.removeAllListeners('check_user_online').on('check_user_online', async ({ targetUserId } = {}) => {
                 if (!targetUserId) return;
                 const online = await this.isUserOnline(targetUserId).catch(() => false);
                 socket.emit('user_online_status', { userId: targetUserId, online, timestamp: Date.now() });
@@ -349,7 +349,7 @@ class WebSocketService {
             // received a socket-level ACK. Now the parent frame emits message:ack after
             // a successful POST /messages, and here we relay delivery:confirmed to sender
             // AND push a delivery notification to the recipient.
-            socket.off('message:ack').on('message:ack', async ({ messageId, chatId, status } = {}) => {
+            socket.removeAllListeners('message:ack').on('message:ack', async ({ messageId, chatId, status } = {}) => {
                 if (!messageId) return;
                 try {
                     // Notify sender that message was durably saved
@@ -363,7 +363,7 @@ class WebSocketService {
             this.flushOfflineMessages(userId).catch(() => {});
 
             // ── PHASE14 FIX: sync:missed_messages ────────────────────────────
-            socket.off('sync:missed_messages').on('sync:missed_messages', async ({ chatIds, since } = {}) => {
+            socket.removeAllListeners('sync:missed_messages').on('sync:missed_messages', async ({ chatIds, since } = {}) => {
                 try {
                     const sequelize = require('../models').sequelize;
                     if (!sequelize || !since) return;
@@ -399,7 +399,7 @@ class WebSocketService {
             });
 
             // ── PHASE14 FIX: sync:missed_events ──────────────────────────────
-            socket.off('sync:missed_events').on('sync:missed_events', async ({ since } = {}) => {
+            socket.removeAllListeners('sync:missed_events').on('sync:missed_events', async ({ since } = {}) => {
                 try {
                     const sinceDate = new Date(since);
                     if (isNaN(sinceDate.getTime())) return;
@@ -433,7 +433,7 @@ class WebSocketService {
             });
 
             // ── PHASE14 FIX: online:check ─────────────────────────────────────
-            socket.off('online:check').on('online:check', ({ userIds } = {}) => {
+            socket.removeAllListeners('online:check').on('online:check', ({ userIds } = {}) => {
                 try {
                     if (!Array.isArray(userIds)) return;
                     const result = {};
@@ -446,7 +446,7 @@ class WebSocketService {
             });
 
             // ── PHASE14 FIX: mark_as_read ─────────────────────────────────────
-            socket.off('mark_as_read').on('mark_as_read', async ({ chatId, messageIds } = {}) => {
+            socket.removeAllListeners('mark_as_read').on('mark_as_read', async ({ chatId, messageIds } = {}) => {
                 try {
                     if (!chatId) return;
                     const sequelize = require('../models').sequelize;
@@ -467,7 +467,7 @@ class WebSocketService {
             });
 
             // ── PHASE14 FIX: group:join ───────────────────────────────────────
-            socket.off('group:join').on('group:join', async ({ groupId } = {}) => {
+            socket.removeAllListeners('group:join').on('group:join', async ({ groupId } = {}) => {
                 try {
                     if (!groupId) return;
                     const sequelize = require('../models').sequelize;
@@ -487,7 +487,7 @@ class WebSocketService {
             });
 
             // ── PHASE14 FIX: message:delivered relay ──────────────────────────
-            socket.off('message:delivered').on('message:delivered', ({ chatId, messageId } = {}) => {
+            socket.removeAllListeners('message:delivered').on('message:delivered', ({ chatId, messageId } = {}) => {
                 if (!chatId || !messageId) return;
                 socket.to(`chat:${chatId}`).emit('message:delivered', {
                     chatId, messageId, deliveredTo: userId, deliveredAt: new Date().toISOString()
@@ -495,7 +495,7 @@ class WebSocketService {
             });
 
             // ── PHASE14 FIX P0: WebRTC socket-level signaling relay ───────────
-            socket.off('webrtc:signal').on('webrtc:signal', (payload = {}) => {
+            socket.removeAllListeners('webrtc:signal').on('webrtc:signal', (payload = {}) => {
                 try {
                     const { targetUserId: wtTarget, callId: wtCallId, type: wtType, sdp: wtSdp, candidate: wtCand } = payload;
                     if (!wtTarget) return;
@@ -510,7 +510,7 @@ class WebSocketService {
                 }
             });
 
-            socket.off('webrtc_signal').on('webrtc_signal', (payload = {}) => {
+            socket.removeAllListeners('webrtc_signal').on('webrtc_signal', (payload = {}) => {
                 try {
                     const { targetUserId: wsTarget, callId: wsCallId, type: wsType, sdp: wsSdp, candidate: wsCand } = payload;
                     if (!wsTarget) return;
@@ -525,7 +525,7 @@ class WebSocketService {
                 }
             });
 
-            socket.off('call:heartbeat').on('call:heartbeat', ({ callId: hbCallId, targetUserId: hbTarget } = {}) => {
+            socket.removeAllListeners('call:heartbeat').on('call:heartbeat', ({ callId: hbCallId, targetUserId: hbTarget } = {}) => {
                 if (!hbCallId || !hbTarget) return;
                 const io = this.getIO();
                 if (!io) return;
@@ -538,7 +538,7 @@ class WebSocketService {
             // ── PHASE14 FIX: call:webrtc_offer / call:webrtc_answer relay ────
             // calls-core.js emits these directly via socket but backend had no handler —
             // offers were silently dropped, permanently breaking WebRTC on cloud deployments.
-            socket.off('call:webrtc_offer').on('call:webrtc_offer', (payload = {}) => {
+            socket.removeAllListeners('call:webrtc_offer').on('call:webrtc_offer', (payload = {}) => {
                 try {
                     const { callId: coCallId, targetUserId: coTarget, offer: coOffer } = payload;
                     if (!coTarget) return;
@@ -557,7 +557,7 @@ class WebSocketService {
                 }
             });
 
-            socket.off('call:webrtc_answer').on('call:webrtc_answer', (payload = {}) => {
+            socket.removeAllListeners('call:webrtc_answer').on('call:webrtc_answer', (payload = {}) => {
                 try {
                     const { callId: caCallId, targetUserId: caTarget, answer: caAnswer } = payload;
                     if (!caTarget) return;
@@ -576,7 +576,7 @@ class WebSocketService {
             });
 
             // ── PHASE14 FIX P0: message:send socket handler ───────────────────
-            socket.off('message:send').on('message:send', async (payload = {}) => {
+            socket.removeAllListeners('message:send').on('message:send', async (payload = {}) => {
                 try {
                     const { chatId: msChatId, content: msContent, type: msType = 'text', replyToId: msReplyId, localId: msLocalId } = payload;
                     if (!msChatId || !msContent) {
@@ -601,7 +601,7 @@ class WebSocketService {
             // ── Multi-device call sync ────────────────────────────────────────────
             // When user answers/declines on one device, broadcast to ALL their other
             // devices so the incoming call UI dismisses everywhere automatically.
-            socket.off('call:device_sync').on('call:device_sync', async (payload = {}) => {
+            socket.removeAllListeners('call:device_sync').on('call:device_sync', async (payload = {}) => {
                 try {
                     const { callId: syncCallId, action } = payload; // action: 'answered'|'declined'|'ended'
                     if (!syncCallId || !action) return;
@@ -615,7 +615,7 @@ class WebSocketService {
             });
 
             // ── Live Caption relay ────────────────────────────────────────────────
-            socket.off('call:caption').on('call:caption', async (payload = {}) => {
+            socket.removeAllListeners('call:caption').on('call:caption', async (payload = {}) => {
                 try {
                     const { callId: capCallId, text, ts } = payload;
                     if (!capCallId || !text) return;
@@ -642,7 +642,7 @@ class WebSocketService {
             });
 
             // ── Waiting room knock ─────────────────────────────────────────────────
-            socket.off('call:waiting_room_knock').on('call:waiting_room_knock', async (payload = {}) => {
+            socket.removeAllListeners('call:waiting_room_knock').on('call:waiting_room_knock', async (payload = {}) => {
                 try {
                     const { callId: wrCallId } = payload;
                     if (!wrCallId) return;
@@ -661,7 +661,7 @@ class WebSocketService {
             });
 
             // ── In-call poll relay ────────────────────────────────────────────────
-            socket.off('call:poll_event').on('call:poll_event', async (payload = {}) => {
+            socket.removeAllListeners('call:poll_event').on('call:poll_event', async (payload = {}) => {
                 try {
                     const { callId: pollCallId, action, poll, vote, pollId } = payload;
                     if (!pollCallId || !action) return;
@@ -691,7 +691,7 @@ class WebSocketService {
             // Frontend dual-paths chat: data channel (fast) + socket (persistent).
             // This handler relays the message to all OTHER call participants so
             // the in-call chat is not lost when data channels are recreated.
-            socket.off('call:chat_message').on('call:chat_message', async (payload = {}) => {
+            socket.removeAllListeners('call:chat_message').on('call:chat_message', async (payload = {}) => {
                 try {
                     const { callId: chatCallId, message: chatMsg, timestamp: chatTs } = payload;
                     if (!chatCallId || !chatMsg) return;

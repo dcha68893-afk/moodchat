@@ -294,7 +294,7 @@ class CallSignalingService extends EventEmitter {
 
     // ── Call initiation ──────────────────────────────────────────────────────
 
-    socket.off('call:initiate').on('call:initiate', async data => {
+    socket.removeAllListeners('call:initiate').on('call:initiate', async data => {
       try {
         const { targetUserId, callType, callId: existingId } = data || {};
         if (!targetUserId) return;
@@ -450,7 +450,7 @@ class CallSignalingService extends EventEmitter {
     });
 
     // ── FIX-CALL-DIRECT: webrtc:offer relay via Socket.IO (bypass postMessage) ─
-    socket.off('call:webrtc_offer').on('call:webrtc_offer', async ({ callId, targetUserId: tgt, offer } = {}) => {
+    socket.removeAllListeners('call:webrtc_offer').on('call:webrtc_offer', async ({ callId, targetUserId: tgt, offer } = {}) => {
       if (!callId || !tgt || !offer) return;
       // FIX-DUP-SIGNAL: previously this both sent directly to the target user
       // AND re-broadcast to the call room (which the target is also a member
@@ -467,7 +467,7 @@ class CallSignalingService extends EventEmitter {
 
     // ── Call accept ──────────────────────────────────────────────────────────
 
-    socket.off('call:accept').on('call:accept', async data => {
+    socket.removeAllListeners('call:accept').on('call:accept', async data => {
       const { callId, callerId } = data || {};
       if (!callId || !callerId) return;
 
@@ -504,7 +504,7 @@ class CallSignalingService extends EventEmitter {
 
     // ── Call reject ──────────────────────────────────────────────────────────
 
-    socket.off('call:reject').on('call:reject', async data => {
+    socket.removeAllListeners('call:reject').on('call:reject', async data => {
       const { callId, callerId, reason } = data || {};
       if (!callId || !callerId) return;
 
@@ -518,7 +518,7 @@ class CallSignalingService extends EventEmitter {
 
     // ── Call end ────────────────────────────────────────────────────────────
 
-    socket.off('call:end').on('call:end', async data => {
+    socket.removeAllListeners('call:end').on('call:end', async data => {
       const { callId, reason } = data || {};
       if (!callId) return;
 
@@ -547,7 +547,7 @@ class CallSignalingService extends EventEmitter {
 
     // ── WebRTC signal relay ──────────────────────────────────────────────────
 
-    socket.off('webrtc:signal').on('webrtc:signal', async data => {
+    socket.removeAllListeners('webrtc:signal').on('webrtc:signal', async data => {
       const { targetUserId, callId, type } = data || {};
       if (!targetUserId || !callId) return;
 
@@ -572,7 +572,7 @@ class CallSignalingService extends EventEmitter {
 
     // ── Group call events ────────────────────────────────────────────────────
 
-    socket.off('group:call:join').on('group:call:join', async data => {
+    socket.removeAllListeners('group:call:join').on('group:call:join', async data => {
       const { callId } = data || {};
       // FIX-ADHOC-GROUP-CALL: this previously required BOTH groupId and
       // callId and silently no-op'd otherwise. But the REST ad-hoc
@@ -640,7 +640,7 @@ class CallSignalingService extends EventEmitter {
       socket.emit('group:call:current_participants', { callId, participants: existing });
     });
 
-    socket.off('group:call:leave').on('group:call:leave', data => {
+    socket.removeAllListeners('group:call:leave').on('group:call:leave', data => {
       const { groupId, callId } = data || {};
       if (!callId) return;
 
@@ -653,7 +653,7 @@ class CallSignalingService extends EventEmitter {
     });
 
     // Participant state updates (mute, video, screen share)
-    socket.off('group:call:participant_update').on('group:call:participant_update', data => {
+    socket.removeAllListeners('group:call:participant_update').on('group:call:participant_update', data => {
       const { callId } = data || {};
       if (!callId) return;
       socket.to(`call:${callId}`).emit('group:call:participant_update', {
@@ -668,7 +668,7 @@ class CallSignalingService extends EventEmitter {
     // server never handled them — so the events arrived and were silently
     // dropped. Added here with isHost() authorization so only the call creator
     // can mute or remove other participants.
-    socket.off('group:call:mute_participant').on('group:call:mute_participant', data => {
+    socket.removeAllListeners('group:call:mute_participant').on('group:call:mute_participant', data => {
       const { callId, targetUserId: targetId, muted } = data || {};
       if (!callId || !targetId) return;
 
@@ -703,7 +703,7 @@ class CallSignalingService extends EventEmitter {
     });
 
     // ── Host moderation: remove participant ──────────────────────────────────
-    socket.off('group:call:remove_participant').on('group:call:remove_participant', data => {
+    socket.removeAllListeners('group:call:remove_participant').on('group:call:remove_participant', data => {
       const { callId, targetUserId: targetId } = data || {};
       if (!callId || !targetId) return;
 
@@ -739,7 +739,7 @@ class CallSignalingService extends EventEmitter {
     });
 
     // ── Hand raise / lower ───────────────────────────────────────────────────
-    socket.off('group:call:hand_raised').on('group:call:hand_raised', data => {
+    socket.removeAllListeners('group:call:hand_raised').on('group:call:hand_raised', data => {
       const { callId } = data || {};
       if (!callId) return;
       socket.to(`call:${callId}`).emit('group:call:hand_raised', {
@@ -747,7 +747,7 @@ class CallSignalingService extends EventEmitter {
       });
     });
 
-    socket.off('group:call:lower_hand').on('group:call:lower_hand', data => {
+    socket.removeAllListeners('group:call:lower_hand').on('group:call:lower_hand', data => {
       const { callId } = data || {};
       if (!callId) return;
       socket.to(`call:${callId}`).emit('group:call:hand_lowered', {
@@ -757,19 +757,19 @@ class CallSignalingService extends EventEmitter {
 
     // ── Scheduled call routes ────────────────────────────────────────────────
 
-    socket.off('scheduled_call:create').on('scheduled_call:create', data => {
+    socket.removeAllListeners('scheduled_call:create').on('scheduled_call:create', data => {
       const entry = this._scheduler.schedule({ ...data, hostId: userId });
       socket.emit('scheduled_call:created', { scheduleId: entry.id, ...entry });
     });
 
-    socket.off('scheduled_call:cancel').on('scheduled_call:cancel', data => {
+    socket.removeAllListeners('scheduled_call:cancel').on('scheduled_call:cancel', data => {
       const ok = this._scheduler.cancel(data?.scheduleId);
       socket.emit('scheduled_call:cancelled', { scheduleId: data?.scheduleId, success: ok });
     });
 
     // ── ICE restart relay ────────────────────────────────────────────────────
 
-    socket.off('call:reconnect').on('call:reconnect', async data => {
+    socket.removeAllListeners('call:reconnect').on('call:reconnect', async data => {
       const { callId, peerId } = data || {};
       if (!callId || !peerId) return;
       await this._wsService.sendToUser(peerId, 'call:reconnect', {
@@ -785,7 +785,7 @@ class CallSignalingService extends EventEmitter {
     // FIX: this event was emitted by calls-core.js sendChatMessage() but had
     // no server handler — messages were silently dropped and never reached
     // any other participant. Added relay here via the call room.
-    socket.off('call:chat_message').on('call:chat_message', data => {
+    socket.removeAllListeners('call:chat_message').on('call:chat_message', data => {
       const { callId, message, timestamp, senderId } = data || {};
       if (!callId || !message) return;
       if (!this._rooms.isParticipant(callId, userId)) {
@@ -810,7 +810,7 @@ class CallSignalingService extends EventEmitter {
     // FIX: screen share track was sent via WebRTC (replaceTrack) but remote
     // participants had no way to know it was a screen share vs a camera — they
     // needed to switch their UI from avatar view to full-screen display.
-    socket.off('call:screen_share_started').on('call:screen_share_started', data => {
+    socket.removeAllListeners('call:screen_share_started').on('call:screen_share_started', data => {
       const { callId } = data || {};
       if (!callId || !this._rooms.isParticipant(callId, userId)) return;
       this._io.to(`call:${callId}`).except(socket.id).emit('call:screen_share_started', {
@@ -819,14 +819,14 @@ class CallSignalingService extends EventEmitter {
       this._logger.log(`[CallSignaling] Screen share started by uid=${userId} in call ${callId}`);
     });
 
-    socket.off('call:screen_share_stopped').on('call:screen_share_stopped', data => {
+    socket.removeAllListeners('call:screen_share_stopped').on('call:screen_share_stopped', data => {
       const { callId } = data || {};
       if (!callId || !this._rooms.isParticipant(callId, userId)) return;
       this._io.to(`call:${callId}`).except(socket.id).emit('call:screen_share_stopped', {
         callId, userId, timestamp: Date.now(),
       });
     });
-    socket.off('call:heartbeat').on('call:heartbeat', data => {
+    socket.removeAllListeners('call:heartbeat').on('call:heartbeat', data => {
       const { callId } = data || {};
       if (!callId) return;
       if (this._rooms.isParticipant(callId, userId)) {
@@ -837,7 +837,7 @@ class CallSignalingService extends EventEmitter {
     });
 
     // ── Presence ─────────────────────────────────────────────────────────────
-    socket.off('call:presence').on('call:presence', async data => {
+    socket.removeAllListeners('call:presence').on('call:presence', async data => {
       const { targetUserId: target, status } = data || {};
       if (!target || !status) return;
       await this._wsService.sendToUser(target, 'call:presence_update', {
@@ -846,7 +846,7 @@ class CallSignalingService extends EventEmitter {
     });
 
     // ── Offline recovery resync ───────────────────────────────────────────────
-    socket.off('call:resync').on('call:resync', data => {
+    socket.removeAllListeners('call:resync').on('call:resync', data => {
       const { callId } = data || {};
       if (!callId || !this._rooms.isParticipant(callId, userId)) return;
       socket.emit('call:resync_response', {
