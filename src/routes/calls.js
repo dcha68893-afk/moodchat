@@ -344,6 +344,23 @@ router.post('/', apiRateLimiter, callInitiationLimiter, asyncHandler(async (req,
 
     const call = await callService.initiateCall(userId, targetId, callType, null);
 
+    // FIX-CALLER-NAME-FLIP-DEFINITIVE: the raw `call` DB row has no name
+    // fields — it's just callerId/receiverId/status/etc. chat.html spreads
+    // this response's `data.call` directly into the CALL_INITIATED message
+    // sent to the caller's own calls.html iframe, which is what actually
+    // renders "who am I calling". Without a resolved name here, that screen
+    // has nothing to show and falls back to a generic placeholder. Resolve
+    // it the same way resolveCallerName() resolves the caller's own name.
+    let _calleeDisplayName = null;
+    try {
+      const calleeUser = await User.findByPk(targetId, { attributes: ['id', 'username', 'displayName', 'firstName', 'lastName', 'avatar'] });
+      if (calleeUser) {
+        const first = calleeUser.firstName || '';
+        const last  = calleeUser.lastName  || '';
+        _calleeDisplayName = (first + (last ? ' ' + last : '')).trim() || calleeUser.displayName || calleeUser.username || 'User';
+      }
+    } catch (_) { /* leave null — chat.html already has a local fallback name from the contact list */ }
+
     // Always notify — if they are online, they'll get it; if not, it'll be a missed call
     const _callerDisplayName = await resolveCallerName(userId, req.user);
     const _rawCallPayload = {
@@ -398,7 +415,11 @@ router.post('/', apiRateLimiter, callInitiationLimiter, asyncHandler(async (req,
     // Schedule auto-miss if no answer within RING_TIMEOUT_MS
     scheduleRingTimeout(call.id, call.participants || [userId, targetId], () => req.io);
 
-    return res.status(201).json({ success: true, message: 'Call initiated', data: { call, receiverOnline: isOnline } });
+    return res.status(201).json({
+      success: true,
+      message: 'Call initiated',
+      data: { call, receiverOnline: isOnline, calleeName: _calleeDisplayName, calleeAvatar: null }
+    });
 
   } catch (err) {
     console.error('[POST /calls]', err.message);
@@ -452,6 +473,17 @@ router.post('/initiate', apiRateLimiter, callInitiationLimiter, asyncHandler(asy
 
     const call = await callService.initiateCall(userId, targetId, callType, null);
 
+    // FIX-CALLER-NAME-FLIP-DEFINITIVE: same fix as the '/' route above.
+    let _calleeDisplayName2 = null;
+    try {
+      const calleeUser = await User.findByPk(targetId, { attributes: ['id', 'username', 'displayName', 'firstName', 'lastName', 'avatar'] });
+      if (calleeUser) {
+        const first = calleeUser.firstName || '';
+        const last  = calleeUser.lastName  || '';
+        _calleeDisplayName2 = (first + (last ? ' ' + last : '')).trim() || calleeUser.displayName || calleeUser.username || 'User';
+      }
+    } catch (_) {}
+
     const _callerDisplayName = await resolveCallerName(userId, req.user);
     const _initPayload = {
       callId:       call.id,
@@ -466,7 +498,11 @@ router.post('/initiate', apiRateLimiter, callInitiationLimiter, asyncHandler(asy
     await notifyUser(req.io, targetId, 'call_incoming', _initPayload);
     await notifyUser(req.io, targetId, 'call:incoming', _initPayload);
 
-    return res.status(201).json({ success: true, message: 'Call initiated', data: { call, receiverOnline: isOnline } });
+    return res.status(201).json({
+      success: true,
+      message: 'Call initiated',
+      data: { call, receiverOnline: isOnline, calleeName: _calleeDisplayName2, calleeAvatar: null }
+    });
 
   } catch (err) {
     console.error('[POST /calls/initiate]', err.message);

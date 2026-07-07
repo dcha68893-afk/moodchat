@@ -396,7 +396,38 @@ class CallSignalingService extends EventEmitter {
           callerName: resolvedCallerName,
         });
 
-        socket.emit('call:initiated_ack', { callId, success: true });
+        // FIX-CALLER-NAME-FLIP-REAL: call:initiated_ack (the confirmation sent
+        // back to the CALLER) used to carry nothing but {callId, success} — no
+        // name at all. The caller's UI shows the correct name from the local
+        // contact list right when the call starts, then this ack arrives and
+        // overwrites it with nothing usable, so it falls back to displaying
+        // "user". Resolve the callee's display name the same way
+        // resolvedCallerName is resolved above and include it here.
+        let resolvedCalleeName = null;
+        try {
+          const db = require('../../models');
+          const UserModel = db.Users || db.User;
+          if (UserModel) {
+            const calleeUser = await UserModel.findByPk(parseInt(targetUserId, 10), {
+              attributes: ['id', 'username', 'firstName', 'lastName', 'avatar'],
+            });
+            if (calleeUser) {
+              const first = calleeUser.firstName || '';
+              const last  = calleeUser.lastName  || '';
+              resolvedCalleeName = (first + (last ? ' ' + last : '')).trim() || calleeUser.username || `User ${targetUserId}`;
+            }
+          }
+        } catch (lookupErr) {
+          console.warn('[CallSignaling] calleeName DB lookup failed:', lookupErr.message);
+        }
+
+        socket.emit('call:initiated_ack', {
+          callId,
+          success: true,
+          calleeName: resolvedCalleeName,
+          targetUserId,
+        });
+        return;
 
         // Join call room
         socket.join(`call:${callId}`);
