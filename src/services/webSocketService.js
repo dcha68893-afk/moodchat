@@ -141,6 +141,21 @@ class WebSocketService {
             // Tell client auth succeeded
             socket.emit('authenticated', { userId, authenticated: true, timestamp: Date.now() });
 
+            // FIX-QUEUE-FLUSH-ORDER: this MUST run before the HTR offline-queue flush
+            // below. _joinUserChatRooms() joins `user:${uid}`/`user_${uid}` synchronously
+            // (see the top of that method) before it does anything async — but it was
+            // previously called AFTER htr.flushOfflineQueue(), which delivers via
+            // _sendViaInternet() and only counts a message as delivered if the target
+            // room already has at least one member. On every reconnect (page reload,
+            // network blip, app backgrounded/foregrounded, cold start), the flush ran
+            // while this very socket hadn't joined its own room yet, so the room had
+            // zero members, the "delivered" check failed, and flush() clears the queue
+            // regardless of outcome — the message was gone for good, not re-queued.
+            // This is why messages sent while the receiver was briefly offline could
+            // vanish permanently: the sender saw "sent", but the receiver's reconnect
+            // flushed straight past an empty room and never got a retry.
+            this._joinUserChatRooms(userId, socket).catch(() => {});
+
             // PHASE10: Register with HybridTransportRuntime for offline queue flush
             try {
                 const htr = global.__HybridTransportRuntime;
@@ -148,15 +163,13 @@ class WebSocketService {
                     const ip = socket.handshake?.address || '';
                     const subnetKey = ip.split('.').slice(0, 3).join('.');
                     htr.lan.register(String(userId), socket.id, subnetKey);
-                    // Flush any queued messages for this user
+                    // Flush any queued messages for this user — safe now that the
+                    // socket has already joined its personal rooms above.
                     htr.flushOfflineQueue(String(userId));
                     // Store userId on socket for HybridTransportRuntime lookups
                     socket._authenticatedUserId = String(userId);
                 }
             } catch(_) {}
-
-            // Proactively join all chat rooms
-            this._joinUserChatRooms(userId, socket).catch(() => {});
 
             // Allow client to join additional rooms
             // FIX-002: socket.off() before every socket.on() prevents listener accumulation on reconnect

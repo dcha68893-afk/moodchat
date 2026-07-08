@@ -738,6 +738,39 @@ class CallSignalingService extends EventEmitter {
       });
     });
 
+    // ── Host moderation: end call for everyone ────────────────────────────────
+    // In a group call, any participant may leave on their own (group:call:leave
+    // above just removes them). But ending the call for *every* participant is
+    // a host-only action — otherwise any single participant tapping "End" would
+    // terminate the call for the whole group. Mirrors the isHost() authorization
+    // already used for mute/remove.
+    socket.removeAllListeners('group:call:end').on('group:call:end', data => {
+      const { callId, reason } = data || {};
+      if (!callId) return;
+
+      if (!this._rooms.isHost(callId, userId)) {
+        socket.emit('group:call:error', {
+          callId,
+          code: 'NOT_HOST',
+          message: 'Only the call host can end the call for everyone',
+          timestamp: Date.now(),
+        });
+        this._logger.warn(`[CallSignaling] Non-host uid=${userId} tried to end call ${callId} for everyone`);
+        return;
+      }
+
+      // Tell every other participant the host ended the call, so their
+      // clients can tear down and leave without needing their own signal.
+      socket.to(`call:${callId}`).emit('group:call:ended_by_host', {
+        callId,
+        by: userId,
+        reason: reason || 'host_ended',
+        timestamp: Date.now(),
+      });
+
+      this._rooms.endRoom(callId);
+    });
+
     // ── Hand raise / lower ───────────────────────────────────────────────────
     socket.removeAllListeners('group:call:hand_raised').on('group:call:hand_raised', data => {
       const { callId } = data || {};
