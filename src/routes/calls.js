@@ -33,7 +33,7 @@ const { Op, fn, col, literal } = Sequelize;
 // Auto-marks unanswered calls as 'missed' after RING_TIMEOUT_MS.
 // Prevents zombie 'ringing' records from accumulating in the DB and cleans up
 // the caller's UI when the callee never responds.
-const RING_TIMEOUT_MS = parseInt(process.env.RING_TIMEOUT_MS, 10) || 45000; // default 45s
+const RING_TIMEOUT_MS = parseInt(process.env.RING_TIMEOUT_MS, 10) || 180000; // default 3 min — must match frontend CALL_INVITATION_TIMEOUT (calls-core.js)
 const _ringTimers = new Map(); // callId → timer handle
 
 function scheduleRingTimeout(callId, participantIds, ioGetter) {
@@ -906,6 +906,9 @@ router.post('/:callId/accept', apiRateLimiter, asyncHandler(async (req, res) => 
       if (sdpAnswer) call.sdpAnswer = sdpAnswer;
       await call.save();
     }
+    // FIX: was missing here — /answer and /reject already cancel it, but this endpoint
+    // (the other "answer the call" route) left the ring-timeout timer running in memory.
+    cancelRingTimeout(callId);
 
     const user = await User.findByPk(userId, { attributes: ['id', 'username', 'avatar'] });
 
@@ -927,6 +930,10 @@ router.post('/:callId/accept', apiRateLimiter, asyncHandler(async (req, res) => 
       await notifyUser(req.io, pid, 'call_accepted', {
         callId:     call.id,
         answeredBy: user ? { id: user.id, username: user.username, avatar: user.avatar } : { id: userId },
+        // FIX 8: frontend's handleCallAccepted name-resolution chain reads calleeName —
+        // without this it always fell through to the generic 'User' placeholder.
+        calleeName:   user ? user.username : (req.user.username || `User ${userId}`),
+        calleeAvatar: user ? user.avatar   : (req.user.avatar || null),
         status:     call.status,
         startedAt:  call.startedAt,
         timestamp:  new Date(),
@@ -987,6 +994,10 @@ router.post('/:callId/answer', apiRateLimiter, asyncHandler(async (req, res) => 
     const acceptPayload = {
       callId:     call.id,
       answeredBy: answererInfo,
+      // FIX 8: frontend's handleCallAccepted name-resolution chain reads calleeName —
+      // without this it always fell through to the generic 'User' placeholder.
+      calleeName:   answererInfo.username,
+      calleeAvatar: answererInfo.avatar || null,
       status:     call.status,
       startedAt:  call.startedAt,
       timestamp:  new Date(),

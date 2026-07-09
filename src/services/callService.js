@@ -18,7 +18,7 @@ const User    = db.Users || db.User;
 const Chat    = db.Chats || db.Chat;
 
 const MAX_CALL_DURATION           = parseInt(process.env.MAX_CALL_DURATION)           || 3600;
-const CALL_TIMEOUT_SECONDS        = parseInt(process.env.CALL_TIMEOUT_SECONDS)        || 120;
+const CALL_TIMEOUT_SECONDS        = parseInt(process.env.CALL_TIMEOUT_SECONDS)        || 180; // must match RING_TIMEOUT_MS in routes/calls.js (3 min)
 const MAX_GROUP_CALL_PARTICIPANTS = parseInt(process.env.MAX_GROUP_CALL_PARTICIPANTS)  || 10;
 
 // Lazy-require helper — avoids circular dependency at startup
