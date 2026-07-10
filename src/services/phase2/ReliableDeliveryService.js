@@ -303,12 +303,16 @@ class ReliableDeliveryService extends EventEmitter {
     });
 
     // Handle ACKs
-    socket.on('message:ack', data => {
+    // FIX: removeAllListeners() first — matches the defensive pattern already
+    // used in CallSignalingService.js — so a duplicate invocation of
+    // _onConnection for the same socket can't double-process delivery acks
+    // or read receipts.
+    socket.removeAllListeners('message:ack').on('message:ack', data => {
       const id = data?.messageId || data?.id;
       if (id) this.processAck(id, userId);
     });
 
-    socket.on('message:read', data => {
+    socket.removeAllListeners('message:read').on('message:read', data => {
       const id = data?.messageId || data?.id;
       if (id) this.processRead(id, userId);
     });

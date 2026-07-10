@@ -26,6 +26,45 @@ function getSequelize() { return require('../models/index').sequelize; }
 
 const MAX_DEVICES = 5; // Max linked devices per user (Signal-style)
 
+// ── AUTO-MIGRATION: create linked_devices table if it doesn't exist ─────────
+// FIX: there is no Sequelize model AND no migration file anywhere in this
+// codebase that creates this table — every route below queries it directly
+// via raw SQL, so on any database that hasn't had it manually created, every
+// single one of these routes 500s with "relation linked_devices does not
+// exist". Mirrors the same self-healing pattern used in models/Call.js.
+let _linkedDevicesMigrated = false;
+async function ensureLinkedDevicesTable() {
+  if (_linkedDevicesMigrated) return;
+  _linkedDevicesMigrated = true;
+  try {
+    const sequelize = getSequelize();
+    await sequelize.query(`
+      CREATE TABLE IF NOT EXISTS linked_devices (
+        id            SERIAL PRIMARY KEY,
+        "userId"      INTEGER NOT NULL,
+        "deviceId"    VARCHAR(64) NOT NULL,
+        "deviceName"  VARCHAR(200),
+        platform      VARCHAR(50) DEFAULT 'web',
+        "publicKey"   TEXT,
+        "isActive"    BOOLEAN NOT NULL DEFAULT true,
+        "lastSeenAt"  TIMESTAMPTZ,
+        "createdAt"   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        "updatedAt"   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CONSTRAINT linked_devices_user_device_unique UNIQUE ("userId", "deviceId")
+      );
+    `);
+    await sequelize.query(`CREATE INDEX IF NOT EXISTS linked_devices_user_idx ON linked_devices ("userId");`);
+    console.log('[devices.js] ✅ linked_devices table verified/created');
+  } catch (err) {
+    console.error('[devices.js] ⚠️ Could not verify/create linked_devices table:', err.message);
+  }
+}
+// Kick off once at module load, but every route below also awaits this
+// (resolves immediately once the first run completes) so a request that
+// arrives before startup migration finishes still succeeds instead of racing.
+let _linkedDevicesReady = ensureLinkedDevicesTable();
+router.use((req, res, next) => { _linkedDevicesReady.then(() => next()).catch(() => next()); });
+
 // ────────────────────────────────────────────────────────────────────────────
 // DEVICE MANAGEMENT
 // ────────────────────────────────────────────────────────────────────────────

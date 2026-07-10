@@ -158,11 +158,39 @@ function isEncrypted(content) {
 
 // ── DB helpers ────────────────────────────────────────────────────────────────
 
+// FIX: same missing-table issue as routes/encryption.js — this service can be
+// called directly from message-sending code paths that never hit that
+// router's middleware, so it needs its own safety net.
+let _encKeysTableChecked = false;
+async function _ensureEncryptionKeysTable(sequelize) {
+  if (_encKeysTableChecked) return;
+  _encKeysTableChecked = true;
+  try {
+    await sequelize.query(`
+      CREATE TABLE IF NOT EXISTS user_encryption_keys (
+        id                    SERIAL PRIMARY KEY,
+        "userId"              INTEGER NOT NULL,
+        "publicKey"           TEXT NOT NULL,
+        "encryptedPrivateKey" TEXT,
+        "keyId"               VARCHAR(64) NOT NULL,
+        algorithm             VARCHAR(50) NOT NULL DEFAULT 'ECDH-P256-AES256GCM',
+        "isActive"            BOOLEAN NOT NULL DEFAULT true,
+        "createdAt"           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        "updatedAt"           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CONSTRAINT user_encryption_keys_user_key_unique UNIQUE ("userId", "keyId")
+      );
+    `);
+  } catch (err) {
+    console.error('[encryptionService.js] ⚠️ Could not verify/create user_encryption_keys table:', err.message);
+  }
+}
+
 /**
  * ensureUserKeyPair(userId, password, sequelize)
  * Creates key pair if not exists, returns { publicKey, keyId }
  */
 async function ensureUserKeyPair(userId, sequelize) {
+  await _ensureEncryptionKeysTable(sequelize);
   const existing = await sequelize.query(
     `SELECT id, "publicKey", "keyId" FROM user_encryption_keys WHERE "userId"=:userId AND "isActive"=true ORDER BY "createdAt" DESC LIMIT 1`,
     { replacements: { userId }, type: sequelize.QueryTypes.SELECT }
@@ -185,6 +213,7 @@ async function ensureUserKeyPair(userId, sequelize) {
  * getUserPublicKey(userId, sequelize) → base64 SPKI public key
  */
 async function getUserPublicKey(userId, sequelize) {
+  await _ensureEncryptionKeysTable(sequelize);
   const rows = await sequelize.query(
     `SELECT "publicKey", "keyId" FROM user_encryption_keys WHERE "userId"=:userId AND "isActive"=true ORDER BY "createdAt" DESC LIMIT 1`,
     { replacements: { userId }, type: sequelize.QueryTypes.SELECT }

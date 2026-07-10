@@ -1277,6 +1277,26 @@ router.delete('/registration-pin', apiRateLimiter, asyncHandler(async (req, res)
 // DELETE /api/settings/devices/revoke-all — revoke all other sessions
 router.delete('/devices/revoke-all', apiRateLimiter, asyncHandler(async (req, res) => {
   const sequelize = getSequelize();
+  // FIX: linked_devices has no Sequelize model/migration anywhere in this
+  // codebase (see routes/devices.js) — ensure it exists before querying it,
+  // since this route can be the first one hit after a fresh server start.
+  try {
+    await sequelize.query(`
+      CREATE TABLE IF NOT EXISTS linked_devices (
+        id            SERIAL PRIMARY KEY,
+        "userId"      INTEGER NOT NULL,
+        "deviceId"    VARCHAR(64) NOT NULL,
+        "deviceName"  VARCHAR(200),
+        platform      VARCHAR(50) DEFAULT 'web',
+        "publicKey"   TEXT,
+        "isActive"    BOOLEAN NOT NULL DEFAULT true,
+        "lastSeenAt"  TIMESTAMPTZ,
+        "createdAt"   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        "updatedAt"   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CONSTRAINT linked_devices_user_device_unique UNIQUE ("userId", "deviceId")
+      );
+    `);
+  } catch (_) {}
   await sequelize.query(
     `UPDATE linked_devices SET "isActive"=false,"updatedAt"=NOW() WHERE "userId"=:userId`,
     { replacements: { userId: req.user.id } }

@@ -258,8 +258,11 @@ class PresenceEngineFoundation extends EventEmitter {
     this._broadcastStatus(userId, PresenceStatus.ONLINE, socket);
 
     // ── Socket event listeners ───────────────────────────────────────────────
+    // FIX: use removeAllListeners() before each registration (matching the
+    // defensive pattern in CallSignalingService.js) so this is safe even if
+    // _onConnection is ever invoked more than once for the same socket.
 
-    socket.on('heartbeat', () => {
+    socket.removeAllListeners('heartbeat').on('heartbeat', () => {
       this._heartbeats.record(userId, socket.id);
       this._lastActivity.set(userId, Date.now());
 
@@ -271,40 +274,40 @@ class PresenceEngineFoundation extends EventEmitter {
       }
     });
 
-    socket.on('presence:idle', () => {
+    socket.removeAllListeners('presence:idle').on('presence:idle', () => {
       this._setStatus(userId, PresenceStatus.IDLE);
       this._broadcastStatus(userId, PresenceStatus.IDLE, socket);
     });
 
-    socket.on('presence:backgrounded', () => {
+    socket.removeAllListeners('presence:backgrounded').on('presence:backgrounded', () => {
       this._setStatus(userId, PresenceStatus.BACKGROUNDED);
       this._broadcastStatus(userId, PresenceStatus.BACKGROUNDED, socket);
     });
 
-    socket.on('presence:active', () => {
+    socket.removeAllListeners('presence:active').on('presence:active', () => {
       this._heartbeats.record(userId, socket.id);
       this._setStatus(userId, PresenceStatus.ONLINE);
       this._broadcastStatus(userId, PresenceStatus.ONLINE, socket);
     });
 
-    socket.on('typing:start', (data) => {
+    socket.removeAllListeners('typing:start').on('typing:start', (data) => {
       const chatId = data?.chatId || data?.conversationId;
       if (!chatId) return;
       this._typing.start(chatId, userId);
       this._broadcastTypingStart(chatId, userId, socket);
     });
 
-    socket.on('typing:stop', (data) => {
+    socket.removeAllListeners('typing:stop').on('typing:stop', (data) => {
       const chatId = data?.chatId || data?.conversationId;
       if (!chatId) return;
       this._typing.stop(chatId, userId);
     });
 
     // Legacy event aliases
-    socket.on('typing', (data) => socket.emit('typing:start', data));
-    socket.on('stopTyping', (data) => socket.emit('typing:stop', data));
+    socket.removeAllListeners('typing').on('typing', (data) => socket.emit('typing:start', data));
+    socket.removeAllListeners('stopTyping').on('stopTyping', (data) => socket.emit('typing:stop', data));
 
-    socket.on('disconnect', (reason) => {
+    socket.removeAllListeners('disconnect').on('disconnect', (reason) => {
       this._onDisconnect(socket, userId, reason);
     });
   }

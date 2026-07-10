@@ -16,6 +16,39 @@ const asyncHandler = require('express-async-handler');
 
 function getSequelize() { return require('../models/index').sequelize; }
 
+// ── AUTO-MIGRATION: create user_encryption_keys table if it doesn't exist ───
+// FIX: same class of bug as linked_devices in routes/devices.js — there is no
+// Sequelize model and no migration file anywhere in this codebase that
+// creates this table, yet every route below queries it directly via raw SQL.
+let _encKeysMigrated = false;
+async function ensureEncryptionKeysTable() {
+  if (_encKeysMigrated) return;
+  _encKeysMigrated = true;
+  try {
+    const sequelize = getSequelize();
+    await sequelize.query(`
+      CREATE TABLE IF NOT EXISTS user_encryption_keys (
+        id                    SERIAL PRIMARY KEY,
+        "userId"              INTEGER NOT NULL,
+        "publicKey"           TEXT NOT NULL,
+        "encryptedPrivateKey" TEXT,
+        "keyId"               VARCHAR(64) NOT NULL,
+        algorithm             VARCHAR(50) NOT NULL DEFAULT 'ECDH-P256-AES256GCM',
+        "isActive"            BOOLEAN NOT NULL DEFAULT true,
+        "createdAt"           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        "updatedAt"           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CONSTRAINT user_encryption_keys_user_key_unique UNIQUE ("userId", "keyId")
+      );
+    `);
+    await sequelize.query(`CREATE INDEX IF NOT EXISTS user_encryption_keys_user_active_idx ON user_encryption_keys ("userId", "isActive");`);
+    console.log('[encryption.js] ✅ user_encryption_keys table verified/created');
+  } catch (err) {
+    console.error('[encryption.js] ⚠️ Could not verify/create user_encryption_keys table:', err.message);
+  }
+}
+let _encKeysReady = ensureEncryptionKeysTable();
+router.use((req, res, next) => { _encKeysReady.then(() => next()).catch(() => next()); });
+
 // POST /api/encryption/keys — register or update public key
 router.post('/keys', asyncHandler(async (req, res) => {
   const userId    = req.user.id;
