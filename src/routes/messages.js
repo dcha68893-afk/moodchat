@@ -1,5 +1,15 @@
 const path = require('path');
 const asyncHandler = require('express-async-handler');
+
+// FIX: getSequelize() was called in several routes below but never defined
+// anywhere in this file — every one of those routes threw
+// "ReferenceError: getSequelize is not defined" (surfaced to clients as a
+// generic 500). config/database.js exports getSequelizeInstance, not
+// getSequelize, and models/index.js is a safe fallback.
+function getSequelize() {
+  try { return require('../config/database').getSequelizeInstance(); }
+  catch (_) { return require('../models/index').sequelize; }
+}
 const express = require('express');
 const router = express.Router();
 const { Op } = require('sequelize');

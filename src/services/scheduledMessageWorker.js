@@ -37,6 +37,33 @@ async function processDueMessages() {
     wsService = require('./webSocketService');
   } catch (_) {}
 
+  // FIX: the ScheduledMessage model exists and is whitelisted for auto-sync,
+  // but production logs show "relation scheduled_messages does not exist" —
+  // ensure it directly rather than trust sync() timing/ordering.
+  try {
+    await sequelize.query(`
+      CREATE TABLE IF NOT EXISTS scheduled_messages (
+        id            SERIAL PRIMARY KEY,
+        "userId"      INTEGER NOT NULL,
+        "chatId"      INTEGER NOT NULL,
+        content       TEXT,
+        type          VARCHAR(20) NOT NULL DEFAULT 'text',
+        "mediaUrl"    VARCHAR(2048),
+        metadata      JSONB NOT NULL DEFAULT '{}',
+        "sendAt"      TIMESTAMPTZ NOT NULL,
+        status        VARCHAR(20) NOT NULL DEFAULT 'pending',
+        "sentAt"      TIMESTAMPTZ,
+        "failureReason" VARCHAR(500),
+        "retryCount"  INTEGER NOT NULL DEFAULT 0,
+        "createdAt"   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        "updatedAt"   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+    await sequelize.query(`CREATE INDEX IF NOT EXISTS scheduled_messages_due_idx ON scheduled_messages (status, "sendAt");`);
+  } catch (tableErr) {
+    console.error('[ScheduledWorker] Could not verify/create scheduled_messages table:', tableErr.message);
+  }
+
   try {
     // Fetch due messages
     const due = await sequelize.query(

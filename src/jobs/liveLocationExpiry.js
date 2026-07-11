@@ -17,6 +17,36 @@ let _sweepInterval = null;
 
 async function sweepExpiredSessions(sequelize) {
   try {
+    // FIX: LiveLocationSession was missing from the model whitelist (fixed
+    // separately in models/index.js) so its table was never created —
+    // ensure it directly here too.
+    try {
+      await sequelize.query(`
+        CREATE TABLE IF NOT EXISTS "LiveLocationSessions" (
+          id              SERIAL PRIMARY KEY,
+          "messageId"     INTEGER NOT NULL,
+          "chatId"        INTEGER NOT NULL,
+          "userId"        INTEGER NOT NULL,
+          latitude        DECIMAL(10,7) NOT NULL,
+          longitude       DECIMAL(10,7) NOT NULL,
+          accuracy        FLOAT,
+          heading         FLOAT,
+          speed           FLOAT,
+          "startedAt"     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          "expiresAt"     TIMESTAMPTZ NOT NULL,
+          "lastUpdatedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          "isActive"      BOOLEAN NOT NULL DEFAULT true,
+          "stoppedAt"     TIMESTAMPTZ,
+          "stoppedReason" VARCHAR(20),
+          "createdAt"     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          "updatedAt"     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+      `);
+      await sequelize.query(`CREATE INDEX IF NOT EXISTS live_location_sessions_active_idx ON "LiveLocationSessions" ("chatId", "isActive");`);
+    } catch (tableErr) {
+      console.warn('[liveLocationExpiry] Could not verify/create LiveLocationSessions table:', tableErr.message);
+    }
+
     const expired = await sequelize.query(
       `UPDATE "LiveLocationSessions"
        SET "isActive" = false, "stoppedAt" = NOW(), "stoppedReason" = 'expired', "updatedAt" = NOW()

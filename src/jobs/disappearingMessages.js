@@ -31,8 +31,8 @@ async function runCleanup() {
 
   try {
     // Lazy-load to avoid circular deps at startup
-    const { getSequelize } = require('../config/database');
-    sequelize = getSequelize();
+    const { getSequelizeInstance } = require('../config/database');
+    sequelize = getSequelizeInstance();
   } catch (e) {
     console.warn('[DisappearingMessages] DB not ready:', e.message);
     return;

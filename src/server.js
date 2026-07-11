@@ -5595,11 +5595,18 @@ async function main() {
             if (!Status || !Op) return;
 
             const cutoff = new Date(Date.now() - EXPIRY_MS);
-            // Find statuses that are still active but older than 24h
+            // FIX: Status has no isDeleted/deletedAt fields — its real
+            // soft-delete/expiry convention is isActive + expiresAt (see the
+            // model's own cleanupExpiredStatuses method). Find statuses that
+            // are still active but past their expiry (or, if no expiresAt was
+            // ever set, older than the 24h default cutoff).
             const expired = await Status.findAll({
                 where: {
-                    isDeleted: false,
-                    createdAt: { [Op.lt]: cutoff }
+                    isActive: true,
+                    [Op.or]: [
+                        { expiresAt: { [Op.lte]: new Date() } },
+                        { expiresAt: null, createdAt: { [Op.lt]: cutoff } },
+                    ],
                 },
                 attributes: ['id', 'userId', 'mediaUrl'],
                 limit: 100
@@ -5608,7 +5615,7 @@ async function main() {
             if (expired.length === 0) return;
 
             const ids = expired.map(s => s.id);
-            await Status.update({ isDeleted: true, deletedAt: new Date() }, { where: { id: ids } });
+            await Status.update({ isActive: false, expiresAt: new Date() }, { where: { id: ids } });
 
             // Broadcast expiration to each status owner + their friends
             const io = global.__socketIO;

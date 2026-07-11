@@ -20,6 +20,14 @@ class RedisClient {
    * Load Redis configuration from environment variables
    */
   loadConfigFromEnv() {
+    // FIX: this previously only read REDIS_HOST/REDIS_PORT/REDIS_PASSWORD,
+    // none of which your environment sets — rateLimiter.js and the socket.io
+    // Redis adapter in server.js both correctly use REDIS_URL instead. This
+    // silently fell back to localhost:6379, which will never come up in this
+    // environment, causing the endless reconnect loop seen in production logs.
+    if (process.env.REDIS_URL) {
+      return { url: process.env.REDIS_URL };
+    }
     return {
       host: process.env.REDIS_HOST || 'localhost',
       port: parseInt(process.env.REDIS_PORT || '6379', 10),
@@ -40,41 +48,53 @@ class RedisClient {
     }
 
     try {
-      // Create Redis client configuration
-      const clientConfig = {
-        socket: {
-          host: this.config.host,
-          port: this.config.port,
-          reconnectStrategy: (retries) => {
-            this.connectionAttempts = retries;
-            const delay = Math.min(retries * 100, 3000);
-            
-            // Log reconnection attempts less frequently to avoid spam
-            if (retries % 5 === 0 || retries === 1) {
-              logger.warn(`Redis reconnecting attempt ${retries}, delay: ${delay}ms`);
-            }
-            
-            return delay;
-          },
-          // Add TLS configuration if enabled
-          ...(this.config.tls ? { tls: true } : {})
-        },
-        // Only add password if it exists and is not empty
-        ...(this.config.password && this.config.password.trim() !== '' 
-          ? { password: this.config.password } 
-          : {}),
-        // Only add database if specified
-        ...(this.config.db !== undefined ? { database: this.config.db } : {}),
+      const reconnectStrategy = (retries) => {
+        this.connectionAttempts = retries;
+        // FIX: this always returned a delay, never an Error/false, so the
+        // client retried forever even against a fundamentally unreachable
+        // Redis (wrong URL, credentials, or network). Cap it — the app
+        // already runs in degraded mode without Redis (see the callers of
+        // this client), so give up after a bounded number of attempts
+        // instead of hammering indefinitely.
+        if (retries > this.maxRetries) {
+          logger.error(`Redis reconnect gave up after ${retries} attempts — running without Redis`);
+          return new Error('Redis reconnect attempts exhausted');
+        }
+        const delay = Math.min(retries * 200, 5000);
+        if (retries % 5 === 0 || retries === 1) {
+          logger.warn(`Redis reconnecting attempt ${retries}, delay: ${delay}ms`);
+        }
+        return delay;
       };
 
-      // Log connection details (without password)
-      logger.info('Creating Redis client with config:', {
-        host: clientConfig.socket.host,
-        port: clientConfig.socket.port,
-        db: clientConfig.database || 0,
-        tls: !!clientConfig.socket.tls,
-        hasPassword: !!clientConfig.password,
-      });
+      // FIX: support REDIS_URL (the standard connection-string format) in
+      // addition to the discrete host/port/password/db/tls fields, matching
+      // what rateLimiter.js and the socket.io Redis adapter already do.
+      const clientConfig = this.config.url
+        ? { url: this.config.url, socket: { reconnectStrategy } }
+        : {
+            socket: {
+              host: this.config.host,
+              port: this.config.port,
+              reconnectStrategy,
+              ...(this.config.tls ? { tls: true } : {})
+            },
+            ...(this.config.password && this.config.password.trim() !== ''
+              ? { password: this.config.password }
+              : {}),
+            ...(this.config.db !== undefined ? { database: this.config.db } : {}),
+          };
+
+      // Log connection details (without password/URL credentials)
+      logger.info('Creating Redis client with config:', this.config.url
+        ? { mode: 'url', hasUrl: true }
+        : {
+            host: clientConfig.socket.host,
+            port: clientConfig.socket.port,
+            db: clientConfig.database || 0,
+            tls: !!clientConfig.socket.tls,
+            hasPassword: !!clientConfig.password,
+          });
 
       // Create Redis client
       this.client = redis.createClient(clientConfig);

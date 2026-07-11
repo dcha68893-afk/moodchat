@@ -136,7 +136,7 @@ const MODEL_WHITELIST = [
   'Users', 'Token', 'Profile', 'Settings',
   // ── Chat & messaging ────────────────────────────────────────────────────────
   'Chats', 'ChatParticipant',
-  'Messages', 'Message', 'MessageReport', 'StarredMessage', 'ScheduledMessage', 'PinnedMessage',
+  'Messages', 'Message', 'MessageReport', 'StarredMessage', 'ScheduledMessage', 'PinnedMessage', 'LiveLocationSession',
   // ── Social & presence ───────────────────────────────────────────────────────
   'GroupMembers', 'TypingIndicator', 'UserStatus', 'ReadReceipt',
   'SharedMood', 'Notification', 'Friend',

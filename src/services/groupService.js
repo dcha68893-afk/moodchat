@@ -223,7 +223,11 @@ class GroupService {
             } catch (_) {}
 
             console.log(`[GroupService] ✅ Group created: "${group.name}" (id: ${group.id}, chatId: ${chat.id})`);
-            const formatted = formatGroup(group);
+            // FIX: formatGroup's memberCount default reads a non-existent
+            // Groups.memberCount column (always 0) — pass the real count
+            // (the owner membership just created above) explicitly, matching
+            // the pattern already used correctly in getGroupById/getUserGroups.
+            const formatted = formatGroup(group, { memberCount: 1, participantCount: 1, stats: { totalMembers: 1, totalMessages: 0 } });
             groupServiceEvents.emit('groupMutation', { action: 'create', group: formatted, userId: parseInt(creatorId) });
             return { group: formatted };
 
@@ -295,7 +299,10 @@ class GroupService {
             }
             await group.update(fields);
             console.log(`[GroupService] ✅ Group ${groupId} updated`);
-            const formatted = formatGroup(group);
+            // FIX: compute the real member count instead of formatGroup's
+            // always-0 default (see createGroup fix above for root cause).
+            const _mc = GroupMembers ? await GroupMembers.count({ where: { groupId, leftAt: null } }) : 0;
+            const formatted = formatGroup(group, { memberCount: _mc, participantCount: _mc, stats: { totalMembers: _mc, totalMessages: 0 } });
             groupServiceEvents.emit('groupMutation', { action: 'update', group: formatted, userId });
             return formatted;
         } catch (e) {
@@ -641,7 +648,10 @@ class GroupService {
             if (settings.scheduledPostingEnd)   updatePayload.scheduledPostingEnd   = settings.scheduledPostingEnd;
 
             await group.update(updatePayload);
-            const formatted = formatGroup(group);
+            // FIX: compute the real member count instead of formatGroup's
+            // always-0 default.
+            const _mc2 = GroupMembers ? await GroupMembers.count({ where: { groupId, leftAt: null } }) : 0;
+            const formatted = formatGroup(group, { memberCount: _mc2, participantCount: _mc2, stats: { totalMembers: _mc2, totalMessages: 0 } });
             groupServiceEvents.emit('groupMutation', { action: 'update', group: formatted, userId });
             return formatted;
         } catch (e) {
@@ -699,7 +709,10 @@ class GroupService {
             const settings = { ...(group.settings || {}), archived };
             await group.update({ settings });
             console.log(`[GroupService] ✅ Group ${groupId} ${archived ? 'archived' : 'unarchived'}`);
-            const formatted = formatGroup(group);
+            // FIX: compute the real member count instead of formatGroup's
+            // always-0 default.
+            const _mc3 = GroupMembers ? await GroupMembers.count({ where: { groupId, leftAt: null } }) : 0;
+            const formatted = formatGroup(group, { memberCount: _mc3, participantCount: _mc3, stats: { totalMembers: _mc3, totalMessages: 0 } });
             groupServiceEvents.emit('groupMutation', { action: archived ? 'archive' : 'unarchive', group: formatted, userId });
             return formatted;
         } catch (e) {
