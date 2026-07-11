@@ -60,89 +60,38 @@ function getDatabaseConfig() {
 
 let sequelizeInstance = null;
 
+// FIX-EMAXCONNSESSION: this module used to build its OWN Sequelize instance
+// (with its own connection pool, max:10) that ran side-by-side with the
+// separate pool created in models/index.js (max:20/min:5). Two independent
+// pools against the same Supabase/Postgres pooler meant the app could open
+// up to 30 simultaneous connections, but the pooler runs in PgBouncer
+// "session" mode with pool_size 15 — so any burst of concurrent requests
+// (e.g. several logins at once) tipped it over into
+// "EMAXCONNSESSION: max clients reached in session mode".
+//
+// Fix: there must be exactly ONE Sequelize instance (and therefore one
+// connection pool) for the whole process. models/index.js is that single
+// source of truth (52+ files already depend on it). This module now just
+// returns that same shared instance instead of creating a second pool.
 function getSequelizeInstance() {
   if (sequelizeInstance) return sequelizeInstance;
 
   try {
-    const config = getDatabaseConfig();
+    // Reuse the single shared Sequelize instance from models/index.js.
+    // Lazy require avoids a circular-require issue at module load time.
+    const db = require('../models');
+    sequelizeInstance = db.sequelize;
 
-    const poolConfig = {
-      max: 10,
-      min: 0,
-      acquire: 30000,
-      idle: 10000
-    };
-
-    const dialectOptions = {
-      keepAlive: true,
-      statement_timeout: 10000,
-      query_timeout: 10000,
-      idle_in_transaction_session_timeout: 10000,
-      // SSL configuration for Render PostgreSQL - SSL is required
-      ssl: {
-        require: true,
-        rejectUnauthorized: false
-      }
-    };
-
-    const retryConfig = {
-      max: 3,
-      timeout: 10000,
-      match: [
-        /ConnectionError/,
-        /SequelizeConnectionError/,
-        /SequelizeConnectionRefusedError/,
-        /SequelizeHostNotFoundError/,
-        /SequelizeHostNotReachableError/,
-        /SequelizeInvalidConnectionError/,
-        /SequelizeConnectionTimedOutError/,
-        /ETIMEDOUT/,
-        /ECONNREFUSED/,
-        /ENOTFOUND/
-      ]
-    };
-
-    const defineConfig = {
-      timestamps: true,
-      underscored: true,
-      freezeTableName: true
-    };
-
-    if (config.connectionString) {
-      sequelizeInstance = new Sequelize(config.connectionString, {
-        dialect: 'postgres',
-        dialectModule: pg,
-        logging: false,
-        pool: poolConfig,
-        dialectOptions,
-        define: defineConfig,
-        retry: retryConfig
-      });
-    } else {
-      sequelizeInstance = new Sequelize(
-        config.database,
-        config.username,
-        config.password,
-        {
-          host: config.host,
-          port: config.port,
-          dialect: config.dialect,
-          dialectModule: config.dialectModule,
-          logging: config.logging,
-          pool: poolConfig,
-          dialectOptions,
-          define: defineConfig,
-          retry: retryConfig
-        }
-      );
+    if (!sequelizeInstance) {
+      throw new Error('Shared Sequelize instance from models/index.js is not available');
     }
 
-    console.log('[Database] Sequelize instance created successfully');
+    console.log('[Database] Reusing shared Sequelize instance from models/index.js (no second pool created)');
     return sequelizeInstance;
 
   } catch (error) {
     // Never log credentials — only the sanitized message
-    console.error('[Database] Failed to create Sequelize instance:', error.message);
+    console.error('[Database] Failed to obtain shared Sequelize instance:', error.message);
     throw new Error(`Database configuration error: ${error.message}`);
   }
 }

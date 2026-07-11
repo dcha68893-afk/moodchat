@@ -16,9 +16,17 @@ const getDbConfig = () => {
       url: process.env.DATABASE_URL,
       dialect: 'postgres',
       logging: process.env.NODE_ENV === 'development' ? console.log : false,
+      // FIX-EMAXCONNSESSION: this is now the ONLY Sequelize pool in the
+      // process (config/database.js reuses this same instance instead of
+      // opening a second one — see that file for the full explanation).
+      // The Supabase/Postgres pooler runs in PgBouncer "session" mode with
+      // pool_size 15, so the app's own pool max must stay comfortably below
+      // that — 20/min:5 was already over budget on its own before the
+      // second pool was even added. Defaults dropped to max:8/min:0; still
+      // overridable via DB_POOL_MAX/DB_POOL_MIN if the pooler's limit changes.
       pool: {
-        max: parseInt(process.env.DB_POOL_MAX) || 20,
-        min: parseInt(process.env.DB_POOL_MIN) || 5,
+        max: parseInt(process.env.DB_POOL_MAX) || 8,
+        min: parseInt(process.env.DB_POOL_MIN) || 0,
         acquire: parseInt(process.env.DB_POOL_ACQUIRE) || 30000,
         idle: parseInt(process.env.DB_POOL_IDLE) || 10000
       },
@@ -54,9 +62,12 @@ const getDbConfig = () => {
     password: process.env.DB_PASSWORD || '',
     dialect: process.env.DB_DIALECT || 'postgres',
     logging: process.env.NODE_ENV === 'development' ? console.log : false,
+    // FIX-EMAXCONNSESSION: see matching comment above in the DATABASE_URL
+    // branch — kept in sync so both code paths respect the pooler's 15
+    // session-mode client limit.
     pool: {
-      max: parseInt(process.env.DB_POOL_MAX) || 20,
-      min: parseInt(process.env.DB_POOL_MIN) || 5,
+      max: parseInt(process.env.DB_POOL_MAX) || 8,
+      min: parseInt(process.env.DB_POOL_MIN) || 0,
       acquire: parseInt(process.env.DB_POOL_ACQUIRE) || 30000,
       idle: parseInt(process.env.DB_POOL_IDLE) || 10000
     },
