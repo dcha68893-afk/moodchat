@@ -955,6 +955,30 @@ async function ensurePhase34Tables() {
     `ALTER TABLE "Messages" ADD COLUMN IF NOT EXISTS "expiresAt" TIMESTAMPTZ`,
     // Phase 1-4: rich message metadata (gif, poll, sticker, view-once, sealed)
     `ALTER TABLE "Messages" ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'`,
+    // FIX-500 (/api/tools/marketplace/wishlist): tools.saved_by/purchased_by
+    // were declared ARRAY(UUID) while Users.id is INTEGER (same class of bug
+    // fixed for seller_id/buyer_id/user_id in
+    // 20260626_fix_marketplace_fk_types.js — these two array columns were
+    // missed). Tool.getSavedListings()'s `savedBy: { [Op.contains]: [userId] }`
+    // query 500s with "invalid input syntax for type uuid" because userId is
+    // an integer. A uuid[] column can never have accepted a real integer
+    // userId, so there's no data to lose here — just the type to correct.
+    // Wrapped in a DO block so it only runs if the column is still uuid[].
+    `DO $$
+     BEGIN
+       IF EXISTS (
+         SELECT 1 FROM information_schema.columns
+         WHERE table_name='tools' AND column_name='saved_by' AND udt_name='_uuid'
+       ) THEN
+         ALTER TABLE "tools" ALTER COLUMN "saved_by" TYPE INTEGER[] USING ARRAY[]::INTEGER[];
+       END IF;
+       IF EXISTS (
+         SELECT 1 FROM information_schema.columns
+         WHERE table_name='tools' AND column_name='purchased_by' AND udt_name='_uuid'
+       ) THEN
+         ALTER TABLE "tools" ALTER COLUMN "purchased_by" TYPE INTEGER[] USING ARRAY[]::INTEGER[];
+       END IF;
+     END $$;`,
   ];
   for (const sql of ddl) {
     try { await sequelize.query(sql, { type: Q }); }
@@ -1345,34 +1369,52 @@ async function runFullMigration() {
 }
 
 // ===== RUN MIGRATION ON STARTUP =====
-(async function runMigrationAndContinue() {
-  _slog('[Database] Starting database initialization...');
-  
-  try {
-    // Run the full migration
-    const migrationSuccess = await runFullMigration();
-    
-    if (!migrationSuccess) {
-      console.error('[Database] ⚠️ Migration completed with errors - some features may be limited');
-    }
-    
-    // Additional sync to ensure everything is consistent
-    _slog('[Database] Syncing models for consistency...');
-    await sequelize.sync({ force: false, alter: false });
-    _slog('[Database] ✅ Final sync complete');
-    
-  } catch (error) {
-    console.error('[Database] ❌ Migration error (non-critical):', error.message);
-    
-    // Try fallback sync
+// FIX (missing tables after deploy, e.g. "relation GameProgress does not
+// exist"): during a Render deploy, the OLD instance's DB connections can
+// briefly overlap with the NEW instance's while the old one finishes
+// shutting down — for a few seconds right at boot, both are alive and
+// competing for the pooler's session-mode connection budget. If this
+// startup migration/sync happened to run during that overlap, it failed
+// with EMAXCONNSESSION, and the one immediate fallback retry (no delay)
+// almost always hit the exact same contention and failed too — so any
+// table that hadn't been created yet (this app creates tables lazily on
+// first successful sync, not via versioned migrations) just stayed missing
+// until the next deploy happened to get lucky. Retrying a few times with
+// real delay lets the old instance's connections actually free up first.
+async function _runStartupMigrationWithRetry() {
+  const MAX_ATTEMPTS = 4;
+  const DELAY_MS = 6000; // old-instance connections are typically gone well within this
+
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
-      _slog('[Database] 🔧 Trying fallback sync without alter...');
+      const migrationSuccess = await runFullMigration();
+      if (!migrationSuccess) {
+        console.error('[Database] ⚠️ Migration completed with errors - some features may be limited');
+      }
+      _slog('[Database] Syncing models for consistency...');
       await sequelize.sync({ force: false, alter: false });
-      _slog('[Database] ✅ Fallback sync complete');
-    } catch (fallbackErr) {
-      console.error('[Database] ❌ Fallback sync also failed:', fallbackErr.message);
+      _slog(`[Database] ✅ Final sync complete (attempt ${attempt}/${MAX_ATTEMPTS})`);
+      return;
+    } catch (error) {
+      const isConnBusy = /EMAXCONNSESSION|max clients reached|too many clients/i.test(error.message || '');
+      console.error(`[Database] ❌ Migration/sync error on attempt ${attempt}/${MAX_ATTEMPTS}:`, error.message);
+      if (!isConnBusy || attempt === MAX_ATTEMPTS) {
+        // Not a connection-exhaustion error, or we're out of attempts — give up
+        // (this matches the previous behavior for genuine, non-transient errors).
+        if (attempt === MAX_ATTEMPTS) {
+          console.error('[Database] ❌ Giving up after retries — some tables/columns may still be missing until the next successful sync.');
+        }
+        return;
+      }
+      _slog(`[Database] 🔧 Connection pool busy (likely deploy overlap) — retrying in ${DELAY_MS / 1000}s...`);
+      await new Promise(resolve => setTimeout(resolve, DELAY_MS));
     }
   }
+}
+
+(async function runMigrationAndContinue() {
+  _slog('[Database] Starting database initialization...');
+  await _runStartupMigrationWithRetry();
 })();
 
 // ===== CORE MODEL VALIDATION =====

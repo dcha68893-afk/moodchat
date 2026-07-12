@@ -171,6 +171,18 @@ module.exports = (sequelize, DataTypes) => {
         defaultValue: false,
         allowNull: false,
       },
+      // FIX-500 (registration-pin routes): routes/settings.js's
+      // /registration-pin/status, POST, and DELETE handlers all read/write a
+      // "registrationPin" column via raw SQL, but this column was never
+      // added to the model (and there's no migration for it either) — so
+      // every call 500'd with "column registrationPin does not exist".
+      // models/index.js auto-adds any column present on a model but missing
+      // in the DB at startup, so defining it here is enough to self-heal it.
+      registrationPin: {
+        type: DataTypes.STRING,
+        allowNull: true,
+        defaultValue: null,
+      },
       // P2 FIX (Forensic Audit): GDPR right to erasure — set when a user
       // requests account deletion; permanent purge runs 30 days later.
       deletionRequestedAt: {

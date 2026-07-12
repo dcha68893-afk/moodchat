@@ -126,13 +126,23 @@ module.exports = (sequelize, DataTypes) => {
         defaultValue: 0,
         validate: { min: 0 },
       },
+      // FIX-500 (/api/tools/marketplace/wishlist): these were declared as
+      // ARRAY(UUID) but userId (Users.id) is an INTEGER — the same FK-type
+      // mismatch that migration 20260626_fix_marketplace_fk_types.js already
+      // fixed for seller_id/buyer_id/user_id, just missed on these two array
+      // columns. Tool.getSavedListings() below runs
+      // `savedBy: { [Op.contains]: [userId] }`, which Postgres rejects with
+      // "invalid input syntax for type uuid" because userId is an integer —
+      // that's the 500 seen in the browser console. See migration
+      // 20260711_fix_tool_saved_purchased_by_types.js for the matching
+      // column-type fix on the existing table.
       savedBy: {
-        type: DataTypes.ARRAY(DataTypes.UUID),
+        type: DataTypes.ARRAY(DataTypes.INTEGER),
         defaultValue: [],
         field: 'saved_by',
       },
       purchasedBy: {
-        type: DataTypes.ARRAY(DataTypes.UUID),
+        type: DataTypes.ARRAY(DataTypes.INTEGER),
         defaultValue: [],
         field: 'purchased_by',
       },
