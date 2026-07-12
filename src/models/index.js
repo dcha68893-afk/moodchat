@@ -987,6 +987,51 @@ async function ensurePhase34Tables() {
   _slog('[Migration] ✅ Phase 3-4 tables ready');
 }
 
+// FIX: "relation \"GroupTasks\" does not exist" / GroupEvents / GroupPolls /
+// GroupNotes / GroupFiles (Group Smart Tools showing errors, group panel
+// stuck on "fetching group conversation").
+//
+// Root cause: the migration that actually creates these 13 tables
+// (migrations/2026999990009_create_smart_group_tables.js) was written for
+// the top-level `migrations/` folder, sequelize-cli style — but this app
+// does NOT run sequelize-cli at startup or as part of the Render build; the
+// live table-creation path is this file (src/models/index.js), which is a
+// hand-rolled runFullMigration()/sequelize.sync() flow. That folder is never
+// read at runtime, so the migration has been sitting there doing nothing and
+// the 13 tables were never created.
+//
+// Separately, sequelize.sync() (the very last step of the startup migration,
+// see _runStartupMigrationWithRetry below) has been failing outright with
+// "syntax error at or near NULL" — visible directly in the boot logs. Since
+// that's a single all-or-nothing call across every loaded model, one bad
+// definition anywhere aborts table creation for every model still pending,
+// which likely includes these Group* smart-tool models (added after most of
+// the "core" tables in the load order). So even fixing the wrong-folder
+// problem alone wouldn't be enough while that sync() call can still blow up.
+//
+// Fix: run the already-written, already-correct migration's up() logic
+// directly, right here in the path that actually executes at boot, using
+// Sequelize's queryInterface — completely independent of sequelize.sync(),
+// so it succeeds whether or not the broader sync does. It's idempotent
+// (checks tableExists before creating each table) so it's safe to run on
+// every boot.
+async function ensureSmartGroupTables() {
+  try {
+    const migrationPath = path.join(__dirname, '..', '..', 'migrations', '2026999990009_create_smart_group_tables.js');
+    if (!fs.existsSync(migrationPath)) {
+      console.warn('[Migration] ⚠️ Smart group tables migration file not found at', migrationPath, '— skipping');
+      return;
+    }
+    const smartGroupTablesMigration = require(migrationPath);
+    await smartGroupTablesMigration.up(sequelize.getQueryInterface(), Sequelize);
+    _slog('[Migration] ✅ Smart Group Tools tables ensured (Tasks/Events/Attendance/Polls/Notes/Files/Finance/Analytics/ActivityLog/AISummaries)');
+  } catch (smartGroupErr) {
+    // Non-fatal: log clearly so it's visible in Render logs, but never block
+    // the rest of startup over this — matches every other step in this file.
+    console.error('[Migration] ❌ Smart group tables creation error (non-fatal):', smartGroupErr.message);
+  }
+}
+
 async function runFullMigration() {
   _slog('\n[Migration] ===== STARTING FULL DATABASE MIGRATION =====');
   _slog(`[Migration] Environment: ${env}`);
@@ -1357,6 +1402,12 @@ async function runFullMigration() {
     } catch (mpErr) {
       console.error('[Migration] ⚠️ Marketplace table creation error (non-fatal):', mpErr.message);
     }
+
+    // FIX: Group Smart Tools tables (Tasks/Events/Polls/Notes/Files/…) — see
+    // ensureSmartGroupTables() above for the full root-cause writeup. Runs
+    // independently of sequelize.sync() so it isn't taken down by unrelated
+    // sync failures elsewhere.
+    await ensureSmartGroupTables();
     
     _slog('\n[Migration] ===== MIGRATION COMPLETE =====\n');
     

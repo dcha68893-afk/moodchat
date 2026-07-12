@@ -256,11 +256,11 @@ class GroupService {
             // to hide all tools panels for members who opened a group from Discover.
             let membership = null;
             const isMember = GroupMembers
-                ? !!(membership = await GroupMembers.findOne({ where: { groupId, userId, leftAt: null } }))
+                ? !!(membership = await withTimeout(GroupMembers.findOne({ where: { groupId, userId, leftAt: null } })))
                 : false;
             if (!group.isPublic && !isMember) throw new Error('You do not have permission to view this group');
             const memberCount = GroupMembers
-                ? await GroupMembers.count({ where: { groupId, leftAt: null } })
+                ? await withTimeout(GroupMembers.count({ where: { groupId, leftAt: null } }))
                 : 0;
             const role = membership ? (membership.role || 'member') : 'member';
             return formatGroup(group, {
