@@ -313,6 +313,16 @@ class CallSignalingService extends EventEmitter {
           return;
         }
 
+        // FIX: this dedup key was referenced below but never declared, so
+        // `this._dedup.isDuplicate(key)` threw ReferenceError on every single
+        // call:initiate event — caught by the outer try/catch, logged, and
+        // the call was never actually created. That means the socket-based
+        // call:initiate path (which the frontend's calls-core.js does use —
+        // see its retry-wrapped safeSend('call:initiate', ...)) was silently
+        // broken end to end. Declared using the same pattern as call:accept's
+        // dedup key further below.
+        const key = `initiate:${userId}:${targetUserId}`;
+
         // Check whether target is already in an active call (call-waiting signal)
         // We still CREATE the call record so it shows in history, but we flag it
         // immediately so the caller knows the callee is busy. The callee gets a
@@ -329,9 +339,14 @@ class CallSignalingService extends EventEmitter {
         }
 
         if (targetBusy) {
-          // Tell the caller the callee is busy
+          // FIX: `callId` isn't defined yet at this point in the handler (the
+          // call record — and its id — isn't created until further down, via
+          // `this.initiateCall(...)`), so this was also a ReferenceError,
+          // just one that only fired in the narrower "target already busy"
+          // case. Use the caller-supplied id if this is a retry of an
+          // already-started attempt; otherwise there simply isn't one yet.
           socket.emit('call:busy', {
-            callId:       callId,
+            callId:       existingId || null,
             targetUserId,
             message:      'User is currently in another call',
             timestamp:    Date.now(),
@@ -339,7 +354,7 @@ class CallSignalingService extends EventEmitter {
           this._logger.log(`[CallSignaling] call:busy for uid=${targetUserId} called by uid=${userId}`);
           // Emit call:waiting to the callee so they can optionally accept/decline
           await this._wsService.sendToUser(targetUserId, 'call:waiting', {
-            callId,
+            callId: existingId || null,
             callerId:  userId,
             callType:  callType || 'audio',
             timestamp: Date.now(),
@@ -427,7 +442,6 @@ class CallSignalingService extends EventEmitter {
           calleeName: resolvedCalleeName,
           targetUserId,
         });
-        return;
 
         // Join call room
         socket.join(`call:${callId}`);

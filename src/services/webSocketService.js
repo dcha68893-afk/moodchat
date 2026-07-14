@@ -508,35 +508,28 @@ class WebSocketService {
             });
 
             // ── PHASE14 FIX P0: WebRTC socket-level signaling relay ───────────
-            socket.removeAllListeners('webrtc:signal').on('webrtc:signal', (payload = {}) => {
-                try {
-                    const { targetUserId: wtTarget, callId: wtCallId, type: wtType, sdp: wtSdp, candidate: wtCand } = payload;
-                    if (!wtTarget) return;
-                    const wtRelay = { callId: wtCallId, fromUserId: userId, type: wtType, sdp: wtSdp || undefined, candidate: wtCand || undefined, timestamp: Date.now() };
-                    const io = this.getIO();
-                    if (!io) return;
-                    [`user:${wtTarget}`,`user_${wtTarget}`,`user:${String(wtTarget)}`,`user_${String(wtTarget)}`].forEach(room => {
-                        try { io.to(room).emit('webrtc:signal', wtRelay); } catch (_) {}
-                    });
-                } catch (err) {
-                    console.warn('[WSService] webrtc:signal relay error:', err.message);
-                }
+            // FIX: this handler (and the three below it — webrtc_signal,
+            // call:webrtc_offer, call:webrtc_answer) is now a deliberate
+            // no-op. CallSignalingService (Phase 3) owns these events —
+            // it re-registers all four with socket.removeAllListeners(...)
+            // .on(...) once it initializes, which normally wipes out
+            // whatever was bound here first. So in steady-state operation
+            // these were already dead code. The problem: if Phase 3 ever
+            // fails to initialize for any reason, the app silently falls
+            // back to THIS implementation with no visible error — and this
+            // version relays each offer/answer to 4 different room-name
+            // variants under 2 different event names apiece, which is
+            // exactly the kind of duplicate delivery that breaks WebRTC
+            // (a second setRemoteDescription() on an already-negotiating
+            // connection throws and drops the call). Rather than relying on
+            // initialization-order luck to keep this dead, these are now
+            // genuinely inert so CallSignalingService is the only possible
+            // source of these events regardless of init timing.
+            socket.removeAllListeners('webrtc:signal').on('webrtc:signal', () => {
+                console.warn('[WSService] webrtc:signal received but CallSignalingService should own this — Phase 3 may not be initialized');
             });
 
-            socket.removeAllListeners('webrtc_signal').on('webrtc_signal', (payload = {}) => {
-                try {
-                    const { targetUserId: wsTarget, callId: wsCallId, type: wsType, sdp: wsSdp, candidate: wsCand } = payload;
-                    if (!wsTarget) return;
-                    const wsRelay = { callId: wsCallId, fromUserId: userId, type: wsType, sdp: wsSdp || undefined, candidate: wsCand || undefined, timestamp: Date.now() };
-                    const io = this.getIO();
-                    if (!io) return;
-                    [`user:${wsTarget}`,`user_${wsTarget}`,`user:${String(wsTarget)}`,`user_${String(wsTarget)}`].forEach(room => {
-                        try { io.to(room).emit('webrtc:signal', wsRelay); io.to(room).emit('webrtc_signal', wsRelay); } catch (_) {}
-                    });
-                } catch (err) {
-                    console.warn('[WSService] webrtc_signal relay error:', err.message);
-                }
-            });
+            socket.removeAllListeners('webrtc_signal').on('webrtc_signal', () => {});
 
             socket.removeAllListeners('call:heartbeat').on('call:heartbeat', ({ callId: hbCallId, targetUserId: hbTarget } = {}) => {
                 if (!hbCallId || !hbTarget) return;
@@ -549,44 +542,10 @@ class WebSocketService {
             });
 
             // ── PHASE14 FIX: call:webrtc_offer / call:webrtc_answer relay ────
-            // calls-core.js emits these directly via socket but backend had no handler —
-            // offers were silently dropped, permanently breaking WebRTC on cloud deployments.
-            socket.removeAllListeners('call:webrtc_offer').on('call:webrtc_offer', (payload = {}) => {
-                try {
-                    const { callId: coCallId, targetUserId: coTarget, offer: coOffer } = payload;
-                    if (!coTarget) return;
-                    const io = this.getIO();
-                    if (!io) return;
-                    const coRelay = { callId: coCallId, fromUserId: userId, offer: coOffer, type: 'offer', timestamp: Date.now() };
-                    [`user:${coTarget}`,`user_${coTarget}`,`user:${String(coTarget)}`,`user_${String(coTarget)}`].forEach(room => {
-                        try {
-                            io.to(room).emit('call:webrtc_offer', coRelay);
-                            io.to(room).emit('webrtc:signal', { ...coRelay, type: 'offer', sdp: coOffer });
-                        } catch (_) {}
-                    });
-                         _flog(`[WSService] ☁️  call:webrtc_offer relayed callId=${coCallId} from=${userId} to=${coTarget}`);
-                } catch (err) {
-                    console.warn('[WSService] call:webrtc_offer relay error:', err.message);
-                }
-            });
+            // See the no-op note above — CallSignalingService owns these now.
+            socket.removeAllListeners('call:webrtc_offer').on('call:webrtc_offer', () => {});
 
-            socket.removeAllListeners('call:webrtc_answer').on('call:webrtc_answer', (payload = {}) => {
-                try {
-                    const { callId: caCallId, targetUserId: caTarget, answer: caAnswer } = payload;
-                    if (!caTarget) return;
-                    const io = this.getIO();
-                    if (!io) return;
-                    const caRelay = { callId: caCallId, fromUserId: userId, answer: caAnswer, type: 'answer', timestamp: Date.now() };
-                    [`user:${caTarget}`,`user_${caTarget}`,`user:${String(caTarget)}`,`user_${String(caTarget)}`].forEach(room => {
-                        try {
-                            io.to(room).emit('call:webrtc_answer', caRelay);
-                            io.to(room).emit('webrtc:signal', { ...caRelay, type: 'answer', sdp: caAnswer });
-                        } catch (_) {}
-                    });
-                } catch (err) {
-                    console.warn('[WSService] call:webrtc_answer relay error:', err.message);
-                }
-            });
+            socket.removeAllListeners('call:webrtc_answer').on('call:webrtc_answer', () => {});
 
             // ── PHASE14 FIX P0: message:send socket handler ───────────────────
             socket.removeAllListeners('message:send').on('message:send', async (payload = {}) => {
