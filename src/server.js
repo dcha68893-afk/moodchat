@@ -2151,7 +2151,29 @@ class DatabaseService {
             
             // Test connection
             await this.sequelize.authenticate();
-            
+
+            // FIX: run any pending migrations automatically on every boot.
+            // Root cause of the recurring "column X does not exist" errors
+            // (e.g. viewOnceViewedAt) — sequelize-cli was in devDependencies,
+            // so `npm run start:render`'s migration step silently had no CLI
+            // to run even when that script *was* the configured start
+            // command. sequelize-cli has been moved to dependencies (see
+            // package.json) so that's fixed either way, but this also
+            // guards against the start command not being start:render at
+            // all — migrations now run here regardless of how the process
+            // was launched, before the server starts accepting traffic.
+            try {
+                const { execSync } = require('child_process');
+                const migrateEnv = config.get('NODE_ENV') === 'production' ? 'production' : (config.get('NODE_ENV') || 'development');
+                const output = execSync(
+                    `npx sequelize-cli db:migrate --env ${migrateEnv}`,
+                    { cwd: BACKEND_ROOT_DIR, timeout: 60000, encoding: 'utf8' }
+                );
+                _slog('[DB MIGRATE] ' + output);
+            } catch (migrateErr) {
+                console.error('[DB MIGRATE] Auto-migration failed (server will continue starting):', migrateErr.message);
+            }
+
             // Update state to CONNECTED
             systemState.updateServiceState('database', {
                 status: 'CONNECTED',
