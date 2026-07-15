@@ -22,7 +22,7 @@
 //   ✔ Event bus exported correctly: module.exports.groupServiceEvents.
 // ============================================================
 
-let db, Groups, GroupMembers, Users, Chats;
+let db, Groups, GroupMembers, Users, Chats, Friends;
 try {
     db = require('../models');
     const m = db.models || {};
@@ -30,6 +30,7 @@ try {
     GroupMembers = m.GroupMembers || m.GroupMember || db.GroupMembers || db.GroupMember;
     Users        = m.Users        || m.User        || db.Users        || db.User;
     Chats        = m.Chats        || m.Chat        || db.Chats        || db.Chat;
+    Friends      = m.Friends      || m.Friend       || db.Friends      || db.Friend;
 } catch (e) {
     console.error('[GroupService] ❌ Model load failed:', e.message);
 }
@@ -149,6 +150,7 @@ class GroupService {
             tags        = [],
             privacy,
             avatar,
+            discoveryScope = 'world',
         } = groupData;
 
         if (!name)      throw new Error('Group name is required');
@@ -197,6 +199,7 @@ class GroupService {
                 maxMembers  : sanitizedMax,
                 tags        : sanitizedTags,
                 avatar      : avatar ? avatar.toString().substring(0, 500) : null,
+                discoveryScope: ['community', 'region', 'county', 'world'].includes(discoveryScope) ? discoveryScope : 'world',
             });
 
             if (!group || !group.id) throw new Error('Failed to create group — database returned no ID');
@@ -502,7 +505,7 @@ class GroupService {
     async searchGroups(userId, options = {}) {
         const empty = { groups: [], pagination: { currentPage: 1, totalPages: 0, totalGroups: 0 } };
         if (!Groups) return empty;
-        const { query = '', page = 1, limit = 20, purpose } = options;
+        const { query = '', page = 1, limit = 20, purpose, scope } = options;
         const pageNum  = Math.max(1, parseInt(page));
         const limitNum = Math.min(50, Math.max(1, parseInt(limit)));
         const offset   = (pageNum - 1) * limitNum;
@@ -517,12 +520,36 @@ class GroupService {
             // FIX: honour purpose filter passed from controller
             if (purpose && purpose !== 'all') where.purpose = purpose;
 
+            // FEATURE: Discover-by-scope. 'friends' isn't a stored group attribute —
+            // it's resolved per-viewer as "groups created by someone I'm friends with".
+            // The other four scopes filter on the group's own discoveryScope column.
+            if (scope === 'friends') {
+                if (!userId || !Friends) {
+                    return { groups: [], pagination: { currentPage: pageNum, totalPages: 0, totalGroups: 0 } };
+                }
+                const friendRows = await Friends.findAll({
+                    where: {
+                        status: 'accepted',
+                        [Op.or]: [{ requesterId: userId }, { receiverId: userId }],
+                    },
+                    attributes: ['requesterId', 'receiverId'],
+                    raw: true,
+                });
+                const friendIds = friendRows.map(f => (f.requesterId === userId ? f.receiverId : f.requesterId));
+                if (friendIds.length === 0) {
+                    return { groups: [], pagination: { currentPage: pageNum, totalPages: 0, totalGroups: 0 } };
+                }
+                where.createdBy = { [Op.in]: friendIds };
+            } else if (scope && ['community', 'region', 'county', 'world'].includes(scope)) {
+                where.discoveryScope = scope;
+            }
+
             const { count, rows } = await withTimeout(Groups.findAndCountAll({
                 where,
                 limit  : limitNum,
                 offset,
                 order  : [['createdAt', 'DESC']],
-                attributes: ['id','name','description','avatar','purpose','isPublic','maxMembers','createdBy','createdAt'],
+                attributes: ['id','name','description','avatar','purpose','isPublic','maxMembers','createdBy','createdAt','discoveryScope'],
             }));
             const totalPages = Math.ceil(count / limitNum);
 

@@ -64,6 +64,16 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.STRING(100),
         allowNull: true,
       },
+      // FEATURE (2026-07-13): lets Discover filter groups by scope instead of
+      // dumping every public group into one undifferentiated list. 'friends' is
+      // derived at query time (groups created by the viewer's accepted friends),
+      // not stored — the other four are the creator's explicit choice at creation.
+      discoveryScope: {
+        type: DataTypes.STRING(20),
+        allowNull: false,
+        defaultValue: 'world',
+        validate: { isIn: [['community', 'region', 'county', 'world']] },
+      },
       purpose: {
         type: DataTypes.STRING(100),
         allowNull: true,

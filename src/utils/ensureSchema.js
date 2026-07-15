@@ -97,6 +97,11 @@ const REQUIRED_COLUMNS = [
     sql: `ALTER TABLE "Groups" ADD COLUMN IF NOT EXISTS "groupUsername" VARCHAR(50)`,
   },
   {
+    // FEATURE: powers the Discover-by-scope filter (friends / community / region / county / world)
+    table: 'Groups', column: 'discoveryScope',
+    sql: `ALTER TABLE "Groups" ADD COLUMN IF NOT EXISTS "discoveryScope" VARCHAR(20) NOT NULL DEFAULT 'world'`,
+  },
+  {
     table: 'Groups', column: 'blockedWords',
     sql: `ALTER TABLE "Groups" ADD COLUMN IF NOT EXISTS "blockedWords" TEXT[] NOT NULL DEFAULT '{}'`,
   },
@@ -133,6 +138,103 @@ const REQUIRED_COLUMNS = [
   {
     table: 'GroupMembers', column: 'warnings',
     sql: `ALTER TABLE "GroupMembers" ADD COLUMN IF NOT EXISTS "warnings" INTEGER NOT NULL DEFAULT 0`,
+  },
+
+  // ── Messages ──────────────────────────────────────────────────────────────
+  // FIX (2026-07-13): src/models/Message.js has accumulated columns over several
+  // feature sessions (view-once, pin, disappearing timer, read receipts, replies,
+  // soft-delete) that were never added here. Since DB_SYNC_ALTER is off by default,
+  // sequelize.sync() never ALTERs an existing table, so every one of these was
+  // silently missing in production — causing `column "X" does not exist` on
+  // every Message.create()/update() that touches them (e.g. viewOnceViewedAt).
+  {
+    table: 'Messages', column: 'replyToId',
+    sql: `ALTER TABLE "Messages" ADD COLUMN IF NOT EXISTS "replyToId" INTEGER`,
+  },
+  {
+    table: 'Messages', column: 'replyToStatusId',
+    sql: `ALTER TABLE "Messages" ADD COLUMN IF NOT EXISTS "replyToStatusId" INTEGER`,
+  },
+  {
+    table: 'Messages', column: 'statusPreview',
+    sql: `ALTER TABLE "Messages" ADD COLUMN IF NOT EXISTS "statusPreview" TEXT`,
+  },
+  {
+    table: 'Messages', column: 'isEdited',
+    sql: `ALTER TABLE "Messages" ADD COLUMN IF NOT EXISTS "isEdited" BOOLEAN NOT NULL DEFAULT false`,
+  },
+  {
+    table: 'Messages', column: 'editedAt',
+    sql: `ALTER TABLE "Messages" ADD COLUMN IF NOT EXISTS "editedAt" TIMESTAMP WITH TIME ZONE`,
+  },
+  {
+    table: 'Messages', column: 'isDeleted',
+    sql: `ALTER TABLE "Messages" ADD COLUMN IF NOT EXISTS "isDeleted" BOOLEAN NOT NULL DEFAULT false`,
+  },
+  {
+    table: 'Messages', column: 'deletedAt',
+    sql: `ALTER TABLE "Messages" ADD COLUMN IF NOT EXISTS "deletedAt" TIMESTAMP WITH TIME ZONE`,
+  },
+  {
+    table: 'Messages', column: 'deletedBy',
+    sql: `ALTER TABLE "Messages" ADD COLUMN IF NOT EXISTS "deletedBy" INTEGER`,
+  },
+  {
+    table: 'Messages', column: 'isRead',
+    sql: `ALTER TABLE "Messages" ADD COLUMN IF NOT EXISTS "isRead" BOOLEAN NOT NULL DEFAULT false`,
+  },
+  {
+    table: 'Messages', column: 'readAt',
+    sql: `ALTER TABLE "Messages" ADD COLUMN IF NOT EXISTS "readAt" TIMESTAMP WITH TIME ZONE`,
+  },
+  {
+    table: 'Messages', column: 'reactions',
+    sql: `ALTER TABLE "Messages" ADD COLUMN IF NOT EXISTS "reactions" JSONB NOT NULL DEFAULT '{}'::jsonb`,
+  },
+  {
+    table: 'Messages', column: 'metadata',
+    sql: `ALTER TABLE "Messages" ADD COLUMN IF NOT EXISTS "metadata" JSONB NOT NULL DEFAULT '{}'::jsonb`,
+  },
+  {
+    table: 'Messages', column: 'encryptionKey',
+    sql: `ALTER TABLE "Messages" ADD COLUMN IF NOT EXISTS "encryptionKey" VARCHAR(100)`,
+  },
+  {
+    table: 'Messages', column: 'sentAt',
+    sql: `ALTER TABLE "Messages" ADD COLUMN IF NOT EXISTS "sentAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()`,
+  },
+  {
+    table: 'Messages', column: 'deliveredAt',
+    sql: `ALTER TABLE "Messages" ADD COLUMN IF NOT EXISTS "deliveredAt" TIMESTAMP WITH TIME ZONE`,
+  },
+  {
+    table: 'Messages', column: 'expiresAt',
+    sql: `ALTER TABLE "Messages" ADD COLUMN IF NOT EXISTS "expiresAt" TIMESTAMP WITH TIME ZONE`,
+  },
+  {
+    table: 'Messages', column: 'disappearingTimer',
+    sql: `ALTER TABLE "Messages" ADD COLUMN IF NOT EXISTS "disappearingTimer" INTEGER`,
+  },
+  {
+    // THE reported bug: "column viewOnceViewedAt does not exist"
+    table: 'Messages', column: 'viewOnceViewedAt',
+    sql: `ALTER TABLE "Messages" ADD COLUMN IF NOT EXISTS "viewOnceViewedAt" TIMESTAMP WITH TIME ZONE`,
+  },
+  {
+    table: 'Messages', column: 'viewOnceViewedBy',
+    sql: `ALTER TABLE "Messages" ADD COLUMN IF NOT EXISTS "viewOnceViewedBy" INTEGER`,
+  },
+  {
+    table: 'Messages', column: 'isPinned',
+    sql: `ALTER TABLE "Messages" ADD COLUMN IF NOT EXISTS "isPinned" BOOLEAN NOT NULL DEFAULT false`,
+  },
+  {
+    table: 'Messages', column: 'pinnedAt',
+    sql: `ALTER TABLE "Messages" ADD COLUMN IF NOT EXISTS "pinnedAt" TIMESTAMP WITH TIME ZONE`,
+  },
+  {
+    table: 'Messages', column: 'pinnedBy',
+    sql: `ALTER TABLE "Messages" ADD COLUMN IF NOT EXISTS "pinnedBy" INTEGER`,
   },
 ];
 

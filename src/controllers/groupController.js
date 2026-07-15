@@ -87,7 +87,7 @@ class GroupController {
             const userId = getUserId(req);
             if (!userId) throw new AppError('Authentication required', 401);
 
-            const { name, description, avatar, members, memberIds, privacy, isPublic, settings } = req.body;
+            const { name, description, avatar, members, memberIds, privacy, isPublic, settings, discoveryScope } = req.body;
             if (!name) throw new AppError('Group name is required', 400);
 
             // Merge members + memberIds, always include creator
@@ -126,6 +126,7 @@ class GroupController {
                 privacy    : privacy || (isPublic === true ? 'public' : isPublic === false ? 'private' : 'public'),
                 isPublic   : isPublic !== undefined ? isPublic : (privacy === 'public'),
                 settings   : settings || {},
+                discoveryScope: ['community', 'region', 'county', 'world'].includes(discoveryScope) ? discoveryScope : 'world',
             });
 
             // Socket emit — now works because group.id is defined after the fix above
@@ -561,13 +562,14 @@ class GroupController {
     async searchGroups(req, res, next) {
         try {
             const userId = getUserId(req);
-            const { q, query = q, page = 1, limit = 20, privacy, purpose } = req.query;
+            const { q, query = q, page = 1, limit = 20, privacy, purpose, scope } = req.query;
             const result = await groupService.searchGroups(userId, {
                 query  : query || '',
                 page   : parseInt(page),
                 limit  : parseInt(limit),
                 privacy,
                 purpose,
+                scope,
             });
             res.status(200).json({ success: true, message: 'Groups search completed', data: result });
         } catch (error) { handleError(error, next, 'searchGroups'); }
