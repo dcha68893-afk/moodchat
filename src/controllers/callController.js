@@ -120,13 +120,43 @@ class CallController {
       const rawType   = req.body.callType || req.body.type || 'audio';
       const type      = rawType === 'voice' ? 'audio' : rawType;
       let   chatId    = req.body.chatId || null;
-      const calleeIds = req.body.calleeIds ||
+      // FIX-GROUP-CALL-NOTICE: a groupId may be supplied instead of (or in
+      // addition to) an explicit calleeIds list — the frontend group-chat
+      // "call" button only knows the group it's in, not every member's id.
+      // When groupId is present, resolve the live member list from the DB
+      // ourselves rather than trusting the client to enumerate members.
+      const groupId   = req.body.groupId ? parseInt(req.body.groupId, 10) : null;
+      const isGroupCallFlag = req.body.isGroupCall === true || req.body.isGroupCall === 'true';
+      let   calleeIds = req.body.calleeIds ||
         (Array.isArray(req.body.participantIds) && req.body.participantIds.length > 1 ? req.body.participantIds : null);
       const calleeId  = req.body.calleeId ||
-        (Array.isArray(req.body.participantIds) && req.body.participantIds.length === 1 ? req.body.participantIds[0] : null);
+        (Array.isArray(req.body.participantIds) && req.body.participantIds.length === 1 && !groupId ? req.body.participantIds[0] : null);
+
+      let resolvedGroupName = null;
+      if (groupId && (isGroupCallFlag || !calleeIds || !calleeIds.length)) {
+        try {
+          const memberRows = await db.sequelize.query(
+            `SELECT "userId" FROM "GroupMembers" WHERE "groupId" = :groupId AND "leftAt" IS NULL`,
+            { replacements: { groupId }, type: db.sequelize.QueryTypes.SELECT }
+          );
+          const memberIds = (memberRows || []).map(r => r.userId).filter(id => Number(id) !== Number(callerId));
+          if (memberIds.length) calleeIds = memberIds;
+          const grpRows = await db.sequelize.query(
+            `SELECT name FROM "Groups" WHERE id = :groupId LIMIT 1`,
+            { replacements: { groupId }, type: db.sequelize.QueryTypes.SELECT }
+          ).catch(() => []);
+          if (grpRows && grpRows[0]) resolvedGroupName = grpRows[0].name;
+        } catch (e) {
+          logger.warn('[callController] group member lookup failed:', e.message);
+        }
+      }
 
       // ── Group call ──────────────────────────────────────────────────────────
-      if (Array.isArray(calleeIds) && calleeIds.length > 1) {
+      // FIX-GROUP-CALL-NOTICE: previously required calleeIds.length > 1, which
+      // meant a 2-member group (only one other callee) fell through to the 1:1
+      // branch and never emitted group:call-started. groupId presence is what
+      // actually determines "this is a group call", not headcount.
+      if (Array.isArray(calleeIds) && calleeIds.length >= 1 && (groupId || calleeIds.length > 1)) {
         const call = await callService.initiateGroupCall(callerId, calleeIds.map(Number), type, chatId ? parseInt(chatId, 10) : null);
 
         // FIX-PHASE16: Look up real caller name for group calls too
@@ -152,10 +182,29 @@ class CallController {
             callerName:   groupCallerName,
             callerAvatar: req.user.avatar   || null,
             isGroupCall:  true,
+            groupId:      groupId || null,
             callType:     type,
             chatId:       chatId ? parseInt(chatId, 10) : null,
             timestamp:    Date.now(),
           });
+        }
+
+        // FIX-GROUP-CALL-NOTICE: also broadcast a group-wide "call started" event
+        // (distinct from the per-user ringing notification above) so anyone with
+        // the group chat open sees a "<name> started a call — Join" banner and can
+        // hop in without having received a direct ring themselves.
+        if (groupId) {
+          try {
+            const svc = getWsService();
+            if (svc && typeof svc.notifyGroupCallStarted === 'function') {
+              await svc.notifyGroupCallStarted(groupId, {
+                callId: call.id, callerId, callerName: groupCallerName,
+                callType: type, groupName: resolvedGroupName,
+              });
+            }
+          } catch (e) {
+            logger.warn('[callController] notifyGroupCallStarted failed:', e.message);
+          }
         }
 
         return res.status(201).json({ success: true, message: 'Group call initiated', data: { call } });

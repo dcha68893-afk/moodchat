@@ -1440,6 +1440,23 @@ class WebSocketService {
         });
     }
 
+    // FIX-GROUP-CALL-NOTICE: notify every member of a group (via their own
+    // user:{id} room, not just members currently sitting inside the group's
+    // socket room) that a voice/video call has just started, so the group
+    // chat screen can show a "<caller> started a call — Join" banner even
+    // for members who have the group list open rather than the group itself.
+    async notifyGroupCallStarted(groupId, { callId, callerId, callerName, callType, groupName } = {}) {
+        const payload = {
+            groupId, callId, callerId, callerName: callerName || 'Someone',
+            callType: callType || 'audio', groupName: groupName || null,
+            timestamp: new Date().toISOString()
+        };
+        // Broadcast to sockets already in the group room AND to every member's
+        // personal user room (covers members who haven't opened this group yet).
+        this.broadcastToGroup(groupId, 'group:call-started', payload, callerId);
+        return this.broadcastGroupMessageToMembers(groupId, 'group:call-started', payload);
+    }
+
     // ── RECONNECT HOOK ────────────────────────────────────────────────────────
 
     handleReconnect(userId, socketId) {
