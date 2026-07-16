@@ -640,6 +640,10 @@ class GroupService {
                 onlyAdminsCanPost    : settings.onlyAdminsCanPost     ?? mod.onlyAdminsCanPost     ?? existing.onlyAdminsCanPost     ?? false,
                 disappearingMessages : settings.disappearingMessages  ?? mod.disappearingMessages  ?? existing.disappearingMessages  ?? false,
                 archived             : settings.archived              ?? existing.archived         ?? false,
+                // FIX-GROUP-THEME-NOT-SAVED: this field was previously missing here
+                // entirely, so a theme sent in the request body was silently dropped
+                // and never persisted, even on the correct /:groupId/settings route.
+                theme                : settings.theme                 ?? existing.theme            ?? 'blue',
             };
 
             const updatePayload = { settings: { ...existing, ...filtered } };
