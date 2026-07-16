@@ -229,14 +229,6 @@ class CallService {
       await svc.sendToUser(parseInt(callerId), 'call:initiated', callPayload);
       await svc.sendToUser(parseInt(callerId), 'call_initiated', callPayload);
       console.log(`[CallService] ✅ EMITTED call:initiated to caller ${callerId}`);
-      // FIX (call ending itself — local/server call-id mismatch): also send
-      // the ack event the frontend's id-reconciliation logic listens for
-      // (handleCallInitiatedAck in calls-core.js). Without this, the client
-      // never learns that its own locally-generated call id and this
-      // record's real database id (call.id) refer to the same call, so a
-      // later end/accept/offer signal tagged with the real id could be
-      // rejected as "a different call" and the call torn down.
-      await svc.sendToUser(parseInt(callerId), 'call:initiated_ack', { callId: call.id, calleeName: calleeDisplayName });
     } else {
       console.warn('[CallService] ⚠️  webSocketService not available — call:incoming NOT emitted');
     }

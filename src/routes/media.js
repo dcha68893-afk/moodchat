@@ -44,36 +44,37 @@ const storage = multer.diskStorage({
 });
 
 // File filter based on config
-const ALLOWED_FILE_TYPES = config.uploadAllowedTypes?.split(',') || [
-  'image/jpeg',
-  'image/png',
-  'image/gif',
-  'image/webp',
-  'video/mp4',
-  'video/mpeg',
-  'audio/mpeg',
-  'audio/wav',
-  'application/pdf',
-  'text/plain'
+// FIX-VOICE-UPLOAD-BLOCKED: UPLOAD_ALLOWED_TYPES (env var or the default below)
+// was being used as the *entire* allow-list, so if it's set to an images-only
+// value (as it is in production), voice notes recorded via MediaRecorder
+// (audio/webm, sometimes audio/ogg) — a core app feature, not an optional one —
+// get rejected outright with "File type audio/webm is not allowed". These are
+// unioned in regardless of what the config specifies.
+const CORE_FEATURE_FILE_TYPES = [
+  'audio/webm', 'audio/ogg', 'audio/mp4', 'audio/mpeg', 'audio/wav', 'audio/x-wav',
+  'video/mp4', 'video/webm'
 ];
-
-// FIX (voice messages rejected with "File type audio/webm is not allowed"):
-// ALLOWED_FILE_TYPES above is driven by UPLOAD_ALLOWED_TYPES, an env var
-// configured for this endpoint's main use (avatar/image uploads) — on this
-// deployment it's set to an images-only list, and even the hardcoded
-// fallback above never included the format the browser's MediaRecorder
-// actually produces (audio/webm, and audio/ogg on some browsers). Voice
-// notes are a core, already-supported message type (see the separate
-// attachment allowlist in routes/messages.js), so always allow the common
-// recorded-audio mime types here regardless of what the image-oriented
-// allowlist says.
-const ALWAYS_ALLOWED_AUDIO_TYPES = ['audio/webm', 'audio/ogg', 'audio/mpeg', 'audio/wav', 'audio/mp4', 'audio/x-m4a', 'audio/m4a'];
+const ALLOWED_FILE_TYPES = Array.from(new Set([
+  ...(config.uploadAllowedTypes?.split(',') || [
+    'image/jpeg',
+    'image/png',
+    'image/gif',
+    'image/webp',
+    'video/mp4',
+    'video/mpeg',
+    'audio/mpeg',
+    'audio/wav',
+    'application/pdf',
+    'text/plain'
+  ]),
+  ...CORE_FEATURE_FILE_TYPES
+]));
 
 const fileFilter = (req, file, cb) => {
-  if (ALLOWED_FILE_TYPES.includes(file.mimetype) || ALWAYS_ALLOWED_AUDIO_TYPES.includes(file.mimetype)) {
+  if (ALLOWED_FILE_TYPES.includes(file.mimetype)) {
     cb(null, true);
   } else {
-    cb(new ValidationError(`File type ${file.mimetype} is not allowed. Allowed types: ${ALLOWED_FILE_TYPES.concat(ALWAYS_ALLOWED_AUDIO_TYPES).join(', ')}`), false);
+    cb(new ValidationError(`File type ${file.mimetype} is not allowed. Allowed types: ${ALLOWED_FILE_TYPES.join(', ')}`), false);
   }
 };
 

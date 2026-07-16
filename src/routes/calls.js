@@ -313,12 +313,6 @@ router.post('/', apiRateLimiter, callInitiationLimiter, asyncHandler(async (req,
           timestamp:    Date.now(),
         });
       }
-      // FIX (call ending itself — local/server call-id mismatch, group calls):
-      // same fix as the 1:1 path below — without this ack the caller's client
-      // never reconciles its own locally-generated call id with this call's
-      // real database id, so a later end/accept signal tagged with the real
-      // id could get rejected as "a different call".
-      await notifyUser(req.io, userId, 'call:initiated_ack', { callId: call.id });
       return res.status(201).json({ success: true, message: 'Group call initiated', data: { call } });
     }
 
