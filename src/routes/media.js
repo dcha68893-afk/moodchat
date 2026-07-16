@@ -57,11 +57,23 @@ const ALLOWED_FILE_TYPES = config.uploadAllowedTypes?.split(',') || [
   'text/plain'
 ];
 
+// FIX (voice messages rejected with "File type audio/webm is not allowed"):
+// ALLOWED_FILE_TYPES above is driven by UPLOAD_ALLOWED_TYPES, an env var
+// configured for this endpoint's main use (avatar/image uploads) — on this
+// deployment it's set to an images-only list, and even the hardcoded
+// fallback above never included the format the browser's MediaRecorder
+// actually produces (audio/webm, and audio/ogg on some browsers). Voice
+// notes are a core, already-supported message type (see the separate
+// attachment allowlist in routes/messages.js), so always allow the common
+// recorded-audio mime types here regardless of what the image-oriented
+// allowlist says.
+const ALWAYS_ALLOWED_AUDIO_TYPES = ['audio/webm', 'audio/ogg', 'audio/mpeg', 'audio/wav', 'audio/mp4', 'audio/x-m4a', 'audio/m4a'];
+
 const fileFilter = (req, file, cb) => {
-  if (ALLOWED_FILE_TYPES.includes(file.mimetype)) {
+  if (ALLOWED_FILE_TYPES.includes(file.mimetype) || ALWAYS_ALLOWED_AUDIO_TYPES.includes(file.mimetype)) {
     cb(null, true);
   } else {
-    cb(new ValidationError(`File type ${file.mimetype} is not allowed. Allowed types: ${ALLOWED_FILE_TYPES.join(', ')}`), false);
+    cb(new ValidationError(`File type ${file.mimetype} is not allowed. Allowed types: ${ALLOWED_FILE_TYPES.concat(ALWAYS_ALLOWED_AUDIO_TYPES).join(', ')}`), false);
   }
 };
 
