@@ -4922,8 +4922,17 @@ class Application {
             await this.initialize();
         }
         
+        // CLUSTER FIX: when launched as a worker under src/cluster.js, the primary
+        // process owns the real listening port and forwards accepted connections
+        // to us over IPC via @socket.io/sticky. If we also called app.listen(PORT)
+        // here, every worker would try to bind the same port directly and only one
+        // would win — so in that mode we create the http.Server object but never
+        // bind a real port; onListening() below runs immediately instead of on a
+        // 'listening' event.
+        const isClusterWorker = process.env.CLUSTER_STICKY_WORKER === '1';
+
         return new Promise((resolve, reject) => {
-            this.server = this.app.listen(config.get('PORT'), config.get('HOST'), () => {
+            const onListening = () => {
                 // Server is listening
                 const host = config.get('HOST');
                 const port = config.get('PORT');
@@ -5053,6 +5062,54 @@ class Application {
                     // FIX: Auth runs in middleware (before 'connection').
                     // Failed auth → client gets 'connect_error', NOT "io server disconnect".
                     this.io.use(socketAuthenticate);
+
+                    // SCALABILITY FIX: wire the Socket.IO Redis adapter so events
+                    // broadcast across every worker (src/cluster.js) and every Render
+                    // instance, not just sockets connected to THIS process. Without
+                    // this, running more than one process/instance would silently
+                    // drop messages/calls between users on different workers.
+                    // Falls back to no adapter (today's single-process behavior) if
+                    // Redis isn't configured — this never blocks startup.
+                    if (config.get('REDIS_ENABLED') && config.get('REDIS_URL')) {
+                        try {
+                            const { createAdapter } = require('@socket.io/redis-adapter');
+                            const redisLib = require('redis');
+                            const adapterPubClient = redisLib.createClient({ url: config.get('REDIS_URL') });
+                            const adapterSubClient = adapterPubClient.duplicate();
+
+                            adapterPubClient.on('error', (err) =>
+                                console.error('[Socket.IO Redis adapter] pub client error:', err.message));
+                            adapterSubClient.on('error', (err) =>
+                                console.error('[Socket.IO Redis adapter] sub client error:', err.message));
+
+                            Promise.all([adapterPubClient.connect(), adapterSubClient.connect()])
+                                .then(() => {
+                                    this.io.adapter(createAdapter(adapterPubClient, adapterSubClient));
+                                    logger.success('Socket.IO Redis adapter connected — cross-worker/instance delivery enabled', 'WEBSOCKET');
+                                })
+                                .catch((err) => {
+                                    console.error('[Socket.IO Redis adapter] failed to connect, staying in single-process mode:', err.message);
+                                });
+                        } catch (err) {
+                            console.error('[Socket.IO Redis adapter] setup error, staying in single-process mode:', err.message);
+                        }
+                    } else {
+                        logger.warn('Socket.IO Redis adapter NOT enabled (set REDIS_ENABLED + REDIS_URL) — sockets only visible within this single process', 'WEBSOCKET');
+                    }
+
+                    // CLUSTER FIX: when this process is a worker forked by
+                    // src/cluster.js, register it with @socket.io/sticky so the
+                    // primary can route each client's connection consistently to
+                    // this worker (required for the HTTP long-polling transport).
+                    if (isClusterWorker) {
+                        try {
+                            const { setupWorker } = require('@socket.io/sticky');
+                            setupWorker(this.io);
+                            logger.success(`Socket.IO sticky worker registered (pid ${process.pid})`, 'WEBSOCKET');
+                        } catch (err) {
+                            console.error('[Cluster] setupWorker failed:', err.message);
+                        }
+                    }
 
                     // Init WebSocket service AFTER attaching auth middleware
                     this.websocket = WebSocketService;
@@ -5425,8 +5482,17 @@ class Application {
                 _slog('='.repeat(80));
                 
                 resolve(this.server);
-            });
-            
+            };
+
+            if (isClusterWorker) {
+                const http = require('http');
+                this.server = http.createServer(this.app);
+                // No real port to wait on in this mode - run the same init immediately.
+                onListening();
+            } else {
+                this.server = this.app.listen(config.get('PORT'), config.get('HOST'), onListening);
+            }
+
             this.server.on('error', (error) => {
                 if (error.code === 'EADDRINUSE') {
                     logger.error(`Port ${config.get('PORT')} is already in use - CRITICAL`, error, 'APPLICATION');
