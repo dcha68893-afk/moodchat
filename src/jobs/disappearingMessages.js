@@ -70,7 +70,9 @@ async function runCleanup() {
   try {
     await sequelize.query(
       `UPDATE "Messages"
-       SET "deletedAt" = NOW(),
+       SET "isDeleted" = true,
+           "deletedAt" = NOW(),
+           "deletedBy" = 'system',
            content = '[This message has disappeared]',
            "updatedAt" = NOW()
        WHERE id = ANY(:ids)`,

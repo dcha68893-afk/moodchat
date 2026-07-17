@@ -92,11 +92,67 @@ class WebSocketService {
             global.__io = io;
             global.io = io;
             _flog('[WSService] Socket.IO instance exposed globally');
+            this._startPresenceHeartbeatSweep();
         }
         return this;
     }
 
     init(io) { return this.setIO(io); }
+
+    /**
+     * Periodically checks connected users' last presence:heartbeat against a
+     * staleness threshold. Socket.IO's own ping/pong (pingInterval/pingTimeout,
+     * configured in server.js) already detects a fully dead connection and
+     * fires 'disconnect' — usually within ~90s — which is already handled by
+     * removeUser() above. This sweep is a faster, independent check on top of
+     * that: it catches a connection that's gone quiet (app suspended, network
+     * degraded) without waiting for the Socket.IO-level timeout, and restores
+     * 'user:online' automatically if a heartbeat resumes before the socket
+     * actually disconnects.
+     */
+    _startPresenceHeartbeatSweep() {
+        if (this._presenceSweepInterval) return; // already running — setIO can be called more than once
+        const SWEEP_INTERVAL_MS = 30000;
+        const STALE_THRESHOLD_MS = 75000; // ~3x the client's 25s heartbeat interval, tolerates jitter
+        this._staleUsers = this._staleUsers || new Set();
+        this._presenceSweepInterval = setInterval(() => {
+            try {
+                const now = Date.now();
+                const lastHb = this._lastHeartbeatAt;
+                if (!lastHb) return;
+                for (const uid of this.onlineUsers.keys()) {
+                    const last = lastHb.get(uid);
+                    // Only judge users who have sent at least one heartbeat —
+                    // a brand-new connection hasn't had the chance to yet,
+                    // and Socket.IO's own ping/pong is still the backstop.
+                    if (last === undefined) continue;
+                    const isStale = now - last > STALE_THRESHOLD_MS;
+                    if (isStale && !this._staleUsers.has(uid)) {
+                        this._staleUsers.add(uid);
+                        this._broadcastPresenceToContacts(uid, 'user:offline', {
+                            userId: uid, lastSeen: new Date(last).toISOString(), timestamp: now, reason: 'heartbeat_stale'
+                        }).catch(() => {});
+                    } else if (!isStale && this._staleUsers.has(uid)) {
+                        this._staleUsers.delete(uid);
+                        this._broadcastPresenceToContacts(uid, 'user:online', {
+                            userId: uid, timestamp: now
+                        }).catch(() => {});
+                    }
+                }
+                // Drop bookkeeping for anyone no longer tracked as online at all
+                // (already handled by a clean disconnect/removeUser).
+                for (const uid of lastHb.keys()) {
+                    if (!this.onlineUsers.has(uid)) {
+                        lastHb.delete(uid);
+                        this._staleUsers.delete(uid);
+                    }
+                }
+            } catch (err) {
+                _flog(`[WSService] presence sweep error: ${err.message}`);
+            }
+        }, SWEEP_INTERVAL_MS);
+        if (this._presenceSweepInterval.unref) this._presenceSweepInterval.unref();
+    }
 
     /**
      * FIX: Auth is now done in io.use() BEFORE 'connection' fires.
@@ -588,6 +644,30 @@ class WebSocketService {
             });
             }
 
+            // General presence heartbeat (distinct from call:heartbeat above,
+            // which is call-signaling specific). Client sends this every
+            // 25-30s while the tab is foregrounded. Keeps lastSeen accurate
+            // while a user is actively online, and — combined with the
+            // periodic staleness sweep in _startPresenceHeartbeatSweep()
+            // (see near setIO() in this file) — catches a connection that's
+            // gone quiet without a clean 'disconnect' event faster than
+            // Socket.IO's own ~90s ping timeout would on its own. Uses the
+            // same guard-flag pattern as call:heartbeat above rather than
+            // removeAllListeners, for the same collision reason.
+            if (!socket.__wsPresenceHeartbeatBound) {
+            socket.__wsPresenceHeartbeatBound = true;
+            socket.on('presence:heartbeat', async () => {
+                this._lastHeartbeatAt = this._lastHeartbeatAt || new Map();
+                this._lastHeartbeatAt.set(userId, Date.now());
+                try {
+                    const UserStatusModel = db.models && db.models.UserStatus;
+                    if (!UserStatusModel) return;
+                    const row = await UserStatusModel.findOne({ where: { userId } });
+                    if (row && row.status !== 'offline') await row.updateLastSeen();
+                } catch (_) {}
+            });
+            }
+
             // ── PHASE14 FIX: call:webrtc_offer / call:webrtc_answer relay ────
             // See the no-op note above — CallSignalingService owns these now.
             socket.removeAllListeners('call:webrtc_offer').on('call:webrtc_offer', () => {});
@@ -854,6 +934,25 @@ class WebSocketService {
         if (!this.onlineUsers.has(uid)) this.onlineUsers.set(uid, new Set());
         this.onlineUsers.get(uid).add(socketId);
 
+        // FIX (presence accuracy — DB was never kept in sync with the live
+        // in-memory socket map): persist this connection to the UserStatus
+        // row so lastSeen/status survive a server restart and are accurate
+        // for any REST call (getStatus/getBulkStatus) instead of only ever
+        // reflecting reality via this specific process's in-memory map.
+        // Fire-and-forget — must never block or fail the actual connection.
+        (async () => {
+            try {
+                const UserStatusModel = db.models && db.models.UserStatus;
+                if (!UserStatusModel) return;
+                let row = await UserStatusModel.findOne({ where: { userId: uid } });
+                if (!row) row = await UserStatusModel.create({ userId: uid, status: 'offline' });
+                await row.addSocket(socketId);
+                if (row.status === 'offline') await row.setOnline(socketId);
+            } catch (err) {
+                _flog(`[WSService] UserStatus sync on connect failed uid=${uid}: ${err.message}`);
+            }
+        })();
+
         // FIX-AUDIT: io.emit() broadcasts to EVERY connected socket on the server,
         // not just this user's contacts. Two problems: (1) privacy — any stranger
         // can observe this user's online status; (2) scalability — at 100M+
@@ -913,6 +1012,22 @@ class WebSocketService {
                 }).catch(() => {});
             }
         }
+
+        // FIX (presence accuracy — see registerUser above): mirror the
+        // removal into the persistent UserStatus row. removeSocket() already
+        // correctly only flips status to 'offline' once socketIds is empty,
+        // so this is safe to call on every disconnect regardless of whether
+        // other devices for this user are still connected.
+        (async () => {
+            try {
+                const UserStatusModel = db.models && db.models.UserStatus;
+                if (!UserStatusModel || !socketId) return;
+                const row = await UserStatusModel.findOne({ where: { userId: uid } });
+                if (row) await row.removeSocket(socketId);
+            } catch (err) {
+                _flog(`[WSService] UserStatus sync on disconnect failed uid=${uid}: ${err.message}`);
+            }
+        })();
 
              _flog(`[WSService] removeUser uid=${uid} socket=${socketId}`);
         return true;

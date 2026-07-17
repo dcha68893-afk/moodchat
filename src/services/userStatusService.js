@@ -22,7 +22,7 @@ class UserStatusService {
         throw new ValidationError('User ID is required');
       }
 
-      const { status, customMessage, expiresAt, deviceInfo } = statusData;
+      const { status, customMessage, deviceInfo } = statusData;
 
       // Validate status
       const validStatuses = ['online', 'away', 'busy', 'offline', 'invisible'];
@@ -36,49 +36,49 @@ class UserStatusService {
         throw new NotFoundError('User not found');
       }
 
-      // Find or create user status
-      let userStatus = await getUserStatus().findOne({ where: { userId } });
-      
+      // FIX: this used to do `new UserStatus({...})` — UserStatus was never
+      // imported/declared in this file, so that line would throw
+      // "ReferenceError: UserStatus is not defined" the first time any user
+      // without an existing row hit this path. Use the model's own .create().
+      const UserStatusModel = getUserStatus();
+      let userStatus = await UserStatusModel.findOne({ where: { userId } });
       if (!userStatus) {
-        userStatus = new UserStatus({ userId });
+        userStatus = await UserStatusModel.create({ userId, status: 'offline' });
       }
 
-      // Update status fields
-      if (status) {
-        userStatus.status = status;
-        if (status === 'online') {
-          userStatus.lastSeen = new Date();
-          userStatus.isOnline = true;
-        } else if (status === 'offline') {
-          userStatus.isOnline = false;
-        } else {
-          userStatus.isOnline = true;
-        }
+      // Update status fields — using the model's own instance methods where
+      // they exist (they already handle lastSeen/socketIds correctly) rather
+      // than reimplementing that logic here.
+      if (status === 'online') {
+        await userStatus.setOnline();
+      } else if (status === 'offline') {
+        await userStatus.setOffline();
+      } else if (status === 'away') {
+        await userStatus.setAway();
+      } else if (status === 'busy') {
+        await userStatus.setBusy();
+      } else if (status === 'invisible') {
+        await userStatus.setInvisible();
       }
 
+      // FIX: the model's actual column for this is `customStatus`, not
+      // `customMessage` — the old code wrote to a field that doesn't exist
+      // on the model, so it silently never persisted.
       if (customMessage !== undefined) {
-        userStatus.customMessage = customMessage;
-        if (customMessage) {
-          userStatus.customMessageSetAt = new Date();
-        }
+        userStatus.customStatus = customMessage;
       }
 
-      if (expiresAt) {
-        userStatus.expiresAt = new Date(expiresAt);
-      }
-
+      // FIX: the model's actual column for this is `activeDevice`, not
+      // `deviceInfo`.
       if (deviceInfo) {
-        userStatus.deviceInfo = deviceInfo;
+        userStatus.activeDevice = deviceInfo;
       }
 
-      userStatus.lastUpdated = new Date();
+      if (customMessage !== undefined || deviceInfo) {
+        await userStatus.save();
+      }
 
-      await userStatus.save();
-
-      // Populate user details
-      await userStatus;
-
-      return this._formatUserStatus(userStatus);
+      return this._formatUserStatus(userStatus, user);
     } catch (error) {
       if (
         error instanceof ValidationError ||
@@ -114,25 +114,24 @@ class UserStatusService {
       }
 
       // Get user status
-      let userStatus = await getUserStatus().findOne({ where: { userId } });
+      const UserStatusModel = getUserStatus();
+      let userStatus = await UserStatusModel.findOne({ where: { userId } });
 
       if (!userStatus) {
-        // Create default status if not exists
-        userStatus = new UserStatus({
-          userId: user._id,
+        // FIX: `new UserStatus(...)` referenced an undeclared variable and
+        // `user._id` was the Mongoose id field — Sequelize uses `user.id`.
+        userStatus = await UserStatusModel.create({
+          userId: user.id,
           status: 'offline',
-          isOnline: false,
           lastSeen: new Date()
         });
-        await userStatus.save();
-        await userStatus;
       }
 
       // Check privacy settings
-      const formattedStatus = this._formatUserStatus(userStatus);
+      const formattedStatus = this._formatUserStatus(userStatus, user);
       
       // If user is invisible, only show to self
-      if (formattedStatus.status === 'invisible' && userId !== requesterId) {
+      if (formattedStatus.status === 'invisible' && String(userId) !== String(requesterId)) {
         return {
           userId: formattedStatus.userId,
           username: formattedStatus.username,
@@ -174,53 +173,50 @@ class UserStatusService {
         throw new ValidationError('Maximum 100 users allowed per request');
       }
 
-      // Get all statuses
-      const userStatuses = await getUserStatus().findAll({
-        where: { userId: { [Op.in]: userIds } }
-      });
+      // FIX: this whole method assumed `status.userId` was a Mongoose-
+      // populated User document (`status.userId._id.toString()`) — in this
+      // Sequelize schema `userId` on a UserStatus row is just an integer FK,
+      // so that line threw every time this endpoint was called (i.e. every
+      // time a contact list tried to load initial online/offline dots for
+      // more than one contact at once). Fetch both in parallel batch queries
+      // and join them in memory instead.
+      const [userStatuses, users] = await Promise.all([
+        getUserStatus().findAll({ where: { userId: { [Op.in]: userIds } } }),
+        getUser().findAll({ where: { id: { [Op.in]: userIds } } })
+      ]);
 
-      // Create default statuses for users without one
-      const statusMap = new Map();
-      userStatuses.forEach(status => {
-        statusMap.set(status.userId._id.toString(), status);
-      });
+      const userMap = new Map(users.map(u => [String(u.id), u]));
+      const statusMap = new Map(userStatuses.map(s => [String(s.userId), s]));
 
       const results = [];
       for (const userId of userIds) {
-        let status = statusMap.get(userId);
-        
+        const user = userMap.get(String(userId));
+        if (!user) continue; // unknown user id — skip rather than fail the whole batch
+
+        let status = statusMap.get(String(userId));
         if (!status) {
-          // Create default status
-          const user = await getUser().findByPk(userId);
-          if (user) {
-            status = new UserStatus({
-              userId: user._id,
-              status: 'offline',
-              isOnline: false,
-              lastSeen: new Date()
-            });
-            await status.save();
-            status.userId = user;
-          }
+          status = await getUserStatus().create({
+            userId: user.id,
+            status: 'offline',
+            lastSeen: new Date()
+          });
         }
 
-        if (status) {
-          const formattedStatus = this._formatUserStatus(status);
-          
-          // Handle invisible status
-          if (formattedStatus.status === 'invisible' && userId !== requesterId) {
-            results.push({
-              userId: formattedStatus.userId,
-              username: formattedStatus.username,
-              avatar: formattedStatus.avatar,
-              status: 'offline',
-              isOnline: false,
-              lastSeen: formattedStatus.lastSeen,
-              isInvisible: true
-            });
-          } else {
-            results.push(formattedStatus);
-          }
+        const formattedStatus = this._formatUserStatus(status, user);
+
+        // Handle invisible status
+        if (formattedStatus.status === 'invisible' && String(userId) !== String(requesterId)) {
+          results.push({
+            userId: formattedStatus.userId,
+            username: formattedStatus.username,
+            avatar: formattedStatus.avatar,
+            status: 'offline',
+            isOnline: false,
+            lastSeen: formattedStatus.lastSeen,
+            isInvisible: true
+          });
+        } else {
+          results.push(formattedStatus);
         }
       }
 
@@ -371,24 +367,20 @@ class UserStatusService {
         throw new ValidationError('User ID is required');
       }
 
-      let userStatus = await getUserStatus().findOne({ where: { userId } });
-      
+      const UserStatusModel = getUserStatus();
+      let userStatus = await UserStatusModel.findOne({ where: { userId } });
+
       if (!userStatus) {
-        userStatus = new UserStatus({ userId });
+        userStatus = await UserStatusModel.create({ userId, status: 'online', lastSeen: new Date() });
+      } else if (userStatus.status === 'offline') {
+        // Coming back from offline counts as an online transition.
+        await userStatus.setOnline();
+      } else {
+        await userStatus.updateLastSeen();
       }
 
-      userStatus.lastSeen = new Date();
-      userStatus.isOnline = true;
-      
-      // If status was offline, change to online
-      if (userStatus.status === 'offline') {
-        userStatus.status = 'online';
-      }
-
-      await userStatus.save();
-      await userStatus;
-
-      return this._formatUserStatus(userStatus);
+      const user = await getUser().findByPk(userId);
+      return this._formatUserStatus(userStatus, user);
     } catch (error) {
       if (error instanceof ValidationError) {
         throw error;
@@ -414,29 +406,27 @@ class UserStatusService {
   /**
    * Format user status response
    * @private
-   * @param {Object} userStatus - User status document
+   * @param {Object} userStatus - UserStatus row (Sequelize instance)
+   * @param {Object} [user] - The associated User row, if already fetched —
+   *   userId on UserStatus is just an integer FK, not a populated object,
+   *   so display fields (username/avatar/etc.) have to come from here.
    * @returns {Object} Formatted user status
    */
-  _formatUserStatus(userStatus) {
+  _formatUserStatus(userStatus, user) {
+    const displayName = user ? `${user.firstName || ''} ${user.lastName || ''}`.trim() || user.username : undefined;
     return {
-      id: userStatus._id,
-      userId: userStatus.userId._id,
-      username: userStatus.userId.username,
-      displayName: userStatus.userId.displayName,
-      avatar: userStatus.userId.avatar,
-      email: userStatus.userId.email,
+      id: userStatus.id,
+      userId: userStatus.userId,
+      username: user?.username,
+      displayName,
+      avatar: user?.avatar,
+      email: user?.email,
       status: userStatus.status,
-      customMessage: userStatus.customMessage,
-      emoji: userStatus.emoji,
-      isOnline: userStatus.isOnline,
+      customMessage: userStatus.customStatus,
+      isOnline: typeof userStatus.isOnline === 'function' ? userStatus.isOnline() : userStatus.status === 'online',
       lastSeen: userStatus.lastSeen,
-      lastUpdated: userStatus.lastUpdated,
-      deviceInfo: userStatus.deviceInfo,
-      autoReply: userStatus.autoReply,
-      doNotDisturb: userStatus.doNotDisturb,
-      customMessageSetAt: userStatus.customMessageSetAt,
-      customMessageExpiresAt: userStatus.customMessageExpiresAt,
-      expiresAt: userStatus.expiresAt
+      lastUpdated: userStatus.updatedAt,
+      deviceInfo: userStatus.activeDevice
     };
   }
 }
