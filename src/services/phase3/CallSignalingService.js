@@ -237,6 +237,32 @@ class CallSignalingService extends EventEmitter {
     this._attached    = false;
   }
 
+  // FIX-STRUCTURED-LOGGING (Phase 13): the calling module's log lines were
+  // plain strings via this._logger.warn/error (which defaults to bare
+  // console) — no consistent timestamp/callId/userId/socketId/state fields,
+  // making call-related incidents hard to correlate against each other or
+  // against a client-side session. This wraps warn/error with a structured
+  // second argument carrying exactly those fields, without changing the
+  // human-readable message (so anything already grepping log text for
+  // specific strings keeps working) or introducing a new logging
+  // dependency. Scoped to the calling module per the audit's stated scope,
+  // not a whole-app logging retrofit.
+  _logCall(level, message, { callId = null, userId = null, socketId = null, state = null } = {}) {
+    const record = {
+      timestamp: new Date().toISOString(),
+      module:    'CallSignalingService',
+      event:     message,
+      callId:    callId,
+      userId:    userId,
+      socketId:  socketId,
+      state:     state,
+    };
+    try {
+      const fn = (this._logger && typeof this._logger[level] === 'function') ? this._logger[level] : console.log;
+      fn.call(this._logger, `[CallSignaling] ${message}`, record);
+    } catch (_) {}
+  }
+
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
   attach() {
@@ -362,7 +388,7 @@ class CallSignalingService extends EventEmitter {
           return;
         }
         if (this._dedup.isDuplicate(key)) {
-          this._logger.warn('[CallSignaling] Duplicate call:initiate suppressed');
+          this._logCall('warn', 'Duplicate call:initiate suppressed', { userId, socketId: socket.id });
           // C-09 FIX: previously this silently dropped the event with no
           // feedback, so the caller's UI stayed stuck on the outgoing screen
           // even though the call was refused. A legitimate "call back
@@ -459,13 +485,22 @@ class CallSignalingService extends EventEmitter {
           console.log(`[CallSignaling] ✅ Target uid=${targetUserId} pre-joined call:${callId}`);
         }
       } catch (err) {
-        this._logger.warn('[CallSignaling] call:initiate error:', err.message);
+        this._logCall('warn', `call:initiate error: ${err.message}`, { userId, socketId: socket.id });
       }
     });
 
     // ── FIX-CALL-DIRECT: webrtc:offer relay via Socket.IO (bypass postMessage) ─
-    socket.removeAllListeners('call:webrtc_offer').on('call:webrtc_offer', async ({ callId, targetUserId: tgt, offer } = {}) => {
-      if (!callId || !tgt || !offer) return;
+    // FIX-SIGNALING-ACK (Phase 20): accept an optional Socket.IO ack callback
+    // so the sender can know whether the offer was actually delivered and
+    // retry if not, instead of firing-and-forgetting a message that could be
+    // silently lost (e.g. the target's socket dropped a moment earlier and
+    // hasn't been pruned yet). sendToUser() already tells us whether it
+    // reached at least one of the target's live connections.
+    socket.removeAllListeners('call:webrtc_offer').on('call:webrtc_offer', async ({ callId, targetUserId: tgt, offer } = {}, ack) => {
+      if (!callId || !tgt || !offer) {
+        if (typeof ack === 'function') ack({ delivered: false, reason: 'invalid_payload' });
+        return;
+      }
       // FIX-DUP-SIGNAL: previously this both sent directly to the target user
       // AND re-broadcast to the call room (which the target is also a member
       // of), so the target received the same offer twice. A second
@@ -473,10 +508,11 @@ class CallSignalingService extends EventEmitter {
       // throws InvalidStateError and can break the handshake. Deliver via a
       // single path only — sendToUser already fans out to all of the
       // target's connected devices/sockets.
-      await this._wsService.sendToUser(tgt, 'call:webrtc_offer', {
+      const delivered = await this._wsService.sendToUser(tgt, 'call:webrtc_offer', {
         callId, offer, callerId: userId, timestamp: Date.now(),
-      }).catch(() => {});
-      this._logger.log(`[CallSignaling] 📡 webrtc:offer relayed for call ${callId}`);
+      }).catch(() => false);
+      this._logCall('log', `webrtc:offer relayed for call ${callId}, delivered=${delivered}`, { callId, userId, socketId: socket.id });
+      if (typeof ack === 'function') ack({ delivered: !!delivered });
     });
 
     // ── Call accept ──────────────────────────────────────────────────────────
@@ -628,7 +664,7 @@ class CallSignalingService extends EventEmitter {
                   message:   'You are not a participant of this call',
                   timestamp: Date.now(),
                 });
-                this._logger.warn(`[CallSignaling] SEC-03 blocked uid=${userId} from joining call ${callId}`);
+                this._logCall('warn', `SEC-03 blocked uid=${userId} from joining call ${callId}`, { callId, userId, socketId: socket.id });
                 return;
               }
             }
@@ -694,7 +730,7 @@ class CallSignalingService extends EventEmitter {
           message: 'Only the call host can mute participants',
           timestamp: Date.now(),
         });
-        this._logger.warn(`[CallSignaling] Non-host uid=${userId} tried to mute uid=${targetId} in call ${callId}`);
+        this._logCall('warn', `Non-host uid=${userId} tried to mute uid=${targetId} in call ${callId}`, { callId, userId, socketId: socket.id });
         return;
       }
 
@@ -729,7 +765,7 @@ class CallSignalingService extends EventEmitter {
           message: 'Only the call host can remove participants',
           timestamp: Date.now(),
         });
-        this._logger.warn(`[CallSignaling] Non-host uid=${userId} tried to remove uid=${targetId} from call ${callId}`);
+        this._logCall('warn', `Non-host uid=${userId} tried to remove uid=${targetId} from call ${callId}`, { callId, userId, socketId: socket.id });
         return;
       }
 
@@ -769,7 +805,7 @@ class CallSignalingService extends EventEmitter {
           message: 'Only the call host can end the call for everyone',
           timestamp: Date.now(),
         });
-        this._logger.warn(`[CallSignaling] Non-host uid=${userId} tried to end call ${callId} for everyone`);
+        this._logCall('warn', `Non-host uid=${userId} tried to end call ${callId} for everyone`, { callId, userId, socketId: socket.id });
         return;
       }
 
@@ -873,15 +909,22 @@ class CallSignalingService extends EventEmitter {
         callId, userId, timestamp: Date.now(),
       });
     });
-    socket.removeAllListeners('call:heartbeat').on('call:heartbeat', data => {
-      const { callId } = data || {};
-      if (!callId) return;
-      if (this._rooms.isParticipant(callId, userId)) {
-        socket.emit('call:heartbeat_ack', { callId, ts: Date.now() });
-        const room = this._rooms.get(callId);
-        if (room) { const p = room.participants.get(String(userId)); if (p) p.lastHeartbeat = Date.now(); }
-      }
-    });
+    // FIX-DISCONNECT-COLLISION: was removeAllListeners('call:heartbeat'), which
+    // destroyed webSocketService's cross-peer heartbeat relay registered
+    // earlier on the same socket. Guard on a private flag so both this
+    // ack/room-bookkeeping handler and webSocketService's relay can coexist.
+    if (!socket.__callSignalHeartbeatBound) {
+      socket.__callSignalHeartbeatBound = true;
+      socket.on('call:heartbeat', data => {
+        const { callId } = data || {};
+        if (!callId) return;
+        if (this._rooms.isParticipant(callId, userId)) {
+          socket.emit('call:heartbeat_ack', { callId, ts: Date.now() });
+          const room = this._rooms.get(callId);
+          if (room) { const p = room.participants.get(String(userId)); if (p) p.lastHeartbeat = Date.now(); }
+        }
+      });
+    }
 
     // ── Presence ─────────────────────────────────────────────────────────────
     socket.removeAllListeners('call:presence').on('call:presence', async data => {

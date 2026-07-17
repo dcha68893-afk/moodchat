@@ -182,7 +182,26 @@ class WebSocketService {
 
             // join_user_room: moved below with call-room fix (see FIX-CALL-ROOM)
 
-            socket.removeAllListeners('disconnect').on('disconnect', async (reason) => {
+            // FIX-DISCONNECT-COLLISION: this used to be
+            // socket.removeAllListeners('disconnect').on('disconnect', ...), which
+            // doesn't just clear this handler's own prior registration — it destroys
+            // EVERY 'disconnect' listener on the socket, including the ones
+            // PresenceEngineFoundation, CallSignalingService, MonitoringFoundation,
+            // etc. register on the same shared socket via their own io.on('connection')
+            // handlers. Because Socket.IO fires all 'connection' listeners in
+            // registration order for each new connection, and PresenceEngineFoundation's
+            // handler is registered after this one, its own
+            // removeAllListeners('disconnect') was unconditionally wiping THIS handler
+            // out on every single connection — meaning the "STALE CALL FIX" cleanup
+            // below (which ends non-terminal DB calls and cancels pending timers on
+            // disconnect) never actually ran in production. That's the root cause of
+            // calls left stuck in 'ringing'/'in-progress' after a user disconnects, and
+            // of call:incoming replaying on reconnect. Guarding on a private flag scoped
+            // to this handler fixes the intended "don't double-register" case without
+            // destroying listeners owned by other modules.
+            if (!socket.__wsDisconnectBound) {
+            socket.__wsDisconnectBound = true;
+            socket.on('disconnect', async (reason) => {
                 this.removeUser(userId, socket);
                      _flog(`[WSService] socket disconnected uid=${userId} sid=${socket.id} reason=${reason}`);
 
@@ -264,9 +283,17 @@ class WebSocketService {
                 }, CALL_DISCONNECT_GRACE_MS);
                 this._pendingCallCleanupTimers.set(uidInt, cleanupTimer);
             });
+            } // end FIX-DISCONNECT-COLLISION guard
 
             // ── TYPING INDICATORS — FIX: were completely missing ──────────────
-            socket.removeAllListeners('typing:start').on('typing:start', ({ chatId } = {}) => {
+            // FIX-DISCONNECT-COLLISION: was removeAllListeners('typing:start'/'stop'),
+            // which PresenceEngineFoundation's own removeAllListeners on the same
+            // event names (registered afterward) was silently destroying on every
+            // connection — so this chat-room relay never actually fired. Guard on
+            // a private flag so this and Presence's typing tracking both run.
+            if (!socket.__wsTypingBound) {
+            socket.__wsTypingBound = true;
+            socket.on('typing:start', ({ chatId } = {}) => {
                 if (!chatId) return;
                 socket.to(`chat:${chatId}`).emit('typing:start', {
                     chatId,
@@ -275,7 +302,7 @@ class WebSocketService {
                 });
             });
 
-            socket.removeAllListeners('typing:stop').on('typing:stop', ({ chatId } = {}) => {
+            socket.on('typing:stop', ({ chatId } = {}) => {
                 if (!chatId) return;
                 socket.to(`chat:${chatId}`).emit('typing:stop', {
                     chatId,
@@ -283,6 +310,7 @@ class WebSocketService {
                     timestamp: Date.now(),
                 });
             });
+            }
 
             // SETTINGS: relay cross-device settings changes
             socket.removeAllListeners('settings:update').on('settings:update', (payload) => {
@@ -362,7 +390,15 @@ class WebSocketService {
             // received a socket-level ACK. Now the parent frame emits message:ack after
             // a successful POST /messages, and here we relay delivery:confirmed to sender
             // AND push a delivery notification to the recipient.
-            socket.removeAllListeners('message:ack').on('message:ack', async ({ messageId, chatId, status } = {}) => {
+            // FIX-DISCONNECT-COLLISION: was removeAllListeners('message:ack'),
+            // which ReliableDeliveryService's own removeAllListeners('message:ack')
+            // (registered ~1s later at boot) was silently destroying on every
+            // connection — so senders stopped receiving message:delivery_confirmed
+            // even though ReliableDeliveryService's processAck() still ran. Guard
+            // on a private flag so both handlers coexist.
+            if (!socket.__wsMessageAckBound) {
+            socket.__wsMessageAckBound = true;
+            socket.on('message:ack', async ({ messageId, chatId, status } = {}) => {
                 if (!messageId) return;
                 try {
                     // Notify sender that message was durably saved
@@ -371,6 +407,7 @@ class WebSocketService {
                     });
                 } catch(_) {}
             });
+            }
 
             // ── FIX-OFFLINE-QUEUE: Flush any queued messages on reconnect ─────
             this.flushOfflineMessages(userId).catch(() => {});
@@ -531,7 +568,16 @@ class WebSocketService {
 
             socket.removeAllListeners('webrtc_signal').on('webrtc_signal', () => {});
 
-            socket.removeAllListeners('call:heartbeat').on('call:heartbeat', ({ callId: hbCallId, targetUserId: hbTarget } = {}) => {
+            // FIX-DISCONNECT-COLLISION: removeAllListeners('call:heartbeat') here
+            // used to be wiped by CallSignalingService's own
+            // removeAllListeners('call:heartbeat') registering later on the same
+            // socket — silently killing this cross-peer relay while only
+            // CallSignalingService's ack-to-sender/room-bookkeeping survived.
+            // Both are needed for different reasons, so both must coexist; guard
+            // with a private flag instead of clearing the shared event.
+            if (!socket.__wsHeartbeatBound) {
+            socket.__wsHeartbeatBound = true;
+            socket.on('call:heartbeat', ({ callId: hbCallId, targetUserId: hbTarget } = {}) => {
                 if (!hbCallId || !hbTarget) return;
                 const io = this.getIO();
                 if (!io) return;
@@ -540,6 +586,7 @@ class WebSocketService {
                     io.to(`user_${hbTarget}`).emit('call:heartbeat', { callId: hbCallId, fromUserId: userId, ts: Date.now() });
                 } catch (_) {}
             });
+            }
 
             // ── PHASE14 FIX: call:webrtc_offer / call:webrtc_answer relay ────
             // See the no-op note above — CallSignalingService owns these now.

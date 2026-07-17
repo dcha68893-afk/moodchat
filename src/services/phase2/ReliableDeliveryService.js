@@ -307,15 +307,23 @@ class ReliableDeliveryService extends EventEmitter {
     // used in CallSignalingService.js — so a duplicate invocation of
     // _onConnection for the same socket can't double-process delivery acks
     // or read receipts.
-    socket.removeAllListeners('message:ack').on('message:ack', data => {
-      const id = data?.messageId || data?.id;
-      if (id) this.processAck(id, userId);
-    });
+    // FIX-DISCONNECT-COLLISION: was removeAllListeners('message:ack'), which
+    // destroyed webSocketService's message:delivery_confirmed relay
+    // (registered earlier on the same socket) on every connection. Guard on a
+    // private flag instead so both this ack-processing logic and
+    // webSocketService's relay run.
+    if (!socket.__reliableDeliveryAckBound) {
+      socket.__reliableDeliveryAckBound = true;
+      socket.on('message:ack', data => {
+        const id = data?.messageId || data?.id;
+        if (id) this.processAck(id, userId);
+      });
 
-    socket.removeAllListeners('message:read').on('message:read', data => {
-      const id = data?.messageId || data?.id;
-      if (id) this.processRead(id, userId);
-    });
+      socket.on('message:read', data => {
+        const id = data?.messageId || data?.id;
+        if (id) this.processRead(id, userId);
+      });
+    }
   }
 
   _emitToUser(userId, event, payload) {

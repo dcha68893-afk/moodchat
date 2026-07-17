@@ -290,26 +290,48 @@ class PresenceEngineFoundation extends EventEmitter {
       this._broadcastStatus(userId, PresenceStatus.ONLINE, socket);
     });
 
-    socket.removeAllListeners('typing:start').on('typing:start', (data) => {
-      const chatId = data?.chatId || data?.conversationId;
-      if (!chatId) return;
-      this._typing.start(chatId, userId);
-      this._broadcastTypingStart(chatId, userId, socket);
-    });
+    // FIX-DISCONNECT-COLLISION: was removeAllListeners('typing:start'/'stop'),
+    // which was destroying webSocketService's chat-room typing relay
+    // (registered earlier on the same socket) on every connection. Guard on a
+    // private flag so both this presence-tracking logic and webSocketService's
+    // relay run.
+    if (!socket.__presenceTypingBound) {
+      socket.__presenceTypingBound = true;
+      socket.on('typing:start', (data) => {
+        const chatId = data?.chatId || data?.conversationId;
+        if (!chatId) return;
+        this._typing.start(chatId, userId);
+        this._broadcastTypingStart(chatId, userId, socket);
+      });
 
-    socket.removeAllListeners('typing:stop').on('typing:stop', (data) => {
-      const chatId = data?.chatId || data?.conversationId;
-      if (!chatId) return;
-      this._typing.stop(chatId, userId);
-    });
+      socket.on('typing:stop', (data) => {
+        const chatId = data?.chatId || data?.conversationId;
+        if (!chatId) return;
+        this._typing.stop(chatId, userId);
+      });
 
-    // Legacy event aliases
-    socket.removeAllListeners('typing').on('typing', (data) => socket.emit('typing:start', data));
-    socket.removeAllListeners('stopTyping').on('stopTyping', (data) => socket.emit('typing:stop', data));
+      // Legacy event aliases
+      socket.on('typing', (data) => socket.emit('typing:start', data));
+      socket.on('stopTyping', (data) => socket.emit('typing:stop', data));
+    }
 
-    socket.removeAllListeners('disconnect').on('disconnect', (reason) => {
-      this._onDisconnect(socket, userId, reason);
-    });
+    // FIX-DISCONNECT-COLLISION: this used to be
+    // socket.removeAllListeners('disconnect').on('disconnect', ...). Because
+    // Socket.IO invokes every module's io.on('connection') handler in
+    // registration order for each new connection, and this handler is
+    // registered AFTER webSocketService's, removeAllListeners('disconnect')
+    // here was unconditionally destroying webSocketService's disconnect
+    // handler on every connection — including its stale-call DB cleanup and
+    // reconnect-grace-period logic. That was the root cause of calls staying
+    // stuck in a non-terminal state after a user disconnected. Guard on a
+    // private flag scoped to this handler instead, so re-registration is
+    // still prevented without deleting listeners owned by other modules.
+    if (!socket.__presenceDisconnectBound) {
+      socket.__presenceDisconnectBound = true;
+      socket.on('disconnect', (reason) => {
+        this._onDisconnect(socket, userId, reason);
+      });
+    }
   }
 
   _onDisconnect(socket, userId, reason) {

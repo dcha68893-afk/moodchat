@@ -21,6 +21,42 @@ const MAX_CALL_DURATION           = parseInt(process.env.MAX_CALL_DURATION)     
 const CALL_TIMEOUT_SECONDS        = parseInt(process.env.CALL_TIMEOUT_SECONDS)        || 180; // must match RING_TIMEOUT_MS in routes/calls.js (3 min)
 const MAX_GROUP_CALL_PARTICIPANTS = parseInt(process.env.MAX_GROUP_CALL_PARTICIPANTS)  || 10;
 
+// FIX-DUPLICATE-CALL-RACE: initiateCall() checks "is this callee already in
+// an active call" (a Call.findOne()) and then, several lines later, creates
+// a new Call row -- with no atomicity between the two. Two initiateCall()
+// calls for the same callee landing close together (a double-tap on the
+// call button, or two different callers dialing the same person at nearly
+// the same instant) could both pass the check before either had committed
+// its Call.create(), producing two separate Call rows -- duplicate ringing
+// and duplicate call-history entries for what should be a single call
+// attempt. This in-process lock, keyed by calleeId, serializes concurrent
+// initiateCall() calls for the same callee so the second one always sees
+// the first one's freshly-created row. NOTE: this closes the race for a
+// single Node process; if this service is ever horizontally scaled across
+// multiple instances, the same race can still occur across processes and
+// would need a distributed lock (e.g. a Postgres advisory lock or Redis
+// SETNX) instead.
+const _initiateCallLocks = new Map(); // calleeId -> Promise chain
+async function _withCalleeLock(calleeId, fn) {
+  const key = String(calleeId);
+  const prev = _initiateCallLocks.get(key) || Promise.resolve();
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  _initiateCallLocks.set(key, prev.then(() => gate));
+  await prev;
+  try {
+    return await fn();
+  } finally {
+    release();
+    if (_initiateCallLocks.get(key) === undefined || _initiateCallLocks.get(key) === prev.then(() => gate)) {
+      // Best-effort cleanup so the map doesn't grow unboundedly; safe even
+      // if another caller has already queued behind us (they hold their own
+      // reference to the promise chain, not this map entry).
+      _initiateCallLocks.delete(key);
+    }
+  }
+}
+
 // Lazy-require helper — avoids circular dependency at startup
 let _wsService = null;
 function ws() {
@@ -28,6 +64,7 @@ function ws() {
     try { _wsService = require('./webSocketService'); } catch (_) {}
   }
   return _wsService;
+
 }
 
 // FIX-003: Emit ONE canonical colon-style event per participant.
@@ -131,6 +168,12 @@ class CallService {
     // Auto-cleanup stale calls for both parties first — runs before busy-check
     await this._forceCleanupStaleCallsForUsers([parseInt(callerId), parseInt(calleeId)]);
 
+    // FIX-DUPLICATE-CALL-RACE: the "is callee already busy" check and the
+    // Call.create() below must be atomic with respect to other concurrent
+    // initiateCall() calls for the same callee, or two near-simultaneous
+    // requests can both pass the check and both create a Call row. See
+    // _withCalleeLock definition near the top of this file for details.
+    const { activeCall, call } = await _withCalleeLock(calleeId, async () => {
     // Check callee not already in a GENUINE in-progress call
     // We only block if the call is actively in-progress AND recent (< CALL_TIMEOUT_SECONDS)
     const activeCall = await Call.findOne({
@@ -178,6 +221,9 @@ class CallService {
       readBy:       [],
       startedAt:    null,
       metadata:     { ringStartedAt: new Date().toISOString() },
+    });
+
+      return { activeCall, call };
     });
 
     // ✅ FIX: Emit call:incoming to callee NOW — this was completely missing and is why
@@ -601,6 +647,12 @@ class CallService {
 
     await this._forceCleanupStaleCallsForUsers(allIds);
 
+    // FIX-DUPLICATE-CALL-RACE: same class of bug as initiateCall() above.
+    // Locking on callerId (rather than all participants) covers the common
+    // case — a double-tap/double-submit of "start group call" by the same
+    // person — without the deadlock risk of acquiring a multi-key lock
+    // across an arbitrary, possibly-overlapping set of participant IDs.
+    const { active, call } = await _withCalleeLock(`group:${callerId}`, async () => {
     const active = await Call.findOne({
       where: {
         participants: { [Op.overlap]: allIds },
@@ -621,6 +673,9 @@ class CallService {
       readBy:       [],
       startedAt:    new Date(),
       metadata:     { ringStartedAt: new Date().toISOString() },
+    });
+
+      return { active, call };
     });
 
     return this._format(call);
