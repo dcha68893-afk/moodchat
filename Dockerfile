@@ -5,9 +5,9 @@ WORKDIR /usr/src/app
 COPY package*.json ./
 
 RUN if [ -f package-lock.json ]; then \
-      npm ci --only=production; \
+      npm ci --omit=dev; \
     else \
-      npm install --only=production; \
+      npm install --omit=dev; \
     fi
 
 # 🔥 COPY EVERYTHING (ROUTES INCLUDED)
