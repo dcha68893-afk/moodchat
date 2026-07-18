@@ -334,7 +334,7 @@ class GroupMembersService {
     async inviteToGroup(groupId, inviterId, inviteeId, role = 'member', message = '') {
         try {
             const group = await resolveGroup(groupId);
-            await requireMembership(groupId, inviterId, 'member'); // FIX: any member can invite friends, not just admins;
+            const inviterMembership = await requireMembership(groupId, inviterId, 'member'); // any member can invite friends, not just admins
 
             // ── Check if invitee is banned ─────────────────────────────────────
             const inviteeMember = await GroupMembers?.findOne({ where: { groupId, userId: inviteeId } });
@@ -394,7 +394,16 @@ class GroupMembersService {
                 }
             }
 
-            const mustSendInvite = requiresApproval || userBlocksDirectAdd || (inviteePrivacy === 'contacts' && !inviterIsContact);
+            const mustSendInvite = requiresApproval || userBlocksDirectAdd || (inviteePrivacy === 'contacts' && !inviterIsContact)
+                // FIX (invite bypassing accept/decline): an ordinary member
+                // inviting another member must ALWAYS go through the pending
+                // invite flow — only admins/moderators/owners get to add
+                // someone directly. Previously the only gate here was the
+                // invitee's whoCanAddMe privacy setting, which defaults to
+                // 'everyone' — meaning every regular member-to-member invite
+                // silently skipped straight to adding the person, with no
+                // chance for them to accept or decline.
+                || !['admin', 'moderator', 'owner'].includes(inviterMembership.role);
 
             if (!mustSendInvite) {
                 // ── DIRECT ADD ──────────────────────────────────────────────

@@ -494,9 +494,21 @@ class GroupService {
 
             const total      = await GroupMembers.count({ where: { userId, leftAt: null } });
             const totalPages = Math.ceil(total / limitNum);
+            // DIAGNOSTIC (groups tabs showing zero — couldn't reproduce this
+            // round to find a definitive cause; the query/association/format
+            // all look structurally correct from static tracing). Log the
+            // actual counts at each stage so if this recurs, the real
+            // failure point (query found nothing vs. formatting dropped
+            // rows vs. something else) is visible in server logs instead of
+            // needing another round of guessing.
+            if (memberships.length === 0) {
+                console.warn(`[GroupService] getUserGroups: userId=${userId} has 0 memberships with leftAt=null — either genuinely no groups, or leftAt is unexpectedly set on rows that should be active`);
+            } else if (groups.length !== memberships.length) {
+                console.warn(`[GroupService] getUserGroups: userId=${userId} had ${memberships.length} memberships but only ${groups.length} formatted groups — some had a null userGroup (association returned nothing for that groupId, possibly a deleted/orphaned Groups row)`);
+            }
             return { groups, pagination: { currentPage: pageNum, totalPages, totalGroups: total, hasNext: pageNum < totalPages, hasPrevious: pageNum > 1 } };
         } catch (e) {
-            console.error('[GroupService] ❌ getUserGroups failed:', e.message);
+            console.error('[GroupService] ❌ getUserGroups failed:', e.message, e.stack);
             return empty;
         }
     }
