@@ -1,6 +1,9 @@
 const path = require('path');
 const express = require('express');
 const router = express.Router();
+// Reuse the lastSeen privacy enforcement built in users.js (see that file
+// for _applyLastSeenPrivacy) instead of duplicating it here.
+const applyLastSeenPrivacy = require('./users').applyLastSeenPrivacy;
 
 // ── CRITICAL: Inject global.__socketIO into req.io so all handlers can emit ──
 router.use((req, _, next) => { if (!req.io) req.io = global.__socketIO || null; next(); });
@@ -170,9 +173,10 @@ router.get('/', apiRateLimiter, asyncHandler(async (req, res) => {
 
         const friends = await withTimeout(User.findAll({
             where: { id: { [Op.in]: friendIds } },
-            attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen'], limit: 500
+            attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'settings'], limit: 500
         }));
 
+        await applyLastSeenPrivacy(friends, userId);
         return res.json({ success: true, data: { friends: (friends || []).map(formatUser) } });
     } catch (e) {
         console.error('[Friends GET /]', e.message);
@@ -190,10 +194,13 @@ router.get('/list', apiRateLimiter, asyncHandler(async (req, res) => {
         const friendships = await withTimeout(Friend.findAll({
             where: { [Op.or]: [{ requesterId: userId, status: 'accepted' }, { receiverId: userId, status: 'accepted' }] },
             include: [
-                { model: User, as: 'friendRequesterUser', attributes: ['id','username','avatar','firstName','lastName','status','lastSeen'], required: false },
-                { model: User, as: 'friendReceiverUser',  attributes: ['id','username','avatar','firstName','lastName','status','lastSeen'], required: false }
+                { model: User, as: 'friendRequesterUser', attributes: ['id','username','avatar','firstName','lastName','status','lastSeen','settings'], required: false },
+                { model: User, as: 'friendReceiverUser',  attributes: ['id','username','avatar','firstName','lastName','status','lastSeen','settings'], required: false }
             ], limit: 200
         }));
+
+        const site2Users = (friendships || []).flatMap(f => [f.friendRequesterUser, f.friendReceiverUser]).filter(Boolean);
+        if (site2Users.length) await applyLastSeenPrivacy(site2Users, userId);
 
         const friends = (friendships || []).map(f => f.requesterId === userId ? formatUser(f.friendReceiverUser) : formatUser(f.friendRequesterUser)).filter(f => f && f.id);
         return res.json({ success: true, data: { friends } });
@@ -246,13 +253,15 @@ router.get('/users/all', apiRateLimiter, asyncHandler(async (req, res) => {
 
         const { count, rows: users } = await withTimeout(User.findAndCountAll({
             where: whereCondition,
-            attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen'],
+            attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'settings'],
             limit: limitNum, offset,
             order: [
                 [Sequelize.literal("CASE WHEN status IN ('online','away') THEN 0 ELSE 1 END"), 'ASC'],
                 ['username', 'ASC']
             ]
         }), 10000);
+
+        await applyLastSeenPrivacy(users, userId);
 
         // For each user, get their friendship status with the current user
         let friendshipMap = {};
@@ -375,13 +384,15 @@ router.get('/nearby', apiRateLimiter, asyncHandler(async (req, res) => {
                         { lastSeen: { [Op.gte]: new Date(Date.now() - 30 * 60 * 1000) } }
                     ]
                 },
-                attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen'],
+                attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'settings'],
                 limit: 50,
                 order: [
                     [Sequelize.literal("CASE WHEN status = 'online' THEN 0 ELSE 1 END"), 'ASC'],
                     ['lastSeen', 'DESC NULLS LAST']
                 ]
             }));
+
+            await applyLastSeenPrivacy(onlineUsers, userId);
             
             // Get friendship statuses for returned users
             let friendshipMap = {};
@@ -435,13 +446,15 @@ router.get('/nearby', apiRateLimiter, asyncHandler(async (req, res) => {
 
         const users = await withTimeout(User.findAll({
             where: whereClause,
-            attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen'],
+            attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'settings'],
             limit: 100,
             order: [
                 [Sequelize.literal("CASE WHEN status IN ('online','away') THEN 0 ELSE 1 END"), 'ASC'],
                 ['lastSeen', 'DESC NULLS LAST']
             ]
         }));
+
+        await applyLastSeenPrivacy(users, userId);
 
         // Get friendship statuses for returned users
         let friendshipMap = {};
@@ -509,10 +522,12 @@ router.get('/search', searchLimiter, asyncHandler(async (req, res) => {
                     Sequelize.where(Sequelize.fn('LOWER', Sequelize.col('lastName')),  { [Op.like]: s })
                 ]
             },
-            attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'bio'],
+            attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'bio', 'settings'],
             limit: Math.min(100, parseInt(req.query.limit) || 50),
             order: [['username', 'ASC']]
         }));
+
+        await applyLastSeenPrivacy(users, userId);
 
         // Attach friendship status
         let friendshipMap = {};
@@ -594,9 +609,11 @@ router.get('/search/new', searchLimiter, asyncHandler(async (req, res) => {
 
         const { count, rows: users } = await withTimeout(User.findAndCountAll({
             where,
-            attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'bio'],
+            attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'bio', 'settings'],
             order: [['username', 'ASC']], offset, limit: limitNum
         }));
+
+        await applyLastSeenPrivacy(users, userId);
 
         // Attach friendship status
         let fsMap = {};
@@ -648,13 +665,16 @@ router.get('/incoming', apiRateLimiter, asyncHandler(async (req, res) => {
                 { 
                     model: User, 
                     as: 'friendRequesterUser',
-                    attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen'],
+                    attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'settings'],
                     required: false 
                 }
             ],
             order: [['createdAt', 'DESC']], 
             limit: 200
         }));
+
+        const site8Users = (requests || []).map(r => r.friendRequesterUser).filter(Boolean);
+        if (site8Users.length) await applyLastSeenPrivacy(site8Users, userId);
 
         const formatted = (requests || []).map(r => ({
             id: r.id,
@@ -686,13 +706,16 @@ router.get('/sent', apiRateLimiter, asyncHandler(async (req, res) => {
                 { 
                     model: User, 
                     as: 'friendReceiverUser',
-                    attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen'],
+                    attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'settings'],
                     required: false 
                 }
             ],
             order: [['createdAt', 'DESC']], 
             limit: 200
         }));
+
+        const site9Users = (requests || []).map(r => r.friendReceiverUser).filter(Boolean);
+        if (site9Users.length) await applyLastSeenPrivacy(site9Users, userId);
 
         const formatted = (requests || []).map(r => ({
             id: r.id,
@@ -758,8 +781,10 @@ router.get('/accepted', apiRateLimiter, asyncHandler(async (req, res) => {
 
         const friends = await withTimeout(User.findAll({
             where: { id: { [Op.in]: friendIds } },
-            attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'bio'], limit: 200
+            attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'bio', 'settings'], limit: 200
         }));
+
+        await applyLastSeenPrivacy(friends, userId);
 
         const formattedFriends = (friends || []).map(formatUser);
         return res.json({ success: true, data: { friends: formattedFriends, total: formattedFriends.length } });
@@ -813,10 +838,13 @@ router.get('/pinned', apiRateLimiter, asyncHandler(async (req, res) => {
         const friendships = await withTimeout(Friend.findAll({
             where: { [Op.or]: [{ requesterId: userId, status: 'accepted' }, { receiverId: userId, status: 'accepted' }], isPinned: true },
             include: [
-                { model: User, as: 'friendRequesterUser', attributes: ['id','username','avatar','firstName','lastName','bio','status','lastSeen'], required: false },
-                { model: User, as: 'friendReceiverUser',  attributes: ['id','username','avatar','firstName','lastName','bio','status','lastSeen'], required: false }
+                { model: User, as: 'friendRequesterUser', attributes: ['id','username','avatar','firstName','lastName','bio','status','lastSeen','settings'], required: false },
+                { model: User, as: 'friendReceiverUser',  attributes: ['id','username','avatar','firstName','lastName','bio','status','lastSeen','settings'], required: false }
             ], limit: 100
         }));
+
+        const site11Users = (friendships || []).flatMap(f => [f.friendRequesterUser, f.friendReceiverUser]).filter(Boolean);
+        if (site11Users.length) await applyLastSeenPrivacy(site11Users, userId);
 
         const friends = (friendships || []).map(f => f.requesterId === userId ? formatUser(f.friendReceiverUser) : formatUser(f.friendRequesterUser)).filter(f => f && f.id);
         return res.json({ success: true, data: { friends } });
@@ -836,10 +864,13 @@ router.get('/muted', apiRateLimiter, asyncHandler(async (req, res) => {
         const friendships = await withTimeout(Friend.findAll({
             where: { [Op.or]: [{ requesterId: userId, status: 'accepted' }, { receiverId: userId, status: 'accepted' }], isMuted: true },
             include: [
-                { model: User, as: 'friendRequesterUser', attributes: ['id','username','avatar','firstName','lastName','bio','status','lastSeen'], required: false },
-                { model: User, as: 'friendReceiverUser',  attributes: ['id','username','avatar','firstName','lastName','bio','status','lastSeen'], required: false }
+                { model: User, as: 'friendRequesterUser', attributes: ['id','username','avatar','firstName','lastName','bio','status','lastSeen','settings'], required: false },
+                { model: User, as: 'friendReceiverUser',  attributes: ['id','username','avatar','firstName','lastName','bio','status','lastSeen','settings'], required: false }
             ], limit: 100
         }));
+
+        const site12Users = (friendships || []).flatMap(f => [f.friendRequesterUser, f.friendReceiverUser]).filter(Boolean);
+        if (site12Users.length) await applyLastSeenPrivacy(site12Users, userId);
 
         const friends = (friendships || []).map(f => f.requesterId === userId ? formatUser(f.friendReceiverUser) : formatUser(f.friendRequesterUser)).filter(f => f && f.id);
         return res.json({ success: true, data: { friends } });
@@ -859,10 +890,13 @@ router.get('/synced', apiRateLimiter, asyncHandler(async (req, res) => {
         const friendships = await withTimeout(Friend.findAll({
             where: { [Op.or]: [{ requesterId: userId, status: 'accepted' }, { receiverId: userId, status: 'accepted' }] },
             include: [
-                { model: User, as: 'friendRequesterUser', attributes: ['id','username','avatar','firstName','lastName','bio','status','lastSeen'], required: false },
-                { model: User, as: 'friendReceiverUser',  attributes: ['id','username','avatar','firstName','lastName','bio','status','lastSeen'], required: false }
+                { model: User, as: 'friendRequesterUser', attributes: ['id','username','avatar','firstName','lastName','bio','status','lastSeen','settings'], required: false },
+                { model: User, as: 'friendReceiverUser',  attributes: ['id','username','avatar','firstName','lastName','bio','status','lastSeen','settings'], required: false }
             ], limit: 200
         }));
+
+        const site13Users = (friendships || []).flatMap(f => [f.friendRequesterUser, f.friendReceiverUser]).filter(Boolean);
+        if (site13Users.length) await applyLastSeenPrivacy(site13Users, userId);
 
         const contacts = (friendships || []).map(f => f.requesterId === userId ? formatUser(f.friendReceiverUser) : formatUser(f.friendRequesterUser)).filter(f => f && f.id);
         return res.json({ success: true, data: { synced: true, contacts } });
@@ -882,10 +916,13 @@ router.get('/contacts/synced', apiRateLimiter, asyncHandler(async (req, res) => 
         const friendships = await withTimeout(Friend.findAll({
             where: { [Op.or]: [{ requesterId: userId, status: 'accepted' }, { receiverId: userId, status: 'accepted' }] },
             include: [
-                { model: User, as: 'friendRequesterUser', attributes: ['id','username','avatar','firstName','lastName','bio','status','lastSeen'], required: false },
-                { model: User, as: 'friendReceiverUser',  attributes: ['id','username','avatar','firstName','lastName','bio','status','lastSeen'], required: false }
+                { model: User, as: 'friendRequesterUser', attributes: ['id','username','avatar','firstName','lastName','bio','status','lastSeen','settings'], required: false },
+                { model: User, as: 'friendReceiverUser',  attributes: ['id','username','avatar','firstName','lastName','bio','status','lastSeen','settings'], required: false }
             ], limit: 200
         }));
+
+        const site14Users = (friendships || []).flatMap(f => [f.friendRequesterUser, f.friendReceiverUser]).filter(Boolean);
+        if (site14Users.length) await applyLastSeenPrivacy(site14Users, userId);
 
         const contacts = (friendships || []).map(f => f.requesterId === userId ? formatUser(f.friendReceiverUser) : formatUser(f.friendRequesterUser)).filter(f => f && f.id);
         return res.json({ success: true, data: { synced: true, contacts } });
@@ -1088,10 +1125,13 @@ router.get('/contacts', apiRateLimiter, asyncHandler(async (req, res) => {
         const friendships = await withTimeout(Friend.findAll({
             where: { [Op.or]: [{ requesterId: userId, status: 'accepted' }, { receiverId: userId, status: 'accepted' }] },
             include: [
-                { model: User, as: 'friendRequesterUser', attributes: ['id','username','avatar','firstName','lastName','status','lastSeen'], required: false },
-                { model: User, as: 'friendReceiverUser',  attributes: ['id','username','avatar','firstName','lastName','status','lastSeen'], required: false }
+                { model: User, as: 'friendRequesterUser', attributes: ['id','username','avatar','firstName','lastName','status','lastSeen','settings'], required: false },
+                { model: User, as: 'friendReceiverUser',  attributes: ['id','username','avatar','firstName','lastName','status','lastSeen','settings'], required: false }
             ], limit: 200
         }));
+
+        const site15Users = (friendships || []).flatMap(f => [f.friendRequesterUser, f.friendReceiverUser]).filter(Boolean);
+        if (site15Users.length) await applyLastSeenPrivacy(site15Users, userId);
 
         const contacts = (friendships || []).map(f => f.requesterId === userId ? formatUser(f.friendReceiverUser) : formatUser(f.friendRequesterUser)).filter(f => f && f.id);
         return res.json({ success: true, data: { contacts } });
@@ -1124,10 +1164,13 @@ router.get('/export', apiRateLimiter, asyncHandler(async (req, res) => {
                 const friendships = await withTimeout(Friend.findAll({
                     where: { [Op.or]: [{ requesterId: userId, status: 'accepted' }, { receiverId: userId, status: 'accepted' }] },
                     include: [
-                        { model: User, as: 'friendRequesterUser', attributes: ['id','username','firstName','lastName','avatar','status','lastSeen','bio'], required: false },
-                        { model: User, as: 'friendReceiverUser',  attributes: ['id','username','firstName','lastName','avatar','status','lastSeen','bio'], required: false }
+                        { model: User, as: 'friendRequesterUser', attributes: ['id','username','firstName','lastName','avatar','status','lastSeen','bio','settings'], required: false },
+                        { model: User, as: 'friendReceiverUser',  attributes: ['id','username','firstName','lastName','avatar','status','lastSeen','bio','settings'], required: false }
                     ], limit: 1000
                 }));
+
+                const site16Users = friendships.flatMap(f => [f.friendRequesterUser, f.friendReceiverUser]).filter(Boolean);
+                if (site16Users.length) await applyLastSeenPrivacy(site16Users, userId);
 
                 friendsData = friendships.map(f => {
                     const friend = f.requesterId === userId ? f.friendReceiverUser : f.friendRequesterUser;
@@ -1193,8 +1236,10 @@ router.get('/user/:userId', apiRateLimiter, asyncHandler(async (req, res) => {
         const targetId = parseId(req.params.userId);
         if (targetId === null) return res.status(400).json({ success: false, message: 'Invalid user ID' });
 
-        const targetUser = await withTimeout(User.findByPk(targetId, { attributes: ['id','username','avatar','firstName','lastName','status','lastSeen'] }));
+        const targetUser = await withTimeout(User.findByPk(targetId, { attributes: ['id','username','avatar','firstName','lastName','status','lastSeen','settings'] }));
         if (!targetUser) return res.status(404).json({ success: false, message: 'User not found' });
+
+        await applyLastSeenPrivacy(targetUser, requesterId);
 
         let friendshipStatus = null;
         if (Friend) {
@@ -1413,9 +1458,11 @@ router.post('/requests/:requestId/accept', apiRateLimiter, asyncHandler(async (r
             try {
                 if (User) {
                     const [accepterUser, senderUser] = await Promise.all([
-                        User.findByPk(userId,                  { attributes: ['id','username','avatar','firstName','lastName','status','lastSeen'] }),
-                        User.findByPk(friendRequest.requesterId, { attributes: ['id','username','avatar','firstName','lastName','status','lastSeen'] }),
+                        User.findByPk(userId,                  { attributes: ['id','username','avatar','firstName','lastName','status','lastSeen','settings'] }),
+                        User.findByPk(friendRequest.requesterId, { attributes: ['id','username','avatar','firstName','lastName','status','lastSeen','settings'] }),
                     ]);
+                    if (accepterUser) await applyLastSeenPrivacy(accepterUser, friendRequest.requesterId);
+                    if (senderUser) await applyLastSeenPrivacy(senderUser, userId);
                     if (accepterUser) {
                         const u = accepterUser.toJSON ? accepterUser.toJSON() : accepterUser;
                         accepterProfile = { id: u.id, username: u.username||'', displayName: ([u.firstName,u.lastName].filter(Boolean).join(' ').trim())||u.username||'', avatar: u.avatar||null, status: u.status||'offline', lastSeen: u.lastSeen||null };
@@ -1462,8 +1509,9 @@ router.post('/requests/:requestId/accept', apiRateLimiter, asyncHandler(async (r
         try {
             if (User) {
                 const _su = await User.findByPk(_fr2.requesterId, {
-                    attributes: ['id','username','avatar','firstName','lastName','status','lastSeen']
+                    attributes: ['id','username','avatar','firstName','lastName','status','lastSeen','settings']
                 });
+                if (_su) await applyLastSeenPrivacy(_su, userId);
                 if (_su) {
                     const u = _su.toJSON ? _su.toJSON() : _su;
                     senderProfile = {
@@ -2277,8 +2325,10 @@ router.get('/:friendId', apiRateLimiter, asyncHandler(async (req, res) => {
         const targetId = parseId(friendId);
         if (targetId === null) return res.status(400).json({ success: false, message: 'Invalid friend ID' });
 
-        const friend = await withTimeout(User.findByPk(targetId, { attributes: ['id','username','avatar','firstName','lastName','bio','status','lastSeen'] }));
+        const friend = await withTimeout(User.findByPk(targetId, { attributes: ['id','username','avatar','firstName','lastName','bio','status','lastSeen','settings'] }));
         if (!friend) return res.status(404).json({ success: false, message: 'User not found' });
+
+        await applyLastSeenPrivacy(friend, userId);
 
         let isFriend = false, friendship = null;
         if (Friend) {

@@ -10,6 +10,9 @@ router.use((req, _, next) => { if (!req.io) req.io = global.__socketIO || null; 
 
 // These will now work correctly with the new getters
 const User = db.User;
+// Reuse the lastSeen privacy enforcement built in users.js instead of
+// duplicating it — see that file for _applyLastSeenPrivacy.
+const applyLastSeenPrivacy = require('./users').applyLastSeenPrivacy;
 const Chat = db.Chat;
 const Message = db.Message;
 const ChatParticipant = db.ChatParticipant;
@@ -164,12 +167,23 @@ router.get(
                     include: [{
                         model: User,
                         as: 'chatParticipantUser',
-                        attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'email']
+                        attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'email', 'settings']
                     }]
                 });
-                
+
+                // FIX: lastSeen privacy was never checked here — enforce it
+                // before it reaches otherParticipant below.
+                const participantUsers = participants.map(p => p.chatParticipantUser).filter(Boolean);
+                if (participantUsers.length > 0) {
+                    await applyLastSeenPrivacy(participantUsers, userId);
+                }
+
                 // FIXED: Use the correct alias 'chatParticipantUser'
-                chatObj.participants = participants.map(p => p.chatParticipantUser).filter(p => p !== null);
+                chatObj.participants = participantUsers.map(p => {
+                    const j = p.toJSON ? p.toJSON() : p;
+                    delete j.settings;
+                    return j;
+                });
                 
                 // Calculate unread count for this user
                 const unreadCount = await Message.count({
@@ -302,12 +316,22 @@ router.get(
                 include: [{
                     model: User,
                     as: 'chatParticipantUser',
-                    attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'email']
+                    attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'email', 'settings']
                 }]
             });
-            
+
+            // FIX: enforce lastSeen privacy before it reaches otherParticipant below.
+            const participantUsers2 = participants.map(p => p.chatParticipantUser).filter(Boolean);
+            if (participantUsers2.length > 0) {
+                await applyLastSeenPrivacy(participantUsers2, userId);
+            }
+
             // FIXED: Use the correct alias 'chatParticipantUser'
-            chatObj.participants = participants.map(p => p.chatParticipantUser).filter(p => p !== null);
+            chatObj.participants = participantUsers2.map(p => {
+                const j = p.toJSON ? p.toJSON() : p;
+                delete j.settings;
+                return j;
+            });
             
             // Calculate unread count
             const unreadCount = await Message.count({
@@ -397,7 +421,7 @@ router.post(
             
             // Verify other user exists
             const otherUser = await User.findByPk(otherUserId, {
-                attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'socketIds']
+                attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'socketIds', 'settings']
             });
             
             if (!otherUser) {
@@ -406,6 +430,10 @@ router.post(
                     message: 'User not found'
                 });
             }
+
+            // FIX: enforce lastSeen privacy — otherUser.lastSeen is read below
+            // in two places without ever checking this user's privacy setting.
+            await applyLastSeenPrivacy(otherUser, userId);
             
             // Check if direct chat already exists
             const existingParticipant1 = await ChatParticipant.findAll({

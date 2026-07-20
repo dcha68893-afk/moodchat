@@ -28,41 +28,52 @@ router.put('/last-seen', authenticate, apiRateLimiter, asyncHandler(async (req, 
   if (!VALID.includes(visibility)) {
     return res.status(400).json({ status: 'error', message: `visibility must be one of: ${VALID.join(', ')}` });
   }
-  const User = require('../models/User');
+  // FIX: was require('../models/User') — that file does not exist anywhere
+  // in the repo (the real model is models/Users.js, loaded via models/index.js),
+  // so this always threw. Also now writes to settings.privacy.lastSeen (the
+  // same field the main Settings page uses and that users.js's privacy
+  // filter reads) instead of a separate lastSeenVisibility column, so the
+  // two systems can't silently disagree about a user's own setting.
+  const { User } = require('../models');
   try {
-    await User.update({ lastSeenVisibility: visibility }, { where: { id: req.user.id } });
-  } catch (_) {
-    // Column may not exist — safe to ignore, setting is also stored in localStorage
-    console.warn('[privacy] lastSeenVisibility column missing — run migration');
+    const user = await User.findByPk(req.user.id);
+    if (user) {
+      const settings = user.settings || {};
+      settings.privacy = { ...(settings.privacy || {}), lastSeen: visibility };
+      await user.update({ settings });
+    }
+  } catch (err) {
+    console.warn('[privacy] Failed to save last-seen visibility:', err.message);
   }
   res.json({ status: 'success', data: { visibility } });
 }));
 
 // GET /api/privacy/last-seen/:userId — respects that user's visibility setting
 router.get('/last-seen/:userId', authenticate, apiRateLimiter, asyncHandler(async (req, res) => {
-  const User = require('../models/User');
+  // FIX: same broken imports as above (User, Friendship modules don't exist),
+  // plus reads from the same settings.privacy.lastSeen field the rest of the
+  // app now uses (see users.js's _applyLastSeenPrivacy).
+  const { User, Friend } = require('../models');
   const target = await User.findByPk(req.params.userId, {
-    attributes: ['id', 'lastSeen', 'lastSeenVisibility', 'isOnline'],
+    attributes: ['id', 'lastSeen', 'status', 'settings'],
   });
   if (!target) return res.status(404).json({ status: 'error', message: 'User not found' });
 
-  const vis = target.lastSeenVisibility || 'everyone';
+  const vis = target.settings?.privacy?.lastSeen || 'everyone';
   if (vis === 'nobody') {
     return res.json({ status: 'success', data: { visible: false } });
   }
   if (vis === 'contacts') {
-    // Check if requester is a contact
-    const Friendship = require('../models/Friendship');
-    const areFriends = await Friendship.findOne({
+    const isFriend = await Friend.findOne({
       where: {
         status: 'accepted',
         [Op.or]: [
-          { senderId: req.user.id, receiverId: target.id },
-          { senderId: target.id,   receiverId: req.user.id },
+          { requester_id: req.user.id, receiver_id: target.id },
+          { requester_id: target.id, receiver_id: req.user.id },
         ],
       },
     });
-    if (!areFriends) return res.json({ status: 'success', data: { visible: false } });
+    if (!isFriend) return res.json({ status: 'success', data: { visible: false } });
   }
 
   res.json({
@@ -70,7 +81,7 @@ router.get('/last-seen/:userId', authenticate, apiRateLimiter, asyncHandler(asyn
     data: {
       visible:  true,
       lastSeen: target.lastSeen,
-      isOnline: target.isOnline || false,
+      isOnline: target.status === 'online',
     },
   });
 }));

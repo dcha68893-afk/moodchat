@@ -176,6 +176,8 @@ if (ctrl) {
     router.get('/sellers/:id',                       safe(ctrl.getSellerProfile?.bind(ctrl)));
     router.get('/sellers/:id/dashboard',             safe(ctrl.getSellerDashboard?.bind(ctrl)));
     router.get('/sellers/:id/earnings',              safe(ctrl.getSellerEarnings?.bind(ctrl)));
+    router.post('/sellers/:id/follow',               safe(ctrl.toggleFollowSeller?.bind(ctrl)));
+    router.get('/me/following',                      safe(ctrl.getFollowedSellers?.bind(ctrl)));
 
     // ════════════════════════════════════════════════════════════════════════
     // ADMIN ROUTES — adminOnly enforced at router level

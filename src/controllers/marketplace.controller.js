@@ -317,6 +317,8 @@ class MarketplaceController {
                 { id:'electronics', name:'Electronics',     icon:'📱', color:'#2196F3' },
                 { id:'fashion',     name:'Fashion',         icon:'👗', color:'#E91E63' },
                 { id:'home',        name:'Home & Garden',   icon:'🏠', color:'#4CAF50' },
+                { id:'furniture',   name:'Furniture & Home',icon:'🛋️', color:'#8D6E63' },
+                { id:'construction',name:'Building & Construction', icon:'🧱', color:'#78909C' },
                 { id:'beauty',      name:'Beauty',          icon:'💄', color:'#FF4081' },
                 { id:'sports',      name:'Sports',          icon:'⚽', color:'#FF9800' },
                 { id:'books',       name:'Books',           icon:'📚', color:'#795548' },
@@ -2305,7 +2307,7 @@ class MarketplaceExtensions {
             const db = getDb();
             const Users = db.Users || db.User;
             const user = Users ? await Users.findByPk(userId, { attributes: ['id','loyaltyPoints','metadata'] }) : null;
-            const points = user?.loyaltyPoints || user?.metadata?.loyalty_points || 0;
+            const points = user?.loyaltyPoints || user?.settings?.loyalty_points || 0;
 
             // AUDIT FIX: history was hardcoded to always return []. Pull real
             // redemption events now that redeemLoyalty actually logs them.
@@ -2344,7 +2346,7 @@ class MarketplaceExtensions {
 
             const user = await Users.findByPk(userId);
             if (!user) return next(new AppError('User not found', 404));
-            const balance = user.loyaltyPoints || user.metadata?.loyalty_points || 0;
+            const balance = user.loyaltyPoints || user.settings?.loyalty_points || 0;
             if (requested > balance) return next(new AppError(`Insufficient points — you have ${balance}`, 400));
 
             const discount = Math.floor(requested / 100); // 100 points = KES 1
@@ -2416,7 +2418,7 @@ class MarketplaceExtensions {
             const db = getDb();
             const Users = db.Users || db.User;
             const user = Users ? await Users.findByPk(userId, { attributes: ['id','metadata'] }) : null;
-            const addresses = user?.metadata?.addresses || [];
+            const addresses = user?.settings?.addresses || [];
             return ok(res, { addresses });
         } catch(e) { err(next, e, 'getAddresses'); }
     }
@@ -2428,10 +2430,10 @@ class MarketplaceExtensions {
             const Users = db.Users || db.User;
             const user = Users ? await Users.findByPk(userId) : null;
             if (!user) return next(new AppError('User not found', 404));
-            const addresses = user.metadata?.addresses || [];
+            const addresses = user.settings?.addresses || [];
             const addr = { id: Date.now(), ...req.body, created_at: new Date() };
             addresses.unshift(addr);
-            await user.update({ metadata: { ...(user.metadata || {}), addresses: addresses.slice(0,5) } });
+            await user.update({ settings: { ...(user.settings || {}), addresses: addresses.slice(0,5) } });
             return ok(res, { address: addr }, 'Address saved', 201);
         } catch(e) { err(next, e, 'saveAddress'); }
     }
@@ -2445,8 +2447,8 @@ class MarketplaceExtensions {
             const Users = db.Users || db.User;
             const user = Users ? await Users.findByPk(userId) : null;
             if (!user) return next(new AppError('User not found', 404));
-            const addresses = (user.metadata?.addresses || []).filter(a => String(a.id) !== String(req.params.id));
-            await user.update({ metadata: { ...(user.metadata || {}), addresses } });
+            const addresses = (user.settings?.addresses || []).filter(a => String(a.id) !== String(req.params.id));
+            await user.update({ settings: { ...(user.settings || {}), addresses } });
             return ok(res, { addresses }, 'Address deleted');
         } catch(e) { err(next, e, 'deleteAddress'); }
     }
@@ -2458,12 +2460,74 @@ class MarketplaceExtensions {
             const Users = db.Users || db.User;
             const user = Users ? await Users.findByPk(userId) : null;
             if (!user) return next(new AppError('User not found', 404));
-            const addresses = (user.metadata?.addresses || []).map(a => ({
+            const addresses = (user.settings?.addresses || []).map(a => ({
                 ...a, is_default: String(a.id) === String(req.params.id),
             }));
-            await user.update({ metadata: { ...(user.metadata || {}), addresses } });
+            await user.update({ settings: { ...(user.settings || {}), addresses } });
             return ok(res, { addresses }, 'Default address updated');
         } catch(e) { err(next, e, 'setDefaultAddress'); }
+    }
+
+    // AUDIT FIX: "Follow Seller" was entirely client-only (a CSS class toggle
+    // that reset on refresh) with Math.random()-generated fake follower
+    // counts. Real, persisted follow relationship using the same
+    // Users.metadata JSON pattern as addresses/loyalty — no schema
+    // migration needed.
+    static async toggleFollowSeller(req, res, next) {
+        try {
+            const userId = req.user?.id;
+            const sellerId = req.params.id;
+            if (!userId) return next(new AppError('Authentication required', 401));
+            const db = getDb();
+            const Users = db.Users || db.User;
+            if (!Users) return next(new AppError('User service unavailable', 503));
+
+            const buyer = await Users.findByPk(userId);
+            if (!buyer) return next(new AppError('User not found', 404));
+            const following = new Set(buyer.settings?.following || []);
+            const nowFollowing = !following.has(String(sellerId));
+            if (nowFollowing) following.add(String(sellerId)); else following.delete(String(sellerId));
+            await buyer.update({ settings: { ...(buyer.settings||{}), following: Array.from(following) } });
+
+            // Real follower count: how many users have this seller in their
+            // following list. Fine at this app's scale; would need a proper
+            // join table if follower counts became a hot path at large scale.
+            let followerCount = null;
+            try {
+                const seq = getSequelize();
+                if (seq) {
+                    const [rows] = await seq.query(
+                        `SELECT COUNT(*)::int AS count FROM "Users" WHERE settings->'following' @> :val::jsonb`,
+                        { replacements: { val: JSON.stringify([String(sellerId)]) } }
+                    );
+                    followerCount = rows?.[0]?.count ?? null;
+                }
+            } catch(_) { /* non-fatal — follow persisted either way */ }
+
+            return ok(res, { following: nowFollowing, follower_count: followerCount }, nowFollowing ? 'Now following seller' : 'Unfollowed seller');
+        } catch(e) { err(next, e, 'toggleFollowSeller'); }
+    }
+
+    static async getFollowedSellers(req, res, next) {
+        try {
+            const userId = req.user?.id;
+            if (!userId) return next(new AppError('Authentication required', 401));
+            const db = getDb();
+            const Users = db.Users || db.User;
+            const SellerProfile = db.SellerProfile;
+            const buyer = Users ? await Users.findByPk(userId) : null;
+            const followingIds = buyer?.settings?.following || [];
+            if (!followingIds.length) return ok(res, { sellers: [] });
+
+            const profiles = SellerProfile ? await SellerProfile.findAll({ where: { userId: { [Op.in]: followingIds } } }) : [];
+            const sellerUsers = await Users.findAll({ where: { id: { [Op.in]: followingIds } }, attributes: ['id','displayName','username','avatar'] });
+            const sellers = followingIds.map(id => {
+                const u = sellerUsers.find(s => String(s.id) === String(id));
+                const p = profiles.find(pr => String(pr.userId) === String(id));
+                return u ? { id: u.id, name: u.displayName || u.username || 'Seller', avatar: u.avatar || '', trust_score: p?.trustScore || null } : null;
+            }).filter(Boolean);
+            return ok(res, { sellers });
+        } catch(e) { err(next, e, 'getFollowedSellers'); }
     }
 
     // ── Support ticket ────────────────────────────────────────────────────────
@@ -2724,7 +2788,7 @@ class MarketplaceExtensions {
             const db = getDb();
             const Users = db.Users || db.User;
             const user = Users ? await Users.findByPk(req.user?.id, { attributes: ['id','metadata'] }) : null;
-            const plan = user?.metadata?.plan || 'free';
+            const plan = user?.settings?.plan || 'free';
             return ok(res, {
                 plan, active: true,
                 features: plan === 'pro'

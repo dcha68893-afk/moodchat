@@ -49,6 +49,46 @@ const ensureModels = (req, res, next) => {
 
 router.use(ensureModels);
 
+// FIX: previously no route in this file checked a user's privacy.lastSeen
+// setting before returning their lastSeen timestamp — every endpoint below
+// leaked it unconditionally regardless of what the target user configured
+// in Settings > Privacy > Last Seen ('everyone' / 'contacts' / 'nobody').
+// This helper enforces it; call it on any user object/array before sending
+// a response that includes `lastSeen`.
+async function _applyLastSeenPrivacy(userOrUsers, viewerId) {
+  const { areFriends } = require('../services/friendService');
+  const list = Array.isArray(userOrUsers) ? userOrUsers : [userOrUsers];
+
+  await Promise.all(list.map(async (u) => {
+    if (!u) return;
+    const plain = typeof u.get === 'function' ? u.get({ plain: true }) : u;
+    if (String(plain.id) === String(viewerId)) return; // always visible to self
+
+    const visibility = plain.settings?.privacy?.lastSeen; // 'everyone' | 'contacts' | 'nobody' | undefined
+    let visible = true;
+    if (visibility === 'nobody') {
+      visible = false;
+    } else if (visibility === 'contacts') {
+      try {
+        visible = await areFriends(plain.id, viewerId);
+      } catch (_) {
+        visible = false;
+      }
+    }
+    // visibility === 'everyone' or unset (default) stays visible
+
+    if (!visible) {
+      if (typeof u.setDataValue === 'function') {
+        u.setDataValue('lastSeen', null);
+      } else {
+        u.lastSeen = null;
+      }
+    }
+  }));
+
+  return userOrUsers;
+}
+
 console.log('✅ Users routes initialized');
 
 // ===== GET ALL USERS =====
@@ -313,7 +353,7 @@ router.get(
 
       const { count, rows: users } = await User.findAndCountAll({
         where: whereCondition,
-        attributes: ['id', 'username', 'displayName', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'bio'],
+        attributes: ['id', 'username', 'displayName', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'bio', 'settings'],
         offset,
         limit: parseInt(limit),
         order: [
@@ -323,9 +363,19 @@ router.get(
         ]
       });
 
+      await _applyLastSeenPrivacy(users, req.user.id);
+      // 'settings' was only added to the query to check lastSeen privacy above —
+      // strip it before it reaches the response so we don't leak a user's full
+      // settings blob to anyone who searches for them.
+      const usersPlain = users.map(u => {
+        const j = u.toJSON ? u.toJSON() : { ...u };
+        delete j.settings;
+        return j;
+      });
+
       // Add friendship status for each user
-      let usersWithFriendship = users;
-      if (Friend && users.length > 0) {
+      let usersWithFriendship = usersPlain;
+      if (Friend && usersPlain.length > 0) {
         try {
           const friendships = await Friend.findAll({
             where: {
@@ -342,9 +392,8 @@ router.get(
             else if (f.receiver_id === req.user.id) friendIds.add(f.requester_id);
           });
 
-          usersWithFriendship = users.map(user => {
-            const userJson = user.toJSON ? user.toJSON() : user;
-            userJson.friendshipStatus = friendIds.has(user.id) ? 'friends' : 'none';
+          usersWithFriendship = usersPlain.map(userJson => {
+            userJson.friendshipStatus = friendIds.has(userJson.id) ? 'friends' : 'none';
             return userJson;
           });
         } catch (dbError) {
@@ -415,6 +464,8 @@ router.get(
         });
       }
 
+      await _applyLastSeenPrivacy(user, req.user.id);
+
       let friendshipStatus = 'none';
       if (req.user && user.id !== req.user.id && Friend) {
         try {
@@ -435,6 +486,11 @@ router.get(
 
       const userResponse = user.toJSON ? user.toJSON() : user;
       userResponse.friendshipStatus = friendshipStatus;
+      // 'settings' is included by default here (attributes uses an exclude
+      // list) and was only needed above to check the lastSeen privacy value —
+      // strip it so a user's full settings blob doesn't leak to anyone
+      // viewing their profile.
+      delete userResponse.settings;
 
       return res.status(200).json({
         status: 'success',
@@ -474,16 +530,23 @@ router.get(
 
       const { count, rows: users } = await User.findAndCountAll({
         where: whereCondition,
-        attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'bio'],
+        attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'bio', 'settings'],
         offset,
         limit: parseInt(limit),
         order: [['username', 'ASC']]
       });
 
+      await _applyLastSeenPrivacy(users, req.user.id);
+      const usersPlain = users.map(u => {
+        const j = u.toJSON ? u.toJSON() : { ...u };
+        delete j.settings;
+        return j;
+      });
+
       return res.status(200).json({
         status: 'success',
         data: {
-          users: users || [],
+          users: usersPlain,
           pagination: {
             total: count || 0,
             page: parseInt(page),
@@ -529,20 +592,27 @@ router.get(
             {
               model: User,
               as: 'requester',
-              attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'bio', 'status', 'lastSeen']
+              attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'bio', 'status', 'lastSeen', 'settings']
             },
             {
               model: User,
               as: 'receiver',
-              attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'bio', 'status', 'lastSeen']
+              attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'bio', 'status', 'lastSeen', 'settings']
             }
           ]
         });
 
-        const friends = friendships.map(f => {
+        const friendUsers = friendships.map(f => {
           if (f.requester_id === userId) return f.receiver;
           return f.requester;
         }).filter(f => f);
+
+        await _applyLastSeenPrivacy(friendUsers, userId);
+        const friends = friendUsers.map(f => {
+          const j = f.toJSON ? f.toJSON() : f;
+          delete j.settings;
+          return j;
+        });
 
         return res.status(200).json({
           status: 'success',
@@ -1071,5 +1141,9 @@ router.delete(
     }
   })
 );
+
+// Exposed so other route files (chats.js, friends.js, status.js) that also
+// return other users' lastSeen can reuse this instead of duplicating it.
+router.applyLastSeenPrivacy = _applyLastSeenPrivacy;
 
 module.exports = router;

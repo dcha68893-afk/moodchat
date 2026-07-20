@@ -591,7 +591,14 @@ const updateProfileHandler = asyncHandler(async (req, res) => {
     const { displayName, username, bio, theme, language, firstName, lastName } = req.body || {};
     const updateData = {};
 
-    if (displayName !== undefined) updateData.username = displayName;
+    // FIX: displayName was previously written into updateData.username, silently
+    // overwriting the user's login username whenever they edited the separate
+    // "Display Name" field in the UI. There is no real displayName column on
+    // Users (it's a virtual `${firstName} ${lastName}`.trim() || username) —
+    // map it to firstName instead, which actually feeds that computed value,
+    // and leave username alone unless the user explicitly changes the
+    // Username field.
+    if (displayName !== undefined && firstName === undefined) updateData.firstName = displayName;
     if (username !== undefined) updateData.username = username;
     if (bio !== undefined) updateData.bio = bio;
     if (theme !== undefined) updateData.theme = _ensureTheme(theme);
@@ -599,14 +606,50 @@ const updateProfileHandler = asyncHandler(async (req, res) => {
     if (firstName !== undefined) updateData.firstName = firstName;
     if (lastName !== undefined) updateData.lastName = lastName;
 
+    const { photoUrl } = req.body || {};
+
     if (req.file) {
         try {
-            const { uploadToCloudinary } = require('../utils/fileUpload');
-            const uploadResult = await uploadToCloudinary(req.file.buffer, 'avatars');
-            updateData.avatar = uploadResult.secure_url;
+            // FIX: was importing 'uploadToCloudinary' from '../utils/fileUpload',
+            // which exports a multer instance, not this function — the
+            // destructure silently produced undefined, the call threw, and the
+            // catch below swallowed it, so avatar upload never worked even
+            // when a real multipart file arrived. The real implementation is
+            // uploadUserAvatar() in services/cloudinaryService.js, whose
+            // result shape is { url, publicId, ... }, not { secure_url }.
+            const { uploadUserAvatar } = require('../services/cloudinaryService');
+            const uploadResult = await uploadUserAvatar(req.file.buffer, userId);
+            if (uploadResult && uploadResult.url) {
+                updateData.avatar = uploadResult.url;
+            }
         } catch (uploadError) {
             console.error('Error uploading avatar:', uploadError);
         }
+    } else if (typeof photoUrl === 'string' && photoUrl.startsWith('data:image/')) {
+        // Settings is loaded in an iframe that relays every request through
+        // the parent window as JSON (see app.realtime.socket.js / chat.html's
+        // API_REQUEST handler) — there's no multipart upload path from there,
+        // so the frontend sends the photo as a base64 data URL instead.
+        // Decode it here and route it through the same Cloudinary upload.
+        try {
+            const { uploadUserAvatar } = require('../services/cloudinaryService');
+            const matches = photoUrl.match(/^data:image\/(\w+);base64,(.+)$/);
+            if (matches) {
+                const buffer = Buffer.from(matches[2], 'base64');
+                if (buffer.length > 10 * 1024 * 1024) {
+                    return res.status(413).json({ status: 'error', message: 'Photo too large (max 10MB)' });
+                }
+                const uploadResult = await uploadUserAvatar(buffer, userId);
+                if (uploadResult && uploadResult.url) {
+                    updateData.avatar = uploadResult.url;
+                }
+            }
+        } catch (uploadError) {
+            console.error('Error uploading avatar from data URL:', uploadError);
+        }
+    } else if (photoUrl === '') {
+        // Explicit removal (removePhoto() sends photoUrl: '')
+        updateData.avatar = '';
     }
 
     if (Object.keys(updateData).length > 0) {

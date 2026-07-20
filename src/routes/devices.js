@@ -134,6 +134,53 @@ router.post('/heartbeat', asyncHandler(async (req, res) => {
   res.json({ status: 'success' });
 }));
 
+// DELETE /api/devices/revoke-all — sign out every other device
+// IMPORTANT: must be registered BEFORE DELETE /:deviceId below, otherwise
+// Express matches this path as deviceId="revoke-all" and 404s/no-ops instead
+// of actually revoking anything. The frontend (linked-sessions-and-pin.js)
+// calls this exact path; previously only settings.js exposed the equivalent
+// logic at /api/settings/devices/revoke-all, which nothing ever called.
+router.delete('/revoke-all', asyncHandler(async (req, res) => {
+  const userId    = req.user.id;
+  const sequelize = getSequelize();
+
+  await sequelize.query(
+    `UPDATE linked_devices SET "isActive"=false, "updatedAt"=NOW() WHERE "userId"=:userId`,
+    { replacements: { userId } }
+  );
+  try {
+    await sequelize.query(
+      `UPDATE refresh_tokens SET revoked=true,"revokedAt"=NOW() WHERE "userId"=:userId`,
+      { replacements: { userId } }
+    );
+  } catch (_) {}
+
+  res.json({ status: 'success', message: 'All other sessions terminated' });
+}));
+
+// PATCH /api/devices/:deviceId — rename a linked device
+// Added: mission Step 7 requires device rename; no route for it existed
+// anywhere in the backend (settings.js's /devices/revoke-all is the only
+// other devices-adjacent route, and it doesn't do renames either).
+router.patch('/:deviceId', asyncHandler(async (req, res) => {
+  const userId   = req.user.id;
+  const { deviceId } = req.params;
+  const { deviceName } = req.body;
+
+  if (!deviceName || !deviceName.trim()) {
+    return res.status(400).json({ status: 'error', message: 'deviceName required' });
+  }
+
+  const sequelize = getSequelize();
+  const [, affected] = await sequelize.query(
+    `UPDATE linked_devices SET "deviceName"=:deviceName, "updatedAt"=NOW()
+     WHERE "userId"=:userId AND "deviceId"=:deviceId`,
+    { replacements: { userId, deviceId, deviceName: deviceName.trim() } }
+  );
+
+  res.json({ status: 'success', message: 'Device renamed', data: { deviceId, deviceName: deviceName.trim() } });
+}));
+
 // DELETE /api/devices/:deviceId — revoke device
 router.delete('/:deviceId', asyncHandler(async (req, res) => {
   const userId   = req.user.id;
