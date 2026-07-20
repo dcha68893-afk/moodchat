@@ -28,21 +28,15 @@ if (ctrl) {
     // M-Pesa callback from Safaricom — no auth needed
     router.post('/mpesa/callback',    ctrl.mpesaCallback.bind(ctrl));
 
-    // Card payment
-    router.post('/card', async (req, res) => {
-        // Placeholder — real card integration goes here
-        res.json({ success: true, message: 'Card payment initiated', data: { reference: `CARD-${Date.now()}` } });
-    });
-
-    // Wallet payment
-    router.post('/wallet', async (req, res) => {
-        res.json({ success: true, message: 'Wallet payment initiated', data: { reference: `WALLET-${Date.now()}` } });
-    });
-
-    // Wallet balance
-    router.get('/wallet/:userId/balance', async (req, res) => {
-        res.json({ success: true, data: { balance: 0, currency: 'KES' } });
-    });
+    // AUDIT FIX: These used to be fake stubs that always returned
+    // success:true without charging anything. marketplace.controller.js
+    // already has real, working implementations (Flutterwave card charge
+    // with honest 503 when unconfigured; row-locked wallet DB debit with
+    // transaction logging) — they were just never wired here. Use them.
+    router.post('/card',   ctrl.cardPayment.bind(ctrl));
+    router.post('/wallet', ctrl.walletPayment.bind(ctrl));
+    router.get('/wallet/:userId/balance', ctrl.getWalletBalance.bind(ctrl));
+    router.post('/wallet/topup', ctrl.walletTopup.bind(ctrl));
 }
 
 // Fallback for missing ctrl

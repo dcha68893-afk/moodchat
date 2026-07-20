@@ -53,6 +53,7 @@ if (ctrl) {
     router.get('/flash-sales',           safe(ctrl.getFlashSales?.bind(ctrl)));
     router.get('/recommendations',       safe(ctrl.getRecommendations?.bind(ctrl)));
     router.get('/trending',              safe(ctrl.getProducts?.bind(ctrl)));
+    router.get('/compare',               safe(ctrl.compareProducts?.bind(ctrl)));
 
     // ── Cart ─────────────────────────────────────────────────────────────────
     router.get('/cart',                  safe(ctrl.getCart?.bind(ctrl)));
@@ -106,6 +107,8 @@ if (ctrl) {
     // ── Addresses (checkout.js) ───────────────────────────────────────────────
     router.get('/addresses',             safe(ctrl.getAddresses?.bind(ctrl)));
     router.post('/addresses',            safe(ctrl.saveAddress?.bind(ctrl)));
+    router.delete('/addresses/:id',      safe(ctrl.deleteAddress?.bind(ctrl)));
+    router.patch('/addresses/:id/default', safe(ctrl.setDefaultAddress?.bind(ctrl)));
 
     // ── Delivery ─────────────────────────────────────────────────────────────
     router.get('/delivery-zones',        safe(ctrl.getDeliveryZones?.bind(ctrl)));
@@ -163,6 +166,17 @@ if (ctrl) {
 
     router.get('/seller/:id',                        safe(ctrl.getSellerProfile?.bind(ctrl)));
 
+    // AUDIT FIX: marketplace-ecommerce.js's SellerEngine calls the plural
+    // "/sellers/:id" form (getProfile, getDashboard, getEarnings) but only
+    // the singular "/seller/:id" route existed — these calls were 404ing
+    // silently (the frontend _api() fallback swallows failed responses).
+    // getSellerDashboard/getSellerEarnings read the authenticated user from
+    // req.user internally, so the :id param is accepted for URL symmetry
+    // with getSellerProfile but the data returned is always the caller's own.
+    router.get('/sellers/:id',                       safe(ctrl.getSellerProfile?.bind(ctrl)));
+    router.get('/sellers/:id/dashboard',             safe(ctrl.getSellerDashboard?.bind(ctrl)));
+    router.get('/sellers/:id/earnings',              safe(ctrl.getSellerEarnings?.bind(ctrl)));
+
     // ════════════════════════════════════════════════════════════════════════
     // ADMIN ROUTES — adminOnly enforced at router level
     // ════════════════════════════════════════════════════════════════════════
@@ -184,6 +198,9 @@ if (ctrl) {
     router.get('/admin/buyers',                      safe(ctrl.adminGetBuyers?.bind(ctrl)));
     router.post('/admin/ban/:userId',                safe(ctrl.adminBanSeller?.bind(ctrl)));
     router.post('/admin/unban/:userId',              safe(ctrl.adminUnbanUser?.bind(ctrl)));
+    // AUDIT FIX: marketplace-admin.js's real "Ban" button calls this path;
+    // it was 404ing because only /admin/ban/:userId existed.
+    router.post('/admin/sellers/:userId/ban',        safe(ctrl.adminBanSeller?.bind(ctrl)));
 
     router.get('/admin/orders',                      safe(ctrl.adminGetOrders?.bind(ctrl)));
 
@@ -219,6 +236,10 @@ if (ctrl) {
     router.get('/admin/kyc/pending',                 safe(ctrl.adminGetPendingKYC?.bind(ctrl)));
     router.post('/admin/kyc/:id/approve',            safe(ctrl.adminApproveKYC?.bind(ctrl)));
     router.post('/admin/kyc/:id/reject',             safe(ctrl.adminRejectKYC?.bind(ctrl)));
+    // AUDIT FIX: marketplace-admin.js's Verify/Reject seller button posts a
+    // single {approved, reason} body to /admin/sellers/:id/verify. Dispatch
+    // to the existing approve/reject controller methods based on that flag.
+    router.post('/admin/sellers/:id/verify', safe(ctrl.verifySeller?.bind(ctrl)));
 
     router.get('/admin/audit-log',                   safe(ctrl.getAuditLog?.bind(ctrl)));
 }

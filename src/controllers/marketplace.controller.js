@@ -123,10 +123,19 @@ class MarketplaceController {
                 if (max_price) where.price[Op.lte] = parseFloat(max_price);
             }
             if (search) {
-                where[Op.or] = [
+                const searchOr = [
                     { title:       { [Op.iLike]: `%${search}%` } },
                     { description: { [Op.iLike]: `%${search}%` } },
                 ];
+                // AUDIT FIX: don't let the search condition silently clobber
+                // the approval-status visibility filter set above — combine
+                // both instead of one overwriting the other.
+                if (where[Op.or]) {
+                    where[Op.and] = [{ [Op.or]: where[Op.or] }, { [Op.or]: searchOr }];
+                    delete where[Op.or];
+                } else {
+                    where[Op.or] = searchOr;
+                }
             }
 
             const orderMap = {
@@ -179,9 +188,14 @@ class MarketplaceController {
 
             const {
                 title, description, price=0, category='other', type='physical',
-                images=[], tags=[], stock, condition, brand, delivery_fee,
+                images=[], tags=[], condition, brand, delivery_fee,
                 location, available=true, metadata={}
             } = req.body;
+            // AUDIT FIX: marketplace-seller.js's create-listing form sends
+            // "stock_quantity", not "stock" — this was silently dropped,
+            // always saving stock as null (no inventory tracking) no matter
+            // what the seller entered. Accept either field name.
+            const stock = req.body.stock_quantity ?? req.body.stock;
 
             if (!title?.trim()) return next(new AppError('Title is required', 400));
             if (title.trim().length < 3) return next(new AppError('Title must be at least 3 characters', 400));
@@ -318,6 +332,35 @@ class MarketplaceController {
         } catch(e) { err(next, e, 'getCategories'); }
     }
 
+    // ── GET /api/marketplace/compare?ids=a,b,c ────────────────────────────────
+    async compareProducts(req, res, next) {
+        try {
+            const T = Model.Tool;
+            const ids = String(req.query.ids || '').split(',').map(s => s.trim()).filter(Boolean).slice(0, 6);
+            if (!T || ids.length < 2) return next(new AppError('At least 2 product ids required', 400));
+
+            const rows = await T.findAll({ where: { id: { [Op.in]: ids } }, include: _sellerInclude(T) });
+            const products = ids
+                .map(id => rows.find(r => String(r.id) === String(id)))
+                .filter(Boolean)
+                .map(r => _formatProduct(r));
+            if (!products.length) return next(new AppError('No matching products found', 404));
+
+            const specRows = [
+                { key: 'Price',        get: p => `KES ${p.price.toLocaleString()}` },
+                { key: 'Category',     get: p => p.category || '—' },
+                { key: 'Condition',    get: p => p.condition || '—' },
+                { key: 'Brand',        get: p => p.brand || '—' },
+                { key: 'Rating',       get: p => p.rating ? `${p.rating.toFixed(1)} ★ (${p.reviews_count})` : 'No reviews' },
+                { key: 'Stock',        get: p => (p.stock_quantity ?? null) === null ? 'Unlimited' : (p.stock_quantity > 0 ? `${p.stock_quantity} available` : 'Out of stock') },
+                { key: 'Delivery fee', get: p => p.delivery_fee ? `KES ${p.delivery_fee.toLocaleString()}` : 'Free' },
+            ];
+            const specs = specRows.map(row => ({ key: row.key, values: products.map(row.get) }));
+
+            return ok(res, { products, specs }, 'Comparison ready');
+        } catch(e) { err(next, e, 'compareProducts'); }
+    }
+
     // ══════════════════════════════════════════════════════════════════════════
     // CART (FIX: Forensic Audit P1 — Cart model + endpoints added)
     // ══════════════════════════════════════════════════════════════════════════
@@ -351,15 +394,40 @@ class MarketplaceController {
         try {
             const userId = req.user?.id;
             if (!userId) return next(new AppError('Authentication required', 401));
-            const { product_id, seller_id, title, price, quantity = 1, image, variant } = req.body;
-            if (!product_id) return next(new AppError('product_id required', 400));
-            if (!price && price !== 0) return next(new AppError('price required', 400));
 
             const CartModel = getDb().Cart;
             if (!CartModel) return next(new AppError('Cart service not available', 503));
 
             const cart = await CartModel.getOrCreate(userId);
-            await cart.addItem({ product_id, seller_id, title, price, quantity, image, variant });
+
+            // AUDIT FIX: marketplace-ecommerce.js's _syncToServer() sends a
+            // batch { items: [...] } body, not flat product_id/price fields.
+            // Support both shapes so add-to-cart actually persists instead of
+            // 400ing on every real call.
+            const batch = Array.isArray(req.body?.items) ? req.body.items : null;
+            if (batch) {
+                // Full replace, not incremental addItem: the frontend sends its
+                // entire local cart state on every debounced sync, so treating
+                // it as authoritative avoids quantities compounding each sync.
+                const normalized = batch
+                    .filter(item => item?.product_id)
+                    .map(item => ({
+                        product_id: item.product_id,
+                        seller_id:  item.seller_id || null,
+                        title:      item.title || '',
+                        price:      parseFloat(item.price) || 0,
+                        quantity:   item.quantity || 1,
+                        image:      item.image || null,
+                        variant:    item.variant || null,
+                        added_at:   new Date().toISOString(),
+                    }));
+                await cart.update({ items: normalized });
+            } else {
+                const { product_id, seller_id, title, price, quantity = 1, image, variant } = req.body;
+                if (!product_id) return next(new AppError('product_id required', 400));
+                if (!price && price !== 0) return next(new AppError('price required', 400));
+                await cart.addItem({ product_id, seller_id, title, price, quantity, image, variant });
+            }
             await cart.reload();
 
             _socketBroadcast(req, 'cart:updated', { user_id: userId, item_count: cart.getItemCount() });
@@ -495,7 +563,7 @@ class MarketplaceController {
             const buyerId = req.user?.id;
             if (!buyerId) return next(new AppError('Authentication required', 401));
 
-            const { items, delivery_address, payment_method, phone, notes, total, subtotal, delivery, currency='KES' } = req.body;
+            const { items, delivery_address, payment_method, phone, notes, total, subtotal, delivery, currency='KES', idempotency_key } = req.body;
             if (!items?.length) return next(new AppError('Cart is empty', 400));
             if (!delivery_address) return next(new AppError('Delivery address required', 400));
 
@@ -508,13 +576,22 @@ class MarketplaceController {
             // P1 FIX: Idempotency — prevent double orders on double-click
             if (idempotency_key) {
                 try {
-                    const existing = await O.findOne({ where: { buyerId } });
-                    if (existing && existing.metadata?.idempotency_key === idempotency_key) {
+                    const seq = getSequelize();
+                    const existing = seq ? await O.findOne({
+                        where: {
+                            buyerId,
+                            [Op.and]: [
+                                seq.where(seq.json('metadata.idempotency_key'), idempotency_key)
+                            ]
+                        },
+                        order: [['createdAt', 'DESC']],
+                    }) : null;
+                    if (existing) {
                         return ok(res, { order: { id: existing.id, buyer_id: buyerId,
                             status: existing.status, idempotent: true, created_at: existing.createdAt }
                         }, 'Order already exists', 200);
                     }
-                } catch(_) {}
+                } catch(_) { /* non-fatal — fall through and create the order normally */ }
             }
 
             // Group items by seller
@@ -678,6 +755,26 @@ class MarketplaceController {
             if (note) updates.metadata = { ...(order.metadata||{}), status_notes: [...(order.metadata?.status_notes||[]), { status, note, at: new Date() }] };
 
             await order.update(updates);
+
+            // AUDIT FIX: loyaltyPoints was read by getLoyalty/redeemLoyalty but
+            // never credited anywhere, so every buyer's balance was stuck at 0
+            // forever. Credit points once, on delivery.
+            if (status === 'delivered' && order.buyerId) {
+                try {
+                    const db = getDb();
+                    const Users = db.Users || db.User;
+                    if (Users && !order.metadata?.loyalty_credited) {
+                        const earned = Math.floor(parseFloat(order.totalPrice || 0) / 20); // 1 pt per KES 20
+                        if (earned > 0) {
+                            const buyer = await Users.findByPk(order.buyerId);
+                            if (buyer) {
+                                await buyer.increment('loyaltyPoints', { by: earned }).catch(() => {});
+                                await order.update({ metadata: { ...(order.metadata||{}), loyalty_credited: true, loyalty_points_earned: earned } });
+                            }
+                        }
+                    }
+                } catch(_) { /* non-fatal — never block order status update on loyalty crediting */ }
+            }
 
             // Broadcast status change
             _socketBroadcast(req, 'order:status_changed', {
@@ -1048,23 +1145,22 @@ class MarketplaceController {
             let isVerified = false;
             let verifiedOrderId = order_id || null;
             if (O) {
-                const purchaseOrder = await O.findOne({
+                const candidateOrders = await O.findAll({
                     where: {
                         buyerId: userId,
                         status: { [Op.in]: ['paid', 'delivered', 'shipped'] },
-                        [Op.or]: [
-                            { productId },
-                            order_id ? { id: order_id } : { id: null },
-                            { metadata: { [Op.contains]: [{ product_id: productId }] } },
-                        ]
-                    }
-                }).catch(() => null);  // graceful: if metadata query fails, fall back
+                        ...(order_id ? { id: order_id } : {}),
+                    },
+                    order: [['createdAt', 'DESC']],
+                    limit: order_id ? 1 : 50,
+                }).catch(() => []);
 
-                if (!purchaseOrder && !order_id) {
-                    // Soft enforcement: allow review but mark as unverified
-                    // Hard enforcement option: return next(new AppError('You must purchase this product before reviewing it', 403));
-                    isVerified = false;
-                } else if (purchaseOrder) {
+                const purchaseOrder = candidateOrders.find(o =>
+                    o.productId === productId ||
+                    (Array.isArray(o.metadata?.items) && o.metadata.items.some(i => i.product_id === productId))
+                ) || null;
+
+                if (purchaseOrder) {
                     isVerified = true;
                     verifiedOrderId = verifiedOrderId || purchaseOrder.id;
                 }
@@ -1307,6 +1403,7 @@ class MarketplaceController {
             if (!product) return res.status(404).json({ success: false, message: 'Product not found' });
             await product.update({
                 status: 'active',
+                available: true,
                 approval_status: 'approved',
                 approvalStatus: 'approved',
                 approvedAt: new Date(),
@@ -1334,6 +1431,7 @@ class MarketplaceController {
             const { reason } = req.body || {};
             await product.update({
                 status: 'rejected',
+                available: false,
                 approval_status: 'rejected',
                 approvalStatus: 'rejected',
                 rejectionReason: reason || 'Does not meet marketplace standards',
@@ -1450,7 +1548,45 @@ class MarketplaceController {
             if (!Refund) return next(new AppError('Refund system unavailable', 503));
             const refund = await Refund.findByPk(req.params.id);
             if (!refund) return next(new AppError('Refund not found', 404));
-            await refund.update({ status: 'approved', approvedAt: new Date(), approvedBy: req.user.id });
+            const order = O ? await O.findByPk(refund.orderId) : null;
+
+            // AUDIT FIX: this used to only flip DB status/restore stock —
+            // no money ever actually moved back to the buyer. For
+            // wallet-paid orders, credit the wallet back for real (fully in
+            // our control). For card/M-Pesa orders, don't pretend the
+            // gateway-side reversal happened — that needs a real call to
+            // Flutterwave/M-Pesa's refund API with tested parameters, which
+            // isn't something to guess at blindly against real money.
+            let walletCredited = false;
+            let manualActionNeeded = false;
+            const seq = getSequelize();
+            if (order?.paymentMethod === 'wallet' && seq) {
+                const t = await seq.transaction();
+                try {
+                    const Wallet = db.Wallet;
+                    const WalletTransaction = db.WalletTransaction;
+                    const wallet = Wallet ? await Wallet.findOne({ where: { userId: refund.buyerId }, transaction: t, lock: t.LOCK.UPDATE }) : null;
+                    if (wallet) {
+                        await wallet.increment('balance', { by: parseFloat(refund.amount), transaction: t });
+                        if (WalletTransaction) {
+                            await WalletTransaction.create({
+                                userId: refund.buyerId, type: 'credit', amount: refund.amount,
+                                reason: 'refund', reference: `REFUND-${refund.id}`,
+                                metadata: { refund_id: refund.id, order_id: refund.orderId },
+                            }, { transaction: t });
+                        }
+                        walletCredited = true;
+                    }
+                    await t.commit();
+                } catch(_) { await t.rollback().catch(()=>{}); }
+            } else if (order?.paymentMethod === 'card' || order?.paymentMethod === 'mpesa') {
+                manualActionNeeded = true;
+            }
+
+            await refund.update({
+                status: 'approved', approvedAt: new Date(), approvedBy: req.user.id,
+                metadata: { ...(refund.metadata||{}), wallet_credited: walletCredited, manual_gateway_refund_needed: manualActionNeeded },
+            });
             if (O) await O.update({ status: 'refunded' }, { where: { id: refund.orderId } });
             // Restore stock
             const T = Model.Tool;
@@ -1458,7 +1594,13 @@ class MarketplaceController {
                 try { await T.increment('stock', { by: refund.quantity || 1, where: { id: refund.productId } }); } catch(_) {}
             }
             _socketBroadcast(req, 'refund:approved', { refund_id: refund.id, order_id: refund.orderId, buyer_id: refund.buyerId });
-            return ok(res, { refund_id: refund.id, status: 'approved' }, 'Refund approved');
+            return ok(res, {
+                refund_id: refund.id, status: 'approved', wallet_credited: walletCredited,
+                manual_gateway_refund_needed: manualActionNeeded,
+                note: manualActionNeeded
+                    ? `Payment was via ${order.paymentMethod} — process the actual refund through that gateway's dashboard; this only updates internal records.`
+                    : undefined,
+            }, 'Refund approved');
         } catch(e) { err(next, e, 'adminApproveRefund'); }
     }
 
@@ -1551,6 +1693,30 @@ class MarketplaceController {
             _socketBroadcast(req, 'kyc:rejected', { user_id: profile.userId, reason });
             return ok(res, null, 'KYC rejected');
         } catch(e) { err(next, e, 'adminRejectKYC'); }
+    }
+
+    // AUDIT FIX: marketplace-admin.js's Verify/Reject seller button posts a
+    // single {approved, reason} body keyed on the seller's userId (from the
+    // sellers list, which is Users.id) — not the SellerProfile's own primary
+    // key that adminApproveKYC/adminRejectKYC expect via :id. Look the
+    // profile up by userId instead.
+    async verifySeller(req, res, next) {
+        try {
+            const db = getDb();
+            const SellerProfile = db.SellerProfile;
+            if (!SellerProfile) return next(new AppError('SellerProfile unavailable', 503));
+            const profile = await SellerProfile.findOne({ where: { userId: req.params.id } });
+            if (!profile) return next(new AppError('KYC record not found for this seller', 404));
+            const { approved, reason } = req.body || {};
+            if (approved) {
+                await profile.update({ kycStatus: 'approved', verified: true, verifiedAt: new Date(), verifiedBy: req.user.id });
+                _socketBroadcast(req, 'kyc:approved', { user_id: profile.userId });
+            } else {
+                await profile.update({ kycStatus: 'rejected', rejectionReason: reason, rejectedAt: new Date() });
+                _socketBroadcast(req, 'kyc:rejected', { user_id: profile.userId, reason });
+            }
+            return ok(res, null, approved ? 'Seller verified' : 'Seller rejected');
+        } catch(e) { err(next, e, 'verifySeller'); }
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -2140,20 +2306,63 @@ class MarketplaceExtensions {
             const Users = db.Users || db.User;
             const user = Users ? await Users.findByPk(userId, { attributes: ['id','loyaltyPoints','metadata'] }) : null;
             const points = user?.loyaltyPoints || user?.metadata?.loyalty_points || 0;
+
+            // AUDIT FIX: history was hardcoded to always return []. Pull real
+            // redemption events now that redeemLoyalty actually logs them.
+            let history = [];
+            const AuditLog = db.AuditLog;
+            if (AuditLog) {
+                const events = await AuditLog.findAll({
+                    where: { userId, action: 'loyalty:redeemed' },
+                    order: [['createdAt', 'DESC']], limit: 20,
+                }).catch(() => []);
+                history = events.map(e => ({
+                    type: 'redeemed', points: e.details?.points, discount_kes: e.details?.discount_kes,
+                    code: e.details?.code, at: e.createdAt,
+                }));
+            }
+
             return ok(res, {
                 points, tier: points >= 5000 ? 'Gold' : points >= 1000 ? 'Silver' : 'Bronze',
                 next_tier_points: points >= 5000 ? null : points >= 1000 ? 5000 - points : 1000 - points,
-                history: [],
+                history,
             });
         } catch(e) { err(next, e, 'getLoyalty'); }
     }
 
     static async redeemLoyalty(req, res, next) {
         try {
+            const userId = req.user?.id;
+            if (!userId) return next(new AppError('Authentication required', 401));
             const { points } = req.body;
-            if (!points || parseInt(points) < 100) return next(new AppError('Minimum 100 points to redeem', 400));
-            const discount = Math.floor(parseInt(points) / 100); // 100 points = KES 1
-            return ok(res, { redeemed: parseInt(points), discount_kes: discount, message: `Redeemed ${points} points for KES ${discount} discount` });
+            const requested = parseInt(points);
+            if (!requested || requested < 100) return next(new AppError('Minimum 100 points to redeem', 400));
+
+            const db = getDb();
+            const Users = db.Users || db.User;
+            if (!Users) return next(new AppError('Loyalty service unavailable', 503));
+
+            const user = await Users.findByPk(userId);
+            if (!user) return next(new AppError('User not found', 404));
+            const balance = user.loyaltyPoints || user.metadata?.loyalty_points || 0;
+            if (requested > balance) return next(new AppError(`Insufficient points — you have ${balance}`, 400));
+
+            const discount = Math.floor(requested / 100); // 100 points = KES 1
+            await user.decrement('loyaltyPoints', { by: requested }).catch(() => {});
+
+            const AuditLog = db.AuditLog;
+            const redemptionCode = `LOYALTY-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
+            if (AuditLog) {
+                AuditLog.create({
+                    userId, action: 'loyalty:redeemed',
+                    details: { points: requested, discount_kes: discount, code: redemptionCode },
+                }).catch(() => {});
+            }
+
+            return ok(res, {
+                redeemed: requested, discount_kes: discount, code: redemptionCode,
+                remaining_balance: balance - requested,
+            }, `Redeemed ${requested} points for KES ${discount} discount`);
         } catch(e) { err(next, e, 'redeemLoyalty'); }
     }
 
@@ -2225,6 +2434,36 @@ class MarketplaceExtensions {
             await user.update({ metadata: { ...(user.metadata || {}), addresses: addresses.slice(0,5) } });
             return ok(res, { address: addr }, 'Address saved', 201);
         } catch(e) { err(next, e, 'saveAddress'); }
+    }
+
+    // AUDIT FIX: frontend address-book "delete" and "set default" buttons
+    // called these paths already; neither existed, so both silently 404'd.
+    static async deleteAddress(req, res, next) {
+        try {
+            const userId = req.user?.id;
+            const db = getDb();
+            const Users = db.Users || db.User;
+            const user = Users ? await Users.findByPk(userId) : null;
+            if (!user) return next(new AppError('User not found', 404));
+            const addresses = (user.metadata?.addresses || []).filter(a => String(a.id) !== String(req.params.id));
+            await user.update({ metadata: { ...(user.metadata || {}), addresses } });
+            return ok(res, { addresses }, 'Address deleted');
+        } catch(e) { err(next, e, 'deleteAddress'); }
+    }
+
+    static async setDefaultAddress(req, res, next) {
+        try {
+            const userId = req.user?.id;
+            const db = getDb();
+            const Users = db.Users || db.User;
+            const user = Users ? await Users.findByPk(userId) : null;
+            if (!user) return next(new AppError('User not found', 404));
+            const addresses = (user.metadata?.addresses || []).map(a => ({
+                ...a, is_default: String(a.id) === String(req.params.id),
+            }));
+            await user.update({ metadata: { ...(user.metadata || {}), addresses } });
+            return ok(res, { addresses }, 'Default address updated');
+        } catch(e) { err(next, e, 'setDefaultAddress'); }
     }
 
     // ── Support ticket ────────────────────────────────────────────────────────

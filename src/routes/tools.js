@@ -194,19 +194,19 @@ router.post('/marketplace/tips',      apiRateLimiter, toolsController.sendTip.bi
 router.get('/marketplace/stats',      apiRateLimiter, toolsController.getMarketplaceStats.bind(toolsController));
 
 // ── Frontend alias routes ─────────────────────────────────────────────────────
-// Frontend calls /api/tools/marketplace/products and /marketplace/wishlist;
-// map these to the canonical listing/saved endpoints.
-router.get('/marketplace/products',        apiRateLimiter, toolsController.getListings.bind(toolsController));
-router.get('/marketplace/wishlist',        apiRateLimiter, toolsController.getSavedListings.bind(toolsController));
-router.get('/marketplace/recommendations', apiRateLimiter, toolsController.getSpotlightListings.bind(toolsController));
-
-// ── Orders ────────────────────────────────────────────────────────────────────
+// AUDIT FIX: These aliases used to shadow the real e-commerce marketplace.
+// Tool-core.js's normalizeToolsEndpoint() rewrites every /api/marketplace/*
+// call to /api/tools/marketplace/*, so marketplace-ecommerce.js's product
+// browsing, wishlist, recommendations, and order placement/status/cancel
+// calls were silently being served by the legacy Tools-listings controller
+// (different data model — "listings" not "products") instead of
+// marketplace.controller.js. Removed the colliding aliases; the real router
+// is mounted via _mountEcomRoutes() at the bottom of this file and now
+// handles these paths correctly. Kept /orders/mine and /orders/selling
+// since they don't collide with the real router's route set and are still
+// used by the legacy Tools UI.
 router.get('/marketplace/orders/mine',               apiRateLimiter, toolsController.getMyOrders.bind(toolsController));
 router.get('/marketplace/orders/selling',            apiRateLimiter, toolsController.getSellerOrders.bind(toolsController));
-router.get('/marketplace/orders/:orderId',           apiRateLimiter, toolsController.getOrder.bind(toolsController));
-router.post('/marketplace/orders',                   apiRateLimiter, toolsController.placeOrder.bind(toolsController));
-router.patch('/marketplace/orders/:orderId/status',  apiRateLimiter, toolsController.updateOrderStatus.bind(toolsController));
-router.post('/marketplace/orders/:orderId/cancel',   apiRateLimiter, toolsController.cancelOrder.bind(toolsController));
 
 // ── Reviews ───────────────────────────────────────────────────────────────────
 router.get('/marketplace/listings/:listingId/reviews',  apiRateLimiter, toolsController.getReviews.bind(toolsController));
