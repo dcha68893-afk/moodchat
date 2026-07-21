@@ -223,13 +223,23 @@ router.post('/login', asyncHandler(async (req, res) => {
         // missing (pg error 42703 = undefined_column) fall back to base columns only.
         const UsersModel = _getUsers();
         let user;
+        // BUG FIX (login audit): the frontend's login page has Email/Mobile/
+        // Username tabs and always POSTs whatever was typed as `identifier`
+        // regardless of which tab was active — but this lookup only ever
+        // matched against `email` or `username`, never `phone`. Users have a
+        // `phone` column (settable from their profile) but logging in with
+        // it always failed with "Invalid credentials" since it never
+        // matched anything. Adding `phone` to the OR clause fixes the
+        // Mobile tab without touching the frontend at all.
+        const loginOrClause = [
+            { email: identifier },
+            { username: identifier },
+            { phone: identifier }
+        ];
         try {
             user = await UsersModel.findOne({
                 where: {
-                    [require('sequelize').Op.or]: [
-                        { email: identifier },
-                        { username: identifier }
-                    ]
+                    [require('sequelize').Op.or]: loginOrClause
                 }
             });
         } catch (findErr) {
@@ -239,12 +249,9 @@ router.post('/login', asyncHandler(async (req, res) => {
                 console.warn('[AUTH] ⚠️  DB column missing — retrying with base attributes. Run migrations!', findErr.message);
                 user = await UsersModel.findOne({
                     where: {
-                        [require('sequelize').Op.or]: [
-                            { email: identifier },
-                            { username: identifier }
-                        ]
+                        [require('sequelize').Op.or]: loginOrClause
                     },
-                    attributes: ['id', 'email', 'username', 'password', 'avatar',
+                    attributes: ['id', 'email', 'username', 'phone', 'password', 'avatar',
                                  'firstName', 'lastName', 'role', 'isVerified',
                                  'isActive', 'status', 'lastSeen', 'settings',
                                  'theme', 'language', 'createdAt', 'updatedAt']
