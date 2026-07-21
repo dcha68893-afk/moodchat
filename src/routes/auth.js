@@ -351,7 +351,7 @@ router.get('/me', authenticateToken, asyncHandler(async (req, res) => {
         _slog('[AUTH] /me called for user:', userId);
         
         const user = await _getUsers().findByPk(userId, {
-            attributes: ['id', 'username', 'email', 'avatar', 'firstName', 'lastName', 'bio', 'role', 'status', 'lastSeen']
+            attributes: ['id', 'username', 'email', 'avatar', 'firstName', 'lastName', 'bio', 'role', 'status', 'lastSeen', 'mfaEnabled']
         });
         
         if (!user) {
@@ -380,7 +380,8 @@ router.get('/me', authenticateToken, asyncHandler(async (req, res) => {
             bio: user.bio,
             role: user.role || 'user',
             status: user.status || 'offline',
-            lastActive: user.lastSeen
+            lastActive: user.lastSeen,
+            mfaEnabled: !!user.mfaEnabled
         };
 
         res.json({
