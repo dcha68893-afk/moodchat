@@ -20,8 +20,18 @@ const multer  = require('multer');
 const path    = require('path');
 const fs      = require('fs');
 const crypto  = require('crypto');
+const cloudinaryService = require('../services/cloudinaryService');
 
-// ─── Upload directory ─────────────────────────────────────────────────────────
+// FIX (UPLOAD-EPHEMERAL-DISK): this route used to always write to local disk.
+// Render's filesystem is ephemeral — files vanish on every restart/redeploy
+// and aren't shared across multiple instances — so every image/video sent
+// through chat, group chat, or anywhere else that calls /api/files/upload
+// would eventually 404. Cloudinary is already configured for avatars
+// (see services/cloudinaryService.js); reuse it here for all file uploads
+// whenever it's configured, and only fall back to local disk when it isn't.
+const CLOUDINARY_ENABLED = cloudinaryService.isConfigured();
+
+// ─── Upload directory (disk fallback only) ────────────────────────────────────
 const UPLOAD_ROOT = path.join(process.cwd(), 'uploads');
 const DIRS = {
     image    : path.join(UPLOAD_ROOT, 'images'),
@@ -30,7 +40,11 @@ const DIRS = {
     document : path.join(UPLOAD_ROOT, 'documents'),
     default  : path.join(UPLOAD_ROOT, 'files'),
 };
-Object.values(DIRS).forEach(d => { try { fs.mkdirSync(d, { recursive: true }); } catch(_) {} });
+if (!CLOUDINARY_ENABLED) {
+    Object.values(DIRS).forEach(d => { try { fs.mkdirSync(d, { recursive: true }); } catch(_) {} });
+} else {
+    console.log('✅ /api/files/upload storage: Cloudinary (persistent CDN)');
+}
 
 // ─── MIME → type map ──────────────────────────────────────────────────────────
 const MIME_TYPE_MAP = {
@@ -50,17 +64,19 @@ const ALLOWED_MIMES = new Set(Object.keys(MIME_TYPE_MAP));
 const MAX_SIZE = parseInt(process.env.MAX_UPLOAD_SIZE || '52428800'); // 50MB default
 
 // ─── Multer ───────────────────────────────────────────────────────────────────
-const storage = multer.diskStorage({
-    destination: (req, file, cb) => {
-        const type = MIME_TYPE_MAP[file.mimetype] || 'default';
-        cb(null, DIRS[type] || DIRS.default);
-    },
-    filename: (req, file, cb) => {
-        const ext  = path.extname(file.originalname).toLowerCase() || '';
-        const name = `${Date.now()}-${crypto.randomBytes(8).toString('hex')}${ext}`;
-        cb(null, name);
-    },
-});
+const storage = CLOUDINARY_ENABLED
+    ? multer.memoryStorage()
+    : multer.diskStorage({
+        destination: (req, file, cb) => {
+            const type = MIME_TYPE_MAP[file.mimetype] || 'default';
+            cb(null, DIRS[type] || DIRS.default);
+        },
+        filename: (req, file, cb) => {
+            const ext  = path.extname(file.originalname).toLowerCase() || '';
+            const name = `${Date.now()}-${crypto.randomBytes(8).toString('hex')}${ext}`;
+            cb(null, name);
+        },
+    });
 
 const upload = multer({
     storage,
@@ -81,13 +97,38 @@ function absUrl(req, relPath) {
 
 // ── POST /api/files/upload ────────────────────────────────────────────────────
 // Called by: js/api.messages.js uploadFile(), js/services.message.js uploadFile()
-router.post('/upload', upload.single('file'), (req, res) => {
+router.post('/upload', upload.single('file'), async (req, res) => {
     try {
         if (!req.file) {
             return res.status(400).json({ success: false, message: 'No file uploaded' });
         }
 
-        const type      = MIME_TYPE_MAP[req.file.mimetype] || 'file';
+        const type = MIME_TYPE_MAP[req.file.mimetype] || 'file';
+
+        if (CLOUDINARY_ENABLED) {
+            const folder = `moodchat/files/${type === 'file' ? 'other' : type}s`;
+            const result = await cloudinaryService.uploadToCloudinary(req.file.buffer, { folder });
+            if (!result) {
+                return res.status(502).json({ success: false, message: 'Upload to Cloudinary failed' });
+            }
+            return res.status(201).json({
+                success: true,
+                message: 'File uploaded successfully',
+                data: {
+                    url: result.url,
+                    publicId: result.publicId,
+                    originalName: req.file.originalname,
+                    mimeType: req.file.mimetype,
+                    size: req.file.size,
+                    type,
+                },
+                url: result.url,
+                fileUrl: result.url,
+                mediaUrl: result.url,
+                type,
+            });
+        }
+
         const subDir    = DIRS[type] === DIRS.image  ? 'images'
                         : DIRS[type] === DIRS.audio  ? 'audio'
                         : DIRS[type] === DIRS.video  ? 'video'

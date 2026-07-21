@@ -104,6 +104,7 @@ const ROUTE_MAPPING = {
   'moods.js': '/moods',
   'notes.js': '/notes',
   'media.js': '/media',
+  'cloudinaryUpload.js': '/cloudinary',
   'calls.js': '/calls',
   'readReceipt.js': '/read-receipts',
   'sharedMood.js': '/shared-moods',
