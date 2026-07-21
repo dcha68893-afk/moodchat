@@ -19,6 +19,20 @@ const USER_ATTRS = ['id', 'username', 'avatar', 'firstName', 'lastName', 'status
 function formatUser(user) {
     if (!user) return null;
     const u = user.toJSON ? user.toJSON() : { ...user };
+
+    // FIX-GROUP-INVITE-PRIVACY: this function used to drop privacySettings/
+    // settings entirely, even when the caller's SELECT explicitly fetched
+    // them. The frontend's group-invite UI reads friend.privacy to decide
+    // whether to show "Invite" vs "Add directly", and with this field always
+    // missing it silently defaulted every friend to 'direct_add' regardless
+    // of their real preference. This doesn't change actual authorization —
+    // groupMembersService.js already re-checks the real privacy setting
+    // server-side before acting — it only fixes the UI showing the wrong
+    // thing before the user even clicks. Mirror the same field-resolution
+    // order groupMembersService.js uses so the two stay consistent.
+    const ps = (u.settings && u.settings.privacy) || {};
+    const whoCanAddMe = ps.whoCanAddMe || ps.groupAddPolicy || (ps.allowGroupAdds === false ? 'nobody' : ps.allowGroupAdds) || 'everyone';
+
     return {
         id:          u.id,
         username:    u.username    || '',
@@ -27,7 +41,8 @@ function formatUser(user) {
         firstName:   u.firstName   || '',
         lastName:    u.lastName    || '',
         status:      u.status      || 'offline',
-        lastActive:  u.lastSeen    || null
+        lastActive:  u.lastSeen    || null,
+        privacy:     { whoCanAddMe }
     };
 }
 

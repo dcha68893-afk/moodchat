@@ -351,11 +351,19 @@ class GroupMembersService {
             let inviteePrivacy = 'everyone'; // safe default — direct add allowed
             if (Users) {
                 try {
+                    // FIX-ROOT-CAUSE-GROUP-INVITE-DEFAULT: 'privacySettings' is not
+                    // a real column on the Users model (only 'settings' JSONB
+                    // exists, with privacy nested at settings.privacy). Requesting
+                    // a non-existent attribute makes Sequelize throw on every
+                    // single call here, which the catch block below silently
+                    // swallowed and defaulted to 'everyone' — meaning this check
+                    // never actually ran and direct-add was unconditionally
+                    // allowed for every user regardless of their real setting.
                     const inviteeUser = await Users.findByPk(inviteeId, {
-                        attributes: ['id', 'privacySettings', 'settings'],
+                        attributes: ['id', 'settings'],
                     });
                     if (inviteeUser) {
-                        const ps = inviteeUser.privacySettings || inviteeUser.settings?.privacy || {};
+                        const ps = (inviteeUser.settings && inviteeUser.settings.privacy) || {};
                         inviteePrivacy = ps.whoCanAddMe || ps.groupAddPolicy || ps.allowGroupAdds || 'everyone';
                         // Normalize boolean legacy field: allowGroupAdds=false → 'nobody'
                         if (inviteePrivacy === false) inviteePrivacy = 'nobody';

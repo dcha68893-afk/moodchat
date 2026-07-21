@@ -602,14 +602,38 @@ router.post('/:groupId/messages', async (req, res) => {
 
         const io = global.__socketIO;
         if (io) {
-            const socketPayload    = { groupId, message: savedMessage, senderId: userId, senderName: anonymous ? 'Anonymous' : senderName, timestamp: new Date() };
-            const localSyncPayload = { action: 'message', groupId, message: savedMessage };
+            const socketPayload = { groupId, message: savedMessage, senderId: userId, senderName: anonymous ? 'Anonymous' : senderName, timestamp: new Date() };
 
-            // FIX: Single canonical 'group:message' event — frontend handles via kyn: bridge
+            // FIX-DUPLICATE-GROUP-DELIVERY: This block previously emitted the SAME
+            // message to each recipient up to 4 times:
+            //   1) 'group:message'   to the group:<id> room
+            //   2) 'group:localSync' to the group:<id> room (frontend treats this
+            //      as an independent trigger that re-renders the message — see
+            //      _fwdGroupLocalSync in chat.html, action:'message' branch)
+            //   3) 'group:message'   to every member's user:<id> room, UNCONDITIONALLY
+            //      — even though virtually every online member's socket is already
+            //      sitting in group:<id> from step 1 (webSocketService joins sockets
+            //      to the group room on connect/group-open), so this "fallback" was
+            //      firing for members who were never actually missing the broadcast.
+            //   4) 'group:localSync' to every member's user:<id> room (same double
+            //      render trigger as #2, duplicated again).
+            // Root cause: the per-member loop never checked whether a member's
+            // socket was already covered by the room broadcast before re-emitting.
+            //
+            // Fix: emit the single canonical 'group:message' event once to the group
+            // room (covers every socket already joined to it), snapshot which
+            // sockets that reaches, and only fall back to a per-member user-room
+            // emit for members whose sockets are NOT in that snapshot (i.e. members
+            // who genuinely haven't joined the group room yet). 'group:localSync'
+            // is no longer emitted here — it remains a real event for group
+            // create/update/membership changes elsewhere, but is not a message
+            // delivery event and must not double as one.
             io.to(`group:${groupId}`).emit('group:message', socketPayload);
-            io.to(`group:${groupId}`).emit('group:localSync', localSyncPayload);
 
-            // Also emit to every member's user room (fallback for members who haven't joined the group room yet)
+            const alreadyCoveredSocketIds = new Set(
+                io.sockets.adapter.rooms?.get(`group:${groupId}`) || []
+            );
+
             try {
                 const GM = db?.models?.GroupMembers || db?.models?.GroupMember || db?.GroupMembers || db?.GroupMember || null;
                 if (GM) {
@@ -618,15 +642,24 @@ router.post('/:groupId/messages', async (req, res) => {
                         const mid = m.userId || m.dataValues?.userId;
                         if (!mid) return;
                         const userRoom = io.sockets.adapter.rooms?.get(`user:${mid}`);
-                        if (userRoom) {
-                            userRoom.forEach(socketId => {
-                                const sock = io.sockets.sockets?.get(socketId);
-                                if (sock) sock.join(`group:${groupId}`);
-                            });
-                        }
-                        // FIX: Single canonical 'group:message' per member
+                        if (!userRoom) return;
+
+                        // Does this member have at least one socket that already
+                        // received the room broadcast above? If so, skip them
+                        // entirely — re-emitting would duplicate the message.
+                        let alreadyDelivered = false;
+                        userRoom.forEach(socketId => {
+                            if (alreadyCoveredSocketIds.has(socketId)) alreadyDelivered = true;
+                        });
+                        if (alreadyDelivered) return;
+
+                        // Genuinely missed the broadcast: join them to the group
+                        // room for next time, and deliver this one message once.
+                        userRoom.forEach(socketId => {
+                            const sock = io.sockets.sockets?.get(socketId);
+                            if (sock) sock.join(`group:${groupId}`);
+                        });
                         io.to(`user:${mid}`).emit('group:message', socketPayload);
-                        io.to(`user:${mid}`).emit('group:localSync', localSyncPayload);
                     });
                 }
             } catch (emitErr) {

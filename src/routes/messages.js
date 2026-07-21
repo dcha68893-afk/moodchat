@@ -976,15 +976,22 @@ router.post('/', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
           _chatType = _chatRows?.[0]?.type || null;
         } catch (_) {}
 
-        // FIX-AUDIT-2: Also emit group:message for group chats so group.html receives it
+        // FIX-AUDIT-2 (revised): The previous version emitted this same message
+        // 3 separate ways: 'group:message' to BOTH `group:<id>` and `group_<id>`
+        // rooms (every member's socket is joined to both — see
+        // webSocketService.js's dual room-join — so this alone double-delivered
+        // to every recipient), PLUS a 3rd distinct event 'new_group_message' to
+        // `chat:<id>`, which a separate orchestration layer on the frontend
+        // (CentralOrchestrationRuntime.js) maps to its own render-triggering
+        // event, causing a third independent delivery. Emit the single
+        // canonical event once, matching the one true delivery path used by
+        // the dedicated group-send route in group.js.
         if (_chatType === 'group') {
           try {
             const groupPayload = { ...populatedMessage, groupId: chatId, chatId };
             const _io = wsService.getIO?.() || wsService.io;
             if (_io) {
               _io.to(`group:${chatId}`).emit('group:message', groupPayload);
-              _io.to(`group_${chatId}`).emit('group:message', groupPayload);
-              _io.to(`chat:${chatId}`).emit('new_group_message', groupPayload);
             }
           } catch(_) {}
         }
@@ -1726,15 +1733,34 @@ router.delete('/:messageId', apiRateLimiter, asyncHandler(async (req, res) => {
         deletedFor: deleteForEveryone ? null : [userId],
         timestamp: new Date().toISOString()
       };
+
+      // FIX-ROOT-CAUSE-DELETE-DUPLICATE: this used to broadcast the same
+      // deletion 3 separate ways — 'message:deleted' to the chat room,
+      // 'message_deleted' to the same chat room again (messages-core.js on
+      // the frontend already treats these two names as synonyms, so this was
+      // a pure duplicate), and then an unconditional sendToUser() to every
+      // participant regardless of whether they were already covered by the
+      // chat-room broadcast. Emit the single canonical event to the chat
+      // room, then only fall back to sendToUser for participants whose
+      // sockets weren't actually in that room.
+      const io = wsService.getIO?.() || wsService.io;
+      const alreadyCoveredSocketIds = new Set([
+        ...(io?.sockets?.adapter?.rooms?.get(`chat:${msg.chatId}`) || []),
+        ...(io?.sockets?.adapter?.rooms?.get(`chat_${msg.chatId}`) || [])
+      ]);
       wsService.broadcastToChat(msg.chatId, 'message:deleted', deletePayload);
-      wsService.broadcastToChat(msg.chatId, 'message_deleted', deletePayload);
-      // Also send direct to all participants via user rooms for reliability
+
       const participants = await sequelize.query(
         `SELECT "userId" FROM chat_participants WHERE "chatId" = :chatId`,
         { replacements: { chatId: msg.chatId }, type: sequelize.QueryTypes.SELECT }
       );
+      const _missedParticipants = (participants || []).filter(p => {
+        const userRoom = io?.sockets?.adapter?.rooms?.get(`user:${p.userId}`);
+        if (!userRoom) return true; // no known socket at all — try sendToUser anyway
+        return ![...userRoom].some(sid => alreadyCoveredSocketIds.has(sid));
+      });
       await Promise.allSettled(
-        (participants || []).map(p =>
+        _missedParticipants.map(p =>
           wsService.sendToUser(p.userId, 'message:deleted', deletePayload)
         )
       );

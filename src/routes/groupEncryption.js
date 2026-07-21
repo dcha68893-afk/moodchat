@@ -62,14 +62,11 @@ async function assertActiveMember(groupId, userId) {
 router.post('/:groupId/distribute', asyncHandler(async (req, res) => {
     const groupId = parseInt(req.params.groupId, 10);
     const ownerUserId = req.user.id;
-    const { keyGeneration, distributions } = req.body;
+    const { distributions } = req.body;
     // distributions: [{ recipientUserId, encryptedSenderKey }, ...]
 
     if (!groupId || !Array.isArray(distributions) || distributions.length === 0) {
         return res.status(400).json({ success: false, message: 'groupId and distributions[] are required' });
-    }
-    if (!keyGeneration || keyGeneration < 1) {
-        return res.status(400).json({ success: false, message: 'keyGeneration must be a positive integer' });
     }
 
     const isMember = await assertActiveMember(groupId, ownerUserId);
@@ -80,7 +77,8 @@ router.post('/:groupId/distribute', asyncHandler(async (req, res) => {
     const db = getDb();
     const sequelize = db.sequelize;
     const GroupSenderKeyDistribution = db.models?.GroupSenderKeyDistribution;
-    if (!GroupSenderKeyDistribution) {
+    const GroupSenderKeyGeneration = db.models?.GroupSenderKeyGeneration;
+    if (!GroupSenderKeyDistribution || !GroupSenderKeyGeneration) {
         return res.status(500).json({ success: false, message: 'GroupSenderKeyDistribution model unavailable' });
     }
 
@@ -89,6 +87,26 @@ router.post('/:groupId/distribute', asyncHandler(async (req, res) => {
     if (distributions.length > 500) {
         return res.status(400).json({ success: false, message: 'Too many distributions in one request (max 500)' });
     }
+
+    // FIX-ROOT-CAUSE-GROUP-KEY-GENERATION-RACE: this used to trust whatever
+    // `keyGeneration` number the client sent, which the client computed
+    // itself from an earlier, separate GET /my-generation call ("current +
+    // 1"). Two devices/tabs sending a first message in the same brand new
+    // group around the same moment — each generating genuinely different
+    // random key material — could both read the same "current" value and
+    // both submit the same "next" number. There was no unique constraint on
+    // (groupId, ownerUserId, keyGeneration) to catch that, so whichever
+    // request's bulkCreate landed last silently won for any overlapping
+    // recipients, leaving the other device's key — and anything already
+    // sent with it — permanently undecryptable.
+    //
+    // Claim the generation number atomically here instead, from a counter
+    // table with a real unique constraint (see the migration). The database
+    // is now the single source of truth; two concurrent callers physically
+    // cannot receive the same number. Whatever the client's request body may
+    // still send for `keyGeneration` (older cached frontend build, harmless
+    // to ignore) is not used for anything.
+    const keyGeneration = await GroupSenderKeyGeneration.claimNext(groupId, ownerUserId);
 
     const rows = distributions
         .filter(d => d && d.recipientUserId && d.encryptedSenderKey)
@@ -131,6 +149,9 @@ router.post('/:groupId/distribute', asyncHandler(async (req, res) => {
         }
     } catch (_) { /* real-time notify is best-effort; distribution itself already succeeded */ }
 
+    // keyGeneration here is the SERVER-assigned authoritative number, which
+    // may differ from whatever the client guessed before calling this — the
+    // client must adopt this value for its own local generation tracking.
     return res.status(201).json({
         success: true,
         message: `Distributed sender key generation ${keyGeneration} to ${rows.length} member(s)`,

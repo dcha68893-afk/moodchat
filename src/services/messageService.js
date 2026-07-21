@@ -204,11 +204,28 @@ class MessageService {
             // Get Socket.IO instance directly for reliable delivery
             const io = ws.getIO();
             if (io) {
-                // FIX Bug 5: Emit ONLY to user rooms (not chat room) to prevent duplicate delivery.
-                // Previously: user rooms + chat:X room → receiver got message:new 2-4 times.
-                // The dedup set in messages-core prevented double renders but caused console noise.
-                // Now: single canonical delivery per user via user rooms only.
-                // Add a unique broadcastId so messages-core dedup still works as a safety net.
+                // FIX-ROOT-CAUSE-MESSAGE-DUPLICATE: this block previously emitted
+                // the SAME message up to 7 times to a single recipient:
+                //   - `user:${userId}` and `user:${strUid}` are the exact same
+                //     room name (String(userId) template-concatenates identically
+                //     to userId itself), so those two calls were pure duplicates.
+                //     Same for `user_${userId}` / `user_${strUid}`.
+                //   - A second, different event name ('new_message') was also
+                //     emitted to the same room on top of 'message:new'.
+                //   - Then a full extra loop looked up every actual socket id for
+                //     the user and emitted BOTH event names directly to each
+                //     socket — duplicating the room emits again, since every
+                //     open socket for that user is already a member of both
+                //     `user:<id>` and `user_<id>` at connection time (see
+                //     webSocketService.js's join calls).
+                // Sockets do reliably join both `user:<id>` and `user_<id>` (two
+                // genuinely different room names — not a coercion artifact), so
+                // emitting once to each of those two is the actual minimum
+                // needed for delivery; everything else here was pure duplication.
+                // The frontend's real safety net is its own chatId:messageId
+                // dedup in messages-core.js, not the `_broadcastId` this used to
+                // add — nothing in the frontend ever reads that field, so it's
+                // kept here only for forward compatibility, not relied upon.
                 const _broadcastId = `msg_${payload.id || payload.messageId || Date.now()}_${chatId}`;
                 const payloadWithId = { ...payload, _broadcastId };
                 for (const { userId } of participants) {
@@ -216,24 +233,8 @@ class MessageService {
                     if (blockedUserIds.has(String(userId))) continue;
                     // Skip sender — they already see optimistic message in their own UI
                     if (String(userId) === String(senderId)) continue;
-                    // PHASE15 FIX: emit to ALL 4 room name variants to survive integer/string
-                    // coercion edge cases. Previously only emitting to 2 variants caused missed
-                    // delivery when the receiver's socket joined under a different variant.
-                    const strUid = String(userId);
                     io.to(`user:${userId}`).emit('message:new', payloadWithId);
                     io.to(`user_${userId}`).emit('message:new', payloadWithId);
-                    io.to(`user:${strUid}`).emit('message:new', payloadWithId);
-                    io.to(`user_${strUid}`).emit('message:new', payloadWithId);
-                    // PHASE15 FIX: also emit 'new_message' variant for receivers listening to that
-                    io.to(`user:${strUid}`).emit('new_message', payloadWithId);
-                    // PHASE15 FIX: emit directly to socket IDs as final fallback
-                    try {
-                        const socketIds = await ws.getSocketIdsForUser(userId).catch(() => []);
-                        for (const sid of socketIds) {
-                            try { io.to(sid).emit('message:new', payloadWithId); } catch(_) {}
-                            try { io.to(sid).emit('new_message',  payloadWithId); } catch(_) {}
-                        }
-                    } catch(_) {}
                 }
                 // FIX Bug 5: Do NOT emit to chat:X / chat_X rooms — that would duplicate all above
                 console.log(`[MessageService] ✅ Real-time delivery: chatId=${chatId}, recipients=${participants.length - 1} (sender excluded)`);

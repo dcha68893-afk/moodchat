@@ -57,9 +57,35 @@ class CallRoomRegistry {
 
   removeParticipant(callId, userId) {
     const room = this._rooms.get(callId);
-    if (!room) return;
+    if (!room) return { removed: false, newHostId: null };
+    const wasHost = room.hostId === String(userId);
     room.participants.delete(String(userId));
-    if (room.participants.size === 0) this.endRoom(callId);
+
+    if (room.participants.size === 0) {
+      this.endRoom(callId);
+      return { removed: true, newHostId: null };
+    }
+
+    // FIX-ROOT-CAUSE-NO-HOST-TRANSFER: hostId was set once at room creation
+    // and never touched again anywhere in this file. If the host left or
+    // disconnected without explicitly calling group:call:end, every
+    // remaining participant would permanently fail isHost() — no one could
+    // ever end the call for everyone or mute/remove a participant again for
+    // the rest of that call's lifetime. Promote the longest-standing
+    // remaining participant (a stable, predictable choice — not random, not
+    // "whoever happens to send the next action first") to host.
+    let newHostId = null;
+    if (wasHost) {
+      let earliest = null;
+      for (const p of room.participants.values()) {
+        if (!earliest || p.joinedAt < earliest.joinedAt) earliest = p;
+      }
+      if (earliest) {
+        room.hostId = earliest.userId;
+        newHostId = earliest.userId;
+      }
+    }
+    return { removed: true, newHostId };
   }
 
   endRoom(callId) {
@@ -695,11 +721,18 @@ class CallSignalingService extends EventEmitter {
       if (!callId) return;
 
       socket.leave(`call:${callId}`);
-      this._rooms.removeParticipant(callId, userId);
+      const { newHostId } = this._rooms.removeParticipant(callId, userId);
 
       this._io.to(`call:${callId}`).emit('group:call:participant_left', {
         callId, groupId, userId, timestamp: Date.now(),
       });
+
+      if (newHostId) {
+        this._io.to(`call:${callId}`).emit('group:call:host_changed', {
+          callId, newHostId, reason: 'previous_host_left', timestamp: Date.now(),
+        });
+        this._logCall('log', `Host of call ${callId} left — reassigned to uid=${newHostId}`, { callId, previousHost: userId, newHostId });
+      }
     });
 
     // Participant state updates (mute, video, screen share)
@@ -949,11 +982,16 @@ class CallSignalingService extends EventEmitter {
       // Find any calls this user was in and notify participants
       for (const [callId, room] of this._rooms._rooms) {
         if (room.participants.has(String(userId))) {
-          room.participants.delete(String(userId));
+          const { newHostId } = this._rooms.removeParticipant(callId, userId);
           this._io.to(`call:${callId}`).emit('call:participant_left', {
             callId, userId, reason: 'disconnected', timestamp: Date.now(),
           });
-          if (room.participants.size === 0) this._rooms.endRoom(callId);
+          if (newHostId) {
+            this._io.to(`call:${callId}`).emit('group:call:host_changed', {
+              callId, newHostId, reason: 'previous_host_disconnected', timestamp: Date.now(),
+            });
+            this._logCall('log', `Host of call ${callId} disconnected — reassigned to uid=${newHostId}`, { callId, previousHost: userId, newHostId });
+          }
         }
       }
     });
