@@ -12,6 +12,9 @@
 
 const express = require('express');
 const router = express.Router();
+// Reuse the lastSeen privacy enforcement built in users.js (see that file
+// for _applyLastSeenPrivacy) instead of duplicating it here.
+const applyLastSeenPrivacy = require('./users').applyLastSeenPrivacy;
 const asyncHandler = require('express-async-handler');
 const { apiRateLimiter } = require('../middleware/rateLimiter');
 const { authenticateToken, optionalAuthenticateToken } = require('../middleware/auth');
@@ -125,7 +128,7 @@ const userInclude = () => User ? [{
     model: User,
     as: 'statusUser',
     required: false,
-    attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen'],
+    attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'settings'],
 }] : [];
 
 const activeWhere = () => ({
@@ -435,6 +438,8 @@ router.get('/', apiRateLimiter, asyncHandler(async (req, res) => {
         }).catch(() => ({ rows: [], count: 0 }));
         rows = r.rows;
         total = r.count;
+        const site1Users = rows.map(s => s.statusUser).filter(Boolean);
+        if (site1Users.length) await applyLastSeenPrivacy(site1Users, getUserId(req));
     }
 
     res.json({
@@ -467,6 +472,8 @@ router.get('/public', apiRateLimiter, asyncHandler(async (req, res) => {
         }).catch(() => ({ rows: [], count: 0 }));
         rows = r.rows;
         total = r.count;
+        const site2Users = rows.map(s => s.statusUser).filter(Boolean);
+        if (site2Users.length) await applyLastSeenPrivacy(site2Users, getUserId(req));
 
         // P3 FIX: In-memory weighted score + recency decay for ranked feed
         if (ranked && rows.length > 1) {
@@ -507,6 +514,8 @@ router.get('/trending', apiRateLimiter, asyncHandler(async (req, res) => {
             order: [['likeCount', 'DESC'], ['viewCount', 'DESC'], ['createdAt', 'DESC']],
             limit: Math.min(+limit, 50),
         }).catch(() => []);
+        const site3Users = rows.map(s => s.statusUser).filter(Boolean);
+        if (site3Users.length) await applyLastSeenPrivacy(site3Users, getUserId(req));
     }
 
     res.json({ success: true, data: { statuses: rows.map(formatStatus), total: rows.length } });
@@ -531,6 +540,8 @@ router.get('/search', apiRateLimiter, asyncHandler(async (req, res) => {
         }).catch(() => ({ rows: [], count: 0 }));
         rows = r.rows;
         total = r.count;
+        const site4Users = rows.map(s => s.statusUser).filter(Boolean);
+        if (site4Users.length) await applyLastSeenPrivacy(site4Users, getUserId(req));
     }
 
     res.json({
@@ -564,6 +575,8 @@ router.get('/mood/:moodType', apiRateLimiter, asyncHandler(async (req, res) => {
         }).catch(() => ({ rows: [], count: 0 }));
         rows = r.rows;
         total = r.count;
+        const site5Users = rows.map(s => s.statusUser).filter(Boolean);
+        if (site5Users.length) await applyLastSeenPrivacy(site5Users, getUserId(req));
     }
 
     res.json({
@@ -981,6 +994,8 @@ router.get('/friends', authenticateToken, apiRateLimiter, asyncHandler(async (re
         }).catch(() => ({ rows: [], count: 0 }));
         rows = r.rows;
         total = r.count;
+        const site6Users = rows.map(s => s.statusUser).filter(Boolean);
+        if (site6Users.length) await applyLastSeenPrivacy(site6Users, userId);
     }
 
     rows = await filterStatusesForViewer(rows, userId, friendContext);
@@ -1338,6 +1353,8 @@ router.get('/user/:userId', authenticateToken, apiRateLimiter, asyncHandler(asyn
         }).catch(() => ({ rows: [], count: 0 }));
         rows = r.rows;
         total = r.count;
+        const site7Users = rows.map(s => s.statusUser).filter(Boolean);
+        if (site7Users.length) await applyLastSeenPrivacy(site7Users, viewerId);
     }
 
     if (targetId !== viewerId) {
@@ -1422,6 +1439,7 @@ router.get('/:statusId', optionalAuthenticateToken, apiRateLimiter, asyncHandler
         status = await Status.findOne({ where: { id: statusId }, include: userInclude() }).catch(() => null);
     }
     if (!status) return res.status(404).json({ success: false, message: 'Status not found' });
+    if (status.statusUser) await applyLastSeenPrivacy(status.statusUser, userId);
 
     const isOwner = userId && Number(status.userId) === Number(userId);
     const isExpired = status.expiresAt && new Date(status.expiresAt) < new Date();
@@ -1463,10 +1481,13 @@ router.get('/:statusId/viewers', authenticateToken, apiRateLimiter, asyncHandler
             model: User,
             as: 'viewerUser',
             required: false,
-            attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen'],
+            attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'settings'],
         }] : [],
         order: [['viewedAt', 'DESC']],
     }).catch(() => []) : [];
+
+    const site9Users = viewerRows.map(r => r.viewerUser).filter(Boolean);
+    if (site9Users.length) await applyLastSeenPrivacy(site9Users, ownerId);
 
     const replyRows = StatusReply ? await StatusReply.findAll({
         where: { statusId: Number(statusId) },

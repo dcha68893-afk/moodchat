@@ -142,8 +142,46 @@ async function sendToSubscription(subscription, payload) {
 }
 
 // ── Send to all user subscriptions ───────────────────────────────────────────
+// FIX: sendToUser previously sent a push notification unconditionally to
+// every subscribed device, never checking whether the recipient had turned
+// off notifications for this category in Settings. messageNotifications /
+// mentionNotifications / callNotifications were all fully wired end-to-end
+// (saved, synced, displayed correctly) but never actually consulted by the
+// one function that decides whether to push a notification. Also fetches
+// notificationSound/notificationVibration here (same query, no extra DB
+// hit) so they can ride along in the payload — the service worker runs in
+// its own scope and can't easily ask the page for current settings, so
+// this is the simplest reliable way to get the preference to it.
+const NOTIFICATION_SETTING_KEY = {
+  'message:new':    'messageNotifications',
+  'mention':        'mentionNotifications',
+  'call:incoming':  'callNotifications',
+};
+
+async function _getRecipientNotificationPrefs(userId, type, sequelize) {
+  const defaults = { enabled: true, sound: true, vibrate: true };
+  try {
+    const rows = await sequelize.query(
+      `SELECT settings FROM "Users" WHERE id = :userId LIMIT 1`,
+      { replacements: { userId }, type: sequelize.QueryTypes.SELECT }
+    );
+    const notif = rows?.[0]?.settings?.notifications || {};
+    const settingKey = NOTIFICATION_SETTING_KEY[type];
+    return {
+      enabled: settingKey ? notif[settingKey] !== false : true,
+      sound:   notif.notificationSound !== false,
+      vibrate: notif.notificationVibration !== false,
+    };
+  } catch (_) {
+    return defaults; // fail open — a lookup error shouldn't silently eat notifications
+  }
+}
+
 async function sendToUser(userId, type, data, sequelize) {
   if (!webpush || !sequelize) return;
+
+  const prefs = await _getRecipientNotificationPrefs(userId, type, sequelize);
+  if (!prefs.enabled) return;
 
   const subs = await sequelize.query(
     `SELECT id, endpoint, p256dh, auth FROM push_subscriptions WHERE "userId"=:userId`,
@@ -152,6 +190,8 @@ async function sendToUser(userId, type, data, sequelize) {
   if (!subs || subs.length === 0) return;
 
   const payload   = _buildPayload(type, data);
+  payload.silent  = !prefs.sound;
+  payload.vibrate = prefs.vibrate ? [200, 100, 200] : [];
   const expired   = [];
 
   await Promise.allSettled(subs.map(async (sub) => {

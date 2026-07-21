@@ -146,6 +146,7 @@ if (ctrl) {
 
     router.get('/seller/orders',                     safe(ctrl.getSellerOrders?.bind(ctrl)));
     router.put('/seller/orders/:id/shipping',        safe(ctrl.updateShipping?.bind(ctrl)));
+    router.get('/seller/orders/:id/shipping-label',  safe(ctrl.getShippingLabel?.bind(ctrl)));
 
     router.get('/seller/payout',                     safe(ctrl.getPayouts?.bind(ctrl)));
     router.get('/seller/payouts',                    safe(ctrl.getPayouts?.bind(ctrl)));

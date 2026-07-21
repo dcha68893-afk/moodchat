@@ -1263,16 +1263,23 @@ class MarketplaceController {
 
             const totalListings   = T ? await T.count({ where: { sellerId, status: { [Op.ne]: 'deleted' } } }) : 0;
             const activeListings  = T ? await T.count({ where: { sellerId, status: 'active', available: true } }) : 0;
+            const pendingListings = T ? await T.count({ where: { sellerId, status: 'pending_review' } }) : 0;
             const totalOrders     = O ? await O.count({ where: { sellerId } }) : 0;
             const pendingOrders   = O ? await O.count({ where: { sellerId, status: 'pending' } }) : 0;
             const completedOrders = O ? await O.count({ where: { sellerId, status: 'delivered' } }) : 0;
             const totalRevenue    = O ? (await O.sum('totalPrice', { where: { sellerId, status: { [Op.in]: ['paid','delivered'] } } })) || 0 : 0;
+            const totalViews      = T ? (await T.sum('views', { where: { sellerId, status: { [Op.ne]: 'deleted' } } })) || 0 : 0;
+            const recentOrdersRaw = O ? await O.findAll({ where: { sellerId }, order: [['createdAt','DESC']], limit: 5 }) : [];
 
             return ok(res, {
-                totalListings, activeListings,
+                totalListings, activeListings, products: activeListings, pending: pendingListings,
                 totalOrders, pendingOrders, completedOrders,
                 totalRevenue: parseFloat(totalRevenue).toFixed(2),
                 currency: 'KES',
+                recentOrders: recentOrdersRaw.map(o => ({
+                    id: o.id, status: o.status, totalPrice: o.totalPrice, createdAt: o.createdAt,
+                    metadata: o.metadata,
+                })),
             });
         } catch(e) { err(next, e, 'getSellerDashboard'); }
     }
@@ -1454,20 +1461,24 @@ class MarketplaceController {
         try {
             if (req.user?.role !== 'admin') return next(new AppError('Admin only', 403));
             const T = Model.Tool;
-            if (!T) return ok(res, [], 'No products (model unavailable)');
-            const { Op: _Op } = require('sequelize');
+            if (!T) return ok(res, { products: [] }, 'No products (model unavailable)');
             const pending = await T.findAll({
                 where: {
-                    [_Op.or]: [
+                    [Op.or]: [
                         { status: 'pending_review' },
                         { approvalStatus: 'pending' },
                         { approval_status: 'pending' },
                     ]
                 },
+                include: _sellerInclude(T),
                 order: [['createdAt', 'ASC']],
                 limit: parseInt(req.query.limit) || 50,
             });
-            return ok(res, pending, `${pending.length} pending products`);
+            const products = pending.map(p => ({
+                ..._formatProduct(p),
+                submitted_at: p.createdAt,
+            }));
+            return ok(res, { products }, `${products.length} pending products`);
         } catch(e) { err(next, e, 'adminGetPendingProducts'); }
     }
 
@@ -1653,10 +1664,20 @@ class MarketplaceController {
             const db = getDb();
             const SellerProfile = db.SellerProfile;
             const userId = req.user?.id;
-            if (!SellerProfile) return ok(res, { status: 'not_submitted', verified: false });
+            if (!SellerProfile) return ok(res, { status: 'unverified', verified: false });
             const profile = await SellerProfile.findOne({ where: { userId } });
-            if (!profile) return ok(res, { status: 'not_submitted', verified: false });
-            return ok(res, { status: profile.kycStatus, verified: profile.verified || false, submitted_at: profile.submittedAt });
+            if (!profile) return ok(res, { status: 'unverified', verified: false });
+            // AUDIT FIX: the model stores 'pending_review', but the frontend's
+            // status-message map only has a 'pending' key — a seller under
+            // review saw the "submit documents" message instead of "under
+            // review", which could prompt confusing duplicate submissions.
+            const statusMap = { pending_review: 'pending', approved: 'approved', rejected: 'rejected' };
+            return ok(res, {
+                status: statusMap[profile.kycStatus] || 'unverified',
+                verified: profile.verified || false,
+                submitted_at: profile.submittedAt,
+                kyc: { review_reason: profile.rejectionReason || null },
+            });
         } catch(e) { err(next, e, 'getKYCStatus'); }
     }
 
@@ -1730,21 +1751,40 @@ class MarketplaceController {
             const db = getDb();
             const Payout = db.Payout;
             const userId = req.user?.id;
-            if (!Payout) return ok(res, { payouts: [], available_balance: 0 });
+            if (!Payout) return ok(res, { available: 0, pending_payout: 0, total_earned: 0, gross_sales: 0, platform_fee: 0, total_withdrawn: 0, payout_history: [] });
             const payouts = await Payout.findAll({ where: { sellerId: userId }, order: [['createdAt', 'DESC']] });
 
-            // Compute available balance: sum of paid orders minus paid payouts
             const O = Model.Order;
-            let paidRevenue = 0, paidOut = 0;
+            let grossSales = 0;
             if (O) {
                 const result = await O.sum('totalPrice', { where: { sellerId: userId, status: { [Op.in]: ['paid','delivered'] } } });
-                paidRevenue = parseFloat(result || 0);
+                grossSales = parseFloat(result || 0);
             }
-            for (const p of payouts) { if (p.status === 'paid') paidOut += parseFloat(p.amount || 0); }
             const commission = parseFloat(process.env.SELLER_COMMISSION || '0.05');
-            const available = paidRevenue * (1 - commission) - paidOut;
+            const platformFee = grossSales * commission;
+            const totalEarned = grossSales - platformFee;
 
-            return ok(res, { payouts, available_balance: Math.max(0, available).toFixed(2), commission_rate: commission });
+            let totalWithdrawn = 0, pendingPayout = 0;
+            for (const p of payouts) {
+                const amt = parseFloat(p.amount || 0);
+                if (p.status === 'paid' || p.status === 'completed') totalWithdrawn += amt;
+                else if (p.status === 'pending' || p.status === 'processing') pendingPayout += amt;
+            }
+            const available = Math.max(0, totalEarned - totalWithdrawn - pendingPayout);
+
+            return ok(res, {
+                available: available.toFixed(2),
+                pending_payout: pendingPayout.toFixed(2),
+                total_earned: totalEarned.toFixed(2),
+                gross_sales: grossSales.toFixed(2),
+                platform_fee: platformFee.toFixed(2),
+                total_withdrawn: totalWithdrawn.toFixed(2),
+                payout_history: payouts.map(p => ({
+                    amount: p.amount, method: p.method, status: p.status,
+                    requested_at: p.createdAt,
+                })),
+                commission_rate: commission,
+            });
         } catch(e) { err(next, e, 'getPayouts'); }
     }
 
@@ -1753,7 +1793,8 @@ class MarketplaceController {
             const db = getDb();
             const Payout = db.Payout;
             const userId = req.user?.id;
-            const { amount, method='mpesa', phone, bank_account } = req.body;
+            const { amount, method='mpesa', phone, account, bank_account } = req.body;
+            const recipientPhone = phone || account;
             if (!amount || parseFloat(amount) <= 0) return next(new AppError('Valid amount required', 400));
             if (!Payout) return next(new AppError('Payout system unavailable', 503));
 
@@ -1784,7 +1825,7 @@ class MarketplaceController {
 
             const payout = await Payout.create({
                 sellerId: userId, amount: parseFloat(amount), currency: 'KES',
-                method, phone, bankAccount: bank_account, status: 'pending',
+                method, phone: recipientPhone, bankAccount: bank_account, status: 'pending',
                 requestedAt: new Date(),
             });
             return ok(res, { payout_id: payout.id, amount: payout.amount, status: 'pending' }, 'Payout request submitted. Processed within 1-3 business days.', 201);
@@ -2306,7 +2347,7 @@ class MarketplaceExtensions {
             const userId = req.user?.id;
             const db = getDb();
             const Users = db.Users || db.User;
-            const user = Users ? await Users.findByPk(userId, { attributes: ['id','loyaltyPoints','metadata'] }) : null;
+            const user = Users ? await Users.findByPk(userId, { attributes: ['id','loyaltyPoints','settings'] }) : null;
             const points = user?.loyaltyPoints || user?.settings?.loyalty_points || 0;
 
             // AUDIT FIX: history was hardcoded to always return []. Pull real
@@ -2417,7 +2458,7 @@ class MarketplaceExtensions {
             const userId = req.user?.id;
             const db = getDb();
             const Users = db.Users || db.User;
-            const user = Users ? await Users.findByPk(userId, { attributes: ['id','metadata'] }) : null;
+            const user = Users ? await Users.findByPk(userId, { attributes: ['id','settings'] }) : null;
             const addresses = user?.settings?.addresses || [];
             return ok(res, { addresses });
         } catch(e) { err(next, e, 'getAddresses'); }
@@ -2592,18 +2633,23 @@ class MarketplaceExtensions {
         try {
             const T = Model.Tool;
             const userId = req.user?.id;
-            if (!T) return ok(res, { inventory: [] });
+            if (!T) return ok(res, { items: [], low_stock: [], out_of_stock: [] });
             const products = await T.findAll({
                 where: { sellerId: userId, status: { [Op.ne]: 'deleted' } },
                 attributes: ['id','title','stock','available','price','status','approvalStatus','category','images'],
                 order: [['stock','ASC']],
             });
-            return ok(res, { inventory: products.map(p => ({
-                id: p.id, title: p.title, stock: p.stock, available: p.available,
+            const items = products.map(p => ({
+                id: p.id, title: p.title, stock: p.stock, stockQuantity: p.stock, available: p.available,
                 price: p.price, status: p.status, approval_status: p.approvalStatus,
                 category: p.category, image: p.images?.[0] || null,
-                low_stock: p.stock != null && p.stock < 5,
-            })) });
+                low_stock: p.stock != null && p.stock > 0 && p.stock < 5,
+            }));
+            return ok(res, {
+                items,
+                low_stock: items.filter(i => i.low_stock),
+                out_of_stock: items.filter(i => i.stock === 0),
+            });
         } catch(e) { err(next, e, 'getSellerInventory'); }
     }
 
@@ -2662,10 +2708,22 @@ class MarketplaceExtensions {
             const since = new Date(); since.setDate(since.getDate() - days);
             const paidSt = { [Op.in]: ['paid','delivered'] };
 
-            const [revenue, orders, products] = await Promise.all([
+            const [
+                revenueTotal, ordersTotal, productsTotal, pendingOrders,
+                completedOrders, cancelledOrders, approvedProducts,
+                pendingProducts, totalViews, totalSold,
+            ] = await Promise.all([
                 O ? O.sum('totalPrice', { where: { sellerId: userId, status: paidSt, createdAt: { [Op.gte]: since } } }) || 0 : 0,
                 O ? O.count({ where: { sellerId: userId, createdAt: { [Op.gte]: since } } }) : 0,
                 T ? T.count({ where: { sellerId: userId, status: { [Op.ne]: 'deleted' } } }) : 0,
+                O ? O.count({ where: { sellerId: userId, status: 'pending', createdAt: { [Op.gte]: since } } }) : 0,
+                O ? O.count({ where: { sellerId: userId, status: 'delivered', createdAt: { [Op.gte]: since } } }) : 0,
+                O ? O.count({ where: { sellerId: userId, status: 'cancelled', createdAt: { [Op.gte]: since } } }) : 0,
+                T ? T.count({ where: { sellerId: userId, status: 'active', available: true } }) : 0,
+                T ? T.count({ where: { sellerId: userId, status: 'pending_review' } }) : 0,
+                T ? (T.sum('views', { where: { sellerId: userId, status: { [Op.ne]: 'deleted' } } })) || 0 : 0,
+                T ? T.findAll({ where: { sellerId: userId }, attributes: ['purchasedBy'] })
+                     .then(rows => rows.reduce((s, r) => s + (r.purchasedBy || []).length, 0)) : 0,
             ]);
 
             const daily = [];
@@ -2677,7 +2735,26 @@ class MarketplaceExtensions {
                 daily.push({ date: d.toISOString().slice(0,10), revenue: parseFloat(rev), orders: ords });
             }
 
-            return ok(res, { period: `${days}d`, revenue: parseFloat(revenue), orders, products, daily });
+            const topProductsRaw = T ? await T.findAll({
+                where: { sellerId: userId, status: { [Op.ne]: 'deleted' } },
+                order: [['views','DESC']], limit: 5,
+            }) : [];
+            const top_products = topProductsRaw.map(p => ({
+                title: p.title, views: p.views || 0,
+                sold: (p.purchasedBy || []).length,
+                revenue: (p.purchasedBy || []).length * (parseFloat(p.price) || 0),
+            }));
+
+            const conversionRate = totalViews > 0 ? ((ordersTotal / totalViews) * 100).toFixed(1) : 0;
+
+            return ok(res, {
+                period: `${days}d`,
+                conversion_rate: conversionRate,
+                revenue: { total: parseFloat(revenueTotal), by_day: daily },
+                orders:  { total: ordersTotal, pending: pendingOrders, completed: completedOrders, cancelled: cancelledOrders },
+                products: { total: productsTotal, approved: approvedProducts, pending: pendingProducts, total_views: totalViews, total_sold: totalSold },
+                top_products,
+            });
         } catch(e) { err(next, e, 'getSellerAnalytics'); }
     }
 
@@ -2688,13 +2765,45 @@ class MarketplaceExtensions {
             const { status, tracking_number, courier } = req.body;
             const order = O ? await O.findOne({ where: { id: req.params.id, sellerId: userId } }) : null;
             if (!order) return next(new AppError('Order not found', 404));
-            await order.update({
-                status: status || order.status,
-                metadata: { ...(order.metadata||{}), courier, tracking_number, shipped_at: new Date() },
-            });
+            const newStatus = status || order.status;
+            const updates = {
+                status: newStatus,
+                metadata: { ...(order.metadata||{}), courier: courier || order.metadata?.courier },
+            };
+            // AUDIT FIX: getOrderTracking (buyer-facing) reads these top-level
+            // columns directly — tracking_number/courier used to only be
+            // written into metadata, so the buyer's tracking view always
+            // showed a blank tracking number and no shipped/delivered dates.
+            if (tracking_number) updates.trackingNumber = tracking_number;
+            if (newStatus === 'shipped' && !order.shippedAt) updates.shippedAt = new Date();
+            if (newStatus === 'delivered' && !order.deliveredAt) updates.deliveredAt = new Date();
+            await order.update(updates);
             _socketBroadcast(req, 'order:updated', { order_id: order.id, buyer_id: order.buyerId, status: order.status });
             return ok(res, { order_id: order.id, status: order.status }, 'Shipping updated');
         } catch(e) { err(next, e, 'updateShipping'); }
+    }
+
+    // AUDIT FIX: the "Print Label" button (marketplace-seller.js's
+    // _viewLabel) called GET /marketplace/seller/orders/:id/shipping-label,
+    // which had no route or controller method at all — it always showed
+    // "Label not available yet" regardless of real order/tracking data.
+    static async getShippingLabel(req, res, next) {
+        try {
+            const O = Model.Order;
+            const userId = req.user?.id;
+            const order = O ? await O.findOne({ where: { id: req.params.id, sellerId: userId } }) : null;
+            if (!order) return next(new AppError('Order not found', 404));
+            const addr = order.deliveryAddress || {};
+            return ok(res, {
+                label: {
+                    order_id: order.id,
+                    tracking_number: order.trackingNumber || null,
+                    courier: order.metadata?.courier || 'Standard',
+                    to: { name: addr.name || addr.recipient_name, address: addr.line1 || addr.address, city: addr.city, phone: addr.phone },
+                    items: order.metadata?.items || [],
+                },
+            });
+        } catch(e) { err(next, e, 'getShippingLabel'); }
     }
 
     static async cancelOrder(req, res, next) {
@@ -2758,7 +2867,14 @@ class MarketplaceExtensions {
             const db = getDb();
             const Refund = db.Refund;
             if (!Refund) return ok(res, { returns: [] });
-            const returns = await Refund.findAll({ where: { sellerId: req.user?.id }, order: [['createdAt','DESC']] });
+            const rows = await Refund.findAll({ where: { sellerId: req.user?.id }, order: [['createdAt','DESC']] });
+            // AUDIT FIX: frontend reads order_id/requested_at/total (snake_case);
+            // the model's real fields are orderId/createdAt/amount (camelCase) —
+            // every return row showed a blank order number, date, and amount.
+            const returns = rows.map(r => ({
+                id: r.id, order_id: r.orderId, requested_at: r.createdAt,
+                reason: r.reason, total: r.amount, status: r.status,
+            }));
             return ok(res, { returns });
         } catch(e) { err(next, e, 'getSellerReturns'); }
     }
@@ -2766,10 +2882,50 @@ class MarketplaceExtensions {
     static async approveReturn(req, res, next) {
         try {
             const db = getDb();
-            const r = db.Refund ? await db.Refund.findOne({ where: { id: req.params.id, sellerId: req.user?.id } }) : null;
+            const Refund = db.Refund;
+            const O = Model.Order;
+            const r = Refund ? await Refund.findOne({ where: { id: req.params.id, sellerId: req.user?.id } }) : null;
             if (!r) return next(new AppError('Return not found', 404));
-            await r.update({ status: 'approved', approvedAt: new Date(), approvedBy: req.user?.id });
-            return ok(res, null, 'Return approved');
+
+            // AUDIT FIX: this used to only flip status — no money ever moved
+            // back to the buyer. Reuses the same real wallet-credit logic as
+            // adminApproveRefund (Round 3) instead of duplicating a second,
+            // incomplete implementation.
+            const order = O ? await O.findByPk(r.orderId) : null;
+            let walletCredited = false, manualActionNeeded = false;
+            const seq = getSequelize();
+            if (order?.paymentMethod === 'wallet' && seq) {
+                const t = await seq.transaction();
+                try {
+                    const Wallet = db.Wallet;
+                    const WalletTransaction = db.WalletTransaction;
+                    const wallet = Wallet ? await Wallet.findOne({ where: { userId: r.buyerId }, transaction: t, lock: t.LOCK.UPDATE }) : null;
+                    if (wallet) {
+                        await wallet.increment('balance', { by: parseFloat(r.amount), transaction: t });
+                        if (WalletTransaction) {
+                            await WalletTransaction.create({
+                                userId: r.buyerId, type: 'credit', amount: r.amount,
+                                reason: 'refund', reference: `REFUND-${r.id}`,
+                                metadata: { refund_id: r.id, order_id: r.orderId },
+                            }, { transaction: t });
+                        }
+                        walletCredited = true;
+                    }
+                    await t.commit();
+                } catch(_) { await t.rollback().catch(()=>{}); }
+            } else if (order?.paymentMethod === 'card' || order?.paymentMethod === 'mpesa') {
+                manualActionNeeded = true;
+            }
+
+            await r.update({
+                status: 'approved', approvedAt: new Date(), approvedBy: req.user?.id,
+                metadata: { ...(r.metadata||{}), wallet_credited: walletCredited, manual_gateway_refund_needed: manualActionNeeded },
+            });
+            if (O) await O.update({ status: 'refunded' }, { where: { id: r.orderId } });
+            return ok(res, {
+                wallet_credited: walletCredited, manual_gateway_refund_needed: manualActionNeeded,
+                note: manualActionNeeded ? `Payment was via ${order.paymentMethod} — the buyer's refund still needs to be processed through that gateway.` : undefined,
+            }, 'Return approved');
         } catch(e) { err(next, e, 'approveReturn'); }
     }
 
@@ -2787,7 +2943,7 @@ class MarketplaceExtensions {
         try {
             const db = getDb();
             const Users = db.Users || db.User;
-            const user = Users ? await Users.findByPk(req.user?.id, { attributes: ['id','metadata'] }) : null;
+            const user = Users ? await Users.findByPk(req.user?.id, { attributes: ['id','settings'] }) : null;
             const plan = user?.settings?.plan || 'free';
             return ok(res, {
                 plan, active: true,
