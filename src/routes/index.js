@@ -22,6 +22,7 @@ const IGNORED_FILES = new Set(['index.js', '.DS_Store', 'Thumbs.db']);
 const PUBLIC_PATHS = [
   '/auth/login',
   '/auth/register',
+  '/auth/google',
   '/auth/refresh',
   '/auth/forgot-password',
   '/auth/reset-password',

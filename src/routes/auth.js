@@ -350,6 +350,44 @@ router.post('/login', asyncHandler(async (req, res) => {
     }
 }));
 
+// POST /auth/google — "Sign in with Google" (frontend: js/google-auth.js)
+// FIX: authService.loginWithGoogle() already existed (verifies the Google ID
+// token, auto-creates an account on first sign-in, issues tokens) but no
+// route ever called it, so POST /api/auth/google 404'd — "route not found"
+// on the Google button. This just wires the existing service to the route
+// the frontend has always been calling, matching /login's response shape
+// (token/accessToken/refreshToken/expiresIn/user) so the frontend's existing
+// handleCredentialResponse() needs no changes.
+router.post('/google', asyncHandler(async (req, res) => {
+    const { credential } = req.body;
+    if (!credential) {
+        return res.status(400).json({ success: false, message: 'Google credential is required' });
+    }
+
+    const authService = require('../services/authService');
+    const result = await authService.loginWithGoogle(credential);
+
+    if (!result.success) {
+        const status = result.code === 'GOOGLE_AUTH_ERROR' ? 401 : 500;
+        return res.status(status).json({ success: false, message: result.message || 'Google sign-in failed' });
+    }
+
+    res.json({
+        success:      true,
+        token:        result.tokens.accessToken,
+        accessToken:  result.tokens.accessToken,
+        refreshToken: result.tokens.refreshToken,
+        expiresIn:    result.tokens.expiresIn || 24 * 60 * 60,
+        user: {
+            id:       result.user.id,
+            username: result.user.username,
+            email:    result.user.email,
+            avatar:   result.user.avatar || null,
+            role:     result.user.role || 'user'
+        }
+    });
+}));
+
 // GET /me - Get current user info
 router.get('/me', authenticateToken, asyncHandler(async (req, res) => {
     try {
