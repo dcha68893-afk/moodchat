@@ -38,6 +38,7 @@ class FriendController {
                         username:    req.user.username    || '',
                         displayName: req.user.displayName || req.user.username || '',
                         avatar:      req.user.avatar      || null,
+                        coverPhoto:  req.user.coverPhoto  || null,
                     };
 
                     // Attempt to load full profile fields (firstName/lastName/status) so the
@@ -47,7 +48,7 @@ class FriendController {
                         const User = db.User || db.Users;
                         if (User) {
                             const senderUser = await User.findByPk(req.user.id, {
-                                attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen']
+                                attributes: ['id', 'username', 'avatar', 'coverPhoto', 'firstName', 'lastName', 'status', 'lastSeen']
                             });
                             if (senderUser) {
                                 const u = senderUser.toJSON ? senderUser.toJSON() : senderUser;
@@ -58,6 +59,7 @@ class FriendController {
                                     firstName:   u.firstName  || '',
                                     lastName:    u.lastName   || '',
                                     avatar:      u.avatar     || null,
+                                    coverPhoto:  u.coverPhoto || null,
                                     status:      u.status     || 'offline',
                                     lastSeen:    u.lastSeen   || null,
                                 };
@@ -118,6 +120,7 @@ class FriendController {
                             username:    req.user.username    || '',
                             displayName: req.user.displayName || req.user.username || '',
                             avatar:      req.user.avatar      || null,
+                            coverPhoto:  req.user.coverPhoto  || null,
                         };
 
                         // FIX: Notify the ORIGINAL SENDER (requester) with full accepter profile
@@ -142,7 +145,7 @@ class FriendController {
                             const User = db.User || db.Users;
                             if (User) {
                                 const requesterUser = await User.findByPk(originalRequesterId, {
-                                    attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen']
+                                    attributes: ['id', 'username', 'avatar', 'coverPhoto', 'firstName', 'lastName', 'status', 'lastSeen']
                                 });
                                 if (requesterUser) {
                                     const u = requesterUser.toJSON ? requesterUser.toJSON() : requesterUser;
@@ -151,6 +154,7 @@ class FriendController {
                                         username:    u.username    || '',
                                         displayName: ([u.firstName, u.lastName].filter(Boolean).join(' ').trim()) || u.username || '',
                                         avatar:      u.avatar      || null,
+                                        coverPhoto:  u.coverPhoto  || null,
                                         status:      u.status      || 'offline',
                                         lastSeen:    u.lastSeen    || null,
                                     };

@@ -14,7 +14,13 @@ const User   = db.User   || db.Users;
 const Friend = db.Friend || db.Friends;
 
 // ─── CANONICAL friend normalizer ──────────────────────────────────────────────
-const USER_ATTRS = ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen'];
+// FIX (COVER-PHOTO-NOT-VISIBLE-TO-FRIENDS): coverPhoto was never in this list,
+// so every friend-related query (getFriends/getPendingRequests/getSentRequests)
+// never even SELECTed the column from Postgres — no amount of frontend fixing
+// could show a cover photo that was never fetched in the first place. The
+// column itself (and the upload path that fills it) already works fine; only
+// the "list my friends" read path was missing it.
+const USER_ATTRS = ['id', 'username', 'avatar', 'coverPhoto', 'firstName', 'lastName', 'status', 'lastSeen'];
 
 function formatUser(user) {
     if (!user) return null;
@@ -37,6 +43,7 @@ function formatUser(user) {
         id:          u.id,
         username:    u.username    || '',
         avatar:      u.avatar      || null,
+        coverPhoto:  u.coverPhoto  || null,
         displayName: [u.firstName, u.lastName].filter(Boolean).join(' ').trim() || u.username || '',
         firstName:   u.firstName   || '',
         lastName:    u.lastName    || '',
@@ -72,6 +79,7 @@ function formatFriend(friendRecord, currentUserId) {
         id:          u.id          || null,
         name:        displayName,
         avatar:      u.avatar      || null,
+        coverPhoto:  u.coverPhoto  || null,
         status:      u.status      || 'offline',
         lastSeen:    u.lastSeen    || null,
         isOnline:    (u.status === 'online'),
@@ -227,6 +235,7 @@ async function getPendingRequests(userId) {
                 id:          u.id,
                 name:        displayName,
                 avatar:      u.avatar    || null,
+                coverPhoto:  u.coverPhoto || null,
                 status:      u.status    || 'offline',
                 lastSeen:    u.lastSeen  || null,
                 isOnline:    u.status === 'online',
@@ -258,6 +267,7 @@ async function getSentRequests(userId) {
                 id:          u.id,
                 name:        displayName,
                 avatar:      u.avatar    || null,
+                coverPhoto:  u.coverPhoto || null,
                 status:      u.status    || 'offline',
                 lastSeen:    u.lastSeen  || null,
                 isOnline:    u.status === 'online',
