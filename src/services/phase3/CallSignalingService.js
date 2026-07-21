@@ -57,35 +57,9 @@ class CallRoomRegistry {
 
   removeParticipant(callId, userId) {
     const room = this._rooms.get(callId);
-    if (!room) return { removed: false, newHostId: null };
-    const wasHost = room.hostId === String(userId);
+    if (!room) return;
     room.participants.delete(String(userId));
-
-    if (room.participants.size === 0) {
-      this.endRoom(callId);
-      return { removed: true, newHostId: null };
-    }
-
-    // FIX-ROOT-CAUSE-NO-HOST-TRANSFER: hostId was set once at room creation
-    // and never touched again anywhere in this file. If the host left or
-    // disconnected without explicitly calling group:call:end, every
-    // remaining participant would permanently fail isHost() — no one could
-    // ever end the call for everyone or mute/remove a participant again for
-    // the rest of that call's lifetime. Promote the longest-standing
-    // remaining participant (a stable, predictable choice — not random, not
-    // "whoever happens to send the next action first") to host.
-    let newHostId = null;
-    if (wasHost) {
-      let earliest = null;
-      for (const p of room.participants.values()) {
-        if (!earliest || p.joinedAt < earliest.joinedAt) earliest = p;
-      }
-      if (earliest) {
-        room.hostId = earliest.userId;
-        newHostId = earliest.userId;
-      }
-    }
-    return { removed: true, newHostId };
+    if (room.participants.size === 0) this.endRoom(callId);
   }
 
   endRoom(callId) {
@@ -363,6 +337,54 @@ class CallSignalingService extends EventEmitter {
         if (String(targetUserId) === String(userId)) {
           socket.emit('call:error', { code: 'SELF_CALL', message: 'Cannot call yourself', timestamp: Date.now() });
           return;
+        }
+
+        // ── PRIVACY ENFORCEMENT: whoCanCallMe ────────────────────────────────
+        // FIX: settings.calls.whoCanCallMe existed in the settings UI, was saved
+        // to the DB, and was even propagated down to the client's own calls.html
+        // page — but nothing anywhere, client or server, ever actually checked it
+        // before letting a call ring through. This is the one server-side choke
+        // point every real call passes through (the frontend always uses
+        // socket 'call:initiate', not the REST /api/calls endpoints), so this is
+        // the right place to enforce it — it can't be bypassed by a modified
+        // client the way a client-only check could be.
+        // Fails open on any lookup error so a DB hiccup never blocks a call that
+        // should otherwise be allowed.
+        try {
+          const db = require('../../models');
+          const UserModel = db.Users || db.User;
+          if (UserModel) {
+            const targetUser = await UserModel.findByPk(parseInt(targetUserId, 10), {
+              attributes: ['id', 'settings'],
+            });
+            const whoCanCallMe = targetUser?.settings?.calls?.whoCanCallMe || 'everyone';
+
+            if (whoCanCallMe === 'nobody') {
+              socket.emit('call:error', {
+                code: 'CALLS_RESTRICTED',
+                message: 'This user is not accepting calls right now',
+                timestamp: Date.now(),
+              });
+              return;
+            }
+
+            if (whoCanCallMe === 'friends') {
+              const FriendModel = db.Friend;
+              const friendship = FriendModel
+                ? await FriendModel.getFriendship(parseInt(userId, 10), parseInt(targetUserId, 10))
+                : null;
+              if (!friendship || friendship.status !== 'accepted') {
+                socket.emit('call:error', {
+                  code: 'CALLS_RESTRICTED',
+                  message: 'This user only accepts calls from friends',
+                  timestamp: Date.now(),
+                });
+                return;
+              }
+            }
+          }
+        } catch (privacyErr) {
+          console.warn('[CallSignaling] whoCanCallMe privacy check failed (failing open):', privacyErr.message);
         }
 
         // FIX: this dedup key was referenced below but never declared, so
@@ -721,18 +743,11 @@ class CallSignalingService extends EventEmitter {
       if (!callId) return;
 
       socket.leave(`call:${callId}`);
-      const { newHostId } = this._rooms.removeParticipant(callId, userId);
+      this._rooms.removeParticipant(callId, userId);
 
       this._io.to(`call:${callId}`).emit('group:call:participant_left', {
         callId, groupId, userId, timestamp: Date.now(),
       });
-
-      if (newHostId) {
-        this._io.to(`call:${callId}`).emit('group:call:host_changed', {
-          callId, newHostId, reason: 'previous_host_left', timestamp: Date.now(),
-        });
-        this._logCall('log', `Host of call ${callId} left — reassigned to uid=${newHostId}`, { callId, previousHost: userId, newHostId });
-      }
     });
 
     // Participant state updates (mute, video, screen share)
@@ -982,16 +997,11 @@ class CallSignalingService extends EventEmitter {
       // Find any calls this user was in and notify participants
       for (const [callId, room] of this._rooms._rooms) {
         if (room.participants.has(String(userId))) {
-          const { newHostId } = this._rooms.removeParticipant(callId, userId);
+          room.participants.delete(String(userId));
           this._io.to(`call:${callId}`).emit('call:participant_left', {
             callId, userId, reason: 'disconnected', timestamp: Date.now(),
           });
-          if (newHostId) {
-            this._io.to(`call:${callId}`).emit('group:call:host_changed', {
-              callId, newHostId, reason: 'previous_host_disconnected', timestamp: Date.now(),
-            });
-            this._logCall('log', `Host of call ${callId} disconnected — reassigned to uid=${newHostId}`, { callId, previousHost: userId, newHostId });
-          }
+          if (room.participants.size === 0) this._rooms.endRoom(callId);
         }
       }
     });
