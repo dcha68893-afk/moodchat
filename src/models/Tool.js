@@ -253,18 +253,19 @@ module.exports = (sequelize, DataTypes) => {
   };
 
   Tool.prototype.toggleSave = async function (userId) {
+    const uid = parseInt(userId, 10);
     const saved = this.savedBy || [];
-    const idx = saved.indexOf(userId);
+    const idx = saved.indexOf(uid);
     if (idx === -1) {
-      this.savedBy = [...saved, userId];
+      this.savedBy = [...saved, uid];
     } else {
-      this.savedBy = saved.filter((id) => id !== userId);
+      this.savedBy = saved.filter((id) => id !== uid);
     }
     return await this.save();
   };
 
   Tool.prototype.isSavedBy = function (userId) {
-    return (this.savedBy || []).includes(userId);
+    return (this.savedBy || []).includes(parseInt(userId, 10));
   };
 
   Tool.prototype.addRating = async function (newRating) {

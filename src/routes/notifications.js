@@ -291,6 +291,28 @@ router.delete(
   })
 );
 
+// Get preferences
+router.get(
+  '/preferences',
+  apiRateLimiter,
+  asyncHandler(async (req, res) => {
+    const user = await User.findByPk(req.user.id, { attributes: ['id', 'settings'] });
+    if (!user) throw new NotFoundError('User not found');
+    const notif = user.settings?.notifications || {};
+    res.status(200).json({
+      status: 'success',
+      data: {
+        preferences: {
+          emailNotifications: notif.emailNotifications !== false,
+          pushNotifications: notif.pushNotifications !== false,
+          muteAll: notif.muteAll || false,
+          muteTypes: notif.muteTypes || [],
+        },
+      },
+    });
+  })
+);
+
 // Update preferences
 router.put(
   '/preferences',
@@ -304,25 +326,22 @@ router.put(
         throw new NotFoundError('User not found');
       }
 
-      // Ensure updates object exists even if all fields are undefined
-      const updates = {};
-      if (emailNotifications !== undefined) updates.emailNotifications = emailNotifications;
-      if (pushNotifications !== undefined) updates.pushNotifications = pushNotifications;
-      if (muteAll !== undefined) updates.notificationsMuted = muteAll;
+      // AUDIT FIX: emailNotifications/pushNotifications/notificationsMuted/
+      // mutedNotificationTypes are not real columns on this model — writing
+      // to them silently did nothing. The real JSONB column is `settings`.
+      const currentNotif = user.settings?.notifications || {};
+      const updatedNotif = { ...currentNotif };
+      if (emailNotifications !== undefined) updatedNotif.emailNotifications = emailNotifications;
+      if (pushNotifications !== undefined) updatedNotif.pushNotifications = pushNotifications;
+      if (muteAll !== undefined) updatedNotif.muteAll = muteAll;
+      if (muteTypes && Array.isArray(muteTypes)) updatedNotif.muteTypes = muteTypes;
 
-      if (muteTypes && Array.isArray(muteTypes)) {
-        updates.mutedNotificationTypes = muteTypes;
-      }
-
-      // Only update if there are actual changes
-      if (Object.keys(updates).length > 0) {
-        await user.update(updates);
-      }
+      await user.update({ settings: { ...(user.settings || {}), notifications: updatedNotif } });
 
       res.status(200).json({
         status: 'success',
         message: 'Notification preferences updated',
-        data: { preferences: updates },
+        data: { preferences: updatedNotif },
       });
     } catch (error) {
       console.error('Error updating notification preferences:', error);

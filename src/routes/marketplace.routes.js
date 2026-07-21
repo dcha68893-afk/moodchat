@@ -195,10 +195,13 @@ if (ctrl) {
     router.get('/admin/products/pending',            safe(ctrl.adminGetPendingProducts?.bind(ctrl)));
     router.post('/admin/products/:id/approve',       safe(ctrl.adminApproveProduct?.bind(ctrl)));
     router.post('/admin/products/:id/reject',        safe(ctrl.adminRejectProduct?.bind(ctrl)));
+    router.post('/admin/products/:id/suspend',       safe(ctrl.adminSuspendProduct?.bind(ctrl)));
     router.delete('/admin/products/:id',             safe(ctrl.adminRemoveProduct?.bind(ctrl)));
 
     router.get('/admin/sellers',                     safe(ctrl.adminGetSellers?.bind(ctrl)));
     router.get('/admin/buyers',                      safe(ctrl.adminGetBuyers?.bind(ctrl)));
+    router.post('/admin/buyers/:id/suspend',         safe(ctrl.adminSuspendBuyer?.bind(ctrl)));
+    router.post('/admin/buyers/:id/credit-wallet',   safe(ctrl.adminCreditBuyer?.bind(ctrl)));
     router.post('/admin/ban/:userId',                safe(ctrl.adminBanSeller?.bind(ctrl)));
     router.post('/admin/unban/:userId',              safe(ctrl.adminUnbanUser?.bind(ctrl)));
     // AUDIT FIX: marketplace-admin.js's real "Ban" button calls this path;
@@ -219,6 +222,7 @@ if (ctrl) {
     router.get('/admin/coupons',                     safe(ctrl.adminGetCoupons?.bind(ctrl)));
     router.post('/admin/coupons',                    safe(ctrl.adminCreateCoupon?.bind(ctrl)));
     router.delete('/admin/coupons/:id',              safe(ctrl.adminDeleteCoupon?.bind(ctrl)));
+    router.patch('/admin/coupons/:id/toggle',        safe(ctrl.adminToggleCoupon?.bind(ctrl)));
 
     router.get('/admin/flash-sales',                 safe(ctrl.adminGetFlashSales?.bind(ctrl)));
     router.post('/admin/flash-sales',                safe(ctrl.adminCreateFlashSale?.bind(ctrl)));
@@ -230,6 +234,7 @@ if (ctrl) {
     router.get('/admin/tickets',                     safe(ctrl.adminGetTickets?.bind(ctrl)));
     router.post('/admin/tickets/:id/reply',          safe(ctrl.adminReplyTicket?.bind(ctrl)));
     router.post('/admin/tickets/:id/close',          safe(ctrl.adminCloseTicket?.bind(ctrl)));
+    router.post('/admin/tickets/:id/resolve',        safe(ctrl.adminResolveTicket?.bind(ctrl)));
 
     router.post('/admin/notifications/send',         safe(ctrl.adminSendNotification?.bind(ctrl)));
 
