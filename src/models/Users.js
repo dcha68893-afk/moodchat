@@ -171,6 +171,19 @@ module.exports = (sequelize, DataTypes) => {
         defaultValue: false,
         allowNull: false,
       },
+      // FIX (2FA audit): routes/settings.js's /2fa/setup and /2fa/disable
+      // handlers read/write a "mfaBackupCodes" column, but it was never
+      // defined on this model (and had no migration), so Sequelize silently
+      // dropped it on every user.update() — backup codes were generated and
+      // shown to the user once, then lost forever, making backup-code login
+      // recovery impossible. models/index.js auto-adds any column present
+      // on a model but missing in the DB at startup, so defining it here is
+      // enough to self-heal it (see also ensureSchema.js).
+      mfaBackupCodes: {
+        type: DataTypes.JSONB,
+        allowNull: true,
+        defaultValue: null,
+      },
       // FIX-500 (registration-pin routes): routes/settings.js's
       // /registration-pin/status, POST, and DELETE handlers all read/write a
       // "registrationPin" column via raw SQL, but this column was never

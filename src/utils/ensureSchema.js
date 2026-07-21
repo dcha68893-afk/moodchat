@@ -42,6 +42,10 @@ const REQUIRED_COLUMNS = [
     table: 'Users', column: 'mfaEnabled',
     sql: `ALTER TABLE "Users" ADD COLUMN IF NOT EXISTS "mfaEnabled" BOOLEAN NOT NULL DEFAULT false`,
   },
+  {
+    table: 'Users', column: 'mfaBackupCodes',
+    sql: `ALTER TABLE "Users" ADD COLUMN IF NOT EXISTS "mfaBackupCodes" JSONB`,
+  },
   // P2 FIX (Forensic Audit): GDPR right to erasure
   {
     table: 'Users', column: 'deletionRequestedAt',

@@ -984,7 +984,25 @@ router.post('/2fa/challenge', asyncHandler(async (req, res) => {
             return res.status(400).json({ success: false, message: '2FA is not enabled for this account' });
         }
 
-        const isValid = authenticator.verify({ token: totpToken, secret: user.mfaSecret });
+        const cleanToken = String(totpToken).replace(/\s/g, '').toUpperCase();
+        let isValid = authenticator.verify({ token: totpToken, secret: user.mfaSecret });
+
+        // FIX (2FA audit): fall back to a one-time backup code if the TOTP
+        // check fails. Backup codes are generated during /2fa/setup and
+        // shown to the user once — without this fallback they were
+        // decorative only, since nothing ever consumed them.
+        let usedBackupCode = false;
+        if (!isValid && Array.isArray(user.mfaBackupCodes)) {
+            const codes = user.mfaBackupCodes;
+            const matchIdx = codes.findIndex(c => !c.used && String(c.code).replace(/-/g, '').toUpperCase() === cleanToken.replace(/-/g, ''));
+            if (matchIdx >= 0) {
+                codes[matchIdx].used = true;
+                await user.update({ mfaBackupCodes: codes });
+                isValid = true;
+                usedBackupCode = true;
+            }
+        }
+
         if (!isValid) {
             return res.status(401).json({ success: false, message: 'Invalid TOTP code' });
         }
