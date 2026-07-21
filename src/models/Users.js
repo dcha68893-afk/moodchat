@@ -147,6 +147,25 @@ module.exports = (sequelize, DataTypes) => {
         defaultValue: false,
         allowNull: false,
       },
+      // GOOGLE OAUTH FIX: stores the Google account's stable "sub" claim so a
+      // returning Google login can be matched to the same local user even if
+      // they change their Google display name/photo. models/index.js
+      // auto-adds any column present on a model but missing in the DB at
+      // startup, so defining it here is enough to self-heal it (no separate
+      // migration required, consistent with mfaBackupCodes/registrationPin above).
+      googleId: {
+        type: DataTypes.STRING,
+        allowNull: true,
+        unique: {
+          name: 'googleId',
+          msg: 'This Google account is already linked to another user'
+        },
+      },
+      authProvider: {
+        type: DataTypes.STRING(20),
+        allowNull: false,
+        defaultValue: 'local',
+      },
       // AUTH-X FIX: resetToken / resetTokenExpiry were missing from model definition
       // but used in forgot-password and verify-email routes. Without these columns
       // Sequelize silently ignores user.update({ resetToken: ... }) calls,

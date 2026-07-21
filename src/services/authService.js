@@ -187,6 +187,114 @@ class AuthService {
     }
   }
 
+  // GOOGLE OAUTH FIX: verifies a Google ID token (from the frontend's Google
+  // Identity Services button) and logs the user in, auto-creating an account
+  // on first sign-in — mirrors register()/login()'s user-shape and token
+  // issuance so the rest of the app (which only knows about local login)
+  // doesn't need any special-casing for Google users.
+  async loginWithGoogle(idToken) {
+    try {
+      if (!idToken) {
+        throw new Error('Google credential is required');
+      }
+      if (!this.User) {
+        throw new Error('Service temporarily unavailable');
+      }
+
+      const { OAuth2Client } = require('google-auth-library');
+      const googleClientId = process.env.GOOGLE_CLIENT_ID;
+      if (!googleClientId) {
+        throw new Error('Google sign-in is not configured on the server');
+      }
+      const client = new OAuth2Client(googleClientId);
+
+      let payload;
+      try {
+        const ticket = await client.verifyIdToken({ idToken, audience: googleClientId });
+        payload = ticket.getPayload();
+      } catch (verifyErr) {
+        console.error('❌ [AuthService] Google token verification failed:', verifyErr.message);
+        throw new Error('Invalid Google credential');
+      }
+
+      if (!payload || !payload.email) {
+        throw new Error('Google account has no email on file');
+      }
+      if (payload.email_verified === false) {
+        throw new Error('Google email is not verified');
+      }
+
+      const googleId = payload.sub;
+      const email = payload.email.toLowerCase().trim();
+
+      // Match an existing account by googleId first, then by email so a user
+      // who registered with email/password can also sign in with Google.
+      let user = await this.User.findOne({ where: { googleId } });
+      if (!user) {
+        user = await this.User.findOne({ where: { email } });
+      }
+
+      if (user) {
+        const updates = { lastSeen: new Date(), status: 'online' };
+        if (!user.googleId) updates.googleId = googleId;
+        if (!user.isVerified) updates.isVerified = true;
+        await user.update(updates);
+      } else {
+        // Derive a unique username from the Google profile since MoodChat
+        // requires one; fall back to appending part of the Google id on collision.
+        const base = (payload.given_name || email.split('@')[0])
+          .toLowerCase().replace(/[^a-z0-9_]/g, '') || 'user';
+        let username = base;
+        let suffix = 0;
+        // eslint-disable-next-line no-await-in-loop
+        while (await this.User.findOne({ where: { username } })) {
+          suffix += 1;
+          username = `${base}${suffix}${crypto.randomBytes(1).toString('hex')}`;
+        }
+
+        // The model requires a password column; Google-only accounts get a
+        // random one the user never sees/uses (they always sign in via Google).
+        const randomPassword = crypto.randomBytes(32).toString('hex');
+
+        user = await this.User.create({
+          username,
+          email,
+          password: randomPassword, // hashed by the model's beforeCreate hook
+          firstName: payload.given_name || null,
+          lastName: payload.family_name || null,
+          avatar: payload.picture || `https://ui-avatars.com/api/?name=${encodeURIComponent(username)}&background=random&color=fff`,
+          isActive: true,
+          isVerified: true,
+          status: 'online',
+          googleId,
+          authProvider: 'google'
+        });
+
+        console.log('✅ [AuthService] New user created via Google sign-in:', user.id);
+      }
+
+      const tokens = this.generateTokens(user.id);
+      await require('../services/tokenService').storeRefreshToken(tokens.refreshToken, user.id);
+
+      const userWithoutPassword = user.toJSON();
+      delete userWithoutPassword.password;
+
+      return {
+        success: true,
+        user: userWithoutPassword,
+        tokens: {
+          accessToken: tokens.accessToken,
+          refreshToken: tokens.refreshToken,
+          tokenType: tokens.tokenType,
+          expiresIn: tokens.expiresIn
+        }
+      };
+    } catch (error) {
+      console.error('❌ [AuthService] Google login error:', error.message);
+      return { success: false, message: error.message, code: 'GOOGLE_AUTH_ERROR' };
+    }
+  }
+
   generateTokens(userId, userData = {}) {
     try {
       const tokenService = require('../services/tokenService');

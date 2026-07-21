@@ -3309,6 +3309,14 @@ this.publicRoutes = [
                     requiresAuth: false,
                     isPublic: true,
                     rateLimit: false
+                },
+                {
+                    path: '/api/auth/google',
+                    method: 'POST',
+                    handler: this.createGoogleAuthHandler(),
+                    requiresAuth: false,
+                    isPublic: true,
+                    rateLimit: true
                 }
             ];
             
@@ -3467,6 +3475,58 @@ this.publicRoutes = [
         };
     }
     
+    // GOOGLE OAUTH HANDLER — accepts the Google Identity Services ID token
+    // from the frontend, verifies it server-side, and issues the same
+    // access/refresh token pair as normal login/register.
+    createGoogleAuthHandler() {
+        return async (req, res) => {
+            _slog('🔐 GOOGLE AUTH REQUEST received');
+
+            try {
+                const credential = req.body?.credential || req.body?.idToken || req.body?.token;
+
+                if (!credential) {
+                    return res.status(400).json({
+                        success: false,
+                        message: 'Google credential is required',
+                        code: 'MISSING_CREDENTIAL'
+                    });
+                }
+
+                const result = await this.authService.loginWithGoogle(credential);
+
+                if (result.success) {
+                    _slog(`✅ Google login successful for: ${result.user?.email}`);
+                    systemState.incrementMetric('logins');
+
+                    return res.json({
+                        success: true,
+                        message: 'Google login successful',
+                        token: result.tokens.accessToken,
+                        accessToken: result.tokens.accessToken,
+                        refreshToken: result.tokens.refreshToken,
+                        user: result.user,
+                        expiresIn: result.tokens.expiresIn
+                    });
+                }
+
+                _slog(`❌ Google login failed: ${result.message}`);
+                return res.status(401).json({
+                    success: false,
+                    message: result.message,
+                    code: result.code || 'GOOGLE_AUTH_ERROR'
+                });
+            } catch (error) {
+                console.error(`❌ Google auth handler error: ${error.message}`);
+                return res.status(500).json({
+                    success: false,
+                    message: 'Google login failed',
+                    code: 'GOOGLE_AUTH_HANDLER_ERROR'
+                });
+            }
+        };
+    }
+
     // OPTIMIZED REGISTER HANDLER
     createOptimizedRegisterHandler() {
         return async (req, res) => {

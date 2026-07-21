@@ -99,6 +99,7 @@
     "express-session": "^1.19.0",
     "express-validator": "^7.0.1",
     "firebase-admin": "^12.3.0",
+  "google-auth-library": "^9.14.1",
     "helmet": "^7.0.0",
     "ioredis": "^5.4.1",
     "jsonwebtoken": "^9.0.3",
