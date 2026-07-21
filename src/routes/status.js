@@ -687,24 +687,33 @@ router.get('/:statusId/likes', apiRateLimiter, asyncHandler(async (req, res) => 
 // ── Multer upload for status media (image / video / audio) ─────────────────
 let multer;
 try { multer = require('multer'); } catch(_) { multer = null; }
+const cloudinaryService = require('../services/cloudinaryService');
+const _statusCloudinaryEnabled = cloudinaryService.isConfigured();
 
-const statusMediaStorage = multer ? multer.diskStorage({
-    destination: (req, file, cb) => {
-        const dir = process.env.UPLOAD_DIR || './uploads';
-        const sub = file.mimetype.startsWith('image/') ? 'images' :
-                    file.mimetype.startsWith('video/') ? 'videos' : 'audio';
-        const nodePath = require('path');
-        const fs = require('fs');
-        const dest = nodePath.join(dir, sub);
-        fs.mkdirSync(dest, { recursive: true });
-        cb(null, dest);
-    },
-    filename: (req, file, cb) => {
-        const suffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
-        const ext = file.originalname.split('.').pop();
-        cb(null, 'status-' + suffix + '.' + ext);
-    },
-}) : null;
+const statusMediaStorage = multer ? (
+    _statusCloudinaryEnabled
+    ? multer.memoryStorage()
+    : multer.diskStorage({
+        destination: (req, file, cb) => {
+            const dir = process.env.UPLOAD_DIR || './uploads';
+            const sub = file.mimetype.startsWith('image/') ? 'images' :
+                        file.mimetype.startsWith('video/') ? 'videos' : 'audio';
+            const nodePath = require('path');
+            const fs = require('fs');
+            const dest = nodePath.join(dir, sub);
+            fs.mkdirSync(dest, { recursive: true });
+            cb(null, dest);
+        },
+        filename: (req, file, cb) => {
+            const suffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+            const ext = file.originalname.split('.').pop();
+            cb(null, 'status-' + suffix + '.' + ext);
+        },
+    })
+) : null;
+if (_statusCloudinaryEnabled) {
+    console.log('✅ Status media storage: Cloudinary (persistent CDN)');
+}
 
 const ALLOWED_STATUS_MIMES = new Set([
     'image/jpeg','image/jpg','image/png','image/gif','image/webp',
@@ -721,9 +730,16 @@ const statusUpload = multer ? multer({
     },
 }) : null;
 
-function resolveUploadedFileUrl(req, file) {
+async function resolveUploadedFileUrl(req, file) {
     if (!file) return null;
-    if (file.location) return file.location; // S3/Cloudinary
+    if (_statusCloudinaryEnabled) {
+        const folder = file.mimetype.startsWith('image/') ? 'moodchat/status/images' :
+                       file.mimetype.startsWith('video/') ? 'moodchat/status/videos' : 'moodchat/status/audio';
+        const result = await cloudinaryService.uploadToCloudinary(file.buffer, { folder });
+        if (!result) throw new Error('Cloudinary upload failed');
+        return result.url;
+    }
+    if (file.location) return file.location; // S3/Cloudinary storage engines
     return req.protocol + '://' + req.get('host') + '/' + file.path.replace(/\\/g, '/');
 }
 
@@ -765,7 +781,7 @@ router.post(
         } = req.body;
 
         // P1 FIX: resolve uploaded file → mediaUrl (multipart upload support)
-        const uploadedFileUrl = req.file ? resolveUploadedFileUrl(req, req.file) : null;
+        const uploadedFileUrl = req.file ? await resolveUploadedFileUrl(req, req.file) : null;
         const resolvedMediaUrl = uploadedFileUrl || mediaUrl || null;
         const resolvedType = type || (req.file
             ? (req.file.mimetype.startsWith('image/') ? 'image'

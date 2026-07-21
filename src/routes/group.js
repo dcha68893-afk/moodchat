@@ -300,6 +300,17 @@ const _groupAvatarUpload = _multer({
     },
 });
 router.put('/:groupId', _groupAvatarUpload.single('avatar'), groupController.updateGroup.bind(groupController));
+// NEW: group cover photo (banner) upload — separate multipart field so it
+// doesn't collide with the avatar upload above.
+const _groupCoverUpload = _multer({
+    storage: _multer.memoryStorage(),
+    limits: { fileSize: 8 * 1024 * 1024 }, // 8MB
+    fileFilter: (req, file, cb) => {
+        if (['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(file.mimetype)) cb(null, true);
+        else cb(new Error('Only image files allowed for group cover photo'), false);
+    },
+});
+router.put('/:groupId/cover', _groupCoverUpload.single('cover'), groupController.updateGroupCover.bind(groupController));
 router.delete('/:groupId', groupController.deleteGroup.bind(groupController));
 
 // ── Group members ─────────────────────────────────────────────────────────────

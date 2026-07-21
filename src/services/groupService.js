@@ -57,6 +57,7 @@ const formatGroup = (g, extraFields = {}) => {
         name        : d.name        || '',
         description : d.description || '',
         avatar      : d.avatar      || null,
+        coverPhoto  : d.coverPhoto  || null,
         isPublic    : d.isPublic    !== undefined ? d.isPublic : true,
         purpose     : d.purpose     || 'social',
         maxMembers  : d.maxMembers  || 100,
@@ -292,7 +293,7 @@ class GroupService {
             }
             if (!canEdit) throw new Error('You do not have permission to update this group');
 
-            const allowed = ['name','description','avatar','isPublic','purpose','maxMembers','tags','rules','location'];
+            const allowed = ['name','description','avatar','coverPhoto','isPublic','purpose','maxMembers','tags','rules','location'];
             const fields  = {};
             for (const [k, v] of Object.entries(updates)) {
                 if (!allowed.includes(k)) continue;

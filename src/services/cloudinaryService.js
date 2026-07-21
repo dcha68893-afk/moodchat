@@ -117,6 +117,20 @@ async function uploadGroupAvatar(fileBuffer, groupId) {
 }
 
 /**
+ * Upload a group cover photo (banner). Wide crop, 1600×500, stored in
+ * moodchat/group-covers.
+ */
+async function uploadGroupCover(fileBuffer, groupId) {
+  return uploadToCloudinary(fileBuffer, {
+    folder:   'moodchat/group-covers',
+    publicId: `group_${groupId}_cover`,
+    width:    1600,
+    height:   500,
+    crop:     'fill',
+  });
+}
+
+/**
  * Upload a user avatar
  */
 async function uploadUserAvatar(fileBuffer, userId) {
@@ -157,6 +171,7 @@ function isConfigured() {
 module.exports = {
   uploadToCloudinary,
   uploadGroupAvatar,
+  uploadGroupCover,
   uploadUserAvatar,
   deleteFromCloudinary,
   isConfigured,

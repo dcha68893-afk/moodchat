@@ -64,8 +64,23 @@ const REQUIRED_COLUMNS = [
     table: 'Users', column: 'dateOfBirth',
     sql: `ALTER TABLE "Users" ADD COLUMN IF NOT EXISTS "dateOfBirth" DATE`,
   },
+  {
+    // FIX (PROFILE-COVER-MISSING-COLUMN): profileService.uploadCoverPhoto()
+    // has always set `user.coverPhoto = url` and called user.save(), but no
+    // such column ever existed on Users — Sequelize silently drops unknown
+    // instance properties on save(), so the cover photo upload API call
+    // "succeeded" while never actually persisting anything. Same root cause
+    // class as the resetToken/mfaSecret entries above.
+    table: 'Users', column: 'coverPhoto',
+    sql: `ALTER TABLE "Users" ADD COLUMN IF NOT EXISTS "coverPhoto" TEXT`,
+  },
 
   // ── Groups ────────────────────────────────────────────────────────────────
+  {
+    // NEW: group cover photo (banner) — Groups previously only had `avatar`.
+    table: 'Groups', column: 'coverPhoto',
+    sql: `ALTER TABLE "Groups" ADD COLUMN IF NOT EXISTS "coverPhoto" TEXT`,
+  },
   {
     table: 'Groups', column: 'slowModeInterval',
     sql: `ALTER TABLE "Groups" ADD COLUMN IF NOT EXISTS "slowModeInterval" INTEGER NOT NULL DEFAULT 0`,

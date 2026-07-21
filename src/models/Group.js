@@ -32,6 +32,10 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.STRING,
         allowNull: true,
       },
+      coverPhoto: {
+        type: DataTypes.TEXT,
+        allowNull: true,
+      },
       isPublic: {
         type: DataTypes.BOOLEAN,
         defaultValue: false,

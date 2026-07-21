@@ -12,7 +12,7 @@ class ProfileController {
         throw new AppError('User ID is required', 400);
       }
 
-      const profile = await profileService.getProfile(userId);
+      const profile = await profileService.getProfile(userId, currentUserId);
 
       res.status(200).json({
         success: true,

@@ -22,6 +22,7 @@ const {
   ValidationError,
 } = require('../middleware/errorHandler');
 const { apiRateLimiter, chatLimiter } = require('../middleware/rateLimiter');
+const cloudinaryService = require('../services/cloudinaryService');
 
 // FIX-AUDIT: Forensic logging was unconditionally on in production. Gate
 // behind an explicit env flag — defaults OFF unless DEBUG_MESSAGES=1 is set.
@@ -94,7 +95,12 @@ try {
     throw new Error('S3 not configured');
   }
 } catch (_) {
-  // Fall back to disk
+  // Fall back to Cloudinary (persistent CDN) before resorting to ephemeral disk
+  if (cloudinaryService.isConfigured()) {
+    storage = multer.memoryStorage();
+    _storageBackend = 'cloudinary';
+    _flog('✅ Media storage: Cloudinary (persistent CDN)');
+  } else {
   const ensureUploadDirSync = () => {
     try { fsSync.mkdirSync(UPLOAD_PATH, { recursive: true }); } catch (_e) { /* already exists */ }
   };
@@ -107,7 +113,8 @@ try {
     },
   });
   if (_storageBackend !== 's3') {
-    console.warn('⚠️  Media storage: local disk (ephemeral on Render). Set AWS_S3_BUCKET for persistent storage.');
+    console.warn('⚠️  Media storage: local disk (ephemeral on Render). Set AWS_S3_BUCKET or CLOUDINARY_URL for persistent storage.');
+  }
   }
 }
 
@@ -128,15 +135,20 @@ const MAGIC_SIGNATURES = {
   'text/plain' : [null], // no magic bytes for plain text
 };
 
-function _validateMagicBytes(filePath, declaredMime) {
+function _validateMagicBytes(fileOrPath, declaredMime) {
   try {
     const sigs = MAGIC_SIGNATURES[declaredMime];
     if (!sigs) return false; // mime not in our allow-list at all
     if (sigs[0] === null) return true; // skip deep check for this type
-    const fd  = fsSync.openSync(filePath, 'r');
-    const buf = Buffer.alloc(12);
-    fsSync.readSync(fd, buf, 0, 12, 0);
-    fsSync.closeSync(fd);
+    let buf;
+    if (Buffer.isBuffer(fileOrPath)) {
+      buf = fileOrPath;
+    } else {
+      const fd  = fsSync.openSync(fileOrPath, 'r');
+      buf = Buffer.alloc(12);
+      fsSync.readSync(fd, buf, 0, 12, 0);
+      fsSync.closeSync(fd);
+    }
     return sigs.some(sig => sig.every((byte, i) => buf[i] === byte));
   } catch(_) { return false; }
 }
@@ -1203,8 +1215,8 @@ router.post('/:chatId/upload', apiRateLimiter, upload.single('file'), asyncHandl
     if (!req.file) return res.status(400).json({ success: false, message: 'No file uploaded' });
 
     // SECURITY FIX: validate actual file magic bytes against declared MIME type
-    if (!_validateMagicBytes(req.file.path, req.file.mimetype)) {
-      await fs.unlink(req.file.path).catch(() => {});
+    if (!_validateMagicBytes(req.file.buffer || req.file.path, req.file.mimetype)) {
+      if (req.file.path) await fs.unlink(req.file.path).catch(() => {});
       return res.status(400).json({ success: false, message: 'File content does not match declared type' });
     }
 
@@ -1214,7 +1226,7 @@ router.post('/:chatId/upload', apiRateLimiter, upload.single('file'), asyncHandl
     );
 
     if (!isParticipant || isParticipant.length === 0) {
-      await fs.unlink(req.file.path).catch(() => {});
+      if (req.file.path) await fs.unlink(req.file.path).catch(() => {});
       return res.status(403).json({ success: false, message: 'Chat not found or access denied' });
     }
 
@@ -1249,9 +1261,15 @@ router.post('/:chatId/upload', apiRateLimiter, upload.single('file'), asyncHandl
 
       messageId = msgResult[0][0].id;
 
-      // Build absolute URL — S3 returns req.file.location; disk uses relative path
+      // Build absolute URL — S3 returns req.file.location; Cloudinary needs an
+      // explicit upload of the in-memory buffer; disk uses relative path
       let absUrl;
-      if (_storageBackend === 's3' && req.file && req.file.location) {
+      if (_storageBackend === 'cloudinary') {
+        const folder = `moodchat/messages/${msgType === 'image' ? 'images' : msgType === 'video' ? 'video' : msgType === 'view_once' ? 'view-once' : msgType === 'audio' ? 'audio' : 'files'}`;
+        const cldResult = await cloudinaryService.uploadToCloudinary(req.file.buffer, { folder });
+        if (!cldResult) throw new Error('Cloudinary upload failed');
+        absUrl = cldResult.url;
+      } else if (_storageBackend === 's3' && req.file && req.file.location) {
         absUrl = req.file.location;
       } else {
         const baseUrl = process.env.RENDER_EXTERNAL_URL || process.env.BACKEND_URL || `${req.protocol}://${req.get('host')}`;

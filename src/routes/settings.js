@@ -9,6 +9,7 @@ const { User, Settings } = require('../models');
 const { Op } = require('sequelize');
 const bcrypt = require('bcryptjs');
 const multer = require('multer');
+const cloudinaryService = require('../services/cloudinaryService');
 
 // Configure multer for file uploads
 const storage = multer.memoryStorage();
@@ -123,6 +124,7 @@ const DEFAULT_SETTINGS = {
         username: 'user',
         email: '',
         avatar: null,
+        coverPhoto: null,
         firstName: null,
         lastName: null,
         bio: null,
@@ -213,7 +215,13 @@ function _normalizeVisibility(value, fallback = 'everyone') {
     if (value === undefined || value === null || value === '') return fallback;
     const normalized = String(value).toLowerCase();
     if (normalized === 'public' || normalized === 'all') return 'everyone';
-    if (normalized === 'friends' || normalized === 'contacts') return 'contacts';
+    // FIX (PRIVACY-FRIENDSONLY-NOT-RECOGNIZED): the settings UI dropdown
+    // (settings-ui.js) sends and expects back the literal value
+    // "friendsOnly" — this previously normalized to "contacts", which the
+    // dropdown's `selected` check never matched, so the setting looked reset
+    // to "Everyone" on every reload even when saved correctly. Normalize to
+    // "friendsOnly" (the frontend's own canonical value) instead.
+    if (normalized === 'friends' || normalized === 'contacts' || normalized === 'friendsonly') return 'friendsOnly';
     if (normalized === 'nobody' || normalized === 'none') return 'nobody';
     if (normalized === 'everyone') return 'everyone';
     return fallback;
@@ -314,6 +322,7 @@ function _buildSettingsResponse(user, settingsRow) {
             username: userData.username || snapshot.account.username || 'user',
             email: userData.email || snapshot.account.email || '',
             avatar: userData.avatar || snapshot.account.avatar || null,
+            coverPhoto: userData.coverPhoto || snapshot.account.coverPhoto || null,
             firstName: userData.firstName || snapshot.account.firstName || null,
             lastName: userData.lastName || snapshot.account.lastName || null,
             bio: userData.bio || snapshot.account.bio || null,
@@ -367,7 +376,7 @@ function _buildSettingsResponse(user, settingsRow) {
 async function _getUserAndSettings(userId) {
     const user = await safeDbQuery(
         () => User.findByPk(userId, {
-            attributes: ['id', 'username', 'email', 'avatar', 'firstName', 'lastName', 'bio', 'theme', 'language', 'settings']
+            attributes: ['id', 'username', 'email', 'avatar', 'coverPhoto', 'firstName', 'lastName', 'bio', 'theme', 'language', 'settings']
         }),
         null
     );
@@ -588,7 +597,7 @@ const updateProfileHandler = asyncHandler(async (req, res) => {
         return res.status(401).json({ status: 'error', message: 'Authentication required' });
     }
 
-    const { displayName, username, bio, theme, language, firstName, lastName } = req.body || {};
+    const { displayName, username, bio, theme, language, firstName, lastName, profileVisibility } = req.body || {};
     const updateData = {};
 
     // FIX: displayName was previously written into updateData.username, silently
@@ -652,12 +661,42 @@ const updateProfileHandler = asyncHandler(async (req, res) => {
         updateData.avatar = '';
     }
 
+    // NEW: cover photo (banner), same base64-relay pattern as the avatar
+    // handling above — settings.html runs in an iframe with no real
+    // multipart upload path, so the frontend sends a base64 data URL.
+    const { coverPhotoUrl } = req.body || {};
+    if (typeof coverPhotoUrl === 'string' && coverPhotoUrl.startsWith('data:image/')) {
+        try {
+            const matches = coverPhotoUrl.match(/^data:image\/(\w+);base64,(.+)$/);
+            if (matches) {
+                const buffer = Buffer.from(matches[2], 'base64');
+                if (buffer.length > 10 * 1024 * 1024) {
+                    return res.status(413).json({ status: 'error', message: 'Cover photo too large (max 10MB)' });
+                }
+                const uploadResult = await cloudinaryService.uploadToCloudinary(buffer, {
+                    folder: 'moodchat/user-covers',
+                    publicId: `user_${userId}_cover`,
+                    width: 1600,
+                    height: 600,
+                    crop: 'fill',
+                });
+                if (uploadResult && uploadResult.url) {
+                    updateData.coverPhoto = uploadResult.url;
+                }
+            }
+        } catch (uploadError) {
+            console.error('Error uploading cover photo from data URL:', uploadError);
+        }
+    } else if (coverPhotoUrl === '') {
+        updateData.coverPhoto = '';
+    }
+
     if (Object.keys(updateData).length > 0) {
         await User.update(updateData, { where: { id: userId } });
     }
 
     const updatedUser = await User.findByPk(userId, {
-        attributes: ['id', 'username', 'email', 'avatar', 'firstName', 'lastName', 'bio', 'theme', 'language', 'settings']
+        attributes: ['id', 'username', 'email', 'avatar', 'coverPhoto', 'firstName', 'lastName', 'bio', 'theme', 'language', 'settings']
     });
 
     const settingsPayload = await _persistSettingsSnapshot(userId, {
@@ -670,10 +709,24 @@ const updateProfileHandler = asyncHandler(async (req, res) => {
             username: updatedUser && updatedUser.username,
             email: updatedUser && updatedUser.email,
             avatar: updatedUser && updatedUser.avatar,
+            coverPhoto: updatedUser && updatedUser.coverPhoto,
             firstName: updatedUser && updatedUser.firstName,
             lastName: updatedUser && updatedUser.lastName,
             bio: updatedUser && updatedUser.bio
-        }
+        },
+        // FIX (PROFILE-VISIBILITY-DROPPED): the settings UI sends
+        // profileVisibility through PUT /api/settings/profile (section:
+        // 'profile' → this same endpoint, see settings-core.js
+        // _sendUpdateToBackend), but this handler never read it from the
+        // body at all — it was silently discarded on every save, so
+        // "Friends Only" / "Nobody" never actually persisted no matter how
+        // many times the user picked it.
+        ...(profileVisibility !== undefined ? {
+            privacy: {
+                profileVisibility: _normalizeVisibility(profileVisibility),
+                photoVisibility: _normalizeVisibility(profileVisibility),
+            }
+        } : {})
     });
 
     _emitSettingsUpdated(req, settingsPayload);

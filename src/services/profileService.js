@@ -7,13 +7,22 @@ const getUser = () => db.User || db.models.Users || db.models.User;
 const bcrypt = require('bcryptjs');
 const path = require('path');
 const fs = require('fs');
+const cloudinaryService = require('../services/cloudinaryService');
 
-const uploadProfileImage = async (file) => {
-  return `/uploads/profiles/${file.filename}`;
-};
+// FIX (PROFILE-COVER-EPHEMERAL-DISK + WRONG-COLUMN): this whole file used to
+// write avatar/cover uploads to local disk via uploadProfileImage() below,
+// AND stored the result on `user.profilePicture` / `user.coverPhoto` — but
+// Users never had a `profilePicture` column (the real column is `avatar`),
+// and `coverPhoto` didn't exist as a column at all until the ensureSchema.js
+// fix. Both bugs together meant profile/cover photo uploads through this
+// service silently did nothing durable: the disk copy vanished on Render's
+// next restart, and even if it hadn't, the DB write was targeting a column
+// that either wasn't the real one or didn't exist. Now uploads go straight
+// to Cloudinary (same account already used for group/user avatars via
+// settings.js) and are written to the real `avatar` / `coverPhoto` columns.
 
 class ProfileService {
-  async getProfile(userId) {
+  async getProfile(userId, viewerId = null) {
     try {
       if (!userId) {
         throw new ValidationError('User ID is required');
@@ -28,10 +37,47 @@ class ProfileService {
       }
 
       const completion = this.calculateProfileCompletion(user);
+      const profileJson = { ...user.toJSON(), profileCompletion: completion };
 
+      // FIX (PROFILE-VISIBILITY-NOT-ENFORCED): profileVisibility
+      // (everyone / friendsOnly / nobody, saved via /api/settings/profile)
+      // was persisted correctly but never actually checked here — every
+      // viewer got the full profile, including avatar and coverPhoto,
+      // regardless of what the owner chose. This enforces it.
+      const isSelf = viewerId != null && String(viewerId) === String(userId);
+      if (isSelf) {
+        return profileJson;
+      }
+
+      const visibility = await this._getProfileVisibility(userId);
+
+      if (visibility === 'everyone') {
+        return profileJson;
+      }
+
+      let allowed = false;
+      if (visibility === 'friendsOnly' && viewerId) {
+        allowed = await this._areFriends(userId, viewerId);
+      }
+
+      if (allowed) {
+        return profileJson;
+      }
+
+      // Restricted: strip photos and personal details, keep only safe
+      // public fields (id/username/displayName/online status).
       return {
-        ...user.toJSON(),
-        profileCompletion: completion
+        id: profileJson.id,
+        username: profileJson.username,
+        firstName: null,
+        lastName: null,
+        displayName: profileJson.username,
+        avatar: null,
+        coverPhoto: null,
+        bio: null,
+        status: profileJson.status,
+        restricted: true,
+        restrictedReason: visibility === 'nobody' ? 'nobody' : 'friendsOnly',
       };
     } catch (error) {
       if (
@@ -42,6 +88,35 @@ class ProfileService {
       }
       console.error('Error fetching profile:', error);
       throw new ServerError('Failed to fetch profile');
+    }
+  }
+
+  // Reads the profile visibility choice the owner saved in Settings.privacy
+  // (the same JSONB field /api/settings/profile reads and writes).
+  async _getProfileVisibility(ownerId) {
+    try {
+      const Settings = db.Settings || (db.models && db.models.Settings);
+      if (!Settings) return 'everyone';
+      const row = await Settings.findOne({ where: { userId: ownerId } });
+      const priv = (row && row.privacy) || {};
+      const raw = priv.profileVisibility || priv.photoVisibility || 'everyone';
+      const normalized = String(raw).toLowerCase();
+      if (normalized === 'nobody' || normalized === 'none') return 'nobody';
+      if (normalized === 'friendsonly' || normalized === 'friends' || normalized === 'contacts') return 'friendsOnly';
+      return 'everyone';
+    } catch (_) {
+      return 'everyone';
+    }
+  }
+
+  async _areFriends(ownerId, viewerId) {
+    try {
+      const Friend = db.Friend || (db.models && db.models.Friend);
+      if (!Friend || !Friend.getFriendship) return false;
+      const friendship = await Friend.getFriendship(ownerId, viewerId);
+      return !!(friendship && friendship.status === 'accepted');
+    } catch (_) {
+      return false;
     }
   }
 
@@ -148,24 +223,22 @@ class ProfileService {
         throw new NotFoundError('User not found');
       }
 
-      if (user.profilePicture && !user.profilePicture.includes('/default-avatar.png')) {
-        try {
-          const oldFilePath = path.join(__dirname, '../../', user.profilePicture);
-          if (fs.existsSync(oldFilePath)) {
-            fs.unlinkSync(oldFilePath);
-          }
-        } catch (deleteError) {
-          console.error('Error deleting old profile picture:', deleteError);
-        }
+      const buffer = file.buffer || (file.path ? fs.readFileSync(file.path) : null);
+      if (!buffer) {
+        throw new ValidationError('Uploaded file could not be read');
       }
 
-      const filePath = await uploadProfileImage(file);
-      
-      user.profilePicture = filePath;
+      const uploadResult = await cloudinaryService.uploadUserAvatar(buffer, userId);
+      if (!uploadResult || !uploadResult.url) {
+        throw new ServerError('Failed to upload profile picture');
+      }
+
+      user.avatar = uploadResult.url;
       await user.save();
 
       return {
-        profilePicture: user.profilePicture,
+        avatar: user.avatar,
+        profilePicture: user.avatar, // legacy alias some callers expect
         message: 'Profile picture updated successfully'
       };
     } catch (error) {
@@ -195,20 +268,23 @@ class ProfileService {
         throw new NotFoundError('User not found');
       }
 
-      if (user.coverPhoto) {
-        try {
-          const oldFilePath = path.join(__dirname, '../../', user.coverPhoto);
-          if (fs.existsSync(oldFilePath)) {
-            fs.unlinkSync(oldFilePath);
-          }
-        } catch (deleteError) {
-          console.error('Error deleting old cover photo:', deleteError);
-        }
+      const buffer = file.buffer || (file.path ? fs.readFileSync(file.path) : null);
+      if (!buffer) {
+        throw new ValidationError('Uploaded file could not be read');
       }
 
-      const filePath = await uploadProfileImage(file);
-      
-      user.coverPhoto = filePath;
+      const uploadResult = await cloudinaryService.uploadToCloudinary(buffer, {
+        folder: 'moodchat/user-covers',
+        publicId: `user_${userId}_cover`,
+        width: 1600,
+        height: 600,
+        crop: 'fill',
+      });
+      if (!uploadResult || !uploadResult.url) {
+        throw new ServerError('Failed to upload cover photo');
+      }
+
+      user.coverPhoto = uploadResult.url;
       await user.save();
 
       return {
@@ -238,21 +314,13 @@ class ProfileService {
         throw new NotFoundError('User not found');
       }
 
-      if (user.profilePicture && !user.profilePicture.includes('/default-avatar.png')) {
-        try {
-          const filePath = path.join(__dirname, '../../', user.profilePicture);
-          if (fs.existsSync(filePath)) {
-            fs.unlinkSync(filePath);
-          }
-        } catch (deleteError) {
-          console.error('Error deleting profile picture:', deleteError);
-        }
-      }
+      await cloudinaryService.deleteFromCloudinary(`moodchat/user-avatars/user_${userId}_avatar`);
 
-      user.profilePicture = null;
+      user.avatar = 'https://ui-avatars.com/api/?name=User&background=random&color=fff';
       await user.save();
 
       return {
+        avatar: user.avatar,
         profilePicture: null,
         message: 'Profile picture deleted successfully'
       };
@@ -279,16 +347,7 @@ class ProfileService {
         throw new NotFoundError('User not found');
       }
 
-      if (user.coverPhoto) {
-        try {
-          const filePath = path.join(__dirname, '../../', user.coverPhoto);
-          if (fs.existsSync(filePath)) {
-            fs.unlinkSync(filePath);
-          }
-        } catch (deleteError) {
-          console.error('Error deleting cover photo:', deleteError);
-        }
-      }
+      await cloudinaryService.deleteFromCloudinary(`moodchat/user-covers/user_${userId}_cover`);
 
       user.coverPhoto = null;
       await user.save();

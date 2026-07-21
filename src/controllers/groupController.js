@@ -313,6 +313,41 @@ class GroupController {
         } catch (error) { handleError(error, next, 'updateGroup'); }
     }
 
+    // ── UPDATE GROUP COVER PHOTO ───────────────────────────────────────────
+    async updateGroupCover(req, res, next) {
+        try {
+            const { groupId } = req.params;
+            const userId = getUserId(req);
+            if (!groupId) throw new AppError('Group ID is required', 400);
+            if (!req.file) throw new AppError('Cover photo file is required', 400);
+
+            let coverUrl = null;
+            if (cloudinaryService.isConfigured()) {
+                const result = await cloudinaryService.uploadGroupCover(
+                    req.file.buffer || require('fs').readFileSync(req.file.path),
+                    groupId
+                );
+                if (result?.url) {
+                    coverUrl = result.url;
+                    if (req.file.path) try { require('fs').unlinkSync(req.file.path); } catch (_) {}
+                }
+            } else {
+                coverUrl = req.file.path
+                    ? `/uploads/groups/${require('path').basename(req.file.path)}`
+                    : null;
+            }
+
+            if (!coverUrl) throw new AppError('Failed to upload cover photo', 502);
+
+            const group = await groupService.updateGroup(groupId, userId, { coverPhoto: coverUrl });
+            res.status(200).json({
+                success: true,
+                message: 'Group cover photo updated successfully',
+                data: withLocalSyncMeta({ group, coverUrl }, 'update'),
+            });
+        } catch (error) { handleError(error, next, 'updateGroupCover'); }
+    }
+
     // ── DELETE GROUP ───────────────────────────────────────────────────────
     async deleteGroup(req, res, next) {
         try {

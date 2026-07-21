@@ -161,11 +161,28 @@ router.post('/upload', upload.single('file'), async (req, res) => {
 });
 
 // ── POST /api/files/upload-multiple ──────────────────────────────────────────
-router.post('/upload-multiple', upload.array('files', 10), (req, res) => {
+router.post('/upload-multiple', upload.array('files', 10), async (req, res) => {
     try {
         if (!req.files?.length) {
             return res.status(400).json({ success: false, message: 'No files uploaded' });
         }
+
+        if (CLOUDINARY_ENABLED) {
+            const files = await Promise.all(req.files.map(async f => {
+                const type   = MIME_TYPE_MAP[f.mimetype] || 'file';
+                const folder = `moodchat/files/${type === 'file' ? 'other' : type}s`;
+                const result = await cloudinaryService.uploadToCloudinary(f.buffer, { folder });
+                if (!result) return null;
+                return { url: result.url, publicId: result.publicId, filename: result.publicId,
+                         originalName: f.originalname, mimeType: f.mimetype, size: f.size, type };
+            }));
+            const okFiles = files.filter(Boolean);
+            if (!okFiles.length) {
+                return res.status(502).json({ success: false, message: 'Upload to Cloudinary failed' });
+            }
+            return res.status(201).json({ success: true, message: 'Files uploaded', data: { files: okFiles }, files: okFiles });
+        }
+
         const files = req.files.map(f => {
             const type    = MIME_TYPE_MAP[f.mimetype] || 'file';
             const subDir  = type === 'image' ? 'images' : type === 'audio' ? 'audio'

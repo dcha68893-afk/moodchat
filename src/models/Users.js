@@ -78,6 +78,10 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: true,
         defaultValue: 'https://ui-avatars.com/api/?name=User&background=random&color=fff'
       },
+      coverPhoto: {
+        type: DataTypes.TEXT,
+        allowNull: true,
+      },
       firstName: {
         type: DataTypes.STRING(50),
         allowNull: true,
@@ -376,13 +380,14 @@ module.exports = (sequelize, DataTypes) => {
   };
 
   Users.prototype.getPublicProfile = function () {
-    const { id, username, firstName, lastName, avatar, bio, status, lastSeen, theme, language } = this;
+    const { id, username, firstName, lastName, avatar, coverPhoto, bio, status, lastSeen, theme, language } = this;
     return { 
       id, 
       username, 
       firstName, 
       lastName, 
       avatar, 
+      coverPhoto,
       bio, 
       status, 
       lastSeen,

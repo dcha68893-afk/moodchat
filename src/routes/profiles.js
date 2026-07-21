@@ -5,7 +5,19 @@ const router = express.Router();
 const profileController = require('../controllers/profileController');
 const { authenticateToken } = require(path.join(__dirname, '../middleware/auth'));
 const { apiRateLimiter } = require('../middleware/rateLimiter');
-const upload = require('../utils/fileUpload');
+// FIX (PROFILE-COVER-EPHEMERAL-DISK): was `require('../utils/fileUpload')`,
+// a disk-storage multer instance — profileService now uploads straight to
+// Cloudinary and needs an in-memory buffer, not a disk path.
+const multer = require('multer');
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const allowed = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp'];
+    if (allowed.includes(file.mimetype)) return cb(null, true);
+    cb(new Error('Invalid file type. Allowed types: JPEG, PNG, GIF, WEBP'), false);
+  },
+});
 const asyncHandler = require('express-async-handler');
 
 
