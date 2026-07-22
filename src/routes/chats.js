@@ -124,7 +124,16 @@ router.get(
             const { page = 1, limit = 50, includeArchived = false } = req.query;
             const offset = (parseInt(page) - 1) * parseInt(limit);
             
-            const whereCondition = includeArchived === 'true' ? {} : { isArchived: false };
+            // FIX (deleted-chat-resurrects-on-refresh): DELETE /:chatId marks a
+            // chat with isActive:false, but this list query previously only
+            // filtered on isArchived — so a deleted chat kept coming back on
+            // every refresh because the server itself never stopped returning
+            // it. isActive must always be excluded here regardless of the
+            // includeArchived flag (that flag only controls archived chats,
+            // which are a separate, intentionally-hidden state).
+            const whereCondition = includeArchived === 'true'
+                ? { isActive: { [Op.ne]: false } }
+                : { isArchived: false, isActive: { [Op.ne]: false } };
             
             const { count, rows: chats } = await Chat.findAndCountAll({
                 where: whereCondition,
@@ -456,7 +465,17 @@ router.post(
                 // Check if any common chat is a direct chat
                 for (const chatId of commonChatIds) {
                     const chat = await Chat.findByPk(chatId);
-                    if (chat && chat.type === 'direct' && chat.isActive === true) {
+                    if (chat && chat.type === 'direct') {
+                        // FIX (duplicate-chat-on-remessage): this used to require
+                        // chat.isActive === true, so once a chat had been soft-
+                        // deleted (isActive:false) it was never matched here again
+                        // — the next message to the same person silently created a
+                        // brand new Chat row instead, leaving two threads between
+                        // the same two users. Reactivate the existing thread
+                        // instead of forking a duplicate.
+                        if (chat.isActive === false) {
+                            await chat.update({ isActive: true, deletedAt: null, deletedBy: null });
+                        }
                         const displayName = [otherUser.firstName, otherUser.lastName].filter(Boolean).join(' ').trim() || otherUser.username;
                         
                         return res.status(200).json({
