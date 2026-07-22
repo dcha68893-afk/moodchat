@@ -287,8 +287,20 @@ router.post('/login', asyncHandler(async (req, res) => {
 
         // P2 FIX (Forensic Audit): notify the user of a login from a device
         // (User-Agent) we haven't seen for this account before.
+        //
+        // FIX (Security settings audit): this used to fire unconditionally,
+        // completely ignoring Settings > Security > "Login Notifications"
+        // (saved by settings-ui.js as security.loginNotifications via
+        // PUT /api/settings). The toggle saved fine and showed "Saved" but
+        // had zero effect on whether an email actually went out — a classic
+        // placeholder setting. `user.settings` is already selected in the
+        // attributes list above, so this is just reading what's already in
+        // memory. Default is opt-out (true unless explicitly set to false),
+        // matching the frontend's own `settings.loginNotifications !== false`
+        // default-checked logic in settings-ui.js's loadSecuritySection().
+        const loginNotificationsEnabled = user.settings?.security?.loginNotifications !== false;
         const userAgent = req.headers['user-agent'] || null;
-        if (user.email && userAgent) {
+        if (user.email && userAgent && loginNotificationsEnabled) {
             tokenService.hasKnownDevice(user.id, userAgent).then(known => {
                 if (!known) {
                     emailService.newDeviceLoginAlert(user.email, {
