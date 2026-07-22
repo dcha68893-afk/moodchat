@@ -68,6 +68,30 @@ const apiLimiter = rateLimit({
 // ADDED: Alias for apiRateLimiter (commonly used in routes)
 const apiRateLimiter = apiLimiter;
 
+// FIX (2026-07-22): marketplace/tools routes were sharing the same global
+// apiLimiter (100 req/min, keyed by IP) with every real-time chat feature —
+// messages, typing indicators, read receipts, presence, calls signaling, etc.
+// Normal chat activity alone can exhaust that budget, so by the time a user
+// clicked Publish, the marketplace request rode on whatever was left of the
+// SAME shared bucket and got hit with 429 "Too many requests" — which is
+// exactly the error users were seeing on Publish. Marketplace now gets its
+// own bucket, sized for its actual usage pattern (browsing + CRUD), and is
+// keyed by authenticated user ID rather than IP so it isn't shared across
+// unrelated users behind the same NAT/proxy either.
+const marketplaceLimiter = rateLimit({
+  store: redisStore,
+  windowMs: 60 * 1000, // 1 minute
+  max: 300, // marketplace browsing + listing CRUD is far chattier than chat-only limits allow
+  message: {
+    success: false,
+    message: 'Too many marketplace requests, please try again in a minute',
+    timestamp: new Date().toISOString()
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => (req.user && req.user.id) ? `user:${req.user.id}` : req.ip,
+});
+
 // Rate limiter for registration (more strict)
 const registerLimiter = rateLimit({
   store: redisStore,
@@ -263,6 +287,7 @@ module.exports = {
   authLimiter,
   apiLimiter,
   apiRateLimiter, // Added alias for backward compatibility
+  marketplaceLimiter, // FIX (2026-07-22): dedicated bucket for tools/marketplace routes
   registerLimiter,
   passwordResetLimiter,
   dataExportLimiter,
