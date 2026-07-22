@@ -951,6 +951,54 @@ async function ensurePhase34Tables() {
        UNIQUE("reporterId","messageId"))`,
     // Phase 2: two-step PIN on Users
     `ALTER TABLE "Users" ADD COLUMN IF NOT EXISTS "registrationPin" VARCHAR(255)`,
+    // FIX (500-error audit): mfaSecret/mfaEnabled/mfaBackupCodes and
+    // googleId/authProvider are all declared as attributes on the Sequelize
+    // Users model (src/models/Users.js) -- so every query that touches the
+    // model, and every raw SQL statement in routes/settings.js and
+    // services/authService.js, assumes these columns exist -- but the only
+    // place that ever created them was the formal migrations/ folder
+    // (20260611000001-add-mfa-columns.js, 20260720000001-add-mfa-backup-
+    // codes-column.js for the mfa columns; nothing at all for googleId/
+    // authProvider). server.js's own comments note that sequelize-cli's
+    // auto-migrate-on-boot step is a recent addition guarding against
+    // exactly this class of bug, which means historically these columns had
+    // no guaranteed path onto a live database. This DDL array, by contrast,
+    // is the mechanism that has reliably run on every boot (it's what keeps
+    // registrationPin above working). Adding them here as an idempotent,
+    // guaranteed-to-run safety net -- on top of, not instead of, the formal
+    // migrations -- is why 2FA setup/verify/disable and Google sign-in were
+    // returning bare "internal server error" 500s: the underlying
+    // "column ... does not exist" Postgres error was never caught by
+    // anything upstream and fell straight through to Express's default
+    // error handler.
+    `ALTER TABLE "Users" ADD COLUMN IF NOT EXISTS "mfaSecret" VARCHAR(255)`,
+    `ALTER TABLE "Users" ADD COLUMN IF NOT EXISTS "mfaEnabled" BOOLEAN NOT NULL DEFAULT false`,
+    `ALTER TABLE "Users" ADD COLUMN IF NOT EXISTS "mfaBackupCodes" JSONB`,
+    `ALTER TABLE "Users" ADD COLUMN IF NOT EXISTS "googleId" VARCHAR(255)`,
+    `DO $$
+     BEGIN
+       IF NOT EXISTS (
+         SELECT 1 FROM pg_constraint WHERE conname = 'Users_googleId_key'
+       ) THEN
+         BEGIN
+           ALTER TABLE "Users" ADD CONSTRAINT "Users_googleId_key" UNIQUE ("googleId");
+         EXCEPTION WHEN duplicate_table OR unique_violation THEN
+           NULL; -- constraint already exists under a different name, or
+                 -- pre-existing duplicate NULLs/values block it; either way
+                 -- don't fail the whole migration batch over it.
+         END;
+       END IF;
+     END $$;`,
+    `ALTER TABLE "Users" ADD COLUMN IF NOT EXISTS "authProvider" VARCHAR(20) NOT NULL DEFAULT 'local'`,
+    // Same class of bug, found while auditing the one above: these four are
+    // also declared on the Users model with no migration and no self-heal
+    // entry anywhere -- profile editing (cover photo, phone, date of birth)
+    // and privacy-policy acceptance would 500 the same way the moment they
+    // touch a real database.
+    `ALTER TABLE "Users" ADD COLUMN IF NOT EXISTS "coverPhoto" TEXT`,
+    `ALTER TABLE "Users" ADD COLUMN IF NOT EXISTS "phone" VARCHAR(20)`,
+    `ALTER TABLE "Users" ADD COLUMN IF NOT EXISTS "dateOfBirth" DATE`,
+    `ALTER TABLE "Users" ADD COLUMN IF NOT EXISTS "acceptedPrivacyPolicyAt" TIMESTAMPTZ`,
     // Phase 3: disappearing messages expiry on Messages
     `ALTER TABLE "Messages" ADD COLUMN IF NOT EXISTS "expiresAt" TIMESTAMPTZ`,
     // Phase 1-4: rich message metadata (gif, poll, sticker, view-once, sealed)
