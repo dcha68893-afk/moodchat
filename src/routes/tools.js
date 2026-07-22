@@ -177,6 +177,11 @@ router.get('/marketplace/listings',         apiRateLimiter, toolsController.getL
 router.get('/marketplace/listings/:listingId', apiRateLimiter, toolsController.getListing.bind(toolsController));
 
 router.post('/marketplace/listings',         apiRateLimiter, toolsController.createListing.bind(toolsController));
+// FIX (2026-07-22): frontend has always POSTed here for Premium tab listings,
+// but only a GET existed for this path — every premium submission 404'd.
+// Reuses the same (now premium-aware) createListing controller rather than
+// duplicating listing-creation logic in a second function.
+router.post('/marketplace/listings/premium', apiRateLimiter, toolsController.createListing.bind(toolsController));
 router.post('/marketplace/listings/bulk',    apiRateLimiter, toolsController.bulkCreateListings.bind(toolsController));
 router.put('/marketplace/listings/:listingId',    apiRateLimiter, toolsController.updateListing.bind(toolsController));
 router.delete('/marketplace/listings/:listingId', apiRateLimiter, toolsController.deleteListing.bind(toolsController));

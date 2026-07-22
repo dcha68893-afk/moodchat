@@ -663,7 +663,8 @@ class ToolsController {
         try {
             console.log('[TOOLS FLOW] Step 1: Backend createListing triggered', { userId: req.user?.id });
 
-            const { title, description, price, category, type, images, tags, stock, currency, metadata, condition } = req.body;
+            const { title, description, price, category, type, images, tags, stock, currency, metadata, condition,
+                    isPremium, featured, boosted, expiresAt } = req.body;
             if (!title) throw new AppError('title is required', 400);
 
             console.log('[TOOLS FLOW] Step 2: Payload validated', { title, type, category, price, userId: req.user.id });
@@ -675,7 +676,11 @@ class ToolsController {
 
             const typeMap          = { services: 'service', digital: 'digital', premium: 'premium', physical: 'physical' };
             const normalizedType   = typeMap[type] || type || 'service';
-            const validCategories  = ['electronics','furniture','clothing','books','services','digital','premium','other'];
+            const validCategories  = ['electronics','furniture','clothing','books','services','digital','premium','other',
+                // FIX (2026-07-22): service subcategories (Service tab dropdown)
+                'tutoring','repair','design','tech','cleaning','events','beauty','transport',
+                // FIX (2026-07-22): digital-item subcategories (Digital Item tab dropdown)
+                'notes','templates','ebooks','software','audio','courses'];
             const normalizedCat    = validCategories.includes(category) ? category : (normalizedType === 'digital' ? 'digital' : normalizedType === 'premium' ? 'premium' : 'services');
             const validConditions  = ['new','used','refurbished'];
             const normalizedCond   = validConditions.includes(condition) ? condition : 'new';
@@ -689,6 +694,13 @@ class ToolsController {
                 currency: currency || 'KES',
                 metadata: { ...(metadata || {}), condition: normalizedCond },
                 status: 'active', available: true,
+                // FIX (2026-07-22): these columns already existed on the Tool
+                // model but nothing ever set them, so "Premium" listings were
+                // indistinguishable from regular ones once saved.
+                isPremium: Boolean(isPremium) || normalizedType === 'premium',
+                isFeatured: Boolean(featured),
+                isBoosted: Boolean(boosted),
+                boostExpiresAt: boosted && expiresAt ? new Date(expiresAt) : null,
             });
 
             console.log('[TOOLS FLOW] Step 3: Listing saved to DB', { id: listing.id });

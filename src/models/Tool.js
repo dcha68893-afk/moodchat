@@ -75,7 +75,14 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: false,
         defaultValue: 'other',
         validate: {
-          isIn: [['electronics', 'furniture', 'clothing', 'books', 'services', 'digital', 'premium', 'other']],
+          // FIX (2026-07-22): added the service subcategories now offered in
+          // the Create Listing → Service tab dropdown (tutoring, repair,
+          // design, tech, cleaning, events, beauty, transport). Without this,
+          // Sequelize would reject the insert with a validation error before
+          // it ever reached the controller's own whitelist.
+          isIn: [['electronics', 'furniture', 'clothing', 'books', 'services', 'digital', 'premium', 'other',
+                  'tutoring', 'repair', 'design', 'tech', 'cleaning', 'events', 'beauty', 'transport',
+                  'notes', 'templates', 'ebooks', 'software', 'audio', 'courses']],
         },
       },
       type: {
