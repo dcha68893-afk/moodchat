@@ -171,17 +171,27 @@ async function pushGroupMessage(groupId, message, groupName = 'Group') {
       include: [{
         model: User,
         as:    'groupMemberUser',
-        attributes: ['id', 'fcmToken', 'pushToken'],
+        attributes: ['id', 'fcmToken', 'pushToken', 'settings'],
         required: false,
       }],
     });
 
     // Collect valid tokens
+    // FIX (Notifications audit): this used to push to every member's token
+    // unconditionally — never checking Settings > Notifications at all, so
+    // "Enable Notifications" and "Group Notifications" had zero effect on
+    // this (FCM-based) push path, even though the separate VAPID-based push
+    // path (pushNotificationService.js, used for 1:1 messages/calls) already
+    // gets this right via _getRecipientNotificationPrefs.
     const tokens = [];
     members.forEach(m => {
       const u = m.groupMemberUser;
       const token = u?.fcmToken || u?.pushToken;
-      if (token) tokens.push({ memberId: m.userId, token });
+      if (!token) return;
+      const notif = u?.settings?.notifications || {};
+      if (notif.enableNotifications === false) return;
+      if (notif.groupNotifications === false) return;
+      tokens.push({ memberId: m.userId, token });
     });
 
     if (!tokens.length) return;
