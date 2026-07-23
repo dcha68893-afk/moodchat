@@ -174,7 +174,7 @@ const MODEL_WHITELIST = [
   'GroupTask', 'GroupTaskAssignment',
   'GroupEvent', 'GroupAttendance',
   'GroupPoll', 'GroupPollOption', 'GroupPollVote',
-  'GroupNote', 'GroupThread',
+  'GroupNote', 'GroupThread', 'GroupReport',
   'GroupFile', 'GroupFinance',
   'GroupAISummary', 'GroupActivityLog', 'GroupAnalytics',
 ];

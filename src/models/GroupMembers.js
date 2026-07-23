@@ -67,6 +67,17 @@ module.exports = (sequelize, DataTypes) => {
         defaultValue: false,
         allowNull: false,
       },
+      isFavorite: {
+        type: DataTypes.BOOLEAN,
+        defaultValue: false,
+        allowNull: false,
+      },
+      isBlocked: {
+        type: DataTypes.BOOLEAN,
+        defaultValue: false,
+        allowNull: false,
+        comment: 'User has blocked this group: hidden from active lists, notifications suppressed.',
+      },
       customSettings: {
         type: DataTypes.JSONB,
         defaultValue: {

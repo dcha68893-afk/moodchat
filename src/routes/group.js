@@ -906,6 +906,88 @@ router.get('/:groupId/moderation-log', async (req, res) => {
 });
 
 // ============================================================================
+// GROUP PREFERENCES — favorite / mute (per-member, self-only)
+// PUT /:groupId/preferences  body: { isFavorite?, notificationsMuted? }
+// ============================================================================
+router.put('/:groupId/preferences', async (req, res) => {
+    try {
+        const userId = getUserId(req);
+        const groupId = parseInt(req.params.groupId);
+        if (!userId) return res.status(401).json({ success: false, message: 'Auth required' });
+        if (isNaN(groupId)) return res.status(400).json({ success: false, message: 'Invalid group ID' });
+        const membership = GroupMember ? await GroupMember.findOne({ where: { groupId, userId } }) : null;
+        if (!membership) return res.status(403).json({ success: false, message: 'You are not a member of this group' });
+
+        const update = {};
+        if (typeof req.body.isFavorite === 'boolean') update.isFavorite = req.body.isFavorite;
+        if (typeof req.body.notificationsMuted === 'boolean') update.notificationsMuted = req.body.notificationsMuted;
+        if (Object.keys(update).length === 0) return res.status(400).json({ success: false, message: 'Nothing to update' });
+
+        await membership.update(update);
+        return res.json({ success: true, data: { isFavorite: membership.isFavorite, notificationsMuted: membership.notificationsMuted } });
+    } catch (e) {
+        return res.status(500).json({ success: false, message: 'Failed to update preferences', error: e.message });
+    }
+});
+
+// ============================================================================
+// BLOCK / UNBLOCK GROUP — hides from active lists + suppresses notifications
+// POST /:groupId/block   POST /:groupId/unblock
+// ============================================================================
+router.post('/:groupId/block', async (req, res) => {
+    try {
+        const userId = getUserId(req);
+        const groupId = parseInt(req.params.groupId);
+        if (!userId) return res.status(401).json({ success: false, message: 'Auth required' });
+        const membership = GroupMember ? await GroupMember.findOne({ where: { groupId, userId } }) : null;
+        if (!membership) return res.status(403).json({ success: false, message: 'You are not a member of this group' });
+        await membership.update({ isBlocked: true });
+        return res.json({ success: true, data: { isBlocked: true } });
+    } catch (e) {
+        return res.status(500).json({ success: false, message: 'Failed to block group', error: e.message });
+    }
+});
+
+router.post('/:groupId/unblock', async (req, res) => {
+    try {
+        const userId = getUserId(req);
+        const groupId = parseInt(req.params.groupId);
+        if (!userId) return res.status(401).json({ success: false, message: 'Auth required' });
+        const membership = GroupMember ? await GroupMember.findOne({ where: { groupId, userId } }) : null;
+        if (!membership) return res.status(403).json({ success: false, message: 'You are not a member of this group' });
+        await membership.update({ isBlocked: false });
+        return res.json({ success: true, data: { isBlocked: false } });
+    } catch (e) {
+        return res.status(500).json({ success: false, message: 'Failed to unblock group', error: e.message });
+    }
+});
+
+// ============================================================================
+// REPORT GROUP — group-level abuse/spam report (distinct from per-message report)
+// POST /:groupId/report   body: { reason, details? }
+// ============================================================================
+router.post('/:groupId/report', async (req, res) => {
+    try {
+        const userId = getUserId(req);
+        const groupId = parseInt(req.params.groupId);
+        const { reason = 'other', details = '' } = req.body;
+        if (!userId) return res.status(401).json({ success: false, message: 'Auth required' });
+        if (isNaN(groupId)) return res.status(400).json({ success: false, message: 'Invalid group ID' });
+        const dbInner = require('../models');
+        const GroupReport = dbInner.models?.GroupReport || dbInner.GroupReport || null;
+        if (!GroupReport) return res.status(503).json({ success: false, message: 'Report service unavailable' });
+        const group = await Group.findByPk(groupId);
+        if (!group) return res.status(404).json({ success: false, message: 'Group not found' });
+        const existing = await GroupReport.findOne({ where: { groupId, reporterId: userId } });
+        if (existing) return res.status(409).json({ success: false, message: 'You already reported this group' });
+        const report = await GroupReport.create({ groupId, reporterId: userId, reason, details, status: 'pending' });
+        return res.status(201).json({ success: true, message: 'Report submitted', data: { reportId: report.id } });
+    } catch (e) {
+        return res.status(500).json({ success: false, message: 'Failed to submit report', error: e.message });
+    }
+});
+
+// ============================================================================
 // P1 FIX: UPDATE SETTINGS — persist slowModeInterval, postingRule, disappearingTimer
 // (augments existing PUT /:groupId/settings in groupController)
 // ============================================================================

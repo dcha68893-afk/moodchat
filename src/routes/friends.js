@@ -513,27 +513,65 @@ router.get('/search', searchLimiter, asyncHandler(async (req, res) => {
         if (!query || query.length < 1) return res.status(400).json({ success: false, message: 'Search query required (min 1 char)' });
 
         const s = `%${query.toLowerCase()}%`;
+
+        // FEATURE (settings.friends.discoverByPhone / discoverByEmail): the query string itself
+        // decides the match mode — if it looks like a phone number or an email address, also
+        // match against those columns. Name/username search behavior is unchanged either way.
+        const digitsOnly = query.replace(/[^\d]/g, '');
+        const looksLikePhone = digitsOnly.length >= 7 && digitsOnly.length === query.replace(/[\s\-().+]/g, '').length;
+        const looksLikeEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(query) || (query.includes('@') && query.length >= 3);
+
+        const orConditions = [
+            Sequelize.where(Sequelize.fn('LOWER', Sequelize.col('username')),  { [Op.like]: s }),
+            Sequelize.where(Sequelize.fn('LOWER', Sequelize.col('firstName')), { [Op.like]: s }),
+            Sequelize.where(Sequelize.fn('LOWER', Sequelize.col('lastName')),  { [Op.like]: s }),
+        ];
+        if (looksLikePhone) {
+            orConditions.push({ phone: { [Op.like]: `%${digitsOnly}%` } });
+        }
+        if (looksLikeEmail) {
+            orConditions.push(Sequelize.where(Sequelize.fn('LOWER', Sequelize.col('email')), { [Op.like]: s }));
+        }
+
         const users = await withTimeout(User.findAll({
             where: {
                 id: { [Op.ne]: userId },
-                [Op.or]: [
-                    Sequelize.where(Sequelize.fn('LOWER', Sequelize.col('username')),  { [Op.like]: s }),
-                    Sequelize.where(Sequelize.fn('LOWER', Sequelize.col('firstName')), { [Op.like]: s }),
-                    Sequelize.where(Sequelize.fn('LOWER', Sequelize.col('lastName')),  { [Op.like]: s })
-                ]
+                [Op.or]: orConditions
             },
-            attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'bio', 'settings'],
+            attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'bio', 'settings', 'phone', 'email'],
             limit: Math.min(100, parseInt(req.query.limit) || 50),
             order: [['username', 'ASC']]
         }));
 
         await applyLastSeenPrivacy(users, userId);
 
+        // FEATURE (settings.friends.discoverByPhone / discoverByEmail): only exclude a result
+        // if the ONLY reason it matched was a phone/email hit and that user has turned
+        // discovery-by-that-method off. A user who also matches by name/username stays
+        // discoverable regardless — that's normal profile search, not phone/email lookup.
+        const qLower = query.toLowerCase();
+        const filteredUsers = (users || []).filter(u => {
+            const matchesName =
+                (u.username && u.username.toLowerCase().includes(qLower)) ||
+                (u.firstName && u.firstName.toLowerCase().includes(qLower)) ||
+                (u.lastName && u.lastName.toLowerCase().includes(qLower));
+            if (matchesName) return true;
+
+            const friendSettings = (u.settings && u.settings.friends) || {};
+            if (looksLikePhone && u.phone && u.phone.replace(/[^\d]/g, '').includes(digitsOnly)) {
+                return friendSettings.discoverByPhone !== false;
+            }
+            if (looksLikeEmail && u.email && u.email.toLowerCase().includes(qLower)) {
+                return friendSettings.discoverByEmail !== false;
+            }
+            return true;
+        });
+
         // Attach friendship status
         let friendshipMap = {};
-        if (Friend && users && users.length > 0) {
+        if (Friend && filteredUsers && filteredUsers.length > 0) {
             try {
-                const uids = users.map(u => u.id);
+                const uids = filteredUsers.map(u => u.id);
                 const relations = await withTimeout(Friend.findAll({
                     where: {
                         [Op.or]: [
@@ -557,7 +595,7 @@ router.get('/search', searchLimiter, asyncHandler(async (req, res) => {
 
         return res.json({
             success: true,
-            data: { users: (users || []).map(u => ({ ...formatUser(u), friendshipStatus: friendshipMap[u.id] || 'none' })) }
+            data: { users: (filteredUsers || []).map(u => ({ ...formatUser(u), friendshipStatus: friendshipMap[u.id] || 'none' })) }
         });
     } catch (e) {
         console.error('[Friends GET /search]', e.message);
@@ -2048,6 +2086,13 @@ router.post('/qr/connect', apiRateLimiter, asyncHandler(async (req, res) => {
             try {
                 const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'));
                 targetId = parseInt(decoded.userId || decoded.id);
+
+                // SECURITY FIX: the frontend already checks expiresAt before letting a scan
+                // proceed, but that's a client-side check only — calling this endpoint
+                // directly with an old/replayed token bypassed it entirely. Enforce it here too.
+                if (decoded.expiresAt && Date.now() > decoded.expiresAt) {
+                    return res.status(400).json({ success: false, message: 'QR code has expired' });
+                }
             } catch (e) {
                 return res.status(400).json({ success: false, message: 'Invalid QR token' });
             }

@@ -25,10 +25,10 @@ module.exports = {
     };
 
     await changeCol('tools',    'seller_id');
-    await changeCol('orders',   'buyer_id');
-    await changeCol('orders',   'seller_id');
-    await changeCol('reviews',  'user_id');
-    await changeCol('reviews',  'seller_id');
+    await changeCol('marketplace_orders',   'buyer_id');
+    await changeCol('marketplace_orders',   'seller_id');
+    await changeCol('marketplace_reviews',  'user_id');
+    await changeCol('marketplace_reviews',  'seller_id');
     await changeCol('wishlists','user_id');
   },
 
