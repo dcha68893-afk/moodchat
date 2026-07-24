@@ -121,6 +121,18 @@ const REQUIRED_COLUMNS = [
     sql: `ALTER TABLE "Groups" ADD COLUMN IF NOT EXISTS "discoveryScope" VARCHAR(20) NOT NULL DEFAULT 'world'`,
   },
   {
+    // FIX (GROUP-CREATE-500): migration 20260723000002 added Groups.location
+    // alongside discoveryScope, but only discoveryScope was ever added to this
+    // self-healing fallback list. If the sequelize-cli migration step fails or
+    // is skipped on any given boot (server.js swallows that error and keeps
+    // starting), Groups.location never gets created — and groupService.js
+    // always writes a `location` value on every group creation, so every
+    // single "create group" request throws a Postgres "column location does
+    // not exist" error, surfaced to the client as a generic 500.
+    table: 'Groups', column: 'location',
+    sql: `ALTER TABLE "Groups" ADD COLUMN IF NOT EXISTS "location" VARCHAR(100)`,
+  },
+  {
     table: 'Groups', column: 'blockedWords',
     sql: `ALTER TABLE "Groups" ADD COLUMN IF NOT EXISTS "blockedWords" TEXT[] NOT NULL DEFAULT '{}'`,
   },
@@ -157,6 +169,18 @@ const REQUIRED_COLUMNS = [
   {
     table: 'GroupMembers', column: 'warnings',
     sql: `ALTER TABLE "GroupMembers" ADD COLUMN IF NOT EXISTS "warnings" INTEGER NOT NULL DEFAULT 0`,
+  },
+  {
+    // FIX: same class of bug as Groups.location above — migration
+    // 20260723000001 added these two columns but they were never mirrored
+    // into this fallback list, so favoriteGroup()/blockGroup() 500 if the
+    // migration step didn't run on a given boot.
+    table: 'GroupMembers', column: 'isFavorite',
+    sql: `ALTER TABLE "GroupMembers" ADD COLUMN IF NOT EXISTS "isFavorite" BOOLEAN NOT NULL DEFAULT false`,
+  },
+  {
+    table: 'GroupMembers', column: 'isBlocked',
+    sql: `ALTER TABLE "GroupMembers" ADD COLUMN IF NOT EXISTS "isBlocked" BOOLEAN NOT NULL DEFAULT false`,
   },
 
   // ── Messages ──────────────────────────────────────────────────────────────
@@ -291,6 +315,23 @@ const REQUIRED_TABLES = [
       "user_id"        INTEGER NOT NULL,
       "password_hash"  VARCHAR(255) NOT NULL,
       "created_at"     TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+    )`,
+  },
+  // FIX: same class of bug as Groups.location — migration 20260723000001
+  // creates this table, but it was never mirrored into this fallback list.
+  {
+    name: 'GroupReports',
+    sql: `CREATE TABLE IF NOT EXISTS "GroupReports" (
+      "id"          SERIAL PRIMARY KEY,
+      "groupId"     INTEGER NOT NULL,
+      "reporterId"  INTEGER NOT NULL,
+      "reason"      VARCHAR(50) NOT NULL,
+      "details"     TEXT,
+      "status"      VARCHAR(20) NOT NULL DEFAULT 'pending',
+      "reviewedBy"  INTEGER,
+      "reviewedAt"  TIMESTAMP WITH TIME ZONE,
+      "createdAt"   TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      "updatedAt"   TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
     )`,
   },
 ];
