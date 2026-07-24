@@ -39,6 +39,15 @@ function formatUser(user) {
     const ps = (u.settings && u.settings.privacy) || {};
     const whoCanAddMe = ps.whoCanAddMe || ps.groupAddPolicy || (ps.allowGroupAdds === false ? 'nobody' : ps.allowGroupAdds) || 'everyone';
 
+    // FIX (SEARCH-BY-EMAIL): the browse/search screens' client-side filter has
+    // always checked `user.email`, but this formatter never returned it, so
+    // that match branch could never fire no matter what the caller's SELECT
+    // fetched. Gate it by the same settings.friends.discoverByEmail flag
+    // /search already respects — off by default is NOT assumed; only an
+    // explicit `false` hides it, matching /search's existing behavior.
+    const fs = (u.settings && u.settings.friends) || {};
+    const showEmail = fs.discoverByEmail !== false;
+
     return {
         id:          u.id,
         username:    u.username    || '',
@@ -47,6 +56,7 @@ function formatUser(user) {
         displayName: [u.firstName, u.lastName].filter(Boolean).join(' ').trim() || u.username || '',
         firstName:   u.firstName   || '',
         lastName:    u.lastName    || '',
+        email:       (showEmail && u.email !== undefined) ? (u.email || null) : null,
         status:      u.status      || 'offline',
         lastActive:  u.lastSeen    || null,
         privacy:     { whoCanAddMe }

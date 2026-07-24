@@ -275,7 +275,7 @@ router.get('/users/all', apiRateLimiter, asyncHandler(async (req, res) => {
 
         const { count, rows: users } = await withTimeout(User.findAndCountAll({
             where: whereCondition,
-            attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'settings'],
+            attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'settings', 'email'],
             limit: limitNum, offset,
             order: [
                 [Sequelize.literal("CASE WHEN status IN ('online','away') THEN 0 ELSE 1 END"), 'ASC'],
