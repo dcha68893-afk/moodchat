@@ -4464,7 +4464,16 @@ class Application {
             contentSecurityPolicy: config.get('NODE_ENV') === 'production',
             crossOriginEmbedderPolicy: false,
             crossOriginResourcePolicy: { policy: "cross-origin" },
-            crossOriginOpenerPolicy: { policy: "same-origin" },
+            // FIX: 'same-origin' blocks window.postMessage from any popup this
+            // page opens — including Google Identity Services' Sign-In popup,
+            // which communicates the credential back via postMessage. That's
+            // the source of the console warning "Cross-Origin-Opener-Policy
+            // policy would block the window.postMessage call" and, in some
+            // browsers, of Google sign-in silently never completing.
+            // 'same-origin-allow-popups' keeps this window isolated from
+            // being reached BY other windows, while still allowing it to
+            // receive messages FROM popups it opens itself.
+            crossOriginOpenerPolicy: { policy: "same-origin-allow-popups" },
             hsts: {
                 maxAge: 31536000,
                 includeSubDomains: true,

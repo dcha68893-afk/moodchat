@@ -851,6 +851,84 @@ router.post('/start', apiRateLimiter, callInitiationLimiter, asyncHandler(async 
 // ─────────────────────────────────────────────────────────────────────────────
 
 // GET /:callId
+// NOTE: '/scheduled' and '/ice-config' are single-segment literal routes and
+// MUST be registered before '/:callId' below — Express matches routes in
+// registration order, and '/:callId' would otherwise swallow both paths as
+// callId='scheduled' / callId='ice-config', causing a DB type-cast error
+// (500) instead of ever reaching these handlers.
+// GET /scheduled — List upcoming scheduled calls for the current user
+router.get('/scheduled', apiRateLimiter, asyncHandler(async (req, res) => {
+  try {
+    const auth = checkAuth(req, res); if (!auth) return;
+    const { userId } = auth;
+    if (!checkModels(res)) return;
+
+    const now = new Date();
+    const calls = await Call.findAll({
+      where: {
+        scheduledAt: { [Op.gte]: now },
+        status: 'initiated',
+        [Op.or]: [
+          { callerId: userId },
+          { participants: { [Op.contains]: [userId] } },
+        ],
+      },
+      order: [['scheduledAt', 'ASC']],
+      limit: 50,
+    });
+
+    // Enrich with caller info
+    const enriched = await Promise.all(calls.map(async (c) => {
+      let callerInfo = null;
+      try {
+        const u = await User.findByPk(c.callerId, { attributes: ['id', 'username', 'avatar'] });
+        callerInfo = u ? u.toJSON() : null;
+      } catch (_) {}
+      return { ...c.toJSON(), callerInfo };
+    }));
+
+    res.json({ success: true, data: { calls: enriched, total: enriched.length } });
+  } catch (err) {
+    console.error('[GET /scheduled]', err.message);
+    res.status(500).json({ success: false, message: 'Failed to fetch scheduled calls' });
+  }
+}));
+
+router.get('/ice-config', asyncHandler(async (req, res) => {
+  // SEC-02 FIX: This route previously had no authentication — any unauthenticated
+  // request received TURN credentials. TURN relay costs are metered per-byte; an
+  // unauthenticated endpoint lets anyone enumerate and abuse your TURN server.
+  // Added checkAuth guard; also already uses time-limited HMAC credentials (good).
+  const auth = checkAuth(req, res); if (!auth) return;
+  const userId  = auth.userId;
+  const TURN_URL    = process.env.TURN_URL    || '';
+  const TURN_SECRET = process.env.TURN_SECRET || '';
+
+  const iceServers = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun.cloudflare.com:3478' },
+  ];
+
+  // Add authenticated TURN credentials if configured
+  if (TURN_URL && TURN_SECRET) {
+    try {
+      const crypto = require('crypto');
+      const ttl  = 86400; // 24-hour credential TTL
+      const time = Math.floor(Date.now() / 1000) + ttl;
+      const username = `${time}:user_${userId || 'anon'}`;
+      const credential = crypto
+        .createHmac('sha1', TURN_SECRET)
+        .update(username)
+        .digest('base64');
+      iceServers.push({ urls: `turn:${TURN_URL}`, username, credential });
+      iceServers.push({ urls: `turns:${TURN_URL}?transport=tcp`, username, credential });
+    } catch (_e) { /* TURN credential generation failed — fall back to STUN only */ }
+  }
+
+  return res.json({ success: true, iceServers, ttl: 86400 });
+}));
+
 router.get('/:callId', apiRateLimiter, asyncHandler(async (req, res) => {
   try {
     const auth = checkAuth(req, res); if (!auth) return;
@@ -1554,44 +1632,6 @@ router.post('/:callId/leave', apiRateLimiter, asyncHandler(async (req, res) => {
 // ── GET /api/calls/ice-config — Return STUN/TURN server credentials ──────────
 // Called by calls-core.js after initiating/accepting a call (event: turn:config).
 // If TURN_SECRET is not set, returns free STUN servers only.
-// GET /scheduled — List upcoming scheduled calls for the current user
-router.get('/scheduled', apiRateLimiter, asyncHandler(async (req, res) => {
-  try {
-    const auth = checkAuth(req, res); if (!auth) return;
-    const { userId } = auth;
-    if (!checkModels(res)) return;
-
-    const now = new Date();
-    const calls = await Call.findAll({
-      where: {
-        scheduledAt: { [Op.gte]: now },
-        status: 'initiated',
-        [Op.or]: [
-          { callerId: userId },
-          { participants: { [Op.contains]: [userId] } },
-        ],
-      },
-      order: [['scheduledAt', 'ASC']],
-      limit: 50,
-    });
-
-    // Enrich with caller info
-    const enriched = await Promise.all(calls.map(async (c) => {
-      let callerInfo = null;
-      try {
-        const u = await User.findByPk(c.callerId, { attributes: ['id', 'username', 'avatar'] });
-        callerInfo = u ? u.toJSON() : null;
-      } catch (_) {}
-      return { ...c.toJSON(), callerInfo };
-    }));
-
-    res.json({ success: true, data: { calls: enriched, total: enriched.length } });
-  } catch (err) {
-    console.error('[GET /scheduled]', err.message);
-    res.status(500).json({ success: false, message: 'Failed to fetch scheduled calls' });
-  }
-}));
-
 // POST /schedule — Create a scheduled call
 router.post('/schedule', apiRateLimiter, asyncHandler(async (req, res) => {
   try {
@@ -1652,41 +1692,6 @@ router.post('/schedule', apiRateLimiter, asyncHandler(async (req, res) => {
     console.error('[POST /schedule]', err.message);
     res.status(500).json({ success: false, message: 'Failed to schedule call' });
   }
-}));
-
-router.get('/ice-config', asyncHandler(async (req, res) => {
-  // SEC-02 FIX: This route previously had no authentication — any unauthenticated
-  // request received TURN credentials. TURN relay costs are metered per-byte; an
-  // unauthenticated endpoint lets anyone enumerate and abuse your TURN server.
-  // Added checkAuth guard; also already uses time-limited HMAC credentials (good).
-  const auth = checkAuth(req, res); if (!auth) return;
-  const userId  = auth.userId;
-  const TURN_URL    = process.env.TURN_URL    || '';
-  const TURN_SECRET = process.env.TURN_SECRET || '';
-
-  const iceServers = [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun.cloudflare.com:3478' },
-  ];
-
-  // Add authenticated TURN credentials if configured
-  if (TURN_URL && TURN_SECRET) {
-    try {
-      const crypto = require('crypto');
-      const ttl  = 86400; // 24-hour credential TTL
-      const time = Math.floor(Date.now() / 1000) + ttl;
-      const username = `${time}:user_${userId || 'anon'}`;
-      const credential = crypto
-        .createHmac('sha1', TURN_SECRET)
-        .update(username)
-        .digest('base64');
-      iceServers.push({ urls: `turn:${TURN_URL}`, username, credential });
-      iceServers.push({ urls: `turns:${TURN_URL}?transport=tcp`, username, credential });
-    } catch (_e) { /* TURN credential generation failed — fall back to STUN only */ }
-  }
-
-  return res.json({ success: true, iceServers, ttl: 86400 });
 }));
 
 // ─────────────────────────────────────────────────────────────────────────────

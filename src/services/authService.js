@@ -12,8 +12,28 @@ class AuthService {
 
   constructor() {
     this.db = null;
-    this.User = null;
+    this._User = null;
     this.initialized = false;
+  }
+
+  // Lazily re-resolves the User model from this.db on every access while
+  // unset. setDatabase() below still does the eager assignment so the
+  // normal/fast path is unchanged; this getter is what makes a *late*
+  // DB/model readiness self-heal instead of permanently wedging auth.
+  get User() {
+    if (!this._User && this.db && typeof this.db.getUserModel === 'function') {
+      const model = this.db.getUserModel();
+      if (model) {
+        this._User = model;
+        this.initialized = true;
+        console.log('✅ [AuthService] User model became available (lazy re-check)');
+      }
+    }
+    return this._User;
+  }
+
+  set User(model) {
+    this._User = model;
   }
 
   setDatabase(databaseService) {
