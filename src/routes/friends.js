@@ -1,9 +1,31 @@
 const path = require('path');
 const express = require('express');
 const router = express.Router();
+const crypto = require('crypto');
 // Reuse the lastSeen privacy enforcement built in users.js (see that file
 // for _applyLastSeenPrivacy) instead of duplicating it here.
 const applyLastSeenPrivacy = require('./users').applyLastSeenPrivacy;
+
+// ===== QR CODE SIGNING (server-side secret — see /qr/generate and /qr/connect) =====
+// Previously the frontend signed its own QR codes with an HMAC keyed to the *generating*
+// user's session token. That's unverifiable by design: no other party (not the scanner,
+// not even the backend without persisting live session tokens) can ever recompute it, so
+// the signature existed but nothing ever checked it. Signing here instead, with a secret
+// only the server knows, means the backend actually can verify a scanned QR's authenticity.
+const QR_SIGNING_SECRET = process.env.QR_SIGNING_SECRET || process.env.JWT_SECRET || 'knecta-qr-fallback-secret-change-me';
+function signQrPayload(userId, username, timestamp, nonce) {
+    const message = `${userId}:${username}:${timestamp}:${nonce}`;
+    return crypto.createHmac('sha256', QR_SIGNING_SECRET).update(message).digest('hex').substring(0, 32);
+}
+function verifyQrSignature(decoded) {
+    if (!decoded || !decoded.signature || !decoded.userId || !decoded.timestamp || !decoded.nonce) return false;
+    const expected = signQrPayload(decoded.userId, decoded.username || '', decoded.timestamp, decoded.nonce);
+    // Timing-safe comparison — both must be equal length or timingSafeEqual throws.
+    const a = Buffer.from(expected);
+    const b = Buffer.from(String(decoded.signature));
+    if (a.length !== b.length) return false;
+    return crypto.timingSafeEqual(a, b);
+}
 
 // ── CRITICAL: Inject global.__socketIO into req.io so all handlers can emit ──
 router.use((req, _, next) => { if (!req.io) req.io = global.__socketIO || null; next(); });
@@ -2068,7 +2090,45 @@ async function _checkFriendRequestPrivacy(senderId, receiverId) {
 }
 
 // ===== QR CODE FRIEND REQUEST =====
-// Accept fr
+// SECURITY FIX: QR codes are now generated and signed here, server-side, using a secret
+// only the backend knows (see QR_SIGNING_SECRET above) — the old client-side signing
+// scheme produced a signature nobody could ever actually verify. The frontend calls this
+// instead of building its own signed payload locally.
+router.post('/qr/generate', apiRateLimiter, asyncHandler(async (req, res) => {
+    try {
+        const userId = getUserId(req);
+        if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
+
+        const user = await withTimeout(User.findByPk(userId, {
+            attributes: ['id', 'username', 'firstName', 'lastName', 'avatar', 'email']
+        }));
+        if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+        const timestamp = Date.now();
+        const nonce = crypto.randomBytes(12).toString('hex');
+        const username = user.username || '';
+        const displayName = [user.firstName, user.lastName].filter(Boolean).join(' ').trim() || username || 'User';
+        const signature = signQrPayload(String(userId), username, timestamp, nonce);
+
+        const qrData = {
+            type: 'knecta_friend_request',
+            version: '14.0',
+            userId: String(userId),
+            username,
+            displayName,
+            timestamp,
+            nonce,
+            expiresAt: timestamp + (24 * 60 * 60 * 1000),
+            signature
+        };
+
+        return res.json({ success: true, data: { qrData } });
+    } catch (e) {
+        console.error('[Friends POST /qr/generate]', e.message);
+        return res.status(500).json({ success: false, message: 'Failed to generate QR code' });
+    }
+}));
+
 // Accept friend request by QR code token
 router.post('/qr/connect', apiRateLimiter, asyncHandler(async (req, res) => {
     try {
@@ -2083,18 +2143,27 @@ router.post('/qr/connect', apiRateLimiter, asyncHandler(async (req, res) => {
         // If token is provided, decode it to get the target user ID
         // QR token format from front-end: base64 encoded JSON with userId
         if (token && !targetUserId) {
+            let decoded;
             try {
-                const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'));
+                decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf8'));
                 targetId = parseInt(decoded.userId || decoded.id);
-
-                // SECURITY FIX: the frontend already checks expiresAt before letting a scan
-                // proceed, but that's a client-side check only — calling this endpoint
-                // directly with an old/replayed token bypassed it entirely. Enforce it here too.
-                if (decoded.expiresAt && Date.now() > decoded.expiresAt) {
-                    return res.status(400).json({ success: false, message: 'QR code has expired' });
-                }
             } catch (e) {
                 return res.status(400).json({ success: false, message: 'Invalid QR token' });
+            }
+
+            // SECURITY FIX: the frontend already checks expiresAt before letting a scan
+            // proceed, but that's a client-side check only — calling this endpoint
+            // directly with an old/replayed token bypassed it entirely. Enforce it here too.
+            if (decoded.expiresAt && Date.now() > decoded.expiresAt) {
+                return res.status(400).json({ success: false, message: 'QR code has expired' });
+            }
+
+            // SECURITY FIX: verify the signature was actually produced by this server (see
+            // /qr/generate and QR_SIGNING_SECRET above). QR codes now come from /qr/generate,
+            // so a genuine one always has a verifiable signature — reject anything that
+            // doesn't, rather than trusting client-supplied userId/username unconditionally.
+            if (!verifyQrSignature(decoded)) {
+                return res.status(400).json({ success: false, message: 'Invalid or unrecognized QR code' });
             }
         }
 
