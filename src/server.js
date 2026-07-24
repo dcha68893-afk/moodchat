@@ -4094,6 +4094,22 @@ class Application {
             // this.routerManager = new RouterManager(this.app);
             // await this.routerManager.initialize(this.database);
 
+            // FIX-AUTHSERVICE-NO-DATABASE: RouterManager.initialize() (disabled above)
+            // was the ONLY place in the whole codebase that called
+            // authService.setDatabase(databaseService). With it disabled, the
+            // authService singleton's `db`/`User` were never set at all, so every
+            // call that reads authService.User (loginWithGoogle, and anything else
+            // routed through this instance) permanently threw "Service temporarily
+            // unavailable" — this is why Google sign-in kept 401'ing with that exact
+            // message. routes/index.js needs the same wiring RouterManager used to do.
+            try {
+                const authService = require('./services/authService');
+                authService.setDatabase(this.database);
+                _slog('✅ authService wired to database (RouterManager bypass)');
+            } catch (wireErr) {
+                logger.error(`Failed to wire authService to database: ${wireErr.message}`, wireErr, 'AUTH');
+            }
+
             // Skip RouterManager - use index.js for all routes
             _slog('✅ RouterManager DISABLED - using index.js for all routes');
             

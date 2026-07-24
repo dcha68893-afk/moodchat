@@ -516,6 +516,7 @@ async function addMissingColumns() {
       { name: 'rules', type: Sequelize.TEXT, allowNull: true },
       { name: 'tags', type: Sequelize.ARRAY(Sequelize.STRING), defaultValue: [], allowNull: false },
       { name: 'location', type: Sequelize.STRING(100), allowNull: true },
+      { name: 'discoveryScope', type: Sequelize.STRING(20), defaultValue: 'world', allowNull: false },
       { name: 'purpose', type: Sequelize.STRING(100), allowNull: true, defaultValue: 'general' },
       { name: 'isVerified', type: Sequelize.BOOLEAN, defaultValue: false, allowNull: false },
       { name: 'stats', type: Sequelize.JSONB, defaultValue: {}, allowNull: false }
@@ -1449,6 +1450,79 @@ async function runFullMigration() {
       _slog('[Migration] ✅ All P1/P2 marketplace tables and columns ensured');
     } catch (mpErr) {
       console.error('[Migration] ⚠️ Marketplace table creation error (non-fatal):', mpErr.message);
+    }
+
+    // FIX-MISSING-P1-TABLES: starred_messages, push_subscriptions and
+    // GameProgress each have a versioned migration file, but nothing
+    // guarantees sequelize-cli actually ran it on this deploy (same
+    // connection-pool-contention class of issue already called out above for
+    // GameProgress specifically) — and GameProgress in particular was never
+    // added to this boot-time self-heal block at all, so retrying the
+    // startup migration never actually created it. Every route querying
+    // these tables directly via raw SQL (messagingFeatures.js /starred,
+    // push.js /subscribe, games routes /progress) 500s with "relation does
+    // not exist" until this runs. Mirrors the same idempotent pattern used
+    // for wishlists/wallets/audit_logs above.
+    try {
+      await sequelize.query(`
+        CREATE TABLE IF NOT EXISTS starred_messages (
+          "id"         SERIAL PRIMARY KEY,
+          "userId"     INTEGER NOT NULL,
+          "messageId"  INTEGER NOT NULL,
+          "chatId"     INTEGER NOT NULL,
+          "starredAt"  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          CONSTRAINT starred_messages_user_id_message_id_unique UNIQUE ("userId","messageId")
+        );
+        CREATE INDEX IF NOT EXISTS idx_starred_messages_user    ON starred_messages ("userId");
+        CREATE INDEX IF NOT EXISTS idx_starred_messages_message ON starred_messages ("messageId");
+        CREATE INDEX IF NOT EXISTS idx_starred_messages_chat    ON starred_messages ("chatId");
+      `).catch(e => _slog('[Migration] ⚠️ starred_messages (non-fatal):', e.message));
+
+      await sequelize.query(`
+        CREATE TABLE IF NOT EXISTS push_subscriptions (
+          "id"                       SERIAL PRIMARY KEY,
+          "userId"                   INTEGER NOT NULL,
+          "endpoint"                 TEXT NOT NULL UNIQUE,
+          "p256dh"                   VARCHAR(255) NOT NULL,
+          "auth"                     VARCHAR(255) NOT NULL,
+          "gameRemindersEnabled"     BOOLEAN NOT NULL DEFAULT true,
+          "lastDailyReminderSentAt"  TIMESTAMPTZ,
+          "createdAt"                TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          "updatedAt"                TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user ON push_subscriptions ("userId");
+      `).catch(e => _slog('[Migration] ⚠️ push_subscriptions (non-fatal):', e.message));
+
+      await sequelize.query(`
+        CREATE TABLE IF NOT EXISTS "GameProgress" (
+          "id"                SERIAL PRIMARY KEY,
+          "userId"            INTEGER NOT NULL UNIQUE,
+          "xp"                INTEGER NOT NULL DEFAULT 0,
+          "level"             INTEGER NOT NULL DEFAULT 1,
+          "coins"             INTEGER NOT NULL DEFAULT 250,
+          "gems"              INTEGER NOT NULL DEFAULT 5,
+          "streak"            INTEGER NOT NULL DEFAULT 0,
+          "dayIndex"          INTEGER NOT NULL DEFAULT 0,
+          "lastClaim"         TIMESTAMPTZ,
+          "avatar"            VARCHAR(10) NOT NULL DEFAULT '🦁',
+          "achievements"      JSONB NOT NULL DEFAULT '{}',
+          "shopOwned"         JSONB NOT NULL DEFAULT '[]',
+          "bestScores"        JSONB NOT NULL DEFAULT '{}',
+          "totalGames"        INTEGER NOT NULL DEFAULT 0,
+          "totalPockets"      INTEGER NOT NULL DEFAULT 0,
+          "totalLevels"       INTEGER NOT NULL DEFAULT 0,
+          "lastSessionXp"     INTEGER NOT NULL DEFAULT 0,
+          "lastSessionCoins"  INTEGER NOT NULL DEFAULT 0,
+          "lastSessionAt"     TIMESTAMPTZ,
+          "isFlagged"         BOOLEAN NOT NULL DEFAULT false,
+          "createdAt"         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          "updatedAt"         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+      `).catch(e => _slog('[Migration] ⚠️ GameProgress (non-fatal):', e.message));
+
+      _slog('[Migration] ✅ starred_messages / push_subscriptions / GameProgress ensured');
+    } catch (p1Err) {
+      console.error('[Migration] ⚠️ P1 table creation error (non-fatal):', p1Err.message);
     }
 
     // FIX: Group Smart Tools tables (Tasks/Events/Polls/Notes/Files/…) — see

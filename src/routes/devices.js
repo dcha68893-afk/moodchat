@@ -85,24 +85,39 @@ router.get('/', asyncHandler(async (req, res) => {
 router.post('/link', asyncHandler(async (req, res) => {
   const userId = req.user.id;
   const { deviceName, platform, publicKey } = req.body;
+  // FIX-DEVICEID-IGNORED: this route used to ignore the deviceId the client
+  // already sends (js/multi-device-sync.js persists one per browser via
+  // _getOrCreateDeviceId() specifically so re-linking the same device is
+  // idempotent) and generated a brand-new random one on every single call
+  // instead. That meant the ON CONFLICT ("userId","deviceId") below could
+  // never match an existing row, so every page load/reload inserted a whole
+  // new device instead of updating the existing one — after 5 loads the
+  // MAX_DEVICES cap was permanently hit and every future /link call 422'd,
+  // which is exactly what was being reported.
+  const { deviceId: clientDeviceId } = req.body;
 
   if (!deviceName) return res.status(400).json({ status: 'error', message: 'deviceName required' });
 
   const sequelize = getSequelize();
+  const deviceId  = clientDeviceId || crypto.randomBytes(16).toString('hex');
 
-  // Enforce device limit
-  const [countRows] = await sequelize.query(
-    `SELECT COUNT(*) AS cnt FROM linked_devices WHERE "userId"=:userId AND "isActive"=true`,
-    { replacements: { userId } }
+  // Enforce device limit — only counts if this isn't already a known device
+  const [existingRows] = await sequelize.query(
+    `SELECT 1 FROM linked_devices WHERE "userId"=:userId AND "deviceId"=:deviceId`,
+    { replacements: { userId, deviceId } }
   );
-  if (parseInt(countRows[0]?.cnt || 0) >= MAX_DEVICES) {
-    return res.status(422).json({
-      status: 'error',
-      message: `Maximum ${MAX_DEVICES} devices allowed. Remove a device first.`,
-    });
+  if (!existingRows?.length) {
+    const [countRows] = await sequelize.query(
+      `SELECT COUNT(*) AS cnt FROM linked_devices WHERE "userId"=:userId AND "isActive"=true`,
+      { replacements: { userId } }
+    );
+    if (parseInt(countRows[0]?.cnt || 0) >= MAX_DEVICES) {
+      return res.status(422).json({
+        status: 'error',
+        message: `Maximum ${MAX_DEVICES} devices allowed. Remove a device first.`,
+      });
+    }
   }
-
-  const deviceId = crypto.randomBytes(16).toString('hex');
 
   await sequelize.query(
     `INSERT INTO linked_devices ("userId","deviceId","deviceName",platform,"publicKey","isActive","lastSeenAt","createdAt","updatedAt")
