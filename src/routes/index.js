@@ -349,6 +349,30 @@ function scanAndMountRouters() {
 // ===== EXECUTE ROUTER MOUNTING =====
 const mountResults = scanAndMountRouters();
 
+// FIX: tools.js's own route definitions are already prefixed with
+// '/marketplace/...' (e.g. router.get('/marketplace/listings', ...)), which
+// only resolves correctly if the whole file is mounted at root. The
+// auto-discovery above mounts it at '/tools' instead (see ROUTE_MAPPING),
+// so those routes were only reachable at /api/tools/marketplace/listings —
+// not /api/marketplace/listings, which is what the frontend actually calls
+// (loadListingsFromBackend(), loadSpotlightListingsFromBackend(), etc).
+// That mismatch made every marketplace listing/spotlight/etc. fetch 404,
+// which the frontend silently swallowed — the symptom being "Home shows
+// nothing" and "listing never appears after approval".
+// Mount the same tools.js router an additional time at root, wrapped with
+// the same auth middleware as its normal /tools mount, so both paths work.
+try {
+  const toolsRouterAgain = require('./tools');
+  const toolsInstance = (toolsRouterAgain.default || toolsRouterAgain);
+  const protectedToolsRoot = express.Router();
+  protectedToolsRoot.use(authenticateToken);
+  protectedToolsRoot.use(toolsInstance);
+  router.use('/', protectedToolsRoot);
+  _slog('✅ Additionally mounted tools.js at root so /api/marketplace/* (its internal route prefix) resolves');
+} catch (e) {
+  console.error('❌ Failed to additionally mount tools.js at root:', e.message);
+}
+
 // ===== PRINT SUMMARY =====
 _slog('\n' + '='.repeat(80));
 _slog('📊 ROUTER MOUNT SUMMARY');
