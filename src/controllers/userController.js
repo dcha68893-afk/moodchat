@@ -300,45 +300,19 @@ class UserController {
         });
       }
 
-      // In a real app, you would upload to Cloudinary/S3 and get URL
-      // For now, we'll simulate it
-      const avatarUrl = `/uploads/avatars/${req.file.filename}`;
-
-      let updatedUser = null;
-      
-      // Try database update - FIXED: Use User (singular)
-      if (req.app.locals.dbConnected && req.app.locals.models && (req.app.locals.models.User || req.app.locals.models.Users)) {
-        try {
-          const UsersModel = req.app.locals.models.User || req.app.locals.models.Users;
-          const [affectedRows] = await UsersModel.update(
-            { avatar: avatarUrl },
-            { where: { id: userId } }
-          );
-          
-          if (affectedRows > 0) {
-            updatedUser = await UsersModel.findByPk(userId, {
-              attributes: ['id', 'username', 'avatar']
-            });
-          }
-        } catch (dbError) {
-          console.error('Database update error:', dbError);
-          return next(dbError);
-        }
-      }
-
-      // If database not available, update in-memory
-      if (!updatedUser && req.app.locals.users) {
-        const userIndex = req.app.locals.users.findIndex(u => u.id === userId);
-        if (userIndex !== -1) {
-          req.app.locals.users[userIndex].avatar = avatarUrl;
-          req.app.locals.users[userIndex].updatedAt = new Date().toISOString();
-          updatedUser = {
-            id: req.app.locals.users[userIndex].id,
-            username: req.app.locals.users[userIndex].username,
-            avatar: req.app.locals.users[userIndex].avatar
-          };
-        }
-      }
+      // FIX (IDENTITY-CENTRALIZATION): this endpoint used to write a fake
+      // `/uploads/avatars/<filename>` path assuming disk storage that was
+      // never actually configured (comment literally said "we'll simulate
+      // it"), producing a broken image URL disconnected from the real
+      // upload pipeline, and never told anyone else (friends/groups) that
+      // the avatar changed. The single real upload path is
+      // profileService.updateProfilePicture() -> Cloudinary -> the `avatar`
+      // column -> broadcastIdentityUpdate(). Delegate to it so there is
+      // only ever one way an avatar gets written, no matter which route a
+      // client hits.
+      const profileService = require('../services/profileService');
+      const result = await profileService.updateProfilePicture(userId, req.file);
+      const updatedUser = { id: userId, avatar: result.avatar };
 
       if (!updatedUser) {
         return res.status(404).json({

@@ -8,6 +8,7 @@ const bcrypt = require('bcryptjs');
 const path = require('path');
 const fs = require('fs');
 const cloudinaryService = require('../services/cloudinaryService');
+const { broadcastIdentityUpdate } = require('./identityBroadcastService');
 
 // FIX (PROFILE-COVER-EPHEMERAL-DISK + WRONG-COLUMN): this whole file used to
 // write avatar/cover uploads to local disk via uploadProfileImage() below,
@@ -133,7 +134,13 @@ class ProfileService {
 
       const allowedUpdates = [
         'username', 'email', 'bio', 'location', 'website',
-        'dateOfBirth', 'gender', 'language', 'timezone'
+        'dateOfBirth', 'gender', 'language', 'timezone',
+        // FIX (IDENTITY-CENTRALIZATION): firstName/lastName feed the single
+        // computed `displayName` (see Users.getPublicProfile) — these were
+        // missing here, so "Edit Profile -> Display Name" saved through this
+        // endpoint silently did nothing even though the same fields work
+        // fine via routes/settings.js's updateProfileHandler.
+        'firstName', 'lastName'
       ];
       
       const updateFields = {};
@@ -192,6 +199,16 @@ class ProfileService {
 
       const completion = this.calculateProfileCompletion(updatedUser);
 
+      // FIX (IDENTITY-CENTRALIZATION): this used to silently update the DB
+      // and rely on the caller/route to know to tell anyone else — nothing
+      // did, so friends/groups never saw a changed username/bio/displayName
+      // until they reloaded. Fan the change out in real time now.
+      const { diffChangedFields } = require('../utils/identityNormalizer');
+      const changedFields = diffChangedFields(user, updateFields);
+      if (changedFields.length) {
+        broadcastIdentityUpdate(userId, updatedUser, changedFields).catch(() => {});
+      }
+
       return {
         ...updatedUser.toJSON(),
         profileCompletion: completion
@@ -235,6 +252,11 @@ class ProfileService {
 
       user.avatar = uploadResult.url;
       await user.save();
+
+      // FIX (IDENTITY-CENTRALIZATION): propagate the new avatar to the
+      // owner's other devices + every friend/group co-member immediately,
+      // instead of leaving it to be discovered on next fetch.
+      broadcastIdentityUpdate(userId, user, ['avatar']).catch(() => {});
 
       return {
         avatar: user.avatar,
@@ -287,6 +309,8 @@ class ProfileService {
       user.coverPhoto = uploadResult.url;
       await user.save();
 
+      broadcastIdentityUpdate(userId, user, ['cover']).catch(() => {});
+
       return {
         coverPhoto: user.coverPhoto,
         message: 'Cover photo updated successfully'
@@ -318,6 +342,8 @@ class ProfileService {
 
       user.avatar = 'https://ui-avatars.com/api/?name=User&background=random&color=fff';
       await user.save();
+
+      broadcastIdentityUpdate(userId, user, ['avatar']).catch(() => {});
 
       return {
         avatar: user.avatar,
@@ -351,6 +377,8 @@ class ProfileService {
 
       user.coverPhoto = null;
       await user.save();
+
+      broadcastIdentityUpdate(userId, user, ['cover']).catch(() => {});
 
       return {
         coverPhoto: null,
@@ -445,6 +473,11 @@ class ProfileService {
 
       if (Object.keys(updateFields).length > 0) {
         await user.update({ privacySettings: updateFields });
+        // Privacy changes (e.g. profileVisibility, onlineStatusVisibility)
+        // change what OTHER people are allowed to see of this identity, so
+        // friends/groups need to be told to re-fetch/re-evaluate, not just
+        // the owner's own devices.
+        broadcastIdentityUpdate(userId, user, ['privacy']).catch(() => {});
       }
 
       return user.privacySettings || {};
@@ -495,10 +528,14 @@ class ProfileService {
   }
 
   calculateProfileCompletion(user) {
+    // FIX (IDENTITY-CENTRALIZATION): 'profilePicture' is not a real column
+    // on Users (the real one is 'avatar' — see models/Users.js), so this
+    // check was always false and profile completion was permanently
+    // under-reported for every user who had uploaded a photo.
     const requiredFields = [
       'username',
       'email',
-      'profilePicture',
+      'avatar',
       'bio'
     ];
 

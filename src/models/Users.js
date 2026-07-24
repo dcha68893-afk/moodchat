@@ -380,19 +380,24 @@ module.exports = (sequelize, DataTypes) => {
   };
 
   Users.prototype.getPublicProfile = function () {
-    const { id, username, firstName, lastName, avatar, coverPhoto, bio, status, lastSeen, theme, language } = this;
-    return { 
-      id, 
-      username, 
-      firstName, 
-      lastName, 
-      avatar, 
+    // FIX (IDENTITY-CENTRALIZATION): isVerified was tracked on the model
+    // (see `isVerified` column above) but never surfaced through the one
+    // helper every module is supposed to call to render a user's identity,
+    // so verification badges could never appear consistently anywhere.
+    const { id, username, firstName, lastName, avatar, coverPhoto, bio, status, lastSeen, theme, language, isVerified } = this;
+    return {
+      id,
+      username,
+      firstName,
+      lastName,
+      avatar,
       coverPhoto,
-      bio, 
-      status, 
+      bio,
+      status,
       lastSeen,
       theme,
       language,
+      isVerified: !!isVerified,
       displayName: `${firstName || ''} ${lastName || ''}`.trim() || username,
       isOnline: status === 'online'
     };

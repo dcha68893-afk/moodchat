@@ -10,6 +10,15 @@ const { Op } = require('sequelize');
 const bcrypt = require('bcryptjs');
 const multer = require('multer');
 const cloudinaryService = require('../services/cloudinaryService');
+// FIX (IDENTITY-CENTRALIZATION): this route (Settings -> Edit Profile) is
+// the app's real master controller for avatar/cover/username/bio, but it
+// only ever told the editor's OWN devices about a change (see
+// _emitSettingsUpdated below, which targets `user:${userId}` only). Friends
+// and group co-members never found out, so they kept seeing the old
+// avatar/name/bio until they manually refreshed. This service fans the
+// change out to everyone who can see this identity anywhere in the app.
+const { broadcastIdentityUpdate } = require('../services/identityBroadcastService');
+const { diffChangedFields } = require('../utils/identityNormalizer');
 
 // Configure multer for file uploads
 const storage = multer.memoryStorage();
@@ -55,7 +64,17 @@ const getUserId = (req) => {
 // ─── Helper: emit settings_updated socket event to the requesting user ───────
 function _emitSettingsUpdated(req, settingsPayload) {
     try {
-        const io = global.__socketIO || global.__io || global.io;
+        // FIX (IDENTITY-CENTRALIZATION): server.js only ever sets
+        // `global.__io` (see src/server.js), so the __socketIO/io fallbacks
+        // here were dead paths; also fall back to the webSocketService
+        // singleton's own getIO(), which is the pattern the rest of the
+        // codebase (controllers/callController.js, routes/friends.js, etc.)
+        // already relies on, so this keeps working even if server.js's
+        // global variable name changes again.
+        let io = global.__socketIO || global.__io || global.io;
+        if (!io) {
+            try { io = require('../services/webSocketService').getIO(); } catch (_) {}
+        }
         if (!io) return;
         const userId = getUserId(req);
         if (!userId) return;
@@ -696,8 +715,17 @@ const updateProfileHandler = asyncHandler(async (req, res) => {
     }
 
     const updatedUser = await User.findByPk(userId, {
-        attributes: ['id', 'username', 'email', 'avatar', 'coverPhoto', 'firstName', 'lastName', 'bio', 'theme', 'language', 'settings']
+        attributes: ['id', 'username', 'email', 'avatar', 'coverPhoto', 'firstName', 'lastName', 'bio', 'theme', 'language', 'settings', 'isVerified', 'status', 'lastSeen']
     });
+
+    // FIX (IDENTITY-CENTRALIZATION): propagate to everyone who can see this
+    // user (friends + group co-members), not just the editor's own tabs.
+    // Runs in addition to, not instead of, the existing settings_updated
+    // emit below (that one stays for the owner's own-device sync/back-compat).
+    const changedIdentityFields = diffChangedFields(null, updateData);
+    if (changedIdentityFields.length) {
+        broadcastIdentityUpdate(userId, updatedUser, changedIdentityFields).catch(() => {});
+    }
 
     const settingsPayload = await _persistSettingsSnapshot(userId, {
         appearance: {
@@ -812,6 +840,15 @@ const updatePrivacyHandler = asyncHandler(async (req, res) => {
     const settingsPayload = await _persistSettingsSnapshot(userId, { privacy: payload });
 
     _emitSettingsUpdated(req, settingsPayload);
+
+    // FIX (IDENTITY-CENTRALIZATION): profileVisibility/onlineStatusVisibility
+    // control what friends/groups are ALLOWED to see of this identity —
+    // tell them immediately so a stricter setting takes effect without
+    // waiting for their next full refetch.
+    if (payload && (payload.profileVisibility !== undefined || payload.onlineStatusVisibility !== undefined || payload.lastSeenVisibility !== undefined)) {
+        const user = await User.findByPk(userId, { attributes: ['id', 'username', 'avatar', 'coverPhoto', 'bio', 'firstName', 'lastName', 'isVerified', 'status', 'lastSeen'] });
+        if (user) broadcastIdentityUpdate(userId, user, ['privacy']).catch(() => {});
+    }
     console.log('[Settings] Saved privacy settings for user:', userId);
 
     return res.status(200).json({
