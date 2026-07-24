@@ -152,6 +152,7 @@ class GroupService {
             privacy,
             avatar,
             discoveryScope = 'world',
+            location,
         } = groupData;
 
         if (!name)      throw new Error('Group name is required');
@@ -201,6 +202,7 @@ class GroupService {
                 tags        : sanitizedTags,
                 avatar      : avatar ? avatar.toString().substring(0, 500) : null,
                 discoveryScope: ['community', 'region', 'county', 'world'].includes(discoveryScope) ? discoveryScope : 'world',
+                location    : location ? location.toString().trim().substring(0, 100) : null,
             });
 
             if (!group || !group.id) throw new Error('Failed to create group — database returned no ID');
