@@ -73,9 +73,15 @@ router.use((req, res, next) => { _linkedDevicesReady.then(() => next()).catch(()
 router.get('/', asyncHandler(async (req, res) => {
   const userId    = req.user.id;
   const sequelize = getSequelize();
+  // BUG FIX (REVOKED-DEVICE-NEVER-DISAPPEARS): DELETE /api/devices/:deviceId
+  // only ever sets isActive=false (a soft revoke, so history/backup records
+  // referencing the device stay intact) — but this list query selected every
+  // row for the user with no isActive filter at all, so a "removed" device
+  // kept showing up in Settings forever, with Rename/Revoke still offered on
+  // a session that was already revoked. Only list active devices.
   const devices   = await sequelize.query(
     `SELECT "deviceId","deviceName",platform,"lastSeenAt","isActive","createdAt"
-     FROM linked_devices WHERE "userId"=:userId ORDER BY "lastSeenAt" DESC NULLS LAST`,
+     FROM linked_devices WHERE "userId"=:userId AND "isActive"=true ORDER BY "lastSeenAt" DESC NULLS LAST`,
     { replacements: { userId }, type: sequelize.QueryTypes.SELECT }
   );
   res.json({ status: 'success', data: { devices, count: devices.length } });
