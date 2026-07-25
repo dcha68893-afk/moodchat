@@ -171,6 +171,25 @@ const REQUIRED_COLUMNS = [
     sql: `ALTER TABLE "GroupMembers" ADD COLUMN IF NOT EXISTS "warnings" INTEGER NOT NULL DEFAULT 0`,
   },
   {
+    // FIX (GROUPS-ALWAYS-0): migration 20260716000001 adds this column, but
+    // it was never mirrored into this fallback list. groupService.getUserGroups()
+    // filters `WHERE userId AND leftAt IS NULL`; when the column doesn't
+    // exist that query throws "column leftAt does not exist", which is
+    // caught and silently returns an empty array — every one of My
+    // Groups/Joined/Admin/All Groups renders 0 groups and "No groups created
+    // yet", even for users who created and joined groups successfully.
+    table: 'GroupMembers', column: 'leftAt',
+    sql: `ALTER TABLE "GroupMembers" ADD COLUMN IF NOT EXISTS "leftAt" TIMESTAMP WITH TIME ZONE`,
+  },
+  {
+    table: 'GroupMembers', column: 'notificationsMuted',
+    sql: `ALTER TABLE "GroupMembers" ADD COLUMN IF NOT EXISTS "notificationsMuted" BOOLEAN NOT NULL DEFAULT false`,
+  },
+  {
+    table: 'GroupMembers', column: 'customSettings',
+    sql: `ALTER TABLE "GroupMembers" ADD COLUMN IF NOT EXISTS "customSettings" JSONB NOT NULL DEFAULT '{"bannedAt":null,"banReason":null,"banExpiry":null}'::jsonb`,
+  },
+  {
     // FIX: same class of bug as Groups.location above — migration
     // 20260723000001 added these two columns but they were never mirrored
     // into this fallback list, so favoriteGroup()/blockGroup() 500 if the
@@ -334,6 +353,521 @@ const REQUIRED_TABLES = [
       "updatedAt"   TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
     )`,
   },
+
+  // ── AUDIT (2026-07-25): "many features failing with internal server
+  // errors" — traced to ~22 tables whose migration files exist in
+  // migrations/ (each with its own comment documenting the exact 500 it
+  // causes) but were never actually applied, because the Docker deploy
+  // command runs `node src/server.js` directly and never invokes
+  // `sequelize-cli db:migrate`. This ensureSchema.js pass is the only thing
+  // that has ever actually touched the live production schema. Every table
+  // below is mirrored verbatim (columns/types/defaults) from its migration
+  // so it self-heals on the next boot regardless of whether migrations ever
+  // run. No FK constraints (this file's existing entries above don't use
+  // them either — keeps table-creation order-independent) and VARCHAR in
+  // place of native Postgres ENUM (avoids a CREATE TYPE pass per column;
+  // Sequelize validates ENUM values at the application layer regardless of
+  // the underlying column type, so this is a strictly safer fallback, not
+  // a looser one).
+
+  // group_sender_key_distributions — group E2E encryption (20260621000001)
+  {
+    name: 'group_sender_key_distributions',
+    sql: `CREATE TABLE IF NOT EXISTS "group_sender_key_distributions" (
+      "id"                  SERIAL PRIMARY KEY,
+      "groupId"             INTEGER NOT NULL,
+      "ownerUserId"         INTEGER NOT NULL,
+      "recipientUserId"     INTEGER NOT NULL,
+      "keyGeneration"       INTEGER NOT NULL DEFAULT 1,
+      "encryptedSenderKey"  TEXT NOT NULL,
+      "isActive"            BOOLEAN NOT NULL DEFAULT true,
+      "createdAt"           TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      "updatedAt"           TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      CONSTRAINT "group_sender_key_dist_unique" UNIQUE ("groupId","ownerUserId","recipientUserId","keyGeneration")
+    )`,
+  },
+  // group_sender_key_generations — atomic per-owner key counter (20260721)
+  {
+    name: 'group_sender_key_generations',
+    sql: `CREATE TABLE IF NOT EXISTS "group_sender_key_generations" (
+      "id"                  SERIAL PRIMARY KEY,
+      "group_id"            INTEGER NOT NULL,
+      "owner_user_id"       INTEGER NOT NULL,
+      "current_generation"  INTEGER NOT NULL DEFAULT 0,
+      "created_at"          TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      "updated_at"          TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      CONSTRAINT "uq_group_sender_key_generations_group_owner" UNIQUE ("group_id","owner_user_id")
+    )`,
+  },
+  // starred_messages (2026999990010) — GET /sync and starred endpoints 500'd
+  {
+    name: 'starred_messages',
+    sql: `CREATE TABLE IF NOT EXISTS "starred_messages" (
+      "id"         SERIAL PRIMARY KEY,
+      "userId"     INTEGER NOT NULL,
+      "messageId"  INTEGER NOT NULL,
+      "chatId"     INTEGER NOT NULL,
+      "starredAt"  TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      CONSTRAINT "starred_messages_user_id_message_id_unique" UNIQUE ("userId","messageId")
+    )`,
+  },
+  // push_subscriptions (2026999990011) — POST /api/push/subscribe 500'd
+  {
+    name: 'push_subscriptions',
+    sql: `CREATE TABLE IF NOT EXISTS "push_subscriptions" (
+      "id"                       SERIAL PRIMARY KEY,
+      "userId"                   INTEGER NOT NULL,
+      "endpoint"                 TEXT NOT NULL UNIQUE,
+      "p256dh"                   VARCHAR(255) NOT NULL,
+      "auth"                     VARCHAR(255) NOT NULL,
+      "gameRemindersEnabled"     BOOLEAN NOT NULL DEFAULT true,
+      "lastDailyReminderSentAt"  TIMESTAMP WITH TIME ZONE,
+      "createdAt"                TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      "updatedAt"                TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+    )`,
+  },
+  // GameProgress (2026999990012) — GET /api/games/progress 500'd
+  {
+    name: 'GameProgress',
+    sql: `CREATE TABLE IF NOT EXISTS "GameProgress" (
+      "id"                SERIAL PRIMARY KEY,
+      "userId"            INTEGER NOT NULL UNIQUE,
+      "xp"                INTEGER NOT NULL DEFAULT 0,
+      "level"             INTEGER NOT NULL DEFAULT 1,
+      "coins"             INTEGER NOT NULL DEFAULT 250,
+      "gems"              INTEGER NOT NULL DEFAULT 5,
+      "streak"            INTEGER NOT NULL DEFAULT 0,
+      "dayIndex"          INTEGER NOT NULL DEFAULT 0,
+      "lastClaim"         TIMESTAMP WITH TIME ZONE,
+      "avatar"            VARCHAR(10) NOT NULL DEFAULT '🦁',
+      "achievements"      JSONB NOT NULL DEFAULT '{}'::jsonb,
+      "shopOwned"         JSONB NOT NULL DEFAULT '[]'::jsonb,
+      "bestScores"        JSONB NOT NULL DEFAULT '{}'::jsonb,
+      "totalGames"        INTEGER NOT NULL DEFAULT 0,
+      "totalPockets"      INTEGER NOT NULL DEFAULT 0,
+      "totalLevels"       INTEGER NOT NULL DEFAULT 0,
+      "lastSessionXp"     INTEGER NOT NULL DEFAULT 0,
+      "lastSessionCoins"  INTEGER NOT NULL DEFAULT 0,
+      "lastSessionAt"     TIMESTAMP WITH TIME ZONE,
+      "isFlagged"         BOOLEAN NOT NULL DEFAULT false,
+      "createdAt"         TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      "updatedAt"         TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+    )`,
+  },
+  // message_delivery_logs (2026999990008) — raw INSERT in messages.js 500'd
+  {
+    name: 'message_delivery_logs',
+    sql: `CREATE TABLE IF NOT EXISTS "message_delivery_logs" (
+      "id"         SERIAL PRIMARY KEY,
+      "messageId"  INTEGER NOT NULL,
+      "userId"     INTEGER NOT NULL,
+      "chatId"     INTEGER NOT NULL,
+      "event"      VARCHAR(50) NOT NULL,
+      "createdAt"  TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      CONSTRAINT "uniq_msg_delivery_log" UNIQUE ("messageId","userId","event")
+    )`,
+  },
+  // LiveLocationSessions (2026999990005) — live location sharing
+  {
+    name: 'LiveLocationSessions',
+    sql: `CREATE TABLE IF NOT EXISTS "LiveLocationSessions" (
+      "id"             SERIAL PRIMARY KEY,
+      "messageId"      INTEGER NOT NULL,
+      "chatId"         INTEGER NOT NULL,
+      "userId"         INTEGER NOT NULL,
+      "latitude"       DECIMAL(10,7) NOT NULL,
+      "longitude"      DECIMAL(10,7) NOT NULL,
+      "accuracy"       FLOAT,
+      "heading"        FLOAT,
+      "speed"          FLOAT,
+      "startedAt"      TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      "expiresAt"      TIMESTAMP WITH TIME ZONE NOT NULL,
+      "lastUpdatedAt"  TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      "isActive"       BOOLEAN NOT NULL DEFAULT true,
+      "stoppedAt"      TIMESTAMP WITH TIME ZONE,
+      "stoppedReason"  VARCHAR(20),
+      "createdAt"      TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      "updatedAt"      TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+    )`,
+  },
+
+  // ── Chat-scoped polls (2026999990002) ─────────────────────────────────────
+  {
+    name: 'ChatPolls',
+    sql: `CREATE TABLE IF NOT EXISTS "ChatPolls" (
+      "id"                     SERIAL PRIMARY KEY,
+      "chatId"                 INTEGER NOT NULL,
+      "messageId"              INTEGER,
+      "createdBy"              INTEGER NOT NULL,
+      "question"               VARCHAR(500) NOT NULL,
+      "allowMultipleAnswers"   BOOLEAN NOT NULL DEFAULT false,
+      "isAnonymous"            BOOLEAN NOT NULL DEFAULT false,
+      "closesAt"               TIMESTAMP WITH TIME ZONE,
+      "isClosed"               BOOLEAN NOT NULL DEFAULT false,
+      "closedAt"               TIMESTAMP WITH TIME ZONE,
+      "closedBy"               INTEGER,
+      "createdAt"              TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      "updatedAt"              TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+    )`,
+  },
+  {
+    name: 'ChatPollOptions',
+    sql: `CREATE TABLE IF NOT EXISTS "ChatPollOptions" (
+      "id"         SERIAL PRIMARY KEY,
+      "pollId"     INTEGER NOT NULL,
+      "text"       VARCHAR(255) NOT NULL,
+      "position"   INTEGER NOT NULL DEFAULT 0,
+      "createdAt"  TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+    )`,
+  },
+  {
+    name: 'ChatPollVotes',
+    sql: `CREATE TABLE IF NOT EXISTS "ChatPollVotes" (
+      "id"         SERIAL PRIMARY KEY,
+      "pollId"     INTEGER NOT NULL,
+      "optionId"   INTEGER NOT NULL,
+      "userId"     INTEGER NOT NULL,
+      "createdAt"  TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      CONSTRAINT "uniq_chatpollvotes_option_user" UNIQUE ("optionId","userId")
+    )`,
+  },
+
+  // ── Smart Group Tools (2026999990009) — 13 tables, all previously 500'd
+  // with "relation does not exist" (task boards, events/RSVP, group polls,
+  // notes, shared files, finance/levies, analytics, activity log, AI
+  // summaries) ────────────────────────────────────────────────────────────
+  {
+    name: 'GroupTasks',
+    sql: `CREATE TABLE IF NOT EXISTS "GroupTasks" (
+      "id"             SERIAL PRIMARY KEY,
+      "groupId"        INTEGER NOT NULL,
+      "createdBy"      INTEGER NOT NULL,
+      "title"          VARCHAR(255) NOT NULL,
+      "description"    TEXT,
+      "status"         VARCHAR(20) NOT NULL DEFAULT 'pending',
+      "priority"       VARCHAR(20) NOT NULL DEFAULT 'medium',
+      "dueDate"        TIMESTAMP WITH TIME ZONE,
+      "parentTaskId"   INTEGER,
+      "attachments"    JSONB NOT NULL DEFAULT '[]'::jsonb,
+      "isRecurring"    BOOLEAN NOT NULL DEFAULT false,
+      "recurringRule"  VARCHAR(100),
+      "deletedAt"      TIMESTAMP WITH TIME ZONE,
+      "createdAt"      TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      "updatedAt"      TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+    )`,
+  },
+  {
+    name: 'GroupTaskAssignments',
+    sql: `CREATE TABLE IF NOT EXISTS "GroupTaskAssignments" (
+      "id"           SERIAL PRIMARY KEY,
+      "taskId"       INTEGER NOT NULL,
+      "userId"       INTEGER NOT NULL,
+      "assignedBy"   INTEGER NOT NULL,
+      "completedAt"  TIMESTAMP WITH TIME ZONE,
+      "createdAt"    TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+    )`,
+  },
+  {
+    name: 'GroupEvents',
+    sql: `CREATE TABLE IF NOT EXISTS "GroupEvents" (
+      "id"                  SERIAL PRIMARY KEY,
+      "groupId"             INTEGER NOT NULL,
+      "createdBy"           INTEGER NOT NULL,
+      "title"               VARCHAR(255) NOT NULL,
+      "description"         TEXT,
+      "location"            VARCHAR(255),
+      "latitude"            DECIMAL(10,7),
+      "longitude"           DECIMAL(10,7),
+      "startTime"           TIMESTAMP WITH TIME ZONE NOT NULL,
+      "endTime"             TIMESTAMP WITH TIME ZONE,
+      "timezone"            VARCHAR(50) DEFAULT 'UTC',
+      "isRecurring"         BOOLEAN DEFAULT false,
+      "recurringRule"       VARCHAR(100),
+      "recurrenceRule"      TEXT,
+      "recurrenceIndex"     INTEGER DEFAULT 0,
+      "recurrenceParentId"  INTEGER,
+      "rsvpEnabled"         BOOLEAN DEFAULT true,
+      "maxAttendees"        INTEGER,
+      "coverImage"          VARCHAR(500),
+      "livestreamUrl"       VARCHAR(500),
+      "qrCode"              VARCHAR(500),
+      "status"              VARCHAR(20) NOT NULL DEFAULT 'upcoming',
+      "deletedAt"           TIMESTAMP WITH TIME ZONE,
+      "createdAt"           TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      "updatedAt"           TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+    )`,
+  },
+  {
+    name: 'GroupAttendance',
+    sql: `CREATE TABLE IF NOT EXISTS "GroupAttendance" (
+      "id"          SERIAL PRIMARY KEY,
+      "eventId"     INTEGER NOT NULL,
+      "groupId"     INTEGER NOT NULL,
+      "userId"      INTEGER NOT NULL,
+      "status"      VARCHAR(20) NOT NULL DEFAULT 'pending',
+      "rsvpAt"      TIMESTAMP WITH TIME ZONE,
+      "markedAt"    TIMESTAMP WITH TIME ZONE,
+      "markedBy"    INTEGER,
+      "gpsLat"      DECIMAL(10,7),
+      "gpsLon"      DECIMAL(10,7),
+      "qrVerified"  BOOLEAN DEFAULT false,
+      "note"        TEXT,
+      "createdAt"   TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      "updatedAt"   TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      CONSTRAINT "idx_gattendance_event_user" UNIQUE ("eventId","userId")
+    )`,
+  },
+  {
+    name: 'GroupPolls',
+    sql: `CREATE TABLE IF NOT EXISTS "GroupPolls" (
+      "id"           SERIAL PRIMARY KEY,
+      "groupId"      INTEGER NOT NULL,
+      "createdBy"    INTEGER NOT NULL,
+      "question"     VARCHAR(500) NOT NULL,
+      "type"         VARCHAR(20) NOT NULL DEFAULT 'single',
+      "isAnonymous"  BOOLEAN DEFAULT false,
+      "allowChange"  BOOLEAN DEFAULT true,
+      "showResults"  VARCHAR(20) NOT NULL DEFAULT 'always',
+      "endsAt"       TIMESTAMP WITH TIME ZONE,
+      "status"       VARCHAR(20) NOT NULL DEFAULT 'active',
+      "deletedAt"    TIMESTAMP WITH TIME ZONE,
+      "createdAt"    TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      "updatedAt"    TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+    )`,
+  },
+  {
+    name: 'GroupPollOptions',
+    sql: `CREATE TABLE IF NOT EXISTS "GroupPollOptions" (
+      "id"         SERIAL PRIMARY KEY,
+      "pollId"     INTEGER NOT NULL,
+      "text"       VARCHAR(255) NOT NULL,
+      "emoji"      VARCHAR(10),
+      "isCorrect"  BOOLEAN DEFAULT false,
+      "position"   INTEGER DEFAULT 0,
+      "createdAt"  TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+    )`,
+  },
+  {
+    name: 'GroupPollVotes',
+    sql: `CREATE TABLE IF NOT EXISTS "GroupPollVotes" (
+      "id"         SERIAL PRIMARY KEY,
+      "pollId"     INTEGER NOT NULL,
+      "optionId"   INTEGER NOT NULL,
+      "userId"     INTEGER NOT NULL,
+      "createdAt"  TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+    )`,
+  },
+  {
+    name: 'GroupNotes',
+    sql: `CREATE TABLE IF NOT EXISTS "GroupNotes" (
+      "id"           SERIAL PRIMARY KEY,
+      "groupId"      INTEGER NOT NULL,
+      "createdBy"    INTEGER NOT NULL,
+      "title"        VARCHAR(255) NOT NULL,
+      "content"      TEXT,
+      "contentType"  VARCHAR(20) NOT NULL DEFAULT 'markdown',
+      "isPinned"     BOOLEAN DEFAULT false,
+      "tags"         JSONB NOT NULL DEFAULT '[]'::jsonb,
+      "category"     VARCHAR(100),
+      "version"      INTEGER DEFAULT 1,
+      "deletedAt"    TIMESTAMP WITH TIME ZONE,
+      "createdAt"    TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      "updatedAt"    TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+    )`,
+  },
+  {
+    name: 'GroupFiles',
+    sql: `CREATE TABLE IF NOT EXISTS "GroupFiles" (
+      "id"             SERIAL PRIMARY KEY,
+      "groupId"        INTEGER NOT NULL,
+      "uploadedBy"     INTEGER NOT NULL,
+      "name"           VARCHAR(255) NOT NULL,
+      "url"            VARCHAR(1000) NOT NULL,
+      "mimeType"       VARCHAR(100),
+      "sizeBytes"      BIGINT DEFAULT 0,
+      "folder"         VARCHAR(255) DEFAULT '/',
+      "tags"           JSONB NOT NULL DEFAULT '[]'::jsonb,
+      "thumbnailUrl"   VARCHAR(1000),
+      "downloadCount"  INTEGER DEFAULT 0,
+      "isPublic"       BOOLEAN DEFAULT true,
+      "deletedAt"      TIMESTAMP WITH TIME ZONE,
+      "createdAt"      TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      "updatedAt"      TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+    )`,
+  },
+  {
+    name: 'GroupFinances',
+    sql: `CREATE TABLE IF NOT EXISTS "GroupFinances" (
+      "id"              SERIAL PRIMARY KEY,
+      "groupId"         INTEGER NOT NULL,
+      "createdBy"       INTEGER NOT NULL,
+      "type"            VARCHAR(20) NOT NULL,
+      "amount"          DECIMAL(15,2) NOT NULL,
+      "currency"        VARCHAR(10) DEFAULT 'KES',
+      "description"     TEXT,
+      "category"        VARCHAR(100),
+      "reference"       VARCHAR(255),
+      "paidBy"          INTEGER,
+      "approvedBy"      INTEGER,
+      "status"          VARCHAR(20) NOT NULL DEFAULT 'pending',
+      "receipt"         VARCHAR(1000),
+      "runningBalance"  DECIMAL(15,2) NOT NULL DEFAULT 0,
+      "deletedAt"       TIMESTAMP WITH TIME ZONE,
+      "createdAt"       TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      "updatedAt"       TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+    )`,
+  },
+  {
+    name: 'group_analytics',
+    sql: `CREATE TABLE IF NOT EXISTS "group_analytics" (
+      "id"               SERIAL PRIMARY KEY,
+      "group_id"         INTEGER NOT NULL,
+      "date"             DATE NOT NULL DEFAULT NOW(),
+      "message_count"    INTEGER DEFAULT 0,
+      "active_members"   INTEGER DEFAULT 0,
+      "new_members"      INTEGER DEFAULT 0,
+      "total_reactions"  INTEGER DEFAULT 0,
+      "media_shared"     INTEGER DEFAULT 0,
+      "call_minutes"     INTEGER DEFAULT 0,
+      "createdAt"        TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      "updatedAt"        TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      CONSTRAINT "idx_ganalytics_group_date" UNIQUE ("group_id","date")
+    )`,
+  },
+  {
+    name: 'GroupActivityLogs',
+    sql: `CREATE TABLE IF NOT EXISTS "GroupActivityLogs" (
+      "id"          SERIAL PRIMARY KEY,
+      "groupId"     INTEGER NOT NULL,
+      "userId"      INTEGER NOT NULL,
+      "action"      VARCHAR(100) NOT NULL,
+      "module"      VARCHAR(50),
+      "targetId"    INTEGER,
+      "targetType"  VARCHAR(50),
+      "meta"        JSONB NOT NULL DEFAULT '{}'::jsonb,
+      "createdAt"   TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+    )`,
+  },
+  {
+    name: 'GroupAISummaries',
+    sql: `CREATE TABLE IF NOT EXISTS "GroupAISummaries" (
+      "id"            SERIAL PRIMARY KEY,
+      "groupId"       INTEGER NOT NULL,
+      "type"          VARCHAR(20) NOT NULL,
+      "summary"       TEXT NOT NULL,
+      "actionItems"   JSONB NOT NULL DEFAULT '[]'::jsonb,
+      "keywords"      JSONB NOT NULL DEFAULT '[]'::jsonb,
+      "messageRange"  JSONB,
+      "generatedBy"   VARCHAR(50) DEFAULT 'openai',
+      "createdAt"     TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+    )`,
+  },
+
+  // ── Sealed group membership / Phase 4 group encryption (20260627) ────────
+  {
+    name: 'group_commitments',
+    sql: `CREATE TABLE IF NOT EXISTS "group_commitments" (
+      "id"            SERIAL PRIMARY KEY,
+      "groupId"       INTEGER NOT NULL,
+      "commitment"    TEXT NOT NULL,
+      "memberCount"   INTEGER NOT NULL DEFAULT 0,
+      "publishedBy"   INTEGER NOT NULL,
+      "createdAt"     TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      "updatedAt"     TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+    )`,
+  },
+  {
+    name: 'group_delivery_tokens',
+    sql: `CREATE TABLE IF NOT EXISTS "group_delivery_tokens" (
+      "id"         SERIAL PRIMARY KEY,
+      "groupId"    INTEGER NOT NULL,
+      "userId"     INTEGER NOT NULL,
+      "token"      TEXT NOT NULL UNIQUE,
+      "active"     BOOLEAN NOT NULL DEFAULT true,
+      "createdAt"  TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      CONSTRAINT "group_delivery_tokens_group_user_unique" UNIQUE ("groupId","userId")
+    )`,
+  },
+  {
+    name: 'group_sealed_invites',
+    sql: `CREATE TABLE IF NOT EXISTS "group_sealed_invites" (
+      "id"               SERIAL PRIMARY KEY,
+      "groupId"          INTEGER NOT NULL,
+      "token"            TEXT NOT NULL UNIQUE,
+      "encryptedInvite"  TEXT NOT NULL,
+      "createdBy"        INTEGER NOT NULL,
+      "expiresAt"        TIMESTAMP WITH TIME ZONE,
+      "useCount"         INTEGER NOT NULL DEFAULT 0,
+      "maxUses"          INTEGER NOT NULL DEFAULT 1,
+      "createdAt"        TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+    )`,
+  },
+
+  // GroupThreads (20260610000001) — reply-threading on group messages
+  {
+    name: 'GroupThreads',
+    sql: `CREATE TABLE IF NOT EXISTS "GroupThreads" (
+      "id"               SERIAL PRIMARY KEY,
+      "groupId"          INTEGER NOT NULL,
+      "parentMessageId"  INTEGER NOT NULL,
+      "createdBy"        INTEGER NOT NULL,
+      "title"            VARCHAR(200),
+      "replyCount"       INTEGER DEFAULT 0,
+      "lastReplyAt"      TIMESTAMP WITH TIME ZONE,
+      "lastReplyBy"      INTEGER,
+      "isLocked"         BOOLEAN DEFAULT false,
+      "isArchived"       BOOLEAN DEFAULT false,
+      "createdAt"        TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      "updatedAt"        TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+    )`,
+  },
+];
+
+// ─── Columns whose TYPE was wrong from creation (not missing — wrong type) ────
+// Users.id is INTEGER, but these were originally declared UUID / UUID[],
+// which throws a Sequelize/Postgres type error on every JOIN or array-contains
+// query against them. Mirrors 20260626_fix_marketplace_fk_types.js and
+// 20260711_fix_tool_saved_purchased_by_types.js — same "migration exists but
+// never actually runs in production" gap as every table above. Safe to run
+// on every boot: ALTER COLUMN TYPE to the type it already is is a fast,
+// harmless no-op in Postgres.
+const REQUIRED_TYPE_FIXES = [
+  { table: 'tools',               column: 'seller_id',     arrayType: false },
+  { table: 'marketplace_orders',  column: 'buyer_id',      arrayType: false },
+  { table: 'marketplace_orders',  column: 'seller_id',     arrayType: false },
+  { table: 'marketplace_reviews', column: 'user_id',       arrayType: false },
+  { table: 'marketplace_reviews', column: 'seller_id',     arrayType: false },
+  { table: 'wishlists',           column: 'user_id',       arrayType: false },
+  { table: 'tools',               column: 'saved_by',      arrayType: true },
+  { table: 'tools',               column: 'purchased_by',  arrayType: true },
+];
+
+// ─── Column-level DEFAULTs that were never set at the DB level ────────────────
+// The Sequelize model declares defaultValue, but raw SQL INSERTs elsewhere in
+// the app (src/routes/messages.js) omit these columns entirely, so Postgres
+// stores NULL instead of applying the model's default. `WHERE isArchived =
+// false` / `WHERE isRead = false` never match NULL, so new chats silently
+// vanish from the sidebar and unread counts silently stay at 0 — not a 500,
+// but the same "migration never actually ran" root cause as everything above.
+// Every statement here is idempotent (safe to run identically every boot).
+const REQUIRED_DEFAULTS = [
+  { table: 'chats', column: 'isActive', type: 'BOOLEAN', default: 'true' },
+  { table: 'chats', column: 'isArchived', type: 'BOOLEAN', default: 'false' },
+  { table: 'Messages', column: 'isRead', type: 'BOOLEAN', default: 'false' },
+  { table: 'Messages', column: 'isDeleted', type: 'BOOLEAN', default: 'false' },
+  { table: 'Messages', column: 'isEdited', type: 'BOOLEAN', default: 'false' },
+];
+
+// ─── Postgres ENUM values that were never added to an existing type ───────────
+// ALTER TYPE ... ADD VALUE can't run inside a transaction on older Postgres,
+// so it's kept as its own pass. Mirrors 2026999990003_add_poll_viewonce_
+// message_types.js — same never-ran-in-production gap: without 'poll' and
+// 'view_once' as valid enum_Messages_type values, sending a poll message
+// (even though the ChatPolls tables above now exist) or a view-once media
+// message fails at the DB layer with an invalid input value error.
+const REQUIRED_ENUM_VALUES = [
+  { type: 'enum_Messages_type', value: 'poll' },
+  { type: 'enum_Messages_type', value: 'view_once' },
 ];
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -368,12 +902,94 @@ async function getLiveColumns(sequelize, table) {
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
+/**
+ * Fix the Tools table if it's still on the original minimal 4-column schema
+ * (id, name, description, type) from 2026118081500createtools.js, instead of
+ * the full marketplace schema (seller_id, title, price, category, images[],
+ * status, etc.) that src/models/Tool.js and every marketplace route expect.
+ * Mirrors 20260608000001-fix-tools-marketplace-schema.js's own rename+
+ * recreate approach exactly (renames the old table to Tools_legacy so no
+ * data is lost, rather than dropping it) — same "migration never ran in
+ * production" gap as everything else in this file, just structural instead
+ * of additive so it needs its own guarded routine.
+ */
+async function fixToolsMarketplaceSchema(sequelize) {
+  const tag = '[SchemaEnforcer]';
+  const qi = sequelize.getQueryInterface();
+
+  const tableDesc = await qi.describeTable('Tools').catch(() => null);
+  if (!tableDesc) return false;           // Tools doesn't exist yet — REQUIRED_TABLES/normal model sync owns creating it
+  if (tableDesc.seller_id) return false;  // already on the full marketplace schema — nothing to do
+
+  const transaction = await sequelize.transaction();
+  try {
+    const hasLegacy = await qi.describeTable('Tools_legacy').catch(() => null);
+    if (!hasLegacy) {
+      await qi.renameTable('Tools', 'Tools_legacy', { transaction });
+    } else {
+      await qi.dropTable('Tools', { transaction });
+    }
+
+    await qi.createTable('Tools', {
+      id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true, allowNull: false },
+      seller_id: { type: DataTypes.UUID, allowNull: false },
+      title: { type: DataTypes.STRING(255), allowNull: false },
+      description: { type: DataTypes.TEXT, allowNull: true },
+      price: { type: DataTypes.DECIMAL(10, 2), allowNull: false, defaultValue: 0 },
+      category: { type: DataTypes.STRING(100), allowNull: false, defaultValue: 'other' },
+      type: { type: DataTypes.ENUM('service', 'digital', 'premium', 'physical'), allowNull: false, defaultValue: 'physical' },
+      images: { type: DataTypes.ARRAY(DataTypes.TEXT), defaultValue: [] },
+      tags: { type: DataTypes.ARRAY(DataTypes.STRING), defaultValue: [] },
+      available: { type: DataTypes.BOOLEAN, defaultValue: true },
+      is_premium: { type: DataTypes.BOOLEAN, defaultValue: false },
+      is_spotlight: { type: DataTypes.BOOLEAN, defaultValue: false },
+      is_featured: { type: DataTypes.BOOLEAN, defaultValue: false },
+      is_boosted: { type: DataTypes.BOOLEAN, defaultValue: false },
+      boost_expires_at: { type: DataTypes.DATE, allowNull: true },
+      views: { type: DataTypes.INTEGER, defaultValue: 0 },
+      saved_by: { type: DataTypes.ARRAY(DataTypes.UUID), defaultValue: [] },
+      purchased_by: { type: DataTypes.ARRAY(DataTypes.UUID), defaultValue: [] },
+      rating: { type: DataTypes.DECIMAL(3, 2), defaultValue: 0 },
+      rating_count: { type: DataTypes.INTEGER, defaultValue: 0 },
+      status: { type: DataTypes.ENUM('active', 'inactive', 'sold', 'deleted'), defaultValue: 'active', allowNull: false },
+      currency: { type: DataTypes.STRING(10), defaultValue: 'USD' },
+      stock: { type: DataTypes.INTEGER, allowNull: true },
+      metadata: { type: DataTypes.JSONB, defaultValue: {} },
+      createdAt: { type: DataTypes.DATE, allowNull: false, defaultValue: DataTypes.NOW },
+      updatedAt: { type: DataTypes.DATE, allowNull: false, defaultValue: DataTypes.NOW },
+    }, { transaction });
+
+    await qi.addIndex('Tools', ['seller_id'], { name: 'idx_tools_seller_id', transaction }).catch(() => {});
+    await qi.addIndex('Tools', ['status'], { name: 'idx_tools_status', transaction }).catch(() => {});
+    await qi.addIndex('Tools', ['category'], { name: 'idx_tools_category', transaction }).catch(() => {});
+    await qi.addIndex('Tools', ['available'], { name: 'idx_tools_available', transaction }).catch(() => {});
+    await qi.addIndex('Tools', ['is_featured'], { name: 'idx_tools_is_featured', transaction }).catch(() => {});
+    await qi.addIndex('Tools', ['createdAt'], { name: 'idx_tools_created_at', transaction }).catch(() => {});
+
+    await transaction.commit();
+    console.log(`${tag} ✅ Rebuilt Tools table with full marketplace schema (old data preserved in Tools_legacy)`);
+    return true;
+  } catch (err) {
+    await transaction.rollback();
+    console.warn(`${tag} ⚠️  Could not rebuild Tools marketplace schema: ${err.message}`);
+    return false;
+  }
+}
+
 async function ensureSchema(sequelize) {
   const tag = '[SchemaEnforcer]';
   let added = 0;
   let created = 0;
 
   console.log(`${tag} 🔍 Inspecting live schema…`);
+
+  // ── 0. Rebuild Tools if it's still on the old minimal (pre-marketplace)
+  // schema — must run before the generic passes below, since REQUIRED_TABLES
+  // only CREATEs a table when it's fully absent, and the type-fix pass
+  // assumes seller_id/saved_by/purchased_by already exist in some form ──────
+  await fixToolsMarketplaceSchema(sequelize).catch(err => {
+    console.warn(`${tag} ⚠️  Tools schema check failed: ${err.message}`);
+  });
 
   const liveTables = await getLiveTables(sequelize);
 
@@ -426,10 +1042,92 @@ async function ensureSchema(sequelize) {
     }
   }
 
-  if (added === 0 && created === 0) {
+  // ── 3. Fix columns whose type was wrong from creation (UUID → INTEGER) ─────
+  let typeFixed = 0;
+  for (const { table, column, arrayType } of REQUIRED_TYPE_FIXES) {
+    if (!liveTables.has(table)) continue; // table doesn't exist yet, nothing to fix
+
+    try {
+      const rows = await sequelize.query(
+        `SELECT data_type, udt_name FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = :table AND column_name = :column`,
+        { replacements: { table, column }, type: QueryTypes.SELECT }
+      );
+      const col = rows[0];
+      if (!col) continue; // column doesn't exist — the ADD COLUMN pass above (or a real migration) owns creating it
+
+      const isUuid = arrayType
+        ? (col.data_type === 'ARRAY' && col.udt_name === '_uuid')
+        : col.udt_name === 'uuid';
+      if (!isUuid) continue; // already the right type
+
+      const targetType = arrayType ? 'INTEGER[]' : 'INTEGER';
+      const usingClause = arrayType ? `ARRAY[]::INTEGER[]` : `"${column}"::text::integer`;
+      await sequelize.query(
+        `ALTER TABLE "${table}" ALTER COLUMN "${column}" TYPE ${targetType} USING ${usingClause}`
+      );
+      console.log(`${tag} ✅ Fixed type: ${table}.${column} → ${targetType}`);
+      typeFixed++;
+    } catch (err) {
+      console.warn(`${tag} ⚠️  Could not fix type for ${table}.${column}: ${err.message}`);
+    }
+  }
+
+  // ── 4. Backfill NULLs + set DB-level DEFAULT for columns whose model
+  // default was never applied at the DB level ─────────────────────────────
+  let defaultsFixed = 0;
+  for (const { table, column, default: def } of REQUIRED_DEFAULTS) {
+    if (!liveTables.has(table)) continue;
+
+    const liveCols = await getLiveColumns(sequelize, table);
+    if (!liveCols.has(column)) continue; // ADD COLUMN pass above owns creating it if missing
+
+    try {
+      const nullRows = await sequelize.query(
+        `SELECT COUNT(*)::int AS cnt FROM "${table}" WHERE "${column}" IS NULL`,
+        { type: QueryTypes.SELECT }
+      );
+      const nullCount = nullRows[0]?.cnt || 0;
+
+      if (nullCount > 0) {
+        await sequelize.query(`UPDATE "${table}" SET "${column}" = ${def} WHERE "${column}" IS NULL`);
+      }
+      await sequelize.query(`ALTER TABLE "${table}" ALTER COLUMN "${column}" SET DEFAULT ${def}`);
+
+      if (nullCount > 0) {
+        console.log(`${tag} ✅ Backfilled ${nullCount} NULL row(s) and set DEFAULT: ${table}.${column}`);
+        defaultsFixed++;
+      }
+    } catch (err) {
+      console.warn(`${tag} ⚠️  Could not fix default for ${table}.${column}: ${err.message}`);
+    }
+  }
+
+  // ── 5. Ensure required ENUM values exist ───────────────────────────────────
+  let enumsFixed = 0;
+  for (const { type: enumType, value } of REQUIRED_ENUM_VALUES) {
+    try {
+      const exists = await sequelize.query(
+        `SELECT 1 FROM pg_type t JOIN pg_enum e ON t.oid = e.enumtypid
+         WHERE t.typname = :enumType AND e.enumlabel = :value`,
+        { replacements: { enumType, value }, type: QueryTypes.SELECT }
+      );
+      if (exists.length > 0) continue;
+
+      await sequelize.query(`ALTER TYPE "${enumType}" ADD VALUE IF NOT EXISTS '${value}'`);
+      console.log(`${tag} ✅ Added enum value: ${enumType}.${value}`);
+      enumsFixed++;
+    } catch (err) {
+      if (!/already exists/i.test(err.message)) {
+        console.warn(`${tag} ⚠️  Could not add enum value ${enumType}.${value}: ${err.message}`);
+      }
+    }
+  }
+
+  if (added === 0 && created === 0 && typeFixed === 0 && defaultsFixed === 0 && enumsFixed === 0) {
     console.log(`${tag} ✅ Schema is up to date — nothing to add`);
   } else {
-    console.log(`${tag} 🎉 Schema enforced: ${created} table(s) created, ${added} column(s) added`);
+    console.log(`${tag} 🎉 Schema enforced: ${created} table(s) created, ${added} column(s) added, ${typeFixed} column type(s) fixed, ${defaultsFixed} default(s) backfilled, ${enumsFixed} enum value(s) added`);
   }
 }
 
