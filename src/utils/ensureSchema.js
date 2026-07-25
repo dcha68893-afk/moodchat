@@ -298,6 +298,51 @@ const REQUIRED_COLUMNS = [
     table: 'Messages', column: 'pinnedBy',
     sql: `ALTER TABLE "Messages" ADD COLUMN IF NOT EXISTS "pinnedBy" INTEGER`,
   },
+  // ─── FIX (MARKETPLACE-500s): Tool model fields with no matching migration ───
+  {
+    table: 'tools', column: 'approval_status',
+    sql: `ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "approval_status" VARCHAR(20) NOT NULL DEFAULT 'pending_review'`,
+  },
+  {
+    table: 'tools', column: 'approved_at',
+    sql: `ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "approved_at" TIMESTAMP WITH TIME ZONE`,
+  },
+  {
+    table: 'tools', column: 'rejection_reason',
+    sql: `ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "rejection_reason" TEXT`,
+  },
+  {
+    table: 'tools', column: 'is_flash_sale',
+    sql: `ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "is_flash_sale" BOOLEAN NOT NULL DEFAULT false`,
+  },
+  {
+    table: 'tools', column: 'flash_sale_price',
+    sql: `ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "flash_sale_price" DECIMAL(10,2)`,
+  },
+  {
+    table: 'tools', column: 'flash_sale_end',
+    sql: `ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "flash_sale_end" TIMESTAMP WITH TIME ZONE`,
+  },
+  {
+    table: 'tools', column: 'condition',
+    sql: `ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "condition" VARCHAR(20) DEFAULT 'new'`,
+  },
+  {
+    table: 'tools', column: 'brand',
+    sql: `ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "brand" VARCHAR(100)`,
+  },
+  {
+    table: 'tools', column: 'sku',
+    sql: `ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "sku" VARCHAR(100)`,
+  },
+  {
+    table: 'push_subscriptions', column: 'userAgent',
+    sql: `ALTER TABLE "push_subscriptions" ADD COLUMN IF NOT EXISTS "userAgent" VARCHAR(500)`,
+  },
+  {
+    table: 'push_subscriptions', column: 'lastUsedAt',
+    sql: `ALTER TABLE "push_subscriptions" ADD COLUMN IF NOT EXISTS "lastUsedAt" TIMESTAMP WITH TIME ZONE`,
+  },
 ];
 
 // ─── Tables that must exist (created if missing) ──────────────────────────────
@@ -420,6 +465,8 @@ const REQUIRED_TABLES = [
       "endpoint"                 TEXT NOT NULL UNIQUE,
       "p256dh"                   VARCHAR(255) NOT NULL,
       "auth"                     VARCHAR(255) NOT NULL,
+      "userAgent"                VARCHAR(500),
+      "lastUsedAt"               TIMESTAMP WITH TIME ZONE,
       "gameRemindersEnabled"     BOOLEAN NOT NULL DEFAULT true,
       "lastDailyReminderSentAt"  TIMESTAMP WITH TIME ZONE,
       "createdAt"                TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),

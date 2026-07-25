@@ -47,6 +47,14 @@ module.exports = {
         type: Sequelize.STRING(255),
         allowNull: false,
       },
+      userAgent: {
+        type: Sequelize.STRING(500),
+        allowNull: true,
+      },
+      lastUsedAt: {
+        type: Sequelize.DATE,
+        allowNull: true,
+      },
       gameRemindersEnabled: {
         type: Sequelize.BOOLEAN,
         defaultValue: true,

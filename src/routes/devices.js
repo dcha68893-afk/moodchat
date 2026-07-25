@@ -118,10 +118,23 @@ router.post('/link', asyncHandler(async (req, res) => {
       { replacements: { userId } }
     );
     if (parseInt(countRows[0]?.cnt || 0) >= MAX_DEVICES) {
-      return res.status(422).json({
-        status: 'error',
-        message: `Maximum ${MAX_DEVICES} devices allowed. Remove a device first.`,
-      });
+      // FIX (PERMANENT-LOCKOUT): this used to hard-reject with 422 once the
+      // cap was hit, with no way to recover except manually revoking a
+      // device first — but devices linked before deviceId persistence was
+      // fixed above each grabbed a random, never-reused id, permanently
+      // occupying a slot with no way for the user to even know which entry
+      // to revoke. Evict the least-recently-seen device instead, same as
+      // "signed out of your oldest session" on other apps.
+      await sequelize.query(
+        `UPDATE linked_devices SET "isActive"=false, "updatedAt"=NOW()
+         WHERE id = (
+           SELECT id FROM linked_devices
+           WHERE "userId"=:userId AND "isActive"=true
+           ORDER BY "lastSeenAt" ASC NULLS FIRST, "createdAt" ASC
+           LIMIT 1
+         )`,
+        { replacements: { userId } }
+      );
     }
   }
 
@@ -230,7 +243,13 @@ router.get('/sync', asyncHandler(async (req, res) => {
   const [recentChats, starredMessages, pinnedChats] = await Promise.all([
     sequelize.query(
       `SELECT c.id, c.type, c.name, c."updatedAt", c."lastMessageId",
-              cp."isMuted", cp."isPinned", cp."unreadCount"
+              cp."isMuted", cp."isPinned",
+              (
+                SELECT COUNT(*) FROM "Messages" m2
+                LEFT JOIN "ReadReceipts" rr ON rr."messageId" = m2.id AND rr."userId" = :userId
+                WHERE m2."chatId" = c.id AND m2."isDeleted" = false
+                  AND m2."senderId" != :userId AND rr.id IS NULL
+              ) AS "unreadCount"
        FROM chats c
        JOIN chat_participants cp ON cp."chatId"=c.id AND cp."userId"=:userId
        ${since ? 'WHERE c."updatedAt" > :since' : ''}
