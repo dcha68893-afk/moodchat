@@ -1,0 +1,20 @@
+'use strict';
+/**
+ * .sequelizerc — tells sequelize-cli to use config/config.js (which reads
+ * SUPABASE_DB_URL / DATABASE_URL at runtime, same as src/config/database.js)
+ * instead of the default config/config.json (stale, hardcoded credentials
+ * for an old, now-unused Render Postgres instance). See config/config.js
+ * for the full root-cause writeup.
+ *
+ * migrations/models/seeders paths are left as the project's existing
+ * defaults (root-level migrations/, models/, seeders/ folders).
+ */
+
+const path = require('path');
+
+module.exports = {
+  config: path.resolve(__dirname, 'config', 'config.js'),
+  'migrations-path': path.resolve(__dirname, 'migrations'),
+  'seeders-path': path.resolve(__dirname, 'seeders'),
+  'models-path': path.resolve(__dirname, 'models'),
+};
