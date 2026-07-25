@@ -308,9 +308,21 @@ class WebSocketService {
                         if (!stillOnline) {
                             const Call = db.models?.Calls || db.models?.Call || db.Calls || db.Call;
                             if (Call) {
+                                // FIX-NO-AUTO-END-INCALL: 'in-progress' removed from this filter.
+                                // Previously ANY disconnect (a network blip, brief tab backgrounding,
+                                // reconnect taking >8s) that reached this point would force-end a call
+                                // the moment it was already connected — the app itself was hanging up
+                                // the call, not the user. That is wrong: once a call has reached the
+                                // in-call/connected stage, it must only end when the caller or receiver
+                                // explicitly hangs up (POST /api/calls/:callId/end, elsewhere in this
+                                // codebase, is unaffected and still works normally).
+                                // We still auto-clean 'initiated'/'ringing' calls here — those are calls
+                                // that NEVER connected, so if the caller disappears before being
+                                // answered that's a genuine missed/abandoned call and should resolve
+                                // automatically rather than ring forever.
                                 const staleCalls = await Call.findAll({
                                     where: {
-                                        status: { [WsOp.in]: ['initiated', 'ringing', 'in-progress'] },
+                                        status: { [WsOp.in]: ['initiated', 'ringing'] },
                                         [WsOp.or]: [{ callerId: userId }, { receiverId: userId }],
                                     }
                                 }).catch(() => []);
