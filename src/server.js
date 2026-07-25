@@ -5968,7 +5968,7 @@ async function main() {
             if (!Status || !db.sequelize) return;
             const { Op } = require('sequelize');
             const [affected] = await db.sequelize.query(
-                `UPDATE "Statuses"
+                `UPDATE "statuses"
                     SET "isActive" = false, "updatedAt" = NOW()
                   WHERE "expiresAt" IS NOT NULL
                     AND "expiresAt" < NOW()

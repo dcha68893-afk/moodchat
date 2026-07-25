@@ -241,6 +241,8 @@ class Logger {
         ...(error.code && { code: error.code }),
         ...(error.statusCode && { statusCode: error.statusCode }),
       };
+    } else if (typeof error === 'string') {
+      logMeta.error = error;
     } else if (error && typeof error === 'object') {
       logMeta.error = error;
     }
