@@ -22,6 +22,44 @@ const Friend = db.Friend || db.Friends;
 // the "list my friends" read path was missing it.
 const USER_ATTRS = ['id', 'username', 'avatar', 'coverPhoto', 'firstName', 'lastName', 'status', 'lastSeen'];
 
+// FIX (FRIEND-LIST-BYPASSES-PROFILE-VISIBILITY): every friend-facing read
+// path in this file (getFriends, getPendingRequests, getSentRequests,
+// getBlockedUsers, getNearbyUsers) used to build its response straight from
+// the raw User row's avatar/coverPhoto columns, completely bypassing the
+// profileVisibility choice (everyone/friendsOnly/nobody) that
+// profileService.getProfile() already enforces for direct profile views.
+// A user who set visibility to "Nobody" was still fully visible here. This
+// mirrors profileService's own _getProfileVisibility read (same
+// Settings.privacy JSONB field) without importing profileService, to avoid
+// a circular dependency between the two services.
+async function _getPhotoVisibility(ownerId) {
+    try {
+        const Settings = db.Settings || (db.models && db.models.Settings);
+        if (!Settings) return 'everyone';
+        const row = await Settings.findOne({ where: { userId: ownerId } });
+        const priv = (row && row.privacy) || {};
+        const raw = priv.profileVisibility || priv.photoVisibility || 'everyone';
+        const normalized = String(raw).toLowerCase();
+        if (normalized === 'nobody' || normalized === 'none') return 'nobody';
+        if (normalized === 'friendsonly' || normalized === 'friends' || normalized === 'contacts') return 'friendsOnly';
+        return 'everyone';
+    } catch (_) {
+        return 'everyone';
+    }
+}
+
+// Strips avatar/coverPhoto from an already-formatted user object when the
+// owner's visibility setting doesn't permit this viewer to see them.
+// `alreadyFriends` short-circuits the DB lookup for the common "everyone"
+// case and lets 'friendsOnly' owners stay visible to their real friends.
+async function _applyPhotoVisibility(formatted, ownerId, alreadyFriends) {
+    if (!formatted || !ownerId) return formatted;
+    const visibility = await _getPhotoVisibility(ownerId);
+    if (visibility === 'everyone') return formatted;
+    if (visibility === 'friendsOnly' && alreadyFriends) return formatted;
+    return { ...formatted, avatar: null, coverPhoto: null };
+}
+
 function formatUser(user) {
     if (!user) return null;
     const u = user.toJSON ? user.toJSON() : { ...user };
@@ -63,7 +101,7 @@ function formatUser(user) {
     };
 }
 
-function formatFriend(friendRecord, currentUserId) {
+async function formatFriend(friendRecord, currentUserId) {
     if (!friendRecord) return null;
 
     const fr = friendRecord.toJSON ? friendRecord.toJSON() : { ...friendRecord };
@@ -84,7 +122,7 @@ function formatFriend(friendRecord, currentUserId) {
                      || u.username
                      || `User ${u.id || ''}`;
 
-    return {
+    const formatted = {
         // canonical cross-module fields
         id:          u.id          || null,
         name:        displayName,
@@ -109,6 +147,11 @@ function formatFriend(friendRecord, currentUserId) {
         isMuted:        !!fr.isMuted,
         closenessLevel: fr.closenessLevel || 0,
     };
+
+    // formatFriend() is only ever called on accepted-status Friend rows
+    // (getFriends()), so the viewer and the row's other user are real
+    // friends -> 'friendsOnly' owners stay visible; only 'nobody' hides.
+    return _applyPhotoVisibility(formatted, u.id, true);
 }
 
 const FRIEND_INCLUDES = [
@@ -216,7 +259,7 @@ async function getFriends(userId, status = 'accepted') {
     const seen   = new Set();
     const result = [];
     for (const row of rows) {
-        const formatted = formatFriend(row, userId);
+        const formatted = await formatFriend(row, userId);
         if (formatted && formatted.id && !seen.has(String(formatted.id))) {
             seen.add(String(formatted.id));
             result.push(formatted);
@@ -232,29 +275,30 @@ async function getPendingRequests(userId) {
         order: [['createdAt', 'DESC']],
     });
 
-    return rows.map(row => {
+    return Promise.all(rows.map(async row => {
         const fr = row.toJSON ? row.toJSON() : { ...row };
         const u  = fr.friendRequesterUser || {};
         const displayName = [u.firstName, u.lastName].filter(Boolean).join(' ').trim() || u.username || '';
+        const user = await _applyPhotoVisibility({
+            id:          u.id,
+            name:        displayName,
+            avatar:      u.avatar    || null,
+            coverPhoto:  u.coverPhoto || null,
+            status:      u.status    || 'offline',
+            lastSeen:    u.lastSeen  || null,
+            isOnline:    u.status === 'online',
+            username:    u.username  || '',
+            displayName: displayName,
+        }, u.id, false);
         return {
             id:         fr.id,
             senderId:   fr.requesterId,
             receiverId: fr.receiverId,
             status:     fr.status,
-            user: {
-                id:          u.id,
-                name:        displayName,
-                avatar:      u.avatar    || null,
-                coverPhoto:  u.coverPhoto || null,
-                status:      u.status    || 'offline',
-                lastSeen:    u.lastSeen  || null,
-                isOnline:    u.status === 'online',
-                username:    u.username  || '',
-                displayName: displayName,
-            },
+            user,
             createdAt: fr.createdAt,
         };
-    });
+    }));
 }
 
 async function getSentRequests(userId) {
@@ -264,29 +308,30 @@ async function getSentRequests(userId) {
         order: [['createdAt', 'DESC']],
     });
 
-    return rows.map(row => {
+    return Promise.all(rows.map(async row => {
         const fr = row.toJSON ? row.toJSON() : { ...row };
         const u  = fr.friendReceiverUser || {};
         const displayName = [u.firstName, u.lastName].filter(Boolean).join(' ').trim() || u.username || '';
+        const user = await _applyPhotoVisibility({
+            id:          u.id,
+            name:        displayName,
+            avatar:      u.avatar    || null,
+            coverPhoto:  u.coverPhoto || null,
+            status:      u.status    || 'offline',
+            lastSeen:    u.lastSeen  || null,
+            isOnline:    u.status === 'online',
+            username:    u.username  || '',
+            displayName: displayName,
+        }, u.id, false);
         return {
             id:         fr.id,
             senderId:   fr.requesterId,
             receiverId: fr.receiverId,
             status:     fr.status,
-            user: {
-                id:          u.id,
-                name:        displayName,
-                avatar:      u.avatar    || null,
-                coverPhoto:  u.coverPhoto || null,
-                status:      u.status    || 'offline',
-                lastSeen:    u.lastSeen  || null,
-                isOnline:    u.status === 'online',
-                username:    u.username  || '',
-                displayName: displayName,
-            },
+            user,
             createdAt: fr.createdAt,
         };
-    });
+    }));
 }
 
 async function getBlockedUsers(userId) {
@@ -295,11 +340,15 @@ async function getBlockedUsers(userId) {
         include: [{ model: User, as: 'friendReceiverUser', attributes: USER_ATTRS, required: false }],
     });
 
-    return rows.map(row => {
+    const formatted = await Promise.all(rows.map(async row => {
         const fr = row.toJSON ? row.toJSON() : { ...row };
         const u  = fr.friendReceiverUser || {};
-        return { ...formatUser(u), blockedAt: fr.blockedAt };
-    }).filter(Boolean);
+        const base = formatUser(u);
+        if (!base) return null;
+        const visible = await _applyPhotoVisibility(base, u.id, false);
+        return { ...visible, blockedAt: fr.blockedAt };
+    }));
+    return formatted.filter(Boolean);
 }
 
 async function unfriend(userId, friendId) {
@@ -399,11 +448,12 @@ async function getNearbyUsers(userId, { lat, lng, radius = 5000 } = {}) {
                 });
 
                 if (geoUsers.length > 0) {
+                    const users = await Promise.all(geoUsers.map(async u => {
+                        const f = await _applyPhotoVisibility(formatUser(u), u.id, false);
+                        return { id: f.id, name: f.displayName, avatar: f.avatar, status: f.status, lastSeen: f.lastActive, isOnline: f.status === 'online', username: f.username, displayName: f.displayName };
+                    }));
                     return {
-                        users: geoUsers.map(u => {
-                            const f = formatUser(u);
-                            return { id: f.id, name: f.displayName, avatar: f.avatar, status: f.status, lastSeen: f.lastActive, isOnline: f.status === 'online', username: f.username, displayName: f.displayName };
-                        }),
+                        users,
                         count: geoUsers.length,
                         mode:  'geo',
                     };
@@ -419,10 +469,10 @@ async function getNearbyUsers(userId, { lat, lng, radius = 5000 } = {}) {
         limit: 50,
     });
 
-    const result = onlineUsers.map(u => {
-        const f = formatUser(u);
+    const result = await Promise.all(onlineUsers.map(async u => {
+        const f = await _applyPhotoVisibility(formatUser(u), u.id, false);
         return { id: f.id, name: f.displayName, avatar: f.avatar, status: 'online', lastSeen: f.lastActive, isOnline: true, username: f.username, displayName: f.displayName };
-    });
+    }));
 
     return { users: result, count: result.length, mode: 'online' };
 }

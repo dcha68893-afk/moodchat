@@ -102,6 +102,29 @@ module.exports = (sequelize, DataTypes) => {
           }
         }
       },
+      // FIX (DISPLAYNAME-NOT-A-COLUMN): ~25 query sites across this codebase
+      // (marketplace, calls, games, moods, status, groups...) already write
+      // `attributes: [..., 'displayName', ...]` as if this were a real
+      // column. It never was — the only place it existed was computed
+      // inline inside toSafeJSON() below. Every one of those queries threw
+      // a Postgres "column does not exist" error at request time, which is
+      // why marketplace product listings, wishlist, reviews, and the
+      // follow-seller list all rendered as an empty screen (the frontend
+      // got a 500, not an empty result). Declaring it as a real Sequelize
+      // VIRTUAL attribute makes all of those `attributes` arrays valid:
+      // Sequelize computes it in JS instead of trying to SELECT it. Note
+      // this only resolves to "First Last" when the query's attributes list
+      // also includes firstName/lastName — otherwise it falls back to
+      // username, same fallback toSafeJSON() already used.
+      displayName: {
+        type: DataTypes.VIRTUAL,
+        get() {
+          const first = this.getDataValue('firstName');
+          const last  = this.getDataValue('lastName');
+          const full  = `${first || ''} ${last || ''}`.trim();
+          return full || this.getDataValue('username') || '';
+        }
+      },
       bio: {
         type: DataTypes.TEXT,
         allowNull: true,

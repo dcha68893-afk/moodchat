@@ -47,6 +47,57 @@ async function ensureEncryptionKeysTable() {
   }
 }
 let _encKeysReady = ensureEncryptionKeysTable();
+
+// ── X3DH PREKEYS: signing identity key + signed prekey + one-time prekeys ──
+// FIX (X3DH-UPGRADE): the 1:1 ratchet handshake (js/double-ratchet.js) used
+// to bootstrap a session from nothing but each side's long-term identity
+// key (a simplified 2-DH combine). That means anyone who later steals a
+// user's long-term identity private key could retroactively decrypt the
+// FIRST message of every past 1:1 conversation that user was ever part of
+// (every message after the first is still protected by the ratchet itself).
+// Real X3DH — a separate signing identity key, a rotating signed prekey
+// (proves the DH key really belongs to this identity), and a pool of
+// one-time prekeys (each used for at most one session, then discarded) —
+// closes that gap the same way Signal's protocol does. This table pair
+// stores the public halves; private halves never leave the client.
+let _prekeysMigrated = false;
+async function ensurePrekeyTables() {
+  if (_prekeysMigrated) return;
+  _prekeysMigrated = true;
+  try {
+    const sequelize = getSequelize();
+    await sequelize.query(`
+      CREATE TABLE IF NOT EXISTS user_signed_prekeys (
+        "userId"         INTEGER PRIMARY KEY,
+        "signingPubKey"  TEXT NOT NULL,
+        "signedPreKeyId" VARCHAR(64) NOT NULL,
+        "signedPreKey"   TEXT NOT NULL,
+        "signature"      TEXT NOT NULL,
+        "createdAt"      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        "updatedAt"      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+    await sequelize.query(`
+      CREATE TABLE IF NOT EXISTS user_one_time_prekeys (
+        id            SERIAL PRIMARY KEY,
+        "userId"      INTEGER NOT NULL,
+        "keyId"       VARCHAR(64) NOT NULL,
+        "publicKey"   TEXT NOT NULL,
+        consumed      BOOLEAN NOT NULL DEFAULT false,
+        "consumedAt"  TIMESTAMPTZ,
+        "consumedBy"  INTEGER,
+        "createdAt"   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CONSTRAINT user_one_time_prekeys_user_key_unique UNIQUE ("userId", "keyId")
+      );
+    `);
+    await sequelize.query(`CREATE INDEX IF NOT EXISTS user_otpk_unconsumed_idx ON user_one_time_prekeys ("userId") WHERE consumed = false;`);
+    console.log('[encryption.js] ✅ prekey tables verified/created');
+  } catch (err) {
+    console.error('[encryption.js] ⚠️ Could not verify/create prekey tables:', err.message);
+  }
+}
+let _prekeysReady = ensurePrekeyTables();
+router.use((req, res, next) => { _prekeysReady.then(() => next()).catch(() => next()); });
 router.use((req, res, next) => { _encKeysReady.then(() => next()).catch(() => next()); });
 
 // POST /api/encryption/keys — register or update public key
@@ -178,6 +229,129 @@ router.post('/verify/:userId', asyncHandler(async (req, res) => {
     await sequelize.query(`INSERT INTO key_verifications ("verifierId","verifiedId",fingerprint,"verifiedAt","updatedAt") VALUES (:vid,:rid,:fp,NOW(),NOW()) ON CONFLICT ("verifierId","verifiedId") DO UPDATE SET fingerprint=EXCLUDED.fingerprint,"updatedAt"=NOW()`,{replacements:{vid:req.user.id,rid:parseInt(req.params.userId,10),fp:fingerprint}});
     res.json({status:'success'});
   } catch(e) { res.status(500).json({status:'error'}); }
+}));
+
+// POST /api/encryption/prekeys — upload/replace signing identity key, signed
+// prekey (with its signature), and top up the one-time prekey pool.
+// FIX (X3DH-UPGRADE): see ensurePrekeyTables() above for why this exists.
+router.post('/prekeys', asyncHandler(async (req, res) => {
+  const userId = req.user.id;
+  const { signingPubKey, signedPreKey, oneTimePreKeys } = req.body;
+
+  if (!signingPubKey || typeof signingPubKey !== 'string') {
+    return res.status(400).json({ status: 'error', message: 'signingPubKey required' });
+  }
+  if (!signedPreKey?.keyId || !signedPreKey?.publicKey || !signedPreKey?.signature) {
+    return res.status(400).json({ status: 'error', message: 'signedPreKey {keyId, publicKey, signature} required' });
+  }
+
+  const sequelize = getSequelize();
+
+  await sequelize.query(
+    `INSERT INTO user_signed_prekeys ("userId","signingPubKey","signedPreKeyId","signedPreKey","signature","createdAt","updatedAt")
+     VALUES (:userId,:signingPubKey,:keyId,:pubKey,:signature,NOW(),NOW())
+     ON CONFLICT ("userId") DO UPDATE
+       SET "signingPubKey"=:signingPubKey, "signedPreKeyId"=:keyId, "signedPreKey"=:pubKey,
+           "signature"=:signature, "updatedAt"=NOW()`,
+    { replacements: { userId, signingPubKey, keyId: signedPreKey.keyId, pubKey: signedPreKey.publicKey, signature: signedPreKey.signature } }
+  );
+
+  let inserted = 0;
+  if (Array.isArray(oneTimePreKeys) && oneTimePreKeys.length > 0) {
+    for (const otpk of oneTimePreKeys.slice(0, 200)) { // hard cap per request
+      if (!otpk?.keyId || !otpk?.publicKey) continue;
+      await sequelize.query(
+        `INSERT INTO user_one_time_prekeys ("userId","keyId","publicKey","createdAt")
+         VALUES (:userId,:keyId,:pubKey,NOW())
+         ON CONFLICT ("userId","keyId") DO NOTHING`,
+        { replacements: { userId, keyId: otpk.keyId, pubKey: otpk.publicKey } }
+      );
+      inserted++;
+    }
+  }
+
+  res.status(201).json({ status: 'success', data: { signedPreKeyId: signedPreKey.keyId, oneTimePreKeysAdded: inserted } });
+}));
+
+// GET /api/encryption/prekeys/count — how many unconsumed one-time prekeys
+// this user still has server-side, so the client knows when to top up.
+router.get('/prekeys/count', asyncHandler(async (req, res) => {
+  const sequelize = getSequelize();
+  const rows = await sequelize.query(
+    `SELECT COUNT(*)::int AS count FROM user_one_time_prekeys WHERE "userId"=:userId AND consumed=false`,
+    { replacements: { userId: req.user.id }, type: sequelize.QueryTypes.SELECT }
+  );
+  res.json({ status: 'success', data: { count: rows?.[0]?.count ?? 0 } });
+}));
+
+// GET /api/encryption/prekeys/:userId — fetch a prekey bundle to start a new
+// X3DH session with this user, atomically claiming (and permanently
+// consuming) ONE of their one-time prekeys so it can never be reused for a
+// second session. `FOR UPDATE SKIP LOCKED` makes the claim race-safe if two
+// people start a session with this user at the same moment.
+router.get('/prekeys/:userId', asyncHandler(async (req, res) => {
+  const targetId = parseInt(req.params.userId, 10);
+  if (!targetId) return res.status(400).json({ status: 'error', message: 'Invalid userId' });
+
+  const sequelize = getSequelize();
+
+  // Same relationship check the existing /keys/:userId route uses.
+  const [rel] = await sequelize.query(
+    `SELECT 1 FROM chat_participants cp1
+     JOIN chat_participants cp2 ON cp2."chatId"=cp1."chatId" AND cp2."userId"=:targetId
+     WHERE cp1."userId"=:requesterId LIMIT 1`,
+    { replacements: { requesterId: req.user.id, targetId } }
+  );
+  if (!rel || rel.length === 0) {
+    return res.status(403).json({ status: 'error', message: 'No shared conversation' });
+  }
+
+  const [identityRows, spkRows] = await Promise.all([
+    sequelize.query(
+      `SELECT "keyId","publicKey" FROM user_encryption_keys WHERE "userId"=:targetId AND "isActive"=true ORDER BY "createdAt" DESC LIMIT 1`,
+      { replacements: { targetId }, type: sequelize.QueryTypes.SELECT }
+    ),
+    sequelize.query(
+      `SELECT "signingPubKey","signedPreKeyId","signedPreKey","signature" FROM user_signed_prekeys WHERE "userId"=:targetId LIMIT 1`,
+      { replacements: { targetId }, type: sequelize.QueryTypes.SELECT }
+    ),
+  ]);
+
+  if (!identityRows?.length) {
+    return res.json({ status: 'success', data: null, message: 'User has not enabled encryption' });
+  }
+  if (!spkRows?.length) {
+    // Identity key exists but they haven't uploaded X3DH prekeys yet (e.g.
+    // haven't logged in since this feature shipped) — caller should fall
+    // back to identity-only session bootstrap.
+    return res.json({ status: 'success', data: { identityKeyId: identityRows[0].keyId, identityPubKey: identityRows[0].publicKey, signingPubKey: null, signedPreKey: null, oneTimePreKey: null } });
+  }
+
+  // Atomically claim and consume one unused one-time prekey.
+  const claimed = await sequelize.query(
+    `UPDATE user_one_time_prekeys SET consumed=true, "consumedAt"=NOW(), "consumedBy"=:requesterId
+     WHERE id = (
+       SELECT id FROM user_one_time_prekeys
+       WHERE "userId"=:targetId AND consumed=false
+       ORDER BY id LIMIT 1
+       FOR UPDATE SKIP LOCKED
+     )
+     RETURNING "keyId","publicKey"`,
+    { replacements: { targetId, requesterId: req.user.id }, type: sequelize.QueryTypes.UPDATE }
+  );
+  const otpkRow = Array.isArray(claimed) && Array.isArray(claimed[0]) ? claimed[0][0] : (claimed?.[0] || null);
+
+  const spk = spkRows[0];
+  res.json({
+    status: 'success',
+    data: {
+      identityKeyId: identityRows[0].keyId,
+      identityPubKey: identityRows[0].publicKey,
+      signingPubKey: spk.signingPubKey,
+      signedPreKey: { keyId: spk.signedPreKeyId, publicKey: spk.signedPreKey, signature: spk.signature },
+      oneTimePreKey: otpkRow ? { keyId: otpkRow.keyId, publicKey: otpkRow.publicKey } : null,
+    },
+  });
 }));
 
 module.exports = router;
