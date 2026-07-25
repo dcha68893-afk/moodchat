@@ -964,20 +964,27 @@ async function fixToolsMarketplaceSchema(sequelize) {
   const tag = '[SchemaEnforcer]';
   const qi = sequelize.getQueryInterface();
 
-  const tableDesc = await qi.describeTable('Tools').catch(() => null);
-  if (!tableDesc) return false;           // Tools doesn't exist yet — REQUIRED_TABLES/normal model sync owns creating it
+  // FIX-MARKETPLACE-500-ROOT-CAUSE: use the table name the Tool model
+  // actually uses ('tools', lowercase — see tableName:'tools' + freezeTableName:true
+  // in src/models/Tool.js). Every marketplace route queries THIS table via
+  // the model. Checking/rebuilding a differently-cased 'Tools' identifier
+  // here silently touched a table that doesn't exist, so this function has
+  // been returning early (tableDesc === null) on every single boot without
+  // ever actually fixing anything.
+  const tableDesc = await qi.describeTable('tools').catch(() => null);
+  if (!tableDesc) return false;           // tools doesn't exist yet — REQUIRED_TABLES/normal model sync owns creating it
   if (tableDesc.seller_id) return false;  // already on the full marketplace schema — nothing to do
 
   const transaction = await sequelize.transaction();
   try {
-    const hasLegacy = await qi.describeTable('Tools_legacy').catch(() => null);
+    const hasLegacy = await qi.describeTable('tools_legacy').catch(() => null);
     if (!hasLegacy) {
-      await qi.renameTable('Tools', 'Tools_legacy', { transaction });
+      await qi.renameTable('tools', 'tools_legacy', { transaction });
     } else {
-      await qi.dropTable('Tools', { transaction });
+      await qi.dropTable('tools', { transaction });
     }
 
-    await qi.createTable('Tools', {
+    await qi.createTable('tools', {
       id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true, allowNull: false },
       seller_id: { type: DataTypes.UUID, allowNull: false },
       title: { type: DataTypes.STRING(255), allowNull: false },
@@ -1006,19 +1013,19 @@ async function fixToolsMarketplaceSchema(sequelize) {
       updatedAt: { type: DataTypes.DATE, allowNull: false, defaultValue: DataTypes.NOW },
     }, { transaction });
 
-    await qi.addIndex('Tools', ['seller_id'], { name: 'idx_tools_seller_id', transaction }).catch(() => {});
-    await qi.addIndex('Tools', ['status'], { name: 'idx_tools_status', transaction }).catch(() => {});
-    await qi.addIndex('Tools', ['category'], { name: 'idx_tools_category', transaction }).catch(() => {});
-    await qi.addIndex('Tools', ['available'], { name: 'idx_tools_available', transaction }).catch(() => {});
-    await qi.addIndex('Tools', ['is_featured'], { name: 'idx_tools_is_featured', transaction }).catch(() => {});
-    await qi.addIndex('Tools', ['createdAt'], { name: 'idx_tools_created_at', transaction }).catch(() => {});
+    await qi.addIndex('tools', ['seller_id'], { name: 'idx_tools_seller_id', transaction }).catch(() => {});
+    await qi.addIndex('tools', ['status'], { name: 'idx_tools_status', transaction }).catch(() => {});
+    await qi.addIndex('tools', ['category'], { name: 'idx_tools_category', transaction }).catch(() => {});
+    await qi.addIndex('tools', ['available'], { name: 'idx_tools_available', transaction }).catch(() => {});
+    await qi.addIndex('tools', ['is_featured'], { name: 'idx_tools_is_featured', transaction }).catch(() => {});
+    await qi.addIndex('tools', ['createdAt'], { name: 'idx_tools_created_at', transaction }).catch(() => {});
 
     await transaction.commit();
-    console.log(`${tag} ✅ Rebuilt Tools table with full marketplace schema (old data preserved in Tools_legacy)`);
+    console.log(`${tag} ✅ Rebuilt tools table with full marketplace schema (old data preserved in tools_legacy)`);
     return true;
   } catch (err) {
     await transaction.rollback();
-    console.warn(`${tag} ⚠️  Could not rebuild Tools marketplace schema: ${err.message}`);
+    console.warn(`${tag} ⚠️  Could not rebuild tools marketplace schema: ${err.message}`);
     return false;
   }
 }
