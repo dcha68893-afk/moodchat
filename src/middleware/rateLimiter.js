@@ -48,10 +48,21 @@ const authLimiter = rateLimit({
 });
 
 // Rate limiter for general API routes
+// FIX (messages 429 / "send/receive isn't working"): this limiter is keyed
+// by /api/messages, devices, settings, status, friends, and nearly every
+// other route — all sharing one 100 req/min bucket keyed by IP. Several
+// modules independently re-fetch overlapping data within a couple seconds of
+// load (the "postMessage storm" pattern), which alone burns a big chunk of
+// that budget before a single message is even sent — and IP-keying means
+// unrelated users behind the same NAT/proxy draw from the same bucket too.
+// Same class of bug already fixed for chatLimiter and marketplaceLimiter;
+// applying the identical fix here: key by authenticated user ID (IP only as
+// a fallback for unauthenticated requests) and raise the ceiling to match
+// how this app actually behaves.
 const apiLimiter = rateLimit({
   store: redisStore,
   windowMs: 60 * 1000, // 1 minute
-  max: 100, // Limit each IP to 100 requests per minute
+  max: 300, // raised from 100 — general chat/app traffic legitimately bursts higher than that
   message: {
     success: false,
     message: 'Too many requests, please try again after a minute',
@@ -60,9 +71,7 @@ const apiLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   skipFailedRequests: false,
-  keyGenerator: (req) => {
-    return req.ip;
-  }
+  keyGenerator: (req) => (req.user && req.user.id) ? `user:${req.user.id}` : req.ip,
 });
 
 // ADDED: Alias for apiRateLimiter (commonly used in routes)

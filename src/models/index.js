@@ -1028,6 +1028,60 @@ async function ensurePhase34Tables() {
          ALTER TABLE "tools" ALTER COLUMN "purchased_by" TYPE INTEGER[] USING ARRAY[]::INTEGER[];
        END IF;
      END $$;`,
+    // FIX-500 (/api/marketplace/seller/payout, /returns, /verification):
+    // refunds.buyer_id/seller_id/approved_by, payouts.seller_id/disbursed_by,
+    // and seller_profiles.user_id/verified_by were declared UUID while
+    // Users.id is INTEGER (same class of bug as tools.saved_by/purchased_by
+    // above). Every query filters these with req.user.id, an integer, so
+    // they 500 with "invalid input syntax for type uuid". A uuid column can
+    // never have accepted a real integer id, so there's no data to lose —
+    // just the type to correct. Wrapped in a DO block so it only runs if the
+    // column is still uuid.
+    `DO $$
+     BEGIN
+       IF EXISTS (
+         SELECT 1 FROM information_schema.columns
+         WHERE table_name='refunds' AND column_name='buyer_id' AND udt_name='uuid'
+       ) THEN
+         ALTER TABLE "refunds" ALTER COLUMN "buyer_id" TYPE INTEGER USING NULL;
+       END IF;
+       IF EXISTS (
+         SELECT 1 FROM information_schema.columns
+         WHERE table_name='refunds' AND column_name='seller_id' AND udt_name='uuid'
+       ) THEN
+         ALTER TABLE "refunds" ALTER COLUMN "seller_id" TYPE INTEGER USING NULL;
+       END IF;
+       IF EXISTS (
+         SELECT 1 FROM information_schema.columns
+         WHERE table_name='refunds' AND column_name='approved_by' AND udt_name='uuid'
+       ) THEN
+         ALTER TABLE "refunds" ALTER COLUMN "approved_by" TYPE INTEGER USING NULL;
+       END IF;
+       IF EXISTS (
+         SELECT 1 FROM information_schema.columns
+         WHERE table_name='payouts' AND column_name='seller_id' AND udt_name='uuid'
+       ) THEN
+         ALTER TABLE "payouts" ALTER COLUMN "seller_id" TYPE INTEGER USING NULL;
+       END IF;
+       IF EXISTS (
+         SELECT 1 FROM information_schema.columns
+         WHERE table_name='payouts' AND column_name='disbursed_by' AND udt_name='uuid'
+       ) THEN
+         ALTER TABLE "payouts" ALTER COLUMN "disbursed_by" TYPE INTEGER USING NULL;
+       END IF;
+       IF EXISTS (
+         SELECT 1 FROM information_schema.columns
+         WHERE table_name='seller_profiles' AND column_name='user_id' AND udt_name='uuid'
+       ) THEN
+         ALTER TABLE "seller_profiles" ALTER COLUMN "user_id" TYPE INTEGER USING NULL;
+       END IF;
+       IF EXISTS (
+         SELECT 1 FROM information_schema.columns
+         WHERE table_name='seller_profiles' AND column_name='verified_by' AND udt_name='uuid'
+       ) THEN
+         ALTER TABLE "seller_profiles" ALTER COLUMN "verified_by" TYPE INTEGER USING NULL;
+       END IF;
+     END $$;`,
   ];
   for (const sql of ddl) {
     try { await sequelize.query(sql, { type: Q }); }

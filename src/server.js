@@ -3113,9 +3113,22 @@ class AuthMiddlewareManager {
     }
     
     // Create rate limiting middleware
-    createRateLimitMiddleware(limit = 100, windowMs = 15 * 60 * 1000) {
+    // FIX (messages 429 / "send/receive isn't working" — same investigation
+    // as the apiLimiter fix in middleware/rateLimiter.js): this is a SEPARATE,
+    // stricter gate that mountRoutersSelective() wraps around nearly every
+    // mounted router (messages, devices, settings, status, friends, etc.) —
+    // 100 requests per 15 MINUTES, keyed by IP+path, sitting on top of
+    // apiLimiter's own per-request check. Fixing apiLimiter's IP-keying and
+    // ceiling alone doesn't help if requests get 429'd here first. Applying
+    // the same fix: key by authenticated user id (IP only as an
+    // unauthenticated fallback) so it isn't shared across users behind the
+    // same NAT/proxy, and raising the ceiling to match real chat-app usage
+    // (polling/reconnect bursts routinely exceed ~6.7 req/min, which is what
+    // 100/15min works out to).
+    createRateLimitMiddleware(limit = 1000, windowMs = 15 * 60 * 1000) {
         return (req, res, next) => {
-            const key = req.ip + ':' + req.path;
+            const identity = (req.user && req.user.id) ? `user:${req.user.id}` : req.ip;
+            const key = identity + ':' + req.path;
             const now = Date.now();
             const windowStart = now - windowMs;
             
@@ -3987,7 +4000,7 @@ async mountRoutersSelective(loadedRouters) {
       }
       
       // Add rate limiting for all routes
-      handlers.push(this.authMiddlewareManager.createRateLimitMiddleware(100, 15 * 60 * 1000));
+      handlers.push(this.authMiddlewareManager.createRateLimitMiddleware(1000, 15 * 60 * 1000));
       
       // Mount the router
       handlers.push(router);

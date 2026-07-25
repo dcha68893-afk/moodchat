@@ -396,6 +396,23 @@ router.post('/', apiRateLimiter, callInitiationLimiter, asyncHandler(async (req,
     // FIX: Also emit canonical 'call:incoming' (the frontend listens on this too)
     await notifyUser(req.io, targetId, 'call:incoming', _callIncomingPayload);
 
+    // FIX-CALLID-MISMATCH: the actual call flow goes through this REST route,
+    // not CallSignalingService's socket.on('call:initiate') listener — so
+    // call:initiated_ack (which the frontend already listens for and uses to
+    // reconcile its locally-generated provisional call id with the server's
+    // real UUID) was never sent for real calls. Without it, every later
+    // accept/end/reject for this call arrives tagged with the server's UUID,
+    // never matches the client's local id, and gets rejected as "mismatched
+    // callId" — the call looks like it hangs or self-terminates. Emit it here
+    // to the caller, mirroring the payload CallSignalingService sends on the
+    // (unused) socket path.
+    await notifyUser(req.io, userId, 'call:initiated_ack', {
+      callId: call.id,
+      success: true,
+      calleeName: _calleeDisplayName,
+      targetUserId: targetId,
+    });
+
     // FIX: If the CallSignalingService is attached, use its initiateCall() which
     // also sets up the call room so webrtc:signal events route correctly.
     try {
@@ -497,6 +514,16 @@ router.post('/initiate', apiRateLimiter, callInitiationLimiter, asyncHandler(asy
     // Emit BOTH naming conventions — calls-core.js uses call:incoming, legacy uses call_incoming
     await notifyUser(req.io, targetId, 'call_incoming', _initPayload);
     await notifyUser(req.io, targetId, 'call:incoming', _initPayload);
+
+    // FIX-CALLID-MISMATCH: same fix as the '/' route above — this alias route
+    // creates real calls too, and without this ack the frontend never
+    // reconciles its local provisional call id with the server's real UUID.
+    await notifyUser(req.io, userId, 'call:initiated_ack', {
+      callId: call.id,
+      success: true,
+      calleeName: _calleeDisplayName2,
+      targetUserId: targetId,
+    });
 
     return res.status(201).json({
       success: true,
