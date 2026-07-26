@@ -439,9 +439,32 @@ class WebSocketService {
             });
 
             // ── FIX-MSG-DELIVERY: Phase-2 ack — receiver confirms message got ─
+            // FIX-FALSE-DELIVERY (forensic clue 3): this is the ONLY point in the
+            // whole pipeline where a message has actually been received, stored,
+            // and acknowledged by the receiver's client — so it's the only place
+            // that should ever write a real 'delivered' record. Previously nothing
+            // here persisted that fact at all; the DB's deliveredAt/delivery_logs
+            // were instead being stamped optimistically at send time (see
+            // messages.js), which is a false positive. Both writes are best-effort
+            // and non-fatal — a DB hiccup here must never block notifying the sender.
             socket.removeAllListeners('message:delivery_ack').on('message:delivery_ack', async ({ messageId, chatId, senderId } = {}) => {
                 if (!messageId || !senderId) return;
                 this.clearMessageDeliveryTimeout(messageId);
+                try {
+                    const sequelize = db.sequelize || db;
+                    await sequelize.query(
+                        `UPDATE "Messages" SET "deliveredAt" = NOW() WHERE id = :messageId AND "deliveredAt" IS NULL`,
+                        { replacements: { messageId } }
+                    );
+                    await sequelize.query(
+                        `INSERT INTO message_delivery_logs ("messageId","userId","chatId","event","createdAt")
+                         VALUES (:messageId,:userId,:chatId,'delivered',NOW())
+                         ON CONFLICT ("messageId","userId","event") DO NOTHING`,
+                        { replacements: { messageId, userId, chatId: chatId || null } }
+                    );
+                } catch (_persistErr) {
+                    console.warn('[WSService] delivery_ack persistence failed (non-fatal):', _persistErr.message);
+                }
                 await this.sendToUser(senderId, 'message:delivered', {
                     messageId, chatId, deliveredTo: userId, timestamp: Date.now(),
                 }).catch(() => {});

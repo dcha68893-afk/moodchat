@@ -799,8 +799,18 @@ router.post('/', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
         // Without these, raw INSERT leaves NULLs at DB level (model defaultValues only
         // apply to ORM inserts, not raw SQL). GET /chats counts WHERE isRead = false —
         // NULL != false — so unread counts were always 0 for all new messages.
+        // FIX-FALSE-DELIVERY (forensic clue 3): "deliveredAt" used to be stamped
+        // NOW() right here, at INSERT time — before the message had even been
+        // handed to Socket.IO, let alone actually reached the receiver. That made
+        // every message look "delivered" the instant it was sent, regardless of
+        // whether the receiver was online, in the right room, or ever got it.
+        // socket.emit() succeeding only proves the emit call didn't throw — it is
+        // not proof of delivery. "deliveredAt" is now left NULL at insert time and
+        // is only ever set later, from the real two-phase ack in
+        // webSocketService.js's 'message:delivery_ack' handler (fired only after
+        // the receiver's client has actually received and stored the message).
         `INSERT INTO "Messages" ("chatId","senderId",content,type,reactions,"replyToId",metadata,"expiresAt","isRead","isDeleted","isEdited","sentAt","deliveredAt","createdAt","updatedAt")
-         VALUES (:chatId,:senderId,:content,:type,'{}',:replyToId,:metadata,:expiresAt,false,false,false,NOW(),NOW(),NOW(),NOW())
+         VALUES (:chatId,:senderId,:content,:type,'{}',:replyToId,:metadata,:expiresAt,false,false,false,NOW(),NULL,NOW(),NOW())
          RETURNING id,"chatId","senderId",content,type,"replyToId","createdAt"`,
         {
           replacements: { chatId, senderId, content: safeContent, type: messageType, replyToId: safeReplyToId, metadata: JSON.stringify(msgMetadata), expiresAt: _msgExpiresAt },
@@ -860,7 +870,11 @@ router.post('/', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
       isDeleted:   false,
       isRead:      false,
       sentAt:      new Date().toISOString(),
-      deliveredAt: new Date().toISOString(),
+      // FIX-FALSE-DELIVERY (forensic clue 3): don't hand the client a
+      // deliveredAt timestamp before delivery has actually happened — see the
+      // matching comment on the INSERT above. Real value is filled in later by
+      // the message:delivered event once the receiver's client ACKs.
+      deliveredAt: null,
       createdAt:   new Date().toISOString(),
       updatedAt:   new Date().toISOString(),
       sender:      senderRows[0] || null,
@@ -937,16 +951,27 @@ router.post('/', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
         }
 
         // ── DELIVERY LOGS ───────────────────────────────────────────────────
+        // FIX-FALSE-DELIVERY (forensic clue 3): this used to write a 'delivered'
+        // audit row for every recipientId unconditionally — even ones where
+        // deliveryResults above showed the socket room was empty (recipient
+        // offline/not-yet-joined). socket.emit() not throwing only proves the
+        // emit call completed, not that anything reached the receiver. Log what
+        // actually happened here ('sent' for a successful emit into a non-empty
+        // room, 'send_failed' otherwise); the one true 'delivered' event is now
+        // written from webSocketService.js's 'message:delivery_ack' handler,
+        // which only fires after the receiver's client has actually received
+        // and stored the message and echoed the ack back.
         setImmediate(async () => {
           try {
-            await Promise.allSettled(recipientIds.map(uid =>
-              sequelize.query(
+            await Promise.allSettled(recipientIds.map((uid, i) => {
+              const _wasEmitted = deliveryResults[i] && deliveryResults[i].status === 'fulfilled' && deliveryResults[i].value === true;
+              return sequelize.query(
                 `INSERT INTO message_delivery_logs ("messageId","userId","chatId","event","createdAt")
-                 VALUES (:messageId,:uid,:chatId,'delivered',NOW())
+                 VALUES (:messageId,:uid,:chatId,:event,NOW())
                  ON CONFLICT ("messageId","userId","event") DO NOTHING`,
-                { replacements: { messageId, uid, chatId } }
-              )
-            ));
+                { replacements: { messageId, uid, chatId, event: _wasEmitted ? 'sent' : 'send_failed' } }
+              );
+            }));
           } catch (_) {}
         });
 
