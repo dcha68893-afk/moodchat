@@ -353,6 +353,49 @@ const REQUIRED_COLUMNS = [
     table: 'tools', column: 'sku',
     sql: `ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "sku" VARCHAR(100)`,
   },
+  // ─── FIX (MARKETPLACE-500s cont'd): more Tool model fields with no
+  // matching migration. Found by diffing every field in src/models/Tool.js
+  // against every "table: 'tools'" entry already in this file — these were
+  // still missing, so any query touching them (getProducts, getWishlist,
+  // getRecommendations, seller/products, seller/analytics — all SELECT *
+  // against the tools table) threw "column does not exist" in Postgres,
+  // which the controller's safe() wrapper turns into a 500 to the browser.
+  {
+    table: 'tools', column: 'is_spotlight',
+    sql: `ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "is_spotlight" BOOLEAN NOT NULL DEFAULT false`,
+  },
+  {
+    table: 'tools', column: 'is_featured',
+    sql: `ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "is_featured" BOOLEAN NOT NULL DEFAULT false`,
+  },
+  {
+    table: 'tools', column: 'is_boosted',
+    sql: `ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "is_boosted" BOOLEAN NOT NULL DEFAULT false`,
+  },
+  {
+    table: 'tools', column: 'boost_expires_at',
+    sql: `ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "boost_expires_at" TIMESTAMP WITH TIME ZONE`,
+  },
+  {
+    table: 'tools', column: 'views',
+    sql: `ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "views" INTEGER NOT NULL DEFAULT 0`,
+  },
+  {
+    table: 'tools', column: 'rating',
+    sql: `ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "rating" DECIMAL(3,2) NOT NULL DEFAULT 0`,
+  },
+  {
+    table: 'tools', column: 'rating_count',
+    sql: `ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "rating_count" INTEGER NOT NULL DEFAULT 0`,
+  },
+  {
+    table: 'tools', column: 'stock',
+    sql: `ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "stock" INTEGER`,
+  },
+  {
+    table: 'tools', column: 'images',
+    sql: `ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "images" TEXT[] NOT NULL DEFAULT '{}'`,
+  },
   {
     table: 'push_subscriptions', column: 'userAgent',
     sql: `ALTER TABLE "push_subscriptions" ADD COLUMN IF NOT EXISTS "userAgent" VARCHAR(500)`,
@@ -360,6 +403,59 @@ const REQUIRED_COLUMNS = [
   {
     table: 'push_subscriptions', column: 'lastUsedAt',
     sql: `ALTER TABLE "push_subscriptions" ADD COLUMN IF NOT EXISTS "lastUsedAt" TIMESTAMP WITH TIME ZONE`,
+  },
+  // ─── FIX (CALLS-500s): Call model fields with no matching migration ─────
+  // src/models/Call.js's own comments flag answeredBy/declinedBy/readBy as
+  // "NEW" additions, and several quality/scheduling fields were added after
+  // that. None of them have an ensureSchema entry, so a table created from
+  // the original migration is missing them — every callService.initiateCall()
+  // INSERT sets defaults for these columns, and Postgres rejects the insert
+  // with "column does not exist", which is the POST /api/calls 500 seen in
+  // the browser console. Same never-ran-in-production gap as the tools table
+  // above.
+  {
+    table: 'Calls', column: 'answered_by',
+    sql: `ALTER TABLE "Calls" ADD COLUMN IF NOT EXISTS "answered_by" INTEGER[] NOT NULL DEFAULT '{}'`,
+  },
+  {
+    table: 'Calls', column: 'declined_by',
+    sql: `ALTER TABLE "Calls" ADD COLUMN IF NOT EXISTS "declined_by" INTEGER[] NOT NULL DEFAULT '{}'`,
+  },
+  {
+    table: 'Calls', column: 'read_by',
+    sql: `ALTER TABLE "Calls" ADD COLUMN IF NOT EXISTS "read_by" INTEGER[] NOT NULL DEFAULT '{}'`,
+  },
+  {
+    table: 'Calls', column: 'isGroupCall',
+    sql: `ALTER TABLE "Calls" ADD COLUMN IF NOT EXISTS "isGroupCall" BOOLEAN NOT NULL DEFAULT false`,
+  },
+  {
+    table: 'Calls', column: 'errorReason',
+    sql: `ALTER TABLE "Calls" ADD COLUMN IF NOT EXISTS "errorReason" VARCHAR(200)`,
+  },
+  {
+    table: 'Calls', column: 'qualityScore',
+    sql: `ALTER TABLE "Calls" ADD COLUMN IF NOT EXISTS "qualityScore" DOUBLE PRECISION`,
+  },
+  {
+    table: 'Calls', column: 'networkStats',
+    sql: `ALTER TABLE "Calls" ADD COLUMN IF NOT EXISTS "networkStats" JSONB NOT NULL DEFAULT '{}'::jsonb`,
+  },
+  {
+    table: 'Calls', column: 'postCallRating',
+    sql: `ALTER TABLE "Calls" ADD COLUMN IF NOT EXISTS "postCallRating" INTEGER`,
+  },
+  {
+    table: 'Calls', column: 'postCallFeedback',
+    sql: `ALTER TABLE "Calls" ADD COLUMN IF NOT EXISTS "postCallFeedback" TEXT`,
+  },
+  {
+    table: 'Calls', column: 'scheduledAt',
+    sql: `ALTER TABLE "Calls" ADD COLUMN IF NOT EXISTS "scheduledAt" TIMESTAMP WITH TIME ZONE`,
+  },
+  {
+    table: 'Calls', column: 'scheduledTitle',
+    sql: `ALTER TABLE "Calls" ADD COLUMN IF NOT EXISTS "scheduledTitle" VARCHAR(200)`,
   },
 ];
 

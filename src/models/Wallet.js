@@ -8,10 +8,12 @@ module.exports = (sequelize, DataTypes) => {
     currency: { type: DataTypes.STRING(10), defaultValue: 'KES' },
     isFrozen: { type: DataTypes.BOOLEAN, defaultValue: false, field: 'is_frozen' },
     metadata: { type: DataTypes.JSONB, defaultValue: {} },
-  }, { tableName: 'wallets', timestamps: true, underscored: true,
-      // FIX-500: physical table has literal camelCase createdAt/updatedAt
-      // (see raw CREATE TABLE in src/models/index.js).
-      createdAt: 'createdAt', updatedAt: 'updatedAt' });
+    // FIX-500-ROOT-CAUSE: options-level rename below didn't stop
+    // underscored:true from mapping to created_at/updated_at. Physical table
+    // has literal camelCase columns, so pin via field:.
+    createdAt: { type: DataTypes.DATE, field: 'createdAt' },
+    updatedAt: { type: DataTypes.DATE, field: 'updatedAt' },
+  }, { tableName: 'wallets', timestamps: true, underscored: true });
 
   Wallet.associate = function(models) {
     if (models.Users) Wallet.belongsTo(models.Users, { foreignKey: 'userId', as: 'user', constraints: false });

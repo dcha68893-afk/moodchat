@@ -230,27 +230,35 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.JSONB,
         defaultValue: {},
       },
+      // FIX-500-ROOT-CAUSE (/api/marketplace/products, /api/marketplace/wishlist,
+      // /api/marketplace/recommendations, seller/products, seller/analytics —
+      // every endpoint that touches timestamps): the previous fix pinned
+      // `createdAt`/`updatedAt` as *model options* (see below), but that only
+      // renames the JS-side attribute — it does NOT stop `underscored: true`
+      // from still deriving the column name for that attribute as
+      // `created_at`/`updated_at`. The options-level override and the
+      // underscored auto-mapping are two independent mechanisms; setting the
+      // former does not disable the latter. That's why "column Tool.created_at
+      // does not exist" kept happening even after that fix landed — Sequelize
+      // was still generating `created_at`/`updated_at` in every SELECT/ORDER BY.
+      // The physical `tools` table actually has camelCase `createdAt`/
+      // `updatedAt` columns, so the only way to pin the column name
+      // independent of `underscored` is an explicit `field:` on the attribute
+      // itself, which is what the two definitions below do.
+      createdAt: {
+        type: DataTypes.DATE,
+        field: 'createdAt',
+      },
+      updatedAt: {
+        type: DataTypes.DATE,
+        field: 'updatedAt',
+      },
     },
     {
       tableName: 'tools',
       modelName: 'Tool',
       timestamps: true,
       underscored: true,
-      // FIX-500 (/api/marketplace/products, /api/marketplace/wishlist): the
-      // physical `tools` table was created with literal camelCase
-      // `createdAt`/`updatedAt` columns (see
-      // 20260608000001-fix-tools-marketplace-schema.js), but underscored:true
-      // above makes Sequelize auto-map those two special timestamp columns to
-      // `created_at`/`updated_at` — which don't exist on this table. Every
-      // query that touches them (getProducts' `order: [['createdAt', ...]]`,
-      // getWishlist's `order: [['updatedAt', ...]]`, and even a plain
-      // findAll which always SELECTs the timestamp columns) failed with
-      // "column \"created_at\" does not exist". Pinning these two back to
-      // their real camelCase column names overrides just the timestamp
-      // mapping while leaving every other field's explicit `field:` mapping
-      // (seller_id, is_premium, etc.) untouched.
-      createdAt: 'createdAt',
-      updatedAt: 'updatedAt',
       freezeTableName: true,
       indexes: [
         { fields: ['seller_id'] },

@@ -16,10 +16,12 @@ module.exports = (sequelize, DataTypes) => {
     rejectedAt:      { type: DataTypes.DATE, field: 'rejected_at' },
     processedAt:     { type: DataTypes.DATE, field: 'processed_at' },
     metadata:        { type: DataTypes.JSONB, defaultValue: {} },
-  }, { tableName: 'refunds', timestamps: true, underscored: true,
-      // FIX-500: physical table has literal camelCase createdAt/updatedAt
-      // (see raw CREATE TABLE in src/models/index.js).
-      createdAt: 'createdAt', updatedAt: 'updatedAt' });
+    // FIX-500-ROOT-CAUSE: options-level rename below didn't stop
+    // underscored:true from mapping to created_at/updated_at. Physical table
+    // has literal camelCase columns, so pin via field:.
+    createdAt:       { type: DataTypes.DATE, field: 'createdAt' },
+    updatedAt:       { type: DataTypes.DATE, field: 'updatedAt' },
+  }, { tableName: 'refunds', timestamps: true, underscored: true });
 
   Refund.associate = function(models) {
     if (models.Order) Refund.belongsTo(models.Order, { foreignKey: 'orderId', as: 'order', constraints: false });

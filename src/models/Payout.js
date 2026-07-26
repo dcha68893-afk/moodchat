@@ -16,11 +16,13 @@ module.exports = (sequelize, DataTypes) => {
     disbursedBy: { type: DataTypes.INTEGER, field: 'disbursed_by' },
     notes:       { type: DataTypes.TEXT },
     metadata:    { type: DataTypes.JSONB, defaultValue: {} },
+    // FIX-500-ROOT-CAUSE: options-level createdAt/updatedAt override below
+    // only renamed the JS attribute, didn't stop underscored:true from still
+    // mapping it to created_at/updated_at. Physical table has literal
+    // camelCase columns, so pin via field: on the attribute itself.
+    createdAt:   { type: DataTypes.DATE, field: 'createdAt' },
+    updatedAt:   { type: DataTypes.DATE, field: 'updatedAt' },
   }, { tableName: 'payouts', timestamps: true, underscored: true,
-      // FIX-500: physical table has literal camelCase createdAt/updatedAt
-      // (see raw CREATE TABLE in src/models/index.js).
-      createdAt: 'createdAt',
-      updatedAt: 'updatedAt',
       indexes: [{ fields: ['seller_id'] }, { fields: ['status'] }] });
 
   Payout.associate = function(models) {

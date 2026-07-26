@@ -64,17 +64,24 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: true,
         field: 'seller_replied_at',
       },
+      // FIX-500-ROOT-CAUSE: options-level createdAt/updatedAt override below
+      // only renamed the JS attribute, it didn't stop underscored:true from
+      // still mapping it to created_at/updated_at. Physical table has literal
+      // camelCase columns, so pin via field: on the attribute itself.
+      createdAt: {
+        type: DataTypes.DATE,
+        field: 'createdAt',
+      },
+      updatedAt: {
+        type: DataTypes.DATE,
+        field: 'updatedAt',
+      },
     },
     {
       tableName: 'marketplace_reviews',
       modelName: 'Review',
       timestamps: true,
       underscored: true,
-      // FIX-500: physical table has literal camelCase createdAt/updatedAt
-      // (see raw CREATE TABLE in src/models/index.js); underscored:true would
-      // otherwise map these to created_at/updated_at, which don't exist.
-      createdAt: 'createdAt',
-      updatedAt: 'updatedAt',
       freezeTableName: true,
       indexes: [
         { fields: ['product_id'] },

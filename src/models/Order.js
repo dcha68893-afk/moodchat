@@ -89,23 +89,28 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.JSONB,
         defaultValue: {},
       },
+      // FIX-500-ROOT-CAUSE (getSellerAnalytics/getSellerOrders/getRecommendations):
+      // same class of bug as Tool.js — the options-level createdAt/updatedAt
+      // rename below only renames the JS attribute, it does not stop
+      // `underscored: true` from still deriving `created_at`/`updated_at` as
+      // the column name for that attribute. The physical `marketplace_orders`
+      // table has literal camelCase `createdAt`/`updatedAt` columns, so the
+      // column name has to be pinned via an explicit `field:` on the
+      // attribute itself.
+      createdAt: {
+        type: DataTypes.DATE,
+        field: 'createdAt',
+      },
+      updatedAt: {
+        type: DataTypes.DATE,
+        field: 'updatedAt',
+      },
     },
     {
       tableName: 'marketplace_orders',
       modelName: 'Order',
       timestamps: true,
       underscored: true,
-      // FIX-500 (getSellerAnalytics/getSellerOrders, same class of bug as
-      // Tool.js): the physical `marketplace_orders` table was created with
-      // literal camelCase "createdAt"/"updatedAt" columns (see the raw
-      // CREATE TABLE IF NOT EXISTS in src/models/index.js), but
-      // underscored:true auto-maps those two special timestamp attributes to
-      // created_at/updated_at, which don't exist — causing every query that
-      // touches them to fail with "column \"created_at\" does not exist".
-      // Pinning them back to their real camelCase names leaves every other
-      // field's explicit snake_case `field:` mapping untouched.
-      createdAt: 'createdAt',
-      updatedAt: 'updatedAt',
       freezeTableName: true,
       indexes: [
         { fields: ['buyer_id'] },

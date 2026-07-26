@@ -1155,8 +1155,27 @@ router.post('/', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
           messageId, chatId, timestamp: Date.now()
         }).catch(() => {});
 
-        // FIX-MSG-DELIVERY: schedule 10s delivery timeout per recipient
-        for (const rid of recipientIds) {
+        // FIX-MSG-DELIVERY-FALSE-TIMEOUT-ROOT-CAUSE: this used to schedule the
+        // fragile 10s timeout for EVERY recipient unconditionally, regardless of
+        // whether deliveryResults above already confirmed the socket emit reached
+        // a live, joined room (_delivered/_failed, computed a few lines up). That
+        // timeout is only cleared by a full client round trip — receiver's iframe
+        // must run handleRealtimePayload(), call ackMessageDelivered(), which
+        // posts an API_REQUEST to the parent shell, which fetches
+        // /messages/mark-delivered/batch — all inside 10 seconds. Any hop being
+        // slow (iframe still booting, parent shell busy, tab backgrounded/throttled
+        // by the browser) meant the timer fired and pushed a false
+        // 'message:delivery_failed' to the sender EVEN THOUGH the FORENSIC log
+        // two lines above already shows delivered=1/1 for that exact message.
+        // We already have transport-level proof of delivery here — don't demand a
+        // second, independent, time-boxed proof on top of it. Only arm the
+        // uncertain-delivery timer for recipients the socket layer could NOT
+        // confirm (the same set used for push notifications below).
+        const _unconfirmedRecipientIds = deliveryResults
+          .map((r, i) => ({ uid: recipientIds[i], delivered: r.status === 'fulfilled' && r.value === true }))
+          .filter(r => !r.delivered)
+          .map(r => r.uid);
+        for (const rid of _unconfirmedRecipientIds) {
           if (typeof wsService.scheduleMessageDeliveryTimeout === 'function') {
             wsService.scheduleMessageDeliveryTimeout(messageId, chatId, senderId);
           }

@@ -19,10 +19,12 @@ module.exports = (sequelize, DataTypes) => {
     rejectedAt:      { type: DataTypes.DATE, field: 'rejected_at' },
     submittedAt:     { type: DataTypes.DATE, defaultValue: DataTypes.NOW, field: 'submitted_at' },
     metadata:        { type: DataTypes.JSONB, defaultValue: {} },
+    // FIX-500-ROOT-CAUSE: options-level rename below didn't stop
+    // underscored:true from mapping this to created_at/updated_at. Physical
+    // table has literal camelCase columns, so pin via field:.
+    createdAt:       { type: DataTypes.DATE, field: 'createdAt' },
+    updatedAt:       { type: DataTypes.DATE, field: 'updatedAt' },
   }, { tableName: 'seller_profiles', timestamps: true, underscored: true,
-      // FIX-500: physical table has literal camelCase createdAt/updatedAt
-      // (see raw CREATE TABLE in src/models/index.js).
-      createdAt: 'createdAt', updatedAt: 'updatedAt',
       indexes: [{ fields: ['user_id'], unique: true }, { fields: ['kyc_status'] }] });
 
   SellerProfile.associate = function(models) {

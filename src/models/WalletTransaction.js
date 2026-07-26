@@ -12,10 +12,13 @@ module.exports = (sequelize, DataTypes) => {
     reference:    { type: DataTypes.STRING(255), allowNull: true },
     description:  { type: DataTypes.TEXT, allowNull: true },
     metadata:     { type: DataTypes.JSONB, defaultValue: {} },
-  }, { tableName: 'wallet_transactions', timestamps: true, underscored: true,
-      // FIX-500: physical table has literal camelCase createdAt/updatedAt
-      // (see raw CREATE TABLE in src/models/index.js).
-      createdAt: 'createdAt', updatedAt: 'updatedAt' });
+    // FIX-500-ROOT-CAUSE: the previous options-level createdAt/updatedAt
+    // override below only renamed the JS attribute — it didn't stop
+    // underscored:true from still mapping it to created_at/updated_at.
+    // Physical table has literal camelCase columns, so pin via field:.
+    createdAt:    { type: DataTypes.DATE, field: 'createdAt' },
+    updatedAt:    { type: DataTypes.DATE, field: 'updatedAt' },
+  }, { tableName: 'wallet_transactions', timestamps: true, underscored: true });
 
   WalletTransaction.associate = function(models) {
     if (models.Wallet) WalletTransaction.belongsTo(models.Wallet, { foreignKey: 'walletId', as: 'wallet', constraints: false });
