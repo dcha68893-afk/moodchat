@@ -505,6 +505,18 @@ class WebSocketService {
             // ── FIX-OFFLINE-QUEUE: Flush any queued messages on reconnect ─────
             this.flushOfflineMessages(userId).catch(() => {});
 
+            // ── MESSAGE LIFECYCLE REBUILD (messages-only scope, 2026-07-26) ───
+            // Purely additive: registers its own `msg:*` event namespace
+            // (msg:send / msg:delivered_ack / msg:read / msg:sync), which
+            // does not collide with any existing `message:*` event used by
+            // calls/groups/games. See src/sockets/messageLifecycleSocket.js
+            // for the full rationale.
+            try {
+                require('../sockets/messageLifecycleSocket').register(this, socket, userId);
+            } catch (_lifecycleErr) {
+                console.warn('[WSService] messageLifecycleSocket registration failed (non-fatal):', _lifecycleErr.message);
+            }
+
             // ── PHASE14 FIX: sync:missed_messages ────────────────────────────
             socket.removeAllListeners('sync:missed_messages').on('sync:missed_messages', async ({ chatIds, since } = {}) => {
                 try {

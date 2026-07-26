@@ -76,6 +76,29 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: true,
       },
       // ===== END ADDED COLUMNS =====
+      // ===== MESSAGE LIFECYCLE REBUILD (see migrations/2026999990013) =====
+      // clientMessageId: the sender's locally-generated ID, set BEFORE the
+      // message ever reaches the server. Enables idempotent resend — if a
+      // client retries after a dropped connection, the unique index on
+      // (senderId, clientMessageId) means the server returns the existing
+      // row instead of creating a duplicate.
+      clientMessageId: {
+        type: DataTypes.STRING(64),
+        allowNull: true,
+      },
+      // Explicit lifecycle state: 'sent' | 'delivered' | 'read' | 'failed'.
+      // ('pending' is a client-only, pre-server state and never stored here.)
+      status: {
+        type: DataTypes.STRING(20),
+        defaultValue: 'sent',
+        allowNull: false,
+      },
+      deliveryAttempts: {
+        type: DataTypes.INTEGER,
+        defaultValue: 0,
+        allowNull: false,
+      },
+      // ===== END LIFECYCLE REBUILD COLUMNS =====
       reactions: {
         type: DataTypes.JSONB,
         defaultValue: {},

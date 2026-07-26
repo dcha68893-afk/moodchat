@@ -184,6 +184,72 @@ _flog('✅ Messages routes initialized');
 // ============================================================================
 // GET /api/messages/unread-counts - Get unread counts for all user's chats
 // ============================================================================
+// =============================================================================
+// MESSAGE LIFECYCLE REBUILD (messages-only scope, added 2026-07-26)
+// -----------------------------------------------------------------------------
+// Purely additive REST fallback for the new msg:* socket pipeline
+// (src/sockets/messageLifecycleSocket.js). A client uses these when it has
+// no live socket connection (cold start, socket still reconnecting) — the
+// same idempotency (clientMessageId) and the same missed-message query used
+// by the socket path, so retrying via REST after a failed socket attempt
+// can never create a duplicate message.
+// =============================================================================
+const messageDeliveryService = require('../services/messageDeliveryService');
+
+router.post('/lifecycle/send', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
+  const senderId = req.user.id;
+  const { chatId, content, type, clientMessageId, replyToId } = req.body || {};
+
+  const { message, alreadyExisted } = await messageDeliveryService.sendMessage({
+    chatId, senderId, content, type, clientMessageId, replyToId,
+  });
+
+  // Best-effort real-time push to recipients — if this REST call is itself
+  // the retry after a socket failure, the recipients may already have it,
+  // but msg:new pushes are idempotent client-side (dedup by serverId).
+  if (!alreadyExisted) {
+    try {
+      const wsService = require('../services/webSocketService');
+      const sequelize = getSequelize();
+      const participants = await sequelize.query(
+        `SELECT DISTINCT "userId" FROM chat_participants WHERE "chatId" = :chatId AND "userId" != :senderId`,
+        { replacements: { chatId: parseInt(chatId, 10), senderId: parseInt(senderId, 10) }, type: sequelize.QueryTypes.SELECT }
+      ).catch(() => []);
+      for (const { userId: recipientId } of participants) {
+        wsService.sendToUser(recipientId, 'msg:new', {
+          serverId: message.id, chatId: message.chatId, senderId: message.senderId,
+          content: message.content, type: message.type, sender: message.sender || null,
+          replyToId: message.replyToId || null, createdAt: message.createdAt,
+          sentAt: message.sentAt, status: 'sent',
+        }).catch(() => {});
+      }
+    } catch (_) { /* non-fatal, message is durably saved regardless */ }
+  }
+
+  res.json({
+    success: true,
+    clientMessageId,
+    serverId: message.id,
+    chatId: message.chatId,
+    status: message.status || 'sent',
+    sentAt: message.sentAt || message.createdAt,
+    alreadyExisted: !!alreadyExisted,
+  });
+}));
+
+router.get('/lifecycle/sync/:chatId', apiRateLimiter, asyncHandler(async (req, res) => {
+  const userId = req.user.id;
+  const { chatId } = req.params;
+  const { sinceId, sinceTimestamp } = req.query;
+
+  const messages = await messageDeliveryService.getMissedMessages(userId, chatId, {
+    sinceId: sinceId || null,
+    sinceTimestamp: sinceTimestamp || null,
+  });
+
+  res.json({ success: true, chatId, messages });
+}));
+
 router.get('/unread-counts', apiRateLimiter, asyncHandler(async (req, res) => {
   try {
     const userId = req.user.id;

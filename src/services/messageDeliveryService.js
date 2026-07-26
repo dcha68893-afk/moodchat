@@ -1,0 +1,188 @@
+// =============================================================================
+// messageDeliveryService.js
+// -----------------------------------------------------------------------------
+// MESSAGE LIFECYCLE REBUILD (messages-only scope, added 2026-07-26).
+//
+// This is a NEW, additive module — it does not remove or replace
+// messageService.js, webSocketService.js's existing handlers, or anything
+// calls/groups/games rely on. It exists purely to give the 1:1 message
+// pipeline exactly one canonical, idempotent path for:
+//
+//   create (idempotent on clientMessageId) -> SENT
+//   -> markDelivered                        -> DELIVERED
+//   -> markRead                             -> READ
+//   -> getMissedMessages                    (reconnect catch-up / dead-letter fix)
+//
+// WHY THIS EXISTS
+// ----------------
+// The previous pipeline had two structural gaps that explain "sometimes the
+// message just doesn't show up":
+//
+//  1. No idempotency key. A client that resent a message after a dropped
+//     connection (because it never got a server ACK) had no way to avoid
+//     creating a duplicate row — so clients avoided aggressive retry, which
+//     means a message that silently failed to send just... didn't send.
+//     `clientMessageId` fixes this: same ID sent twice always resolves to
+//     the same row.
+//
+//  2. The reconnect flow (`sync:missed_messages`, already implemented in
+//     webSocketService.js) sends its results back as
+//     `sync:missed_messages_result` — but nothing in the frontend was
+//     listening for that event. Messages the server correctly held for an
+//     offline recipient were fetched on reconnect and then silently
+//     discarded client-side. This is fixed on the frontend side of this
+//     change (MessageLifecycleClient.js), and `getMissedMessages` below is
+//     the same query, exposed as a plain function so both the socket layer
+//     and a REST fallback route can use it.
+// =============================================================================
+
+const { ValidationError, ServerError } = require('../utils/errors');
+
+function getSequelize() {
+  const db = require('../models');
+  if (!db || !db.sequelize) throw new ServerError('Database not available');
+  return db.sequelize;
+}
+
+class MessageDeliveryService {
+  /**
+   * Create a message idempotently. If clientMessageId was already used by
+   * this sender, returns the existing row instead of creating a new one —
+   * this is what makes client-side retry/resend safe.
+   */
+  async sendMessage({ chatId, senderId, content, type = 'text', clientMessageId, replyToId = null }) {
+    const sequelize = getSequelize();
+
+    if (!chatId || !senderId) throw new ValidationError('chatId and senderId are required');
+    if (!clientMessageId) throw new ValidationError('clientMessageId is required for idempotent send');
+    const sanitizedContent = content ? String(content).trim().substring(0, 5000) : '';
+    if (type === 'text' && !sanitizedContent) throw new ValidationError('Content cannot be empty for text messages');
+
+    const chatIdInt = parseInt(chatId, 10);
+    const senderIdInt = parseInt(senderId, 10);
+
+    // Idempotency check FIRST — if this exact (sender, clientMessageId) pair
+    // already produced a message, return it rather than inserting again.
+    const [existing] = await sequelize.query(
+      `SELECT * FROM "Messages" WHERE "senderId" = :senderId AND "clientMessageId" = :clientMessageId LIMIT 1`,
+      { replacements: { senderId: senderIdInt, clientMessageId }, type: sequelize.QueryTypes.SELECT }
+    ).catch(() => [null]);
+
+    if (existing) {
+      return { message: existing, alreadyExisted: true };
+    }
+
+    // Confirm sender is actually a participant (same guard messageService.js uses).
+    const [participant] = await sequelize.query(
+      `SELECT 1 FROM chat_participants WHERE "chatId" = :chatId AND "userId" = :senderId LIMIT 1`,
+      { replacements: { chatId: chatIdInt, senderId: senderIdInt }, type: sequelize.QueryTypes.SELECT }
+    ).catch(() => [null]);
+    if (!participant) throw new ValidationError('Sender is not a participant in this chat');
+
+    const [rows] = await sequelize.query(
+      `INSERT INTO "Messages"
+         ("chatId","senderId",content,type,reactions,metadata,"isEdited","isDeleted","replyToId",
+          "clientMessageId","status","deliveryAttempts","sentAt","deliveredAt","createdAt","updatedAt")
+       VALUES (:chatId,:senderId,:content,:type,'{}','{}',false,false,:replyToId,
+               :clientMessageId,'sent',0,NOW(),NULL,NOW(),NOW())
+       RETURNING *`,
+      {
+        replacements: {
+          chatId: chatIdInt, senderId: senderIdInt, content: sanitizedContent, type,
+          replyToId: replyToId || null, clientMessageId,
+        },
+        type: sequelize.QueryTypes.INSERT,
+      }
+    );
+
+    if (!rows || !rows[0] || !rows[0].id) {
+      throw new ServerError('Failed to create message - database returned invalid data');
+    }
+
+    const message = rows[0];
+
+    await sequelize.query(
+      `UPDATE chats SET "updatedAt" = NOW(), "lastMessageId" = :mid, "lastMessageAt" = NOW() WHERE id = :chatId`,
+      { replacements: { mid: message.id, chatId: chatIdInt } }
+    ).catch(() => {});
+
+    const [sender] = await sequelize.query(
+      `SELECT id, username, avatar, "firstName", "lastName" FROM "Users" WHERE id = :senderId`,
+      { replacements: { senderId: senderIdInt }, type: sequelize.QueryTypes.SELECT }
+    ).catch(() => [null]);
+    message.sender = sender || null;
+
+    return { message, alreadyExisted: false };
+  }
+
+  /** Recipient's client confirms it actually stored the message locally. */
+  async markDelivered(messageId, userId) {
+    const sequelize = getSequelize();
+    await sequelize.query(
+      `UPDATE "Messages" SET "deliveredAt" = NOW(), status = CASE WHEN status = 'sent' THEN 'delivered' ELSE status END
+       WHERE id = :messageId AND "deliveredAt" IS NULL`,
+      { replacements: { messageId } }
+    );
+    await sequelize.query(
+      `INSERT INTO message_delivery_logs ("messageId","userId","chatId","event","createdAt")
+       SELECT :messageId, :userId, "chatId", 'delivered', NOW() FROM "Messages" WHERE id = :messageId
+       ON CONFLICT ("messageId","userId","event") DO NOTHING`,
+      { replacements: { messageId, userId } }
+    ).catch(() => {});
+  }
+
+  /** Recipient opened the chat / read the message. */
+  async markRead(messageIds, userId) {
+    if (!Array.isArray(messageIds) || messageIds.length === 0) return;
+    const sequelize = getSequelize();
+    await sequelize.query(
+      `UPDATE "Messages" SET "isRead" = true, "readAt" = NOW(), status = 'read'
+       WHERE id = ANY(:messageIds::int[])`,
+      { replacements: { messageIds: messageIds.map(Number) } }
+    );
+  }
+
+  /**
+   * Reconnect / cold-start catch-up: every message in `chatId` created after
+   * `sinceId` (preferred) or `sinceTimestamp`, so a client that missed a
+   * live socket push while offline/reconnecting always has a second,
+   * server-authoritative way to get it. This is the query that plugs the
+   * "sync:missed_messages_result had no listener" gap on the frontend.
+   */
+  async getMissedMessages(userId, chatId, { sinceId = null, sinceTimestamp = null, limit = 100 } = {}) {
+    const sequelize = getSequelize();
+    const chatIdInt = parseInt(chatId, 10);
+    const userIdInt = parseInt(userId, 10);
+
+    const [participant] = await sequelize.query(
+      `SELECT 1 FROM chat_participants WHERE "chatId" = :chatId AND "userId" = :userId LIMIT 1`,
+      { replacements: { chatId: chatIdInt, userId: userIdInt }, type: sequelize.QueryTypes.SELECT }
+    ).catch(() => [null]);
+    if (!participant) throw new ValidationError('User is not a participant in this chat');
+
+    const conditions = [`m."chatId" = :chatId`, `m."isDeleted" = false`];
+    const replacements = { chatId: chatIdInt, limit: Math.min(limit, 200) };
+
+    if (sinceId) {
+      conditions.push(`m.id > :sinceId`);
+      replacements.sinceId = parseInt(sinceId, 10);
+    } else if (sinceTimestamp) {
+      conditions.push(`m."createdAt" > :sinceTimestamp`);
+      replacements.sinceTimestamp = new Date(sinceTimestamp);
+    }
+
+    const messages = await sequelize.query(
+      `SELECT m.*, u.username AS "senderUsername", u.avatar AS "senderAvatar"
+       FROM "Messages" m
+       LEFT JOIN "Users" u ON u.id = m."senderId"
+       WHERE ${conditions.join(' AND ')}
+       ORDER BY m.id ASC
+       LIMIT :limit`,
+      { replacements, type: sequelize.QueryTypes.SELECT }
+    ).catch(() => []);
+
+    return messages || [];
+  }
+}
+
+module.exports = new MessageDeliveryService();
