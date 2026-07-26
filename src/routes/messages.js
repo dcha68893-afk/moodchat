@@ -519,6 +519,19 @@ router.post('/mark-delivered/batch', apiRateLimiter, asyncHandler(async (req, re
             ? wsService.sendToUser(senderId, 'message:delivered', { messageIds: safeIds, chatId, deliveredBy: userId, deliveredAt: new Date().toISOString() })
             : io.to(`user:${senderId}`).emit('message:delivered', { messageIds: safeIds, chatId, deliveredBy: userId });
         }
+
+        // FIX-MSG-DELIVERY-FALSE-TIMEOUT: this REST batch endpoint is the ack path the
+        // frontend actually uses (see ackMessageDelivered in messages-core.ui-bridge.js),
+        // but scheduleMessageDeliveryTimeout()'s 10s timer was only ever cleared by the
+        // separate socket-level 'message:delivery_ack' event, which nothing reliably emits
+        // anymore. That meant the timeout fired for essentially every real 1:1 message,
+        // even ones that were delivered instantly, producing a false 'undelivered after 10s'
+        // warning and a spurious 'message:delivery_failed' push to the sender. Clear it here too.
+        if (typeof wsService.clearMessageDeliveryTimeout === 'function') {
+          for (const id of msgRows.map(r => r.id)) {
+            wsService.clearMessageDeliveryTimeout(id);
+          }
+        }
       }
     } catch (_e) { /* non-fatal */ }
 
