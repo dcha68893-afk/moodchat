@@ -185,10 +185,17 @@ class CallService {
     });
     if (activeCall) {
       const callAge = (Date.now() - new Date(activeCall.createdAt).getTime()) / 1000;
-      // Force-clean any call older than CALL_TIMEOUT_SECONDS regardless of status
-      if (callAge >= CALL_TIMEOUT_SECONDS) {
-        const wasAnswered = activeCall.answeredBy && activeCall.answeredBy.length > 0;
-        await activeCall.update({ status: wasAnswered ? 'completed' : 'missed', endedAt: new Date() });
+      const wasAnswered = activeCall.answeredBy && activeCall.answeredBy.length > 0;
+      // FIX-NO-AUTO-END-ANSWERED-CALL-ON-NEW-CALL: this used to force-end ANY
+      // call older than CALL_TIMEOUT_SECONDS "regardless of status" the
+      // moment someone else tried to call one of its participants — which
+      // meant a perfectly healthy, answered call running longer than 3
+      // minutes got torn down mid-conversation by an unrelated incoming call
+      // attempt. Age alone doesn't make a call stale; only "never answered
+      // and still sitting there" does. A call that was actually answered
+      // must only end when caller/receiver hang up, no matter how old it is.
+      if (callAge >= CALL_TIMEOUT_SECONDS && !wasAnswered) {
+        await activeCall.update({ status: 'missed', endedAt: new Date() });
         await emitToAll(activeCall.participants || [], 'call_force_ended', {
           callId: activeCall.id, reason: 'timeout_on_new_call', timestamp: new Date()
         });
@@ -773,18 +780,30 @@ class CallService {
   }
 
   // ── _forceCleanupStaleCallsForUsers ─────────────────────────────────────────
+  // FIX-NO-AUTO-END-ANSWERED-CALL: this used to match status 'in-progress'
+  // too and force-end it purely on createdAt age, with no regard for whether
+  // the call was actually answered and is still ongoing. That's exactly the
+  // kind of write-race window that can end a genuinely live call: if
+  // answerCall() has flipped status to 'in-progress' but a concurrent read
+  // here still sees the pre-answer row (or simply runs a beat before that
+  // write lands), an active call gets torn down just because someone else
+  // tried to call one of its participants. A connected call must only ever
+  // end because the caller/receiver hung up. We now exclude 'in-progress'
+  // from the query entirely and, as a second layer of defense, re-check
+  // answeredBy on anything we do find before touching it.
   async _forceCleanupStaleCallsForUsers(userIds) {
     try {
       const stale = await Call.findAll({
         where: {
           [Op.or]: userIds.map(id => ({ participants: { [Op.contains]: [id] } })),
-          status:    { [Op.in]: ['ringing', 'initiated', 'in-progress'] },
+          status:    { [Op.in]: ['ringing', 'initiated'] },
           createdAt: { [Op.lt]: new Date(Date.now() - CALL_TIMEOUT_SECONDS * 1000) },
         },
       });
       for (const call of stale) {
         const wasAnswered = call.answeredBy && call.answeredBy.length > 0;
-        await call.update({ status: wasAnswered ? 'completed' : 'missed', endedAt: new Date() });
+        if (wasAnswered) continue; // never force-end a call someone actually answered
+        await call.update({ status: 'missed', endedAt: new Date() });
         emitToAll(call.participants, 'call_force_ended', {
           callId:    call.id,
           reason:    'stale_cleanup',
