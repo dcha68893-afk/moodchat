@@ -3,11 +3,11 @@ version: '3.8'
 services:
   postgres:
     image: postgres:15-alpine
-    container_name: moodchat-postgres
+    container_name: nexopa-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-moodchat}
-      POSTGRES_USER: ${POSTGRES_USER:-moodchat_user}
+      POSTGRES_DB: ${POSTGRES_DB:-nexopa}
+      POSTGRES_USER: ${POSTGRES_USER:-nexopa_user}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_this_secure_password}
     volumes:
       - postgres_data:/var/lib/postgresql/data
@@ -15,16 +15,16 @@ services:
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     networks:
-      - moodchat-network
+      - nexopa-network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-moodchat_user}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nexopa_user}"]
       interval: 10s
       timeout: 5s
       retries: 5
 
   redis:
     image: redis:7-alpine
-    container_name: moodchat-redis
+    container_name: nexopa-redis
     restart: unless-stopped
     command: redis-server --requirepass ${REDIS_PASSWORD:-change_this_secure_password}
     volumes:
@@ -32,7 +32,7 @@ services:
     ports:
       - "${REDIS_PORT:-6379}:6379"
     networks:
-      - moodchat-network
+      - nexopa-network
     healthcheck:
       test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
       interval: 10s
@@ -41,7 +41,7 @@ services:
 
   app:
     build: .
-    container_name: moodchat-app
+    container_name: nexopa-app
     restart: unless-stopped
     depends_on:
       postgres:
@@ -80,7 +80,7 @@ services:
       SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_USER: ${SMTP_USER:-}
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
-      EMAIL_FROM: ${EMAIL_FROM:-noreply@moodchat.com}
+      EMAIL_FROM: ${EMAIL_FROM:-noreply@nexopa.com}
     ports:
       - "${APP_PORT:-3000}:3000"
     volumes:
@@ -88,7 +88,7 @@ services:
       - ./logs:/app/logs
       - ./config:/app/config
     networks:
-      - moodchat-network
+      - nexopa-network
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3000/api/v1/health"]
       interval: 30s
@@ -97,12 +97,12 @@ services:
       start_period: 40s
 
 networks:
-  moodchat-network:
+  nexopa-network:
     driver: bridge
-    name: moodchat-network
+    name: nexopa-network
 
 volumes:
   postgres_data:
-    name: moodchat-postgres-data
+    name: nexopa-postgres-data
   redis_data:
-    name: moodchat-redis-data
+    name: nexopa-redis-data

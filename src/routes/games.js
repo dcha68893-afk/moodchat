@@ -1,5 +1,5 @@
 // src/routes/games.js
-// Games API — P1 fixes per MoodChat Games Audit Report
+// Games API — P1 fixes per Nexopa Games Audit Report
 // Covers: server-side progress persistence, real leaderboard, challenge-a-friend,
 //         share score/achievement to chat, basic anti-cheat
 const express = require('express');

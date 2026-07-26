@@ -41,9 +41,9 @@ router.post('/direct-upload', upload.single('file'), async (req, res) => {
     }
 
     const mimetype = req.file.mimetype || '';
-    const folder = mimetype.startsWith('video/') ? 'moodchat/status/videos'
-                 : mimetype.startsWith('audio/') ? 'moodchat/status/audio'
-                 : 'moodchat/status/images';
+    const folder = mimetype.startsWith('video/') ? 'nexopa/status/videos'
+                 : mimetype.startsWith('audio/') ? 'nexopa/status/audio'
+                 : 'nexopa/status/images';
 
     const result = await cloudinaryService.uploadToCloudinary(req.file.buffer, { folder });
 

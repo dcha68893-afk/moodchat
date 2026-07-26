@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# MoodChat Backend Deployment Script
+# Nexopa Backend Deployment Script
 # Deploys the latest version of the application
 
 set -e
@@ -13,14 +13,14 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Configuration
-APP_NAME="moodchat-backend"
-APP_DIR="/opt/moodchat/backend"
-LOG_DIR="/var/log/moodchat"
-BACKUP_DIR="/opt/moodchat/backups"
+APP_NAME="nexopa-backend"
+APP_DIR="/opt/nexopa/backend"
+LOG_DIR="/var/log/nexopa"
+BACKUP_DIR="/opt/nexopa/backups"
 ENV_FILE="$APP_DIR/.env"
-PM2_APP_NAME="moodchat-backend"
+PM2_APP_NAME="nexopa-backend"
 BRANCH="main"
-GIT_REPO="https://github.com/your-org/moodchat-backend.git"
+GIT_REPO="https://github.com/your-org/nexopa-backend.git"
 
 # Logging functions
 log_info() {

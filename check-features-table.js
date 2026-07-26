@@ -4,8 +4,8 @@ async function checkFeaturesTable() {
   const client = new Client({
     host: 'dpg-d7k8hrl7vvec73969alg-a.virginia-postgres.render.com',
     port: 5432,
-    database: 'moodchat',
-    user: 'moodchat_user',
+    database: 'nexopa',
+    user: 'nexopa_user',
     password: '5CzyEV3lQZNgKruwJHOzA7bw8q6T72xD',
     ssl: { rejectUnauthorized: false }
   });

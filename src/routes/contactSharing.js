@@ -8,7 +8,7 @@
  * with { type: 'contact', clientMetadata: { contact: {...} } }.
  *
  * What was MISSING before this file:
- *   1. A search endpoint so the sender can find MoodChat users to share
+ *   1. A search endpoint so the sender can find Nexopa users to share
  *      (rather than hand-building the vCard payload themselves).
  *   2. A contact-card hydration endpoint so a received contact card can be
  *      rendered with live avatar/status even if the underlying user changed
@@ -43,7 +43,7 @@ function buildContactCard(user) {
 }
 
 // ============================================================================
-// GET /api/contact-sharing/search?q=:query — Search MoodChat users to share
+// GET /api/contact-sharing/search?q=:query — Search Nexopa users to share
 // Returns up to 20 results matching username/displayName/phone prefix
 // ============================================================================
 router.get('/search', apiRateLimiter, asyncHandler(async (req, res) => {

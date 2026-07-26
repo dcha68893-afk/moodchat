@@ -1120,7 +1120,7 @@ router.get('/:groupId/invite-link/qr', async (req, res) => {
         if (!group) return res.status(404).json({ success: false, message: 'Group not found' });
         if (!group.inviteLink) return res.status(404).json({ success: false, message: 'No invite link generated. Create one first.' });
         // Return the link URL — frontend generates QR code client-side
-        const baseUrl = process.env.FRONTEND_URL || 'https://moodchat.app';
+        const baseUrl = process.env.FRONTEND_URL || 'https://nexopa.app';
         const inviteUrl = `${baseUrl}/join?token=${group.inviteLink}`;
         return res.json({ success: true, data: { inviteUrl, inviteToken: group.inviteLink, expiresAt: group.inviteLinkExpires } });
     } catch (e) {
@@ -1234,7 +1234,7 @@ router.post('/:groupId/invite-link/generate', async (req, res) => {
         group.inviteLinkMaxUses = maxUses;
         group.inviteLinkUseCount = 0;
         await group.save();
-        const baseUrl = process.env.FRONTEND_URL || 'https://moodchat.app';
+        const baseUrl = process.env.FRONTEND_URL || 'https://nexopa.app';
         return res.json({
             success: true, message: 'Invite link generated',
             data: { inviteLink: group.inviteLink, inviteUrl: `${baseUrl}/join?token=${group.inviteLink}`, expiresAt: group.inviteLinkExpires, maxUses, useCount: 0 },

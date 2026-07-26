@@ -22,7 +22,7 @@ function _getTransporter() {
     return _transporter;
 }
 
-const FROM = process.env.EMAIL_FROM || 'MoodChat <noreply@moodchat.com>';
+const FROM = process.env.EMAIL_FROM || 'Nexopa <noreply@nexopa.com>';
 
 // ── HTML template wrapper ────────────────────────────────────────────────────
 function _wrap(title, body) {
@@ -38,9 +38,9 @@ function _wrap(title, body) {
 .blue{background:#dbeafe;color:#1e40af}.red{background:#fee2e2;color:#991b1b}
 </style></head><body>
 <div class="wrap">
-<div class="hdr">MoodChat Marketplace</div>
+<div class="hdr">Nexopa Marketplace</div>
 <div class="body"><h2 style="margin-top:0;color:#111">${title}</h2>${body}</div>
-<div class="ft">MoodChat · Nairobi, Kenya · You received this because you have an account with us.</div>
+<div class="ft">Nexopa · Nairobi, Kenya · You received this because you have an account with us.</div>
 </div></body></html>`;
 }
 
@@ -79,7 +79,7 @@ async function orderConfirmed(to, { orderId, items = [], total, currency = 'KES'
             </tr>
         </table>
         ${addr ? `<p><strong>Delivery to:</strong> ${addr}</p>` : ''}
-        <p>We'll notify you when your order ships. Thank you for shopping on MoodChat!</p>`;
+        <p>We'll notify you when your order ships. Thank you for shopping on Nexopa!</p>`;
     return send(to, `Order Confirmed — #${String(orderId).slice(-9).toUpperCase()}`, _wrap('Order Confirmed ✅', body));
 }
 
@@ -115,7 +115,7 @@ async function productApproved(to, { productTitle }) {
     const body = `
         <p>Your product listing has been reviewed and approved! 🎉</p>
         <p><strong>Product:</strong> ${productTitle || 'Your listing'}</p>
-        <p>It is now live on MoodChat Marketplace and visible to buyers.</p>`;
+        <p>It is now live on Nexopa Marketplace and visible to buyers.</p>`;
     return send(to, `Product Approved — ${productTitle || 'Your listing'}`, _wrap('Product Approved ✅', body));
 }
 
@@ -156,7 +156,7 @@ async function kycRejected(to, { reason }) {
 // ── Security alert emails (P1/P2 Forensic Audit) ─────────────────────────────
 async function loginAttemptsAlert(to, { identifier, ip, attempts }) {
     const body = `
-        <p>We detected <strong>${attempts}</strong> failed login attempts on your MoodChat account.</p>
+        <p>We detected <strong>${attempts}</strong> failed login attempts on your Nexopa account.</p>
         <p><strong>Account:</strong> ${identifier}</p>
         <p><strong>IP Address:</strong> ${ip}</p>
         <p>If this wasn't you, we recommend changing your password as soon as possible.
@@ -168,41 +168,41 @@ async function loginAttemptsAlert(to, { identifier, ip, attempts }) {
 async function passwordResetEmail(to, { resetToken, resetUrl }) {
     const link = resetUrl || `${process.env.FRONTEND_URL || ''}/reset-password.html?token=${encodeURIComponent(resetToken)}`;
     const body = `
-        <p>We received a request to reset your MoodChat account password.</p>
+        <p>We received a request to reset your Nexopa account password.</p>
         <p><a class="btn" href="${link}">Reset Password</a></p>
         <p>This link will expire in 1 hour. If you did not request this, you can safely ignore this email —
         your password will remain unchanged.</p>`;
-    return send(to, 'Reset Your MoodChat Password', _wrap('Password Reset Request 🔑', body));
+    return send(to, 'Reset Your Nexopa Password', _wrap('Password Reset Request 🔑', body));
 }
 
 async function verificationEmail(to, { verificationToken, verifyUrl }) {
     const link = verifyUrl || `${process.env.FRONTEND_URL || ''}/verify-email.html?token=${encodeURIComponent(verificationToken)}`;
     const body = `
-        <p>Welcome to MoodChat! Please verify your email address to activate your account.</p>
+        <p>Welcome to Nexopa! Please verify your email address to activate your account.</p>
         <p><a class="btn" href="${link}">Verify Email</a></p>
-        <p>This link will expire in 24 hours. If you didn't create a MoodChat account, you can ignore this email.</p>`;
-    return send(to, 'Verify Your MoodChat Email', _wrap('Verify Your Email ✉️', body));
+        <p>This link will expire in 24 hours. If you didn't create a Nexopa account, you can ignore this email.</p>`;
+    return send(to, 'Verify Your Nexopa Email', _wrap('Verify Your Email ✉️', body));
 }
 
 async function passwordChangedAlert(to) {
     const body = `
-        <p>Your MoodChat account password was just changed.</p>
+        <p>Your Nexopa account password was just changed.</p>
         <p>If you made this change, no further action is needed.</p>
         <p><strong>If you did not change your password</strong>, please contact support immediately —
         your account may be compromised.</p>`;
-    return send(to, 'Your MoodChat Password Was Changed', _wrap('Password Changed 🔒', body));
+    return send(to, 'Your Nexopa Password Was Changed', _wrap('Password Changed 🔒', body));
 }
 
 async function newDeviceLoginAlert(to, { device, location, ip, time }) {
     const body = `
-        <p>We noticed a new login to your MoodChat account.</p>
+        <p>We noticed a new login to your Nexopa account.</p>
         <p><strong>Device:</strong> ${device || 'Unknown device'}</p>
         <p><strong>Location:</strong> ${location || 'Unknown'}</p>
         <p><strong>IP Address:</strong> ${ip || 'Unknown'}</p>
         <p><strong>Time:</strong> ${time || new Date().toISOString()}</p>
         <p>If this was you, no action is needed. If you don't recognize this activity,
         please change your password immediately and review your active sessions.</p>`;
-    return send(to, 'New Login to Your MoodChat Account', _wrap('New Device Login 📱', body));
+    return send(to, 'New Login to Your Nexopa Account', _wrap('New Device Login 📱', body));
 }
 
 module.exports = {

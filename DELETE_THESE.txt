@@ -3,6 +3,6 @@ The following .bak files must be deleted from your repo:
   src/services/callService.js.bak
   src/routes/userStatus.js.bak
 
-Run in your moodchat repo root:
+Run in your nexopa repo root:
   git rm src/config/jwt.js.bak src/services/callService.js.bak src/routes/userStatus.js.bak
   git commit -m "chore: remove stale .bak files"

@@ -1,4 +1,4 @@
-# Message Lifecycle Rebuild — Backend (moodchat)
+# Message Lifecycle Rebuild — Backend (nexopa)
 
 Scope agreed with you: **messages only**. Calls/groups/games and the shared
 iframe relay system are untouched.

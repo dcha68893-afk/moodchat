@@ -135,7 +135,7 @@ app.get('/health', async (req, res) => {
     const healthCheck = {
       status: 'healthy',
       timestamp: new Date().toISOString(),
-      service: 'MoodChat API',
+      service: 'Nexopa API',
       nodeEnv: config.nodeEnv,
       uptime: process.uptime(),
     };
@@ -157,7 +157,7 @@ app.get('/health', async (req, res) => {
     res.status(503).json({
       status: 'unhealthy',
       timestamp: new Date().toISOString(),
-      service: 'MoodChat API',
+      service: 'Nexopa API',
       error: error.message
     });
   }

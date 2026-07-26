@@ -1,8 +1,8 @@
 {
   "development": {
-    "username": "moodchat_user",
+    "username": "nexopa_user",
     "password": "5CzyEV3lQZNgKruwJHOzA7bw8q6T72xD",
-    "database": "moodchat",
+    "database": "nexopa",
     "host": "dpg-d7k8hrl7vvec73969alg-a.virginia-postgres.render.com",
     "dialect": "postgres",
     "port": 5432,
@@ -15,18 +15,18 @@
     }
   },
   "test": {
-    "username": "moodchat_user",
+    "username": "nexopa_user",
     "password": "5CzyEV3lQZNgKruwJHOzA7bw8q6T72xD",
-    "database": "moodchat",
+    "database": "nexopa",
     "host": "dpg-d7k8hrl7vvec73969alg-a.virginia-postgres.render.com",
     "dialect": "postgres",
     "port": 5432,
     "logging": false
   },
   "production": {
-    "username": "moodchat_user",
+    "username": "nexopa_user",
     "password": "5CzyEV3lQZNgKruwJHOzA7bw8q6T72xD",
-    "database": "moodchat",
+    "database": "nexopa",
     "host": "dpg-d7k8hrl7vvec73969alg-a.virginia-postgres.render.com",
     "dialect": "postgres",
     "port": 5432,

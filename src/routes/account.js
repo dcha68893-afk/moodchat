@@ -143,7 +143,7 @@ router.get('/export', dataExportLimiter, asyncHandler(async (req, res) => {
 
     await writeAuditLog(userId, 'data_export', {}, req);
 
-    res.setHeader('Content-Disposition', `attachment; filename="moodchat-data-export-${userId}.json"`);
+    res.setHeader('Content-Disposition', `attachment; filename="nexopa-data-export-${userId}.json"`);
     res.setHeader('Content-Type', 'application/json');
     return res.status(200).json({ success: true, data: exportData });
 }));
@@ -228,7 +228,7 @@ router.delete('/', asyncHandler(async (req, res) => {
     }
 
     const originalEmail = user.email;
-    const anonymizedEmail = `deleted_${user.id}@deleted.moodchat.local`;
+    const anonymizedEmail = `deleted_${user.id}@deleted.nexopa.local`;
 
     // Anonymise PII and deactivate the account
     try {
@@ -319,8 +319,8 @@ router.delete('/', asyncHandler(async (req, res) => {
     if (originalEmail) {
         emailService.send(
             originalEmail,
-            'Your MoodChat Account Has Been Deleted',
-            `<p>Your MoodChat account and personal data have been deactivated and anonymised as requested.</p>
+            'Your Nexopa Account Has Been Deleted',
+            `<p>Your Nexopa account and personal data have been deactivated and anonymised as requested.</p>
              <p>Remaining data will be permanently purged within 30 days. If you did not request this, contact support immediately.</p>`
         ).catch(e => console.warn('[Account Delete] Failed to send confirmation email:', e.message));
     }

@@ -1,6 +1,6 @@
-# MoodChat Backend
+# Nexopa Backend
 
-A production-ready backend service for MoodChat application, providing RESTful APIs for real-time mood tracking and social interaction features.
+A production-ready backend service for Nexopa application, providing RESTful APIs for real-time mood tracking and social interaction features.
 
 ## Features
 
@@ -38,4 +38,4 @@ A production-ready backend service for MoodChat application, providing RESTful A
 1. **Clone the repository**
    ```bash
    git clone <repository-url>
-   cd moodchat-backend
+   cd nexopa-backend

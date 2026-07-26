@@ -106,7 +106,7 @@ router.post('/upload', upload.single('file'), async (req, res) => {
         const type = MIME_TYPE_MAP[req.file.mimetype] || 'file';
 
         if (CLOUDINARY_ENABLED) {
-            const folder = `moodchat/files/${type === 'file' ? 'other' : type}s`;
+            const folder = `nexopa/files/${type === 'file' ? 'other' : type}s`;
             const result = await cloudinaryService.uploadToCloudinary(req.file.buffer, { folder });
             if (!result) {
                 return res.status(502).json({ success: false, message: 'Upload to Cloudinary failed' });
@@ -170,7 +170,7 @@ router.post('/upload-multiple', upload.array('files', 10), async (req, res) => {
         if (CLOUDINARY_ENABLED) {
             const files = await Promise.all(req.files.map(async f => {
                 const type   = MIME_TYPE_MAP[f.mimetype] || 'file';
-                const folder = `moodchat/files/${type === 'file' ? 'other' : type}s`;
+                const folder = `nexopa/files/${type === 'file' ? 'other' : type}s`;
                 const result = await cloudinaryService.uploadToCloudinary(f.buffer, { folder });
                 if (!result) return null;
                 return { url: result.url, publicId: result.publicId, filename: result.publicId,

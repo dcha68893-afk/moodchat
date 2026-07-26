@@ -14,10 +14,10 @@ RUN if [ -f package-lock.json ]; then \
 COPY . .
 
 RUN addgroup -g 1001 -S nodejs && \
-    adduser -S moodchat -u 1001
+    adduser -S nexopa -u 1001
 
-RUN chown -R moodchat:nodejs /usr/src/app
-USER moodchat
+RUN chown -R nexopa:nodejs /usr/src/app
+USER nexopa
 
 ARG PORT=3000
 EXPOSE ${PORT}

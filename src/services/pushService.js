@@ -64,7 +64,7 @@ async function sendToToken(token, notification, data = {}) {
     const msg = {
       token,
       notification: {
-        title: String(notification.title || 'MoodChat').slice(0, 50),
+        title: String(notification.title || 'Nexopa').slice(0, 50),
         body:  String(notification.body  || '').slice(0, 200),
         ...(notification.imageUrl && { imageUrl: notification.imageUrl }),
       },
@@ -112,7 +112,7 @@ async function sendToMultipleTokens(tokens, notification, data = {}) {
     try {
       const msg = {
         notification: {
-          title: String(notification.title || 'MoodChat').slice(0, 50),
+          title: String(notification.title || 'Nexopa').slice(0, 50),
           body:  String(notification.body  || '').slice(0, 200),
         },
         data: Object.fromEntries(Object.entries(data).map(([k, v]) => [k, String(v)])),

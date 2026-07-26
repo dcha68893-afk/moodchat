@@ -260,7 +260,7 @@ class AuthService {
         if (!user.isVerified) updates.isVerified = true;
         await user.update(updates);
       } else {
-        // Derive a unique username from the Google profile since MoodChat
+        // Derive a unique username from the Google profile since Nexopa
         // requires one; fall back to appending part of the Google id on collision.
         const base = (payload.given_name || email.split('@')[0])
           .toLowerCase().replace(/[^a-z0-9_]/g, '') || 'user';

@@ -43,7 +43,7 @@ function _loadStreamifier() {
  *
  * @param {Buffer|ReadableStream} fileData
  * @param {object} options
- * @param {string} options.folder   e.g. 'moodchat/group-avatars'
+ * @param {string} options.folder   e.g. 'nexopa/group-avatars'
  * @param {string} options.publicId optional stable public ID
  * @param {number} options.width    resize width
  * @param {number} options.height   resize height
@@ -53,7 +53,7 @@ async function uploadToCloudinary(fileData, options = {}) {
   if (!cld) return null;
 
   const {
-    folder   = 'moodchat/uploads',
+    folder   = 'nexopa/uploads',
     publicId = null,
     width    = null,
     height   = null,
@@ -103,11 +103,11 @@ async function uploadToCloudinary(fileData, options = {}) {
 
 /**
  * Upload a group avatar specifically.
- * Square crop, 400×400, stored in moodchat/group-avatars
+ * Square crop, 400×400, stored in nexopa/group-avatars
  */
 async function uploadGroupAvatar(fileBuffer, groupId) {
   return uploadToCloudinary(fileBuffer, {
-    folder:   'moodchat/group-avatars',
+    folder:   'nexopa/group-avatars',
     publicId: `group_${groupId}_avatar`,
     width:    400,
     height:   400,
@@ -118,11 +118,11 @@ async function uploadGroupAvatar(fileBuffer, groupId) {
 
 /**
  * Upload a group cover photo (banner). Wide crop, 1600×500, stored in
- * moodchat/group-covers.
+ * nexopa/group-covers.
  */
 async function uploadGroupCover(fileBuffer, groupId) {
   return uploadToCloudinary(fileBuffer, {
-    folder:   'moodchat/group-covers',
+    folder:   'nexopa/group-covers',
     publicId: `group_${groupId}_cover`,
     width:    1600,
     height:   500,
@@ -135,7 +135,7 @@ async function uploadGroupCover(fileBuffer, groupId) {
  */
 async function uploadUserAvatar(fileBuffer, userId) {
   return uploadToCloudinary(fileBuffer, {
-    folder:   'moodchat/user-avatars',
+    folder:   'nexopa/user-avatars',
     publicId: `user_${userId}_avatar`,
     width:    400,
     height:   400,

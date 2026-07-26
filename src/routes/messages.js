@@ -1360,7 +1360,7 @@ router.post('/:chatId/upload', apiRateLimiter, upload.single('file'), asyncHandl
       // explicit upload of the in-memory buffer; disk uses relative path
       let absUrl;
       if (_storageBackend === 'cloudinary') {
-        const folder = `moodchat/messages/${msgType === 'image' ? 'images' : msgType === 'video' ? 'video' : msgType === 'view_once' ? 'view-once' : msgType === 'audio' ? 'audio' : 'files'}`;
+        const folder = `nexopa/messages/${msgType === 'image' ? 'images' : msgType === 'video' ? 'video' : msgType === 'view_once' ? 'view-once' : msgType === 'audio' ? 'audio' : 'files'}`;
         const cldResult = await cloudinaryService.uploadToCloudinary(req.file.buffer, { folder });
         if (!cldResult) throw new Error('Cloudinary upload failed');
         absUrl = cldResult.url;

@@ -296,7 +296,7 @@ class ProfileService {
       }
 
       const uploadResult = await cloudinaryService.uploadToCloudinary(buffer, {
-        folder: 'moodchat/user-covers',
+        folder: 'nexopa/user-covers',
         publicId: `user_${userId}_cover`,
         width: 1600,
         height: 600,
@@ -338,7 +338,7 @@ class ProfileService {
         throw new NotFoundError('User not found');
       }
 
-      await cloudinaryService.deleteFromCloudinary(`moodchat/user-avatars/user_${userId}_avatar`);
+      await cloudinaryService.deleteFromCloudinary(`nexopa/user-avatars/user_${userId}_avatar`);
 
       user.avatar = 'https://ui-avatars.com/api/?name=User&background=random&color=fff';
       await user.save();
@@ -373,7 +373,7 @@ class ProfileService {
         throw new NotFoundError('User not found');
       }
 
-      await cloudinaryService.deleteFromCloudinary(`moodchat/user-covers/user_${userId}_cover`);
+      await cloudinaryService.deleteFromCloudinary(`nexopa/user-covers/user_${userId}_cover`);
 
       user.coverPhoto = null;
       await user.save();

@@ -28,7 +28,7 @@ function configureWebPush() {
     return false;
   }
   webpush.setVapidDetails(
-    VAPID_SUBJECT || 'mailto:support@moodchat.app',
+    VAPID_SUBJECT || 'mailto:support@nexopa.app',
     VAPID_PUBLIC_KEY,
     VAPID_PRIVATE_KEY
   );
@@ -91,7 +91,7 @@ async function sendDailyReminders() {
       body: streak > 0
         ? `Don't break your ${streak}-day streak! Claim today's reward in the games hub.`
         : `Open the games hub to claim your daily login reward.`,
-      icon: '/icons/moodchat-192.png',
+      icon: '/icons/nexopa-192.png',
       url: '/game.html',
     });
 

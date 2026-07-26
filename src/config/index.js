@@ -118,7 +118,7 @@ const config = {
 
   // CORS allowed origins — reads ALLOWED_ORIGINS (comma-separated list) or FRONTEND_URL from env.
   // When neither is set, app.js falls back to localhost-only list (dev-safe).
-  // On Render: set ALLOWED_ORIGINS=https://moodfronted.onrender.com in the backend service env vars.
+  // On Render: set ALLOWED_ORIGINS=https://nexopa.onrender.com in the backend service env vars.
   get corsOrigin() {
     const raw = process.env.ALLOWED_ORIGINS || process.env.FRONTEND_URL;
     if (!raw) return undefined;

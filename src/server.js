@@ -130,7 +130,7 @@ if (this.environment === 'production' || this.isRender) {
     _slog('🛡️ CORS: Configuring for PRODUCTION environment');
     
     // Primary Render frontend URL
-    const renderFrontend = 'https://moodfronted.onrender.com';
+    const renderFrontend = 'https://nexopa.onrender.com';
     this.allowedOrigins.add(renderFrontend);
     this.allowedOrigins.add(renderFrontend + '/'); // With trailing slash
     _slog(`✅ CORS: Allowed production frontend: ${renderFrontend}`);
@@ -151,10 +151,10 @@ if (this.environment === 'production' || this.isRender) {
         });
     }
     
-    // CRITICAL: Ensure moodfronted.onrender.com is always allowed
-    if (!this.allowedOrigins.has('https://moodfronted.onrender.com')) {
-        this.allowedOrigins.add('https://moodfronted.onrender.com');
-        _slog(`✅ CORS: Explicitly added moodfronted.onrender.com`);
+    // CRITICAL: Ensure nexopa.onrender.com is always allowed
+    if (!this.allowedOrigins.has('https://nexopa.onrender.com')) {
+        this.allowedOrigins.add('https://nexopa.onrender.com');
+        _slog(`✅ CORS: Explicitly added nexopa.onrender.com`);
     }
     
     // Additional security for production: Remove any insecure origins
@@ -240,7 +240,7 @@ if (this.environment === 'production' || this.isRender) {
         
         // Also allow production frontend in development for testing
         if (process.env.ALLOW_PRODUCTION_IN_DEV === 'true') {
-            this.allowedOrigins.add('https://moodfronted.onrender.com');
+            this.allowedOrigins.add('https://nexopa.onrender.com');
             _slog('⚠️  CORS: Allowing production frontend in development (ALLOW_PRODUCTION_IN_DEV=true)');
         }
         
@@ -1701,7 +1701,7 @@ class ProfessionalLogger {
     
     startupBanner(port, host) {
         _slog(`\n${this.colors.green}══════════════════════════════════════════════════════════════════════════════${this.colors.reset}`);
-        _slog(`${this.colors.green}                    🚀 MoodChat Server Initializing                              ${this.colors.reset}`);
+        _slog(`${this.colors.green}                    🚀 Nexopa Server Initializing                              ${this.colors.reset}`);
         _slog(`${this.colors.green}══════════════════════════════════════════════════════════════════════════════${this.colors.reset}`);
         _slog(`${this.colors.cyan}   Optimizations Enabled:${this.colors.reset}`);
         _slog(`${this.colors.cyan}   • UV_THREADPOOL_SIZE: ${process.env.UV_THREADPOOL_SIZE}${this.colors.reset}`);
@@ -1812,7 +1812,7 @@ class ConfigurationManager {
         this.set('PORT', parseInt(process.env.PORT, 10) || 4000);
         this.set('HOST', isRenderRuntime ? '0.0.0.0' : (process.env.HOST || '0.0.0.0'));
         this.set('API_VERSION', process.env.API_VERSION || '1.0.0');
-        this.set('APP_NAME', process.env.APP_NAME || 'MoodChat');
+        this.set('APP_NAME', process.env.APP_NAME || 'Nexopa');
        
         const jwtSecret = process.env.JWT_SECRET;
     
@@ -4356,7 +4356,7 @@ class Application {
                 logger.warn('DB_SYNC_FORCE is TRUE in production - THIS WILL DROP ALL TABLES!', 'SECURITY');
             }
             
-            const productionFrontend = 'https://moodfronted.onrender.com';
+            const productionFrontend = 'https://nexopa.onrender.com';
             if (!corsManager.isOriginAllowed(productionFrontend)) {
                 logger.warn(`Production frontend ${productionFrontend} may not be allowed by CORS`, 'SECURITY');
             }
@@ -4394,8 +4394,8 @@ class Application {
                         isAllowed = true;
                     }
                     // Also check for Render frontend explicitly
-                    else if (origin === 'https://moodfronted.onrender.com' ||
-                             origin === 'https://moodfronted.onrender.com/' ||
+                    else if (origin === 'https://nexopa.onrender.com' ||
+                             origin === 'https://nexopa.onrender.com/' ||
                              origin.includes('localhost:5500') ||
                              origin.includes('127.0.0.1:5500')) {
                         isAllowed = true;
@@ -4436,7 +4436,7 @@ class Application {
             // Override end to ensure CORS headers are always set
             res.end = function(...args) {
                 const origin = req.headers.origin;
-                if (origin && (origin === 'https://moodfronted.onrender.com' ||
+                if (origin && (origin === 'https://nexopa.onrender.com' ||
                                origin.includes('localhost:5500') ||
                                origin.includes('127.0.0.1:5500'))) {
                     res.setHeader('Access-Control-Allow-Origin', origin);
@@ -4448,7 +4448,7 @@ class Application {
             // Override json to ensure CORS headers
             res.json = function(data) {
                 const origin = req.headers.origin;
-                if (origin && (origin === 'https://moodfronted.onrender.com' ||
+                if (origin && (origin === 'https://nexopa.onrender.com' ||
                                origin.includes('localhost:5500') ||
                                origin.includes('127.0.0.1:5500'))) {
                     res.setHeader('Access-Control-Allow-Origin', origin);
@@ -4460,7 +4460,7 @@ class Application {
             // Override send to ensure CORS headers
             res.send = function(data) {
                 const origin = req.headers.origin;
-                if (origin && (origin === 'https://moodfronted.onrender.com' ||
+                if (origin && (origin === 'https://nexopa.onrender.com' ||
                                origin.includes('localhost:5500') ||
                                origin.includes('127.0.0.1:5500'))) {
                     res.setHeader('Access-Control-Allow-Origin', origin);
@@ -4587,7 +4587,7 @@ class Application {
             systemState.incrementMetric('publicRouteAccess');
             return res.json({
                 success: true,
-                message: 'MoodChat API Server',
+                message: 'Nexopa API Server',
                 version: config.get('API_VERSION'),
                 environment: config.get('NODE_ENV'),
                 timestamp: new Date().toISOString(),
@@ -5222,7 +5222,7 @@ class Application {
                     logger.success('Socket.IO initialized with middleware auth ✅', 'WEBSOCKET');
 
                     // ═══════════════════════════════════════════════════════════════════════
-                    // MOODCHAT INFRASTRUCTURE PHASES 1-6 — AUTO-INITIALIZES AFTER SOCKET INIT
+                    // NEXOPA INFRASTRUCTURE PHASES 1-6 — AUTO-INITIALIZES AFTER SOCKET INIT
                     // Non-destructive: each phase wraps existing services, never replaces them.
                     // ═══════════════════════════════════════════════════════════════════════
 
@@ -5234,13 +5234,13 @@ class Application {
                             adminPath:  '/internal/diagnostics',
                             logger:     console,
                         });
-                        logger.success('MoodChat Phase 1 — Foundation Layer ✅', 'PHASE1');
+                        logger.success('Nexopa Phase 1 — Foundation Layer ✅', 'PHASE1');
 
                     // ── PHASE 15: Message & Call delivery hardening ───────────
                     try {
                         const { installMessageDeliveryPatch } = require('./services/phase15/MessageDeliveryPatch');
                         installMessageDeliveryPatch(this.io, this.app);
-                        logger.success('MoodChat Phase 15 — Delivery Patch ✅', 'PHASE15');
+                        logger.success('Nexopa Phase 15 — Delivery Patch ✅', 'PHASE15');
                     } catch (err) {
                         console.warn('[Phase15] Init failed (non-fatal):', err.message);
                     }
@@ -5256,7 +5256,7 @@ class Application {
                             global.__phase2 = initPhase2(this.io, this.app, {
                                 phase1: global.__phase1, logger: console,
                             });
-                            logger.success('MoodChat Phase 2 — Hybrid Transport Engine ✅', 'PHASE2');
+                            logger.success('Nexopa Phase 2 — Hybrid Transport Engine ✅', 'PHASE2');
                         } catch (err) {
                             console.warn('[Phase2] Init failed (non-fatal):', err.message);
                             global.__phase2 = {};
@@ -5271,7 +5271,7 @@ class Application {
                                 phase1: global.__phase1, phase2: global.__phase2,
                                 wsService: this.websocket, logger: console,
                             });
-                            logger.success('MoodChat Phase 3 — WebRTC Call Engine ✅', 'PHASE3');
+                            logger.success('Nexopa Phase 3 — WebRTC Call Engine ✅', 'PHASE3');
                         } catch (err) {
                             console.warn('[Phase3] Init failed (non-fatal):', err.message);
                             global.__phase3 = {};
@@ -5287,7 +5287,7 @@ class Application {
                                 phase3: global.__phase3, wsService: this.websocket,
                                 logger: console,
                             });
-                            logger.success('MoodChat Phase 4 — Social Ecosystem ✅', 'PHASE4');
+                            logger.success('Nexopa Phase 4 — Social Ecosystem ✅', 'PHASE4');
                         } catch (err) {
                             console.warn('[Phase4] Init failed (non-fatal):', err.message);
                             global.__phase4 = {};
@@ -5303,7 +5303,7 @@ class Application {
                                 phase3: global.__phase3, phase4: global.__phase4,
                                 wsService: this.websocket, logger: console,
                             });
-                            logger.success('MoodChat Phase 5 — Production Reliability ✅', 'PHASE5');
+                            logger.success('Nexopa Phase 5 — Production Reliability ✅', 'PHASE5');
                         } catch (err) {
                             console.warn('[Phase5] Init failed (non-fatal):', err.message);
                             global.__phase5 = {};
@@ -5320,7 +5320,7 @@ class Application {
                                 phase5: global.__phase5, wsService: this.websocket,
                                 logger: console,
                             });
-                            logger.success('MoodChat Phase 6 — Runtime Integration ✅', 'PHASE6');
+                            logger.success('Nexopa Phase 6 — Runtime Integration ✅', 'PHASE6');
                         } catch (err) {
                             console.warn('[Phase6] Init failed (non-fatal):', err.message);
                             global.__phase6 = {};

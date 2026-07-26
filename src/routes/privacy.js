@@ -255,7 +255,7 @@ router.post('/report', authenticate, apiRateLimiter, asyncHandler(async (req, re
     await wsService.sendToUser(req.user.id, 'user:blocked', { userId: reportedUserId });
   } catch (_) {}
 
-  res.json({ status: 'success', message: 'Report submitted. Thank you for helping keep MoodChat safe.' });
+  res.json({ status: 'success', message: 'Report submitted. Thank you for helping keep Nexopa safe.' });
 }));
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

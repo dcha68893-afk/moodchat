@@ -2,7 +2,7 @@
 /**
  * teams.js — Teams / workspace member management routes
  * Mapped from api.core.js calls to /api/teams/*
- * Teams in MoodChat are Groups with type='team'
+ * Teams in Nexopa are Groups with type='team'
  */
 const express = require('express');
 const router  = express.Router();

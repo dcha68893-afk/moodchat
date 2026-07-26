@@ -489,7 +489,7 @@ router.get('/health', (req, res) => {
 router.get('/api/info', (req, res) => {
   res.status(200).json({
     success: true,
-    name: 'MoodChat API',
+    name: 'Nexopa API',
     version: '1.0.0',
     environment: process.env.NODE_ENV || 'development',
     timestamp: new Date().toISOString(),

@@ -101,8 +101,8 @@ public
 .vscode-test
 
 # Local docker volumes
-moodchat-postgres-data/
-moodchat-redis-data/
+nexopa-postgres-data/
+nexopa-redis-data/
 
 # Docker compose
 docker-compose.override.yml

@@ -7,11 +7,11 @@ if (!config.jwt || !config.jwt.secret) {
 
 // Use defaults for optional issuer/audience — don't crash if missing
 if (!config.jwt.issuer) {
-  config.jwt.issuer = process.env.JWT_ISSUER || 'moodchat-api';
+  config.jwt.issuer = process.env.JWT_ISSUER || 'nexopa-api';
 }
 
 if (!config.jwt.audience) {
-  config.jwt.audience = process.env.JWT_AUDIENCE || 'moodchat-client';
+  config.jwt.audience = process.env.JWT_AUDIENCE || 'nexopa-client';
 }
 
 // Validate expiration times

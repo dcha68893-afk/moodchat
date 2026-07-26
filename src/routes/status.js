@@ -733,8 +733,8 @@ const statusUpload = multer ? multer({
 async function resolveUploadedFileUrl(req, file) {
     if (!file) return null;
     if (_statusCloudinaryEnabled) {
-        const folder = file.mimetype.startsWith('image/') ? 'moodchat/status/images' :
-                       file.mimetype.startsWith('video/') ? 'moodchat/status/videos' : 'moodchat/status/audio';
+        const folder = file.mimetype.startsWith('image/') ? 'nexopa/status/images' :
+                       file.mimetype.startsWith('video/') ? 'nexopa/status/videos' : 'nexopa/status/audio';
         const result = await cloudinaryService.uploadToCloudinary(file.buffer, { folder });
         if (!result) throw new Error('Cloudinary upload failed');
         return result.url;

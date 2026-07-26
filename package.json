@@ -1,5 +1,5 @@
 {
-  "name": "moodchat-backend",
+  "name": "nexopa-backend",
   "version": "1.0.0",
   "description": "Real-time chat backend with Express, Socket.IO, PostgreSQL, and Redis",
   "main": "src/server.js",
@@ -32,8 +32,8 @@
     "db:reset": "npm run db:migrate:undo:all && npm run db:migrate && npm run db:seed",
     "db:create": "sequelize-cli db:create",
     "db:drop": "sequelize-cli db:drop",
-    "docker:build": "docker build -t moodchat-backend .",
-    "docker:run": "docker run -p 3001:3001 --env-file .env moodchat-backend",
+    "docker:build": "docker build -t nexopa-backend .",
+    "docker:run": "docker run -p 3001:3001 --env-file .env nexopa-backend",
     "docker:dev": "docker-compose -f docker-compose.dev.yml up",
     "docker:prod": "docker-compose -f docker-compose.prod.yml up -d",
     "docker:down": "docker-compose down",
@@ -44,8 +44,8 @@
     "security:check": "npm audit && npm outdated",
     "build": "echo ? Build completed successfully!",
     "prestart": "npm run build",
-    "docker:build:prod": "docker build -f Dockerfile.prod -t moodchat-backend:prod .",
-    "docker:push": "docker tag moodchat-backend:prod your-registry/moodchat-backend:latest && docker push your-registry/moodchat-backend:latest",
+    "docker:build:prod": "docker build -f Dockerfile.prod -t nexopa-backend:prod .",
+    "docker:push": "docker tag nexopa-backend:prod your-registry/nexopa-backend:latest && docker push your-registry/nexopa-backend:latest",
     "health:check": "curl -f http://localhost:3001/health || exit 1",
     "metrics": "curl http://localhost:3001/metrics",
     "docs:generate": "apidoc -i src/ -o docs/",
@@ -68,16 +68,16 @@
     "jwt",
     "websocket"
   ],
-  "author": "MoodChat Team",
+  "author": "Nexopa Team",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/your-org/moodchat-backend.git"
+    "url": "git+https://github.com/your-org/nexopa-backend.git"
   },
   "bugs": {
-    "url": "https://github.com/your-org/moodchat-backend/issues"
+    "url": "https://github.com/your-org/nexopa-backend/issues"
   },
-  "homepage": "https://github.com/your-org/moodchat-backend#readme",
+  "homepage": "https://github.com/your-org/nexopa-backend#readme",
   "dependencies": {
     "@aws-sdk/client-s3": "^3.440.0",
     "@aws-sdk/s3-request-presigner": "^3.440.0",
