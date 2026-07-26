@@ -236,6 +236,21 @@ module.exports = (sequelize, DataTypes) => {
       modelName: 'Tool',
       timestamps: true,
       underscored: true,
+      // FIX-500 (/api/marketplace/products, /api/marketplace/wishlist): the
+      // physical `tools` table was created with literal camelCase
+      // `createdAt`/`updatedAt` columns (see
+      // 20260608000001-fix-tools-marketplace-schema.js), but underscored:true
+      // above makes Sequelize auto-map those two special timestamp columns to
+      // `created_at`/`updated_at` — which don't exist on this table. Every
+      // query that touches them (getProducts' `order: [['createdAt', ...]]`,
+      // getWishlist's `order: [['updatedAt', ...]]`, and even a plain
+      // findAll which always SELECTs the timestamp columns) failed with
+      // "column \"created_at\" does not exist". Pinning these two back to
+      // their real camelCase column names overrides just the timestamp
+      // mapping while leaving every other field's explicit `field:` mapping
+      // (seller_id, is_premium, etc.) untouched.
+      createdAt: 'createdAt',
+      updatedAt: 'updatedAt',
       freezeTableName: true,
       indexes: [
         { fields: ['seller_id'] },
