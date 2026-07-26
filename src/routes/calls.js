@@ -1193,37 +1193,31 @@ router.post('/:callId/end', apiRateLimiter, asyncHandler(async (req, res) => {
     const { callId }                        = req.params;
     const { duration, status: callEndStatus } = req.body;
 
-    // FIX: Frontend sends local IDs like "call_1780799144203_x021is" which are NOT UUIDs.
-    // Also use OR on callerId/receiverId as fallback when Op.contains is unavailable.
-    let call = null;
-    try {
-      call = await Call.findOne({
-        where: {
-          [Op.or]: [
-            { id: callId },
-            // If the caller passes a local ID that maps via __callIdMap, the parent
-            // already translates it — but fall back to a recent-call lookup by caller
-            { callerId: userId, status: { [Op.in]: ['initiated', 'ringing', 'in-progress'] } },
-          ]
-        }
-      });
-    } catch (_) {
-      // UUID parse error — try plain id lookup without Op.contains
-      try { call = await Call.findOne({ where: { id: callId } }); } catch (__) {}
-    }
+    // FIX-CALLID-MISMATCH-ROOT-CAUSE: this route is only meaningful for calls
+    // that actually have a row in the Calls table (UUID primary key) — i.e.
+    // calls created via the REST callService.js path (group calls, scheduled
+    // calls). Direct calls started via the socket 'call:initiate' path
+    // (CallSignalingService, in-memory only) use local ids like
+    // "call_1780799144203_x021is", which are never persisted here at all —
+    // that path is now ended over its own socket 'call:end' event instead
+    // (see CallSignalingService.js), so this route doesn't need to guess for it.
+    //
+    // The old fallback below ("no exact match? just grab this user's most
+    // recent active call and end THAT one") was the actual mechanism behind
+    // the "mismatched callId" symptom: whenever a non-UUID local id arrived
+    // here, it would silently end a DIFFERENT, unrelated call belonging to
+    // this user (e.g. a real group call) and broadcast call:ended with THAT
+    // call's real UUID — a callId the client never asked about and doesn't
+    // recognize, correctly rejected as mismatched, while the actual call the
+    // user meant to end got no server-side signal at all. A lookup on an id
+    // that clearly isn't a UUID should just no-op, not guess.
+    const _looksLikeUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(callId);
 
-    // If still not found, try matching the most-recent active call for this user
-    if (!call) {
-      call = await Call.findOne({
-        where: {
-          [Op.or]: [
-            { callerId: userId },
-            { receiverId: userId },
-          ],
-          status: { [Op.in]: ['initiated', 'ringing', 'in-progress'] },
-        },
-        order: [['createdAt', 'DESC']],
-      }).catch(() => null);
+    let call = null;
+    if (_looksLikeUUID) {
+      try {
+        call = await Call.findOne({ where: { id: callId } });
+      } catch (_) { call = null; }
     }
 
     if (!call) {
