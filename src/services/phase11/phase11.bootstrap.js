@@ -73,13 +73,23 @@ function _wireWebSocketService(uro, logger) {
       }
 
       // Fallback 2: direct io emit as last resort
+      // FIX-URO-DELIVERED-FALSE-POSITIVE: this used to `return true` unconditionally
+      // whenever `_io` existed, even if neither room had a single member — meaning a
+      // genuinely offline recipient was still reported as delivered. We now check
+      // actual room membership before reporting success, same as the fix applied to
+      // UnifiedRuntimeOrchestrator._sendSocketIO().
       try {
         const _io = global.__io || uro.io;
         if (_io) {
           const uid = String(userId);
-          _io.to(`user:${uid}`).emit(event, data);
-          _io.to(`user_${uid}`).emit(event, data);
-          return true;
+          const room1 = `user:${uid}`;
+          const room2 = `user_${uid}`;
+          const set1 = _io.sockets?.adapter?.rooms?.get(room1);
+          const set2 = _io.sockets?.adapter?.rooms?.get(room2);
+          const hasMembers = !!(set1 && set1.size > 0) || !!(set2 && set2.size > 0);
+          _io.to(room1).emit(event, data);
+          _io.to(room2).emit(event, data);
+          if (hasMembers) return true;
         }
       } catch (err) {
         console.error(`[Phase11] fallback direct io.emit threw for uid=${userId} event=${event}:`, err?.message || err);

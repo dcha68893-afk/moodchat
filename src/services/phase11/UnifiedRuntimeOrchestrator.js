@@ -239,7 +239,21 @@ class UnifiedRuntimeOrchestrator extends EventEmitter {
       const rooms = [`user:${uid}`, `user_${uid}`];
       let sent = false;
       for (const room of rooms) {
-        try { this.io.to(room).emit(event, data); sent = true; } catch (_) {}
+        try {
+          // FIX-URO-DELIVERED-FALSE-POSITIVE: io.to(room).emit() never throws even
+          // when the room has zero members — Socket.IO broadcasts are fire-and-forget.
+          // The old code set sent = true unconditionally inside the try block, so a
+          // fully offline/disconnected recipient was still reported as "delivered".
+          // This is the same class of bug that webSocketService.sendToUser() was
+          // already fixed for (see FIX-DELIVERED-FALSE-POSITIVE there), but this
+          // URO wrapper now runs BEFORE that fix and short-circuits it, so the
+          // false positive was reintroduced at this layer. We now check the room's
+          // actual member count via io.sockets.adapter.rooms before counting it as sent.
+          const roomSet = this.io.sockets?.adapter?.rooms?.get(room);
+          const hasMembers = !!(roomSet && roomSet.size > 0);
+          this.io.to(room).emit(event, data);
+          if (hasMembers) sent = true;
+        } catch (_) {}
       }
       return sent;
     } catch (_) { return false; }
