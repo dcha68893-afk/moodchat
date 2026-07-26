@@ -105,7 +105,13 @@ function _wireWebSocketService(runtime, entityStore, hydration, logger) {
     const _origSendToUser = wsService.sendToUser?.bind(wsService);
     wsService.sendToUser = async function(userId, event, data) {
       // Try HTR first — it checks actual room membership now (not fire-and-forget)
-      const result = await runtime.deliver(userId, event, data).catch(() => null);
+      // FIX (SILENT-ERROR): was `.catch(() => null)`, which hid any real error
+      // thrown inside runtime.deliver (bad state, throw in a listener, etc.) —
+      // it looked identical to a normal "no room members" miss. Now logged.
+      const result = await runtime.deliver(userId, event, data).catch((err) => {
+        console.error(`[Phase10] runtime.deliver threw for uid=${userId} event=${event}:`, err?.message || err);
+        return null;
+      });
       if (result?.ok) return true;
       // ALWAYS fall through to original sendToUser as authoritative fallback.
       // The original checks per-socket-ID delivery and handles offline queuing.

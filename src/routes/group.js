@@ -24,6 +24,14 @@ const express = require('express');
 const router  = express.Router();
 // ── CRITICAL: Inject global.__socketIO into req.io so all handlers can emit ──
 router.use((req, _, next) => { if (!req.io) req.io = global.__socketIO || null; next(); });
+
+// ── FIX (SILENT-CONSOLE): group.js had no forensic logging at all — unlike
+// src/routes/messages.js and webSocketService.js, a stuck group message send
+// produced zero diagnostic output anywhere. Mirrors the same DEBUG_MESSAGES
+// gate (opt-out) used on the direct-message path so both pipelines are
+// equally debuggable from the same env var / Render log stream.
+const _DEBUG_MESSAGES = process.env.DEBUG_MESSAGES !== '0' && process.env.DEBUG_MESSAGES !== 'false';
+const _flog = (...args) => { if (_DEBUG_MESSAGES) console.log(...args); };
 const { authenticateToken } = require('../middleware/auth');
 const { body, validationResult } = require('express-validator');
 
@@ -461,6 +469,10 @@ router.post('/:groupId/messages', async (req, res) => {
         if (isNaN(groupId)) return res.status(400).json({ success: false, message: 'Invalid group ID' });
         const trimmedContent = String(content || '').trim();
         const attachment = metadata?.attachment || null;
+
+        // ── FORENSIC LOG: GROUP_SEND_START ──────────────────────────────────────
+        _flog(`[FORENSIC] GROUP_SEND_START | userId=${userId} | groupId=${groupId} | contentLen=${trimmedContent.length} | ts=${Date.now()}`);
+
         if (!trimmedContent && !attachment) return res.status(400).json({ success: false, message: 'Message content is required' });
 
         if (GroupMember) {
@@ -645,6 +657,9 @@ router.post('/:groupId/messages', async (req, res) => {
                 io.sockets.adapter.rooms?.get(`group:${groupId}`) || []
             );
 
+            // ── FORENSIC LOG: GROUP_BROADCASTED ─────────────────────────────────
+            _flog(`[FORENSIC] GROUP_BROADCASTED | messageId=${record.id} | groupId=${groupId} | roomSockets=${alreadyCoveredSocketIds.size} | ts=${Date.now()}`);
+
             try {
                 const GM = db?.models?.GroupMembers || db?.models?.GroupMember || db?.GroupMembers || db?.GroupMember || null;
                 if (GM) {
@@ -677,7 +692,11 @@ router.post('/:groupId/messages', async (req, res) => {
                 console.warn('[GROUP FLOW] Per-member emit failed (non-fatal):', emitErr.message);
             }
         } else {
-            console.warn('[GROUP FLOW] global.__socketIO not set — real-time not emitted');
+            console.error(
+                `[GROUP FLOW] ❌ global.__socketIO is NULL — group message saved but NOT delivered in real-time. ` +
+                `Ensure global.__socketIO is assigned at server startup BEFORE accepting requests. ` +
+                `groupId=${groupId} messageId=${record.id}`
+            );
         }
 
         // ── P2 FIX: @everyone bulk mention ────────────────────────────────

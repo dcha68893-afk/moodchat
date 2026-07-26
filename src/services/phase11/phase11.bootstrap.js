@@ -53,7 +53,13 @@ function _wireWebSocketService(uro, logger) {
     ws.sendToUser = async function(userId, event, data = {}) {
       // Route through URO (which now always tries direct Socket.IO first for
       // time-sensitive events like calls and messages)
-      const result = await uro.deliver(String(userId), event, data).catch(() => null);
+      // FIX (SILENT-ERROR): was `.catch(() => null)` — identical to the Phase10
+      // wrapper's bug. A real throw inside uro.deliver was indistinguishable
+      // from a normal "not delivered" result. Now logged.
+      const result = await uro.deliver(String(userId), event, data).catch((err) => {
+        console.error(`[Phase11] uro.deliver threw for uid=${userId} event=${event}:`, err?.message || err);
+        return null;
+      });
       if (result?.ok) return true;
 
       // Fallback 1: original sendToUser (pre-Phase11 implementation)
@@ -61,7 +67,9 @@ function _wireWebSocketService(uro, logger) {
         try {
           const origResult = await _orig(userId, event, data);
           if (origResult) return true;
-        } catch (_) {}
+        } catch (err) {
+          console.error(`[Phase11] fallback _orig(sendToUser) threw for uid=${userId} event=${event}:`, err?.message || err);
+        }
       }
 
       // Fallback 2: direct io emit as last resort
@@ -73,7 +81,9 @@ function _wireWebSocketService(uro, logger) {
           _io.to(`user_${uid}`).emit(event, data);
           return true;
         }
-      } catch (_) {}
+      } catch (err) {
+        console.error(`[Phase11] fallback direct io.emit threw for uid=${userId} event=${event}:`, err?.message || err);
+      }
 
       return false;
     };

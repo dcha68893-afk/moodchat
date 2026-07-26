@@ -38,7 +38,9 @@ const User = db.Users || db.User;
 
 // FIX-AUDIT: Gated verbose logger for high-frequency forensic tracing, mirroring
 // the same pattern used in routes/messages.js. Defaults OFF in production.
-const _DEBUG_MESSAGES = process.env.DEBUG_MESSAGES === '1' || process.env.DEBUG_MESSAGES === 'true';
+// FIX (SILENT-CONSOLE): see matching fix + comment in src/routes/messages.js.
+// Was opt-in; now opt-out so EMITTING TO / RECEIVER_RECEIVED logs show by default.
+const _DEBUG_MESSAGES = process.env.DEBUG_MESSAGES !== '0' && process.env.DEBUG_MESSAGES !== 'false';
 const _flog = (...args) => { if (_DEBUG_MESSAGES) console.log(...args); };
 
 // ── FIX #2: Delegate token verification to tokenService (single source of truth) ──

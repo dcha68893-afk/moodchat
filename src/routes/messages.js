@@ -26,7 +26,11 @@ const cloudinaryService = require('../services/cloudinaryService');
 
 // FIX-AUDIT: Forensic logging was unconditionally on in production. Gate
 // behind an explicit env flag — defaults OFF unless DEBUG_MESSAGES=1 is set.
-const _DEBUG_MESSAGES = process.env.DEBUG_MESSAGES === '1' || process.env.DEBUG_MESSAGES === 'true';
+// FIX (SILENT-CONSOLE): was opt-in (only logged if DEBUG_MESSAGES env var was
+// explicitly set), so these forensic SEND_START/TRANSPORT_SELECTED/BROADCASTED
+// logs never appeared in Render's log stream by default — a stuck/failed send
+// and a working one were indistinguishable on the server side. Now opt-out.
+const _DEBUG_MESSAGES = process.env.DEBUG_MESSAGES !== '0' && process.env.DEBUG_MESSAGES !== 'false';
 const _flog = (...args) => { if (_DEBUG_MESSAGES) console.log(...args); };
 
 // FIX-AUDIT: Server-side defense-in-depth against stored XSS. The frontend
