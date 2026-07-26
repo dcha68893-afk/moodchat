@@ -95,6 +95,17 @@ module.exports = (sequelize, DataTypes) => {
       modelName: 'Order',
       timestamps: true,
       underscored: true,
+      // FIX-500 (getSellerAnalytics/getSellerOrders, same class of bug as
+      // Tool.js): the physical `marketplace_orders` table was created with
+      // literal camelCase "createdAt"/"updatedAt" columns (see the raw
+      // CREATE TABLE IF NOT EXISTS in src/models/index.js), but
+      // underscored:true auto-maps those two special timestamp attributes to
+      // created_at/updated_at, which don't exist — causing every query that
+      // touches them to fail with "column \"created_at\" does not exist".
+      // Pinning them back to their real camelCase names leaves every other
+      // field's explicit snake_case `field:` mapping untouched.
+      createdAt: 'createdAt',
+      updatedAt: 'updatedAt',
       freezeTableName: true,
       indexes: [
         { fields: ['buyer_id'] },

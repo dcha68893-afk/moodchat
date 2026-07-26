@@ -551,7 +551,18 @@ async function addMissingColumns() {
       { name: 'metadata', type: Sequelize.JSONB, defaultValue: {}, allowNull: false },
       { name: 'encryptionKey', type: Sequelize.STRING(100), allowNull: true },
       { name: 'sentAt', type: Sequelize.DATE, defaultValue: Sequelize.NOW, allowNull: false },
-      { name: 'deliveredAt', type: Sequelize.DATE, allowNull: true }
+      { name: 'deliveredAt', type: Sequelize.DATE, allowNull: true },
+      // FIX (Groups GET/POST /messages 500s: "column Messages.clientMessageId
+      // does not exist" / "column \"status\" of relation \"Messages\" does not
+      // exist"): these three columns are defined in src/models/Message.js and
+      // added by migration 2026999990013_add_message_lifecycle_fields.js, but
+      // that migration only runs via `sequelize-cli db:migrate` — if the
+      // deploy's start command never runs migrations, the columns never
+      // materialize even though the model expects them. Listed here so this
+      // boot-time defensive pass creates them regardless.
+      { name: 'clientMessageId', type: Sequelize.STRING(64), allowNull: true },
+      { name: 'status', type: Sequelize.STRING(20), defaultValue: 'sent', allowNull: false },
+      { name: 'deliveryAttempts', type: Sequelize.INTEGER, defaultValue: 0, allowNull: false }
     ],
     'statuses': [
       { name: 'privacy', type: Sequelize.STRING(32), defaultValue: 'friends', allowNull: false },

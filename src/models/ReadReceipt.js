@@ -43,24 +43,24 @@ module.exports = (sequelize, DataTypes) => {
       },
     },
     {
-      tableName: 'read_receipts',
+      tableName: 'ReadReceipts',
       modelName: 'ReadReceipt',
       timestamps: true,
-      underscored: true,
+      underscored: false,
       freezeTableName: true,
       indexes: [
         {
-          fields: ['message_id', 'user_id'],
+          fields: ['messageId', 'userId'],
           unique: true,
         },
         {
-          fields: ['message_id'],
+          fields: ['messageId'],
         },
         {
-          fields: ['user_id'],
+          fields: ['userId'],
         },
         {
-          fields: ['read_at'],
+          fields: ['readAt'],
         },
       ],
     }

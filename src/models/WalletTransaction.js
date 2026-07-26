@@ -12,7 +12,10 @@ module.exports = (sequelize, DataTypes) => {
     reference:    { type: DataTypes.STRING(255), allowNull: true },
     description:  { type: DataTypes.TEXT, allowNull: true },
     metadata:     { type: DataTypes.JSONB, defaultValue: {} },
-  }, { tableName: 'wallet_transactions', timestamps: true, underscored: true });
+  }, { tableName: 'wallet_transactions', timestamps: true, underscored: true,
+      // FIX-500: physical table has literal camelCase createdAt/updatedAt
+      // (see raw CREATE TABLE in src/models/index.js).
+      createdAt: 'createdAt', updatedAt: 'updatedAt' });
 
   WalletTransaction.associate = function(models) {
     if (models.Wallet) WalletTransaction.belongsTo(models.Wallet, { foreignKey: 'walletId', as: 'wallet', constraints: false });

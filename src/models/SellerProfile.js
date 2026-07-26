@@ -20,6 +20,9 @@ module.exports = (sequelize, DataTypes) => {
     submittedAt:     { type: DataTypes.DATE, defaultValue: DataTypes.NOW, field: 'submitted_at' },
     metadata:        { type: DataTypes.JSONB, defaultValue: {} },
   }, { tableName: 'seller_profiles', timestamps: true, underscored: true,
+      // FIX-500: physical table has literal camelCase createdAt/updatedAt
+      // (see raw CREATE TABLE in src/models/index.js).
+      createdAt: 'createdAt', updatedAt: 'updatedAt',
       indexes: [{ fields: ['user_id'], unique: true }, { fields: ['kyc_status'] }] });
 
   SellerProfile.associate = function(models) {

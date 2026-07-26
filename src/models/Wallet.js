@@ -8,7 +8,10 @@ module.exports = (sequelize, DataTypes) => {
     currency: { type: DataTypes.STRING(10), defaultValue: 'KES' },
     isFrozen: { type: DataTypes.BOOLEAN, defaultValue: false, field: 'is_frozen' },
     metadata: { type: DataTypes.JSONB, defaultValue: {} },
-  }, { tableName: 'wallets', timestamps: true, underscored: true });
+  }, { tableName: 'wallets', timestamps: true, underscored: true,
+      // FIX-500: physical table has literal camelCase createdAt/updatedAt
+      // (see raw CREATE TABLE in src/models/index.js).
+      createdAt: 'createdAt', updatedAt: 'updatedAt' });
 
   Wallet.associate = function(models) {
     if (models.Users) Wallet.belongsTo(models.Users, { foreignKey: 'userId', as: 'user', constraints: false });

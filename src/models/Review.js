@@ -70,6 +70,11 @@ module.exports = (sequelize, DataTypes) => {
       modelName: 'Review',
       timestamps: true,
       underscored: true,
+      // FIX-500: physical table has literal camelCase createdAt/updatedAt
+      // (see raw CREATE TABLE in src/models/index.js); underscored:true would
+      // otherwise map these to created_at/updated_at, which don't exist.
+      createdAt: 'createdAt',
+      updatedAt: 'updatedAt',
       freezeTableName: true,
       indexes: [
         { fields: ['product_id'] },

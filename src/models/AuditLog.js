@@ -11,6 +11,11 @@ module.exports = (sequelize, DataTypes) => {
     ipAddress:    { type: DataTypes.STRING(50), field: 'ip_address' },
     userAgent:    { type: DataTypes.TEXT, field: 'user_agent' },
   }, { tableName: 'audit_logs', timestamps: true, updatedAt: false, underscored: true,
-      indexes: [{ fields: ['user_id'] }, { fields: ['action'] }, { fields: ['created_at'] }] });
+      // FIX-500: physical table has literal camelCase "createdAt" (see raw
+      // CREATE TABLE in src/models/index.js); underscored:true would
+      // otherwise map it to created_at, which doesn't exist. Index updated
+      // to match the real column name.
+      createdAt: 'createdAt',
+      indexes: [{ fields: ['user_id'] }, { fields: ['action'] }, { fields: ['createdAt'] }] });
   return AuditLog;
 };

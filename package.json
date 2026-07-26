@@ -9,7 +9,7 @@
     "npm": ">=9.0.0"
   },
   "scripts": {
-    "start": "node src/server.js",
+    "start": "(npm run db:migrate || true) && node src/server.js",
     "start:render": "npm run db:migrate:render && npm run prod",
     "dev": "cross-env NODE_ENV=development nodemon src/server.js",
     "dev:debug": "cross-env NODE_ENV=development nodemon --inspect src/server.js",

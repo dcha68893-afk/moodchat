@@ -17,6 +17,10 @@ module.exports = (sequelize, DataTypes) => {
     notes:       { type: DataTypes.TEXT },
     metadata:    { type: DataTypes.JSONB, defaultValue: {} },
   }, { tableName: 'payouts', timestamps: true, underscored: true,
+      // FIX-500: physical table has literal camelCase createdAt/updatedAt
+      // (see raw CREATE TABLE in src/models/index.js).
+      createdAt: 'createdAt',
+      updatedAt: 'updatedAt',
       indexes: [{ fields: ['seller_id'] }, { fields: ['status'] }] });
 
   Payout.associate = function(models) {
