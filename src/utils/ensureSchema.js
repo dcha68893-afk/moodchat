@@ -903,6 +903,68 @@ const REQUIRED_DEFAULTS = [
   { table: 'Messages', column: 'isRead', type: 'BOOLEAN', default: 'false' },
   { table: 'Messages', column: 'isDeleted', type: 'BOOLEAN', default: 'false' },
   { table: 'Messages', column: 'isEdited', type: 'BOOLEAN', default: 'false' },
+
+  // ── Tools (marketplace listings) ─────────────────────────────────────────
+  // FIX-MARKETPLACE-500-APPROVAL-GATE: src/models/Tool.js declares
+  // approvalStatus/approvedAt/rejectionReason (the "P1 FIX: Product approval
+  // gate") and the flash-sale/condition/brand/sku columns ("P2 FIX"s), but no
+  // migration ever created them, and fixToolsMarketplaceSchema() above only
+  // rebuilds the table from scratch when it's still on the pre-marketplace
+  // schema — it early-returns as soon as seller_id exists, so it never adds
+  // these later columns to a table that already has the base marketplace
+  // schema. Every getProducts()/getWishlist() query selects approval_status
+  // (getProducts always references it when available !== 'false'), so a live
+  // table missing it fails at the DB layer with "column approval_status does
+  // not exist" — the exact 500s seen in the browser console on
+  // /api/marketplace/products and /api/marketplace/wishlist. Same
+  // never-ran-in-production gap as everything else in this file, just never
+  // added here for this table.
+  {
+    table: 'tools', column: 'approval_status',
+    pre: `DO $$ BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'enum_tools_approval_status') THEN
+              CREATE TYPE "enum_tools_approval_status" AS ENUM ('pending_review','approved','rejected');
+            END IF;
+          END $$`,
+    sql: `ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "approval_status" "enum_tools_approval_status" NOT NULL DEFAULT 'pending_review'`,
+  },
+  {
+    table: 'tools', column: 'approved_at',
+    sql: `ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "approved_at" TIMESTAMP WITH TIME ZONE`,
+  },
+  {
+    table: 'tools', column: 'rejection_reason',
+    sql: `ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "rejection_reason" TEXT`,
+  },
+  {
+    table: 'tools', column: 'is_flash_sale',
+    sql: `ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "is_flash_sale" BOOLEAN NOT NULL DEFAULT false`,
+  },
+  {
+    table: 'tools', column: 'flash_sale_price',
+    sql: `ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "flash_sale_price" DECIMAL(10,2)`,
+  },
+  {
+    table: 'tools', column: 'flash_sale_end',
+    sql: `ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "flash_sale_end" TIMESTAMP WITH TIME ZONE`,
+  },
+  {
+    table: 'tools', column: 'condition',
+    pre: `DO $$ BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'enum_tools_condition') THEN
+              CREATE TYPE "enum_tools_condition" AS ENUM ('new','like_new','good','fair','poor');
+            END IF;
+          END $$`,
+    sql: `ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "condition" "enum_tools_condition" DEFAULT 'new'`,
+  },
+  {
+    table: 'tools', column: 'brand',
+    sql: `ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "brand" VARCHAR(100)`,
+  },
+  {
+    table: 'tools', column: 'sku',
+    sql: `ALTER TABLE "tools" ADD COLUMN IF NOT EXISTS "sku" VARCHAR(100)`,
+  },
 ];
 
 // ─── Postgres ENUM values that were never added to an existing type ───────────
@@ -915,6 +977,15 @@ const REQUIRED_DEFAULTS = [
 const REQUIRED_ENUM_VALUES = [
   { type: 'enum_Messages_type', value: 'poll' },
   { type: 'enum_Messages_type', value: 'view_once' },
+  // FIX-MARKETPLACE-500-APPROVAL-GATE: fixToolsMarketplaceSchema()'s hardcoded
+  // rebuild SQL only creates enum_tools_status with
+  // ('active','inactive','sold','deleted'), but src/models/Tool.js's status
+  // column defaults every new listing to 'pending_review' and also allows
+  // 'rejected' (the approval-gate states). Without these values in the live
+  // enum type, creating a product fails at the DB layer with an invalid
+  // input value error.
+  { type: 'enum_tools_status', value: 'pending_review' },
+  { type: 'enum_tools_status', value: 'rejected' },
 ];
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
