@@ -22,7 +22,7 @@ const { asyncHandler }   = require('../middleware/asyncHandler');
 
 // GET /api/auth/two-step/status
 router.get('/status', authenticate, apiRateLimiter, asyncHandler(async (req, res) => {
-  const User = require('../models/User');
+  const { User } = require('../models');
   const user = await User.findByPk(req.user.id, { attributes: ['id', 'twoStepPin', 'twoStepHint'] });
   if (!user) return res.status(404).json({ status: 'error', message: 'User not found' });
   res.json({
@@ -40,7 +40,7 @@ router.post('/enable', authenticate, apiRateLimiter, asyncHandler(async (req, re
   if (!pin || !/^\d{6}$/.test(pin)) {
     return res.status(400).json({ status: 'error', message: 'PIN must be exactly 6 digits' });
   }
-  const User = require('../models/User');
+  const { User } = require('../models');
   const user = await User.findByPk(req.user.id);
   if (!user) return res.status(404).json({ status: 'error', message: 'User not found' });
 
@@ -58,7 +58,7 @@ router.post('/enable', authenticate, apiRateLimiter, asyncHandler(async (req, re
 router.post('/disable', authenticate, apiRateLimiter, asyncHandler(async (req, res) => {
   const { pin } = req.body;
   if (!pin) return res.status(400).json({ status: 'error', message: 'PIN required' });
-  const User = require('../models/User');
+  const { User } = require('../models');
   const user = await User.findByPk(req.user.id, { attributes: ['id', 'twoStepPin'] });
   if (!user || !user.twoStepPin) {
     return res.status(400).json({ status: 'error', message: 'Two-step verification is not enabled' });
@@ -73,7 +73,7 @@ router.post('/disable', authenticate, apiRateLimiter, asyncHandler(async (req, r
 router.post('/verify', asyncHandler(async (req, res) => {
   const { userId, pin } = req.body;
   if (!userId || !pin) return res.status(400).json({ status: 'error', message: 'userId and pin required' });
-  const User = require('../models/User');
+  const { User } = require('../models');
   const user = await User.findByPk(userId, { attributes: ['id', 'twoStepPin', 'twoStepHint'] });
   if (!user) return res.status(404).json({ status: 'error', message: 'User not found' });
   if (!user.twoStepPin) return res.json({ status: 'success', required: false });
@@ -86,7 +86,7 @@ router.post('/verify', asyncHandler(async (req, res) => {
 
 // GET /api/auth/two-step/hint/:userId — hint visible before PIN entry (no auth)
 router.get('/hint/:userId', apiRateLimiter, asyncHandler(async (req, res) => {
-  const User = require('../models/User');
+  const { User } = require('../models');
   const user = await User.findByPk(req.params.userId, { attributes: ['twoStepPin', 'twoStepHint'] });
   if (!user || !user.twoStepPin) return res.json({ status: 'success', data: { enabled: false } });
   res.json({ status: 'success', data: { enabled: true, hint: user.twoStepHint || null } });

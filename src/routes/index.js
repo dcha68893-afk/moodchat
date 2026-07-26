@@ -15,7 +15,14 @@ _slog('🔄 Loading all application routers...');
 // ===== CONFIGURATION =====
 const ROUTES_DIR = path.join(__dirname);
 // IMPORTANT: auth.js should NOT be ignored - it needs to be loaded
-const IGNORED_FILES = new Set(['index.js', '.DS_Store', 'Thumbs.db']);
+// chatsParticipant.js is intentionally excluded: it's written against Mongoose
+// (mongoose.startSession(), mongoose.Types.ObjectId) but ChatParticipant is a
+// Sequelize/Postgres model and 'mongoose' has never been a project dependency —
+// this route has never once mounted successfully. Its functionality already
+// exists correctly (Sequelize-based) in routes/chats.js. Excluding it removes
+// a guaranteed-to-fail require() on every boot instead of relying on the
+// try/catch fallback to swallow it silently.
+const IGNORED_FILES = new Set(['index.js', '.DS_Store', 'Thumbs.db', 'chatsParticipant.js']);
 
 // ===== PUBLIC PATHS (No authentication required) =====
 // NOTE: app.js mounts this router at /api, so paths here must NOT include /api prefix
