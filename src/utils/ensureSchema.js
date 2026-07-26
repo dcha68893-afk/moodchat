@@ -75,6 +75,24 @@ const REQUIRED_COLUMNS = [
     sql: `ALTER TABLE "Users" ADD COLUMN IF NOT EXISTS "coverPhoto" TEXT`,
   },
 
+  // ── Marketplace Orders ───────────────────────────────────────────────────
+  // FIX-MARKETPLACE-ANALYTICS-500: Order.js (underscored:true, timestamps:true)
+  // expects created_at/updated_at on marketplace_orders, but this table was
+  // created ad hoc before the 2026-07-25 migration-never-ran audit below and
+  // never got these two columns mirrored into this self-heal list like the
+  // ~22 other tables were — every getSellerAnalytics call (and any other
+  // query filtering/ordering on createdAt) 500'd with:
+  // column "created_at" does not exist. Same idempotent ADD COLUMN IF NOT
+  // EXISTS pattern as the rest of this file.
+  {
+    table: 'marketplace_orders', column: 'created_at',
+    sql: `ALTER TABLE "marketplace_orders" ADD COLUMN IF NOT EXISTS "created_at" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()`,
+  },
+  {
+    table: 'marketplace_orders', column: 'updated_at',
+    sql: `ALTER TABLE "marketplace_orders" ADD COLUMN IF NOT EXISTS "updated_at" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()`,
+  },
+
   // ── Groups ────────────────────────────────────────────────────────────────
   {
     // NEW: group cover photo (banner) — Groups previously only had `avatar`.
