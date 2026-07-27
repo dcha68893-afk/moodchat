@@ -589,6 +589,47 @@ class CallSignalingService extends EventEmitter {
       if (typeof ack === 'function') ack({ delivered: !!delivered });
     });
 
+    // ── ROOT-CAUSE FIX (no audio/video/screen-share): the frontend
+    // (calls-core.js) sends its SDP answer via 'call:webrtc_answer' and its
+    // ICE candidates via 'call:ice_candidate' (see PeerConnectionManager /
+    // calls-core.part5.js / calls-core.part7.js). webSocketService.js
+    // deliberately no-ops both of those event names on the socket and defers
+    // entirely to this service ("CallSignalingService owns these events").
+    // But this service only ever registered a listener for 'call:webrtc_offer'
+    // — there was no 'call:webrtc_answer' or 'call:ice_candidate' listener
+    // anywhere in the codebase. The practical effect: the offer reached the
+    // callee fine, the callee's answer and every ICE candidate on both sides
+    // were silently dropped (no listener = no relay = the other peer's
+    // RTCPeerConnection never got setRemoteDescription(answer) or any remote
+    // ICE candidates), so the connection never reached "connected" state.
+    // That is exactly why neither side could hear or see the other, and why
+    // a screen-share renegotiation (which re-uses this same offer/answer
+    // exchange) never reached the far side either. Mirrors the offer
+    // handler's single-path-delivery pattern so we don't reintroduce the
+    // duplicate-delivery bug the offer relay's own comment warns about.
+    socket.removeAllListeners('call:webrtc_answer').on('call:webrtc_answer', async ({ callId, targetUserId: tgt, answer } = {}, ack) => {
+      if (!callId || !tgt || !answer) {
+        if (typeof ack === 'function') ack({ delivered: false, reason: 'invalid_payload' });
+        return;
+      }
+      const delivered = await this._wsService.sendToUser(tgt, 'call:webrtc_answer', {
+        callId, answer, accepterId: userId, timestamp: Date.now(),
+      }).catch(() => false);
+      this._logCall('log', `webrtc:answer relayed for call ${callId}, delivered=${delivered}`, { callId, userId, socketId: socket.id });
+      if (typeof ack === 'function') ack({ delivered: !!delivered });
+    });
+
+    socket.removeAllListeners('call:ice_candidate').on('call:ice_candidate', async ({ callId, targetUserId: tgt, candidate } = {}, ack) => {
+      if (!callId || !tgt || !candidate) {
+        if (typeof ack === 'function') ack({ delivered: false, reason: 'invalid_payload' });
+        return;
+      }
+      const delivered = await this._wsService.sendToUser(tgt, 'call:ice_candidate', {
+        callId, candidate, senderId: userId, timestamp: Date.now(),
+      }).catch(() => false);
+      if (typeof ack === 'function') ack({ delivered: !!delivered });
+    });
+
     // ── Call accept ──────────────────────────────────────────────────────────
 
     socket.removeAllListeners('call:accept').on('call:accept', async data => {

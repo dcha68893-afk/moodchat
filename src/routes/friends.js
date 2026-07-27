@@ -2183,12 +2183,77 @@ router.post('/qr/connect', apiRateLimiter, asyncHandler(async (req, res) => {
             if (existing.status === 'accepted') return res.json({ success: true, message: 'Already friends', data: { alreadyFriends: true } });
             if (existing.status === 'pending') {
                 existing.status = 'accepted'; existing.acceptedAt = new Date(); await existing.save();
+
+                // BUG FIX: this auto-accept path (scanning a QR from someone who
+                // already sent you a request) silently updated the DB with no
+                // real-time notification to either side — same class of bug as
+                // the plain friend-request-creation path above.
+                const io2 = req.io || (req.app && req.app.get('io'))
+                    || (global._wsService && global._wsService.getIO && global._wsService.getIO())
+                    || null;
+                if (io2) {
+                    const otherId = existing.requesterId === userId ? existing.receiverId : existing.requesterId;
+                    const payload = {
+                        friendshipId: existing.id,
+                        requestId:    existing.id,
+                        friendId:     userId,
+                        acceptedById: userId,
+                        friendship:   existing.toJSON ? existing.toJSON() : existing,
+                        acceptedAt:   new Date().toISOString(),
+                    };
+                    io2.to(`user:${otherId}`).emit('friend:accepted', payload);
+                    io2.to(`user_${otherId}`).emit('friend:accepted', payload);
+                    io2.to(`user:${userId}`).emit('friend:accepted', payload);
+                    io2.to(`user_${userId}`).emit('friend:accepted', payload);
+                }
+
                 return res.json({ success: true, message: 'Friend request accepted via QR', data: { friendship: existing } });
             }
             if (existing.status === 'blocked') return res.status(400).json({ success: false, message: 'Cannot connect to blocked user' });
         }
 
         const friendRequest = await Friend.create({ requesterId: userId, receiverId: targetId, status: 'pending', createdAt: new Date(), updatedAt: new Date() });
+
+        // BUG FIX: this endpoint created the friend request but never told the
+        // receiver in real time (unlike /requests/send, which does). That meant
+        // QR-based friend requests only showed up for the receiver after a manual
+        // refresh or the next poll — never instantly. Emit the same events here.
+        const io = req.io || (req.app && req.app.get('io'))
+            || (global._wsService && global._wsService.getIO && global._wsService.getIO())
+            || null;
+
+        if (io) {
+            const requester = await withTimeout(User.findByPk(userId, {
+                attributes: ['id', 'username', 'firstName', 'lastName', 'avatar']
+            })).catch(() => null);
+            const senderInfo = requester ? {
+                id:          userId,
+                username:    requester.username || '',
+                displayName: [requester.firstName, requester.lastName].filter(Boolean).join(' ').trim() || requester.username || '',
+                avatar:      requester.avatar || null,
+            } : { id: userId };
+
+            const requestPayload = {
+                id:             friendRequest.id,
+                requestId:      friendRequest.id,
+                requesterId:    userId,
+                receiverId:     targetId,
+                status:         'pending',
+                createdAt:      friendRequest.createdAt,
+                senderName:     senderInfo.displayName,
+                senderUsername: senderInfo.username,
+                senderAvatar:   senderInfo.avatar,
+                user:           senderInfo,
+            };
+
+            io.to(`user:${targetId}`).emit('friend:request', requestPayload);
+            io.to(`user_${targetId}`).emit('friend:request', requestPayload);
+            io.to(`user:${targetId}`).emit('FRIEND_REQUEST_RECEIVED', requestPayload);
+            io.to(`user_${targetId}`).emit('FRIEND_REQUEST_RECEIVED', requestPayload);
+        } else {
+            console.warn('[Friends /qr/connect] ⚠️  io not available — receiver will not get real-time notification');
+        }
+
         return res.status(201).json({ success: true, message: 'Friend request sent via QR', data: { request: friendRequest } });
     } catch (e) {
         console.error('[Friends POST /qr/connect]', e.message);

@@ -5,7 +5,16 @@ const router = express.Router();
 // ── CRITICAL: Inject global.__socketIO into req.io so all handlers can emit ──
 router.use((req, _, next) => { if (!req.io) req.io = global.__socketIO || null; next(); });
 const { apiRateLimiter } = require('../middleware/rateLimiter');
-const { User, Settings } = require('../models');
+const { User, Settings, Friend, sequelize } = require('../models');
+// FIX (500-ERRORS-LIVE-AUDIT): this file called a `getSequelize()` function
+// (registration-pin routes, /devices/revoke-all) and referenced a bare
+// `models` variable (`models.Friend` in /block-user, /unblock-user) that
+// were never imported or defined anywhere in this file — both are plain
+// ReferenceErrors, so every request to those 4 routes threw before doing
+// any work and always returned a 500, regardless of input. The real
+// Sequelize instance and the Friend model are already exported from
+// '../models' (see models/index.js), so they're imported above instead.
+function getSequelize() { return sequelize; }
 const { Op } = require('sequelize');
 const bcrypt = require('bcryptjs');
 const multer = require('multer');
@@ -1082,7 +1091,8 @@ router.post(
             if (!targetUserId) return res.status(400).json({ status: 'error', message: 'Target user ID is required' });
             if (String(userId) === String(targetUserId)) return res.status(400).json({ status: 'error', message: 'Cannot block yourself' });
 
-            const Friend = models.Friend;
+            // FIX (500-ERRORS-LIVE-AUDIT): `models` was never imported in this
+            // file; `Friend` is already destructured from '../models' at the top.
             if (Friend) {
                 const existing = await Friend.findOne({
                     where: {
@@ -1119,7 +1129,8 @@ router.post(
             const { targetUserId } = req.body;
             if (!targetUserId) return res.status(400).json({ status: 'error', message: 'Target user ID is required' });
 
-            const Friend = models.Friend;
+            // FIX (500-ERRORS-LIVE-AUDIT): `models` was never imported in this
+            // file; `Friend` is already destructured from '../models' at the top.
             if (Friend) {
                 const relation = await Friend.findOne({
                     where: { requesterId: userId, receiverId: targetUserId, status: 'blocked' }
