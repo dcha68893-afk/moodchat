@@ -72,7 +72,20 @@ async function uploadToCloudinary(fileData, options = {}) {
   };
 
   return new Promise((resolve, reject) => {
+    // FIX (fast-fail-on-bad-config): an invalid cloud_name still makes a
+    // real network round-trip to Cloudinary before it comes back with 401 —
+    // on a single free-tier dyno that's also serving every WebSocket
+    // connection, a pile of these slow failing uploads (e.g. from repeated
+    // save-button clicks) can compete for the same limited resources and
+    // has been observed correlating with socket reconnect storms. Bound
+    // every upload attempt to 15s so a bad config (or a slow Cloudinary
+    // response) can never hold a request open indefinitely.
+    const uploadTimeout = setTimeout(() => {
+      reject(new Error('Cloudinary upload timed out after 15s — check CLOUDINARY_CLOUD_NAME/CLOUDINARY_URL on Render'));
+    }, 15000);
+
     const upload_stream = cld.uploader.upload_stream(uploadOpts, (error, result) => {
+      clearTimeout(uploadTimeout);
       if (error) return reject(error);
       resolve({
         url:      result.secure_url,
