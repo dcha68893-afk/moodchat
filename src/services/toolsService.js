@@ -585,14 +585,54 @@ class ToolsService {
     // ══════════════════════════════════════════════════════════════════════════
 
     async shortenURL(url, userId, customAlias, expiresAt) {
+        // FIX (url-shortener-non-functional): this used to build a response
+        // object and throw it away — nothing was ever written to the
+        // database, so every "shortened" link vanished the instant the
+        // response was sent, and getOriginalURL() (used by the actual
+        // GET /s/:shortCode redirect) always returned the hardcoded
+        // 'https://example.com' no matter what code was requested. Every
+        // link anyone ever shortened silently redirected to example.com.
+        const db = require('../models');
         const shortCode = customAlias || Math.random().toString(36).slice(2, 8);
-        const shortUrl  = `${process.env.BASE_URL || 'http://localhost:3000'}/s/${shortCode}`;
-        return { originalUrl: url, shortUrl, shortCode, expiresAt: expiresAt || new Date(Date.now() + 30 * 86400e3), createdAt: new Date(), userId, clicks: 0 };
+        const expiry = expiresAt ? new Date(expiresAt) : new Date(Date.now() + 30 * 86400e3);
+
+        if (db.sequelize) {
+            if (customAlias) {
+                const [existing] = await db.sequelize.query(
+                    `SELECT short_code FROM short_urls WHERE short_code = :shortCode`,
+                    { replacements: { shortCode }, type: db.Sequelize.QueryTypes.SELECT }
+                );
+                if (existing) throw new ServerError('That custom alias is already taken', 409);
+            }
+            await db.sequelize.query(
+                `INSERT INTO short_urls (short_code, original_url, user_id, expires_at, clicks, "createdAt")
+                 VALUES (:shortCode, :url, :userId, :expiry, 0, NOW())`,
+                { replacements: { shortCode, url, userId: userId || null, expiry } }
+            );
+        }
+
+        const shortUrl = `${process.env.BASE_URL || 'http://localhost:3000'}/s/${shortCode}`;
+        return { originalUrl: url, shortUrl, shortCode, expiresAt: expiry, createdAt: new Date(), userId, clicks: 0 };
     }
 
     async getOriginalURL(shortCode) {
-        // Wire to DB in production
-        return { shortCode, originalUrl: 'https://example.com', clicks: 0 };
+        const db = require('../models');
+        if (db.sequelize) {
+            const [row] = await db.sequelize.query(
+                `SELECT * FROM short_urls WHERE short_code = :shortCode`,
+                { replacements: { shortCode }, type: db.Sequelize.QueryTypes.SELECT }
+            );
+            if (!row) throw new ServerError('Short URL not found', 404);
+            if (row.expires_at && new Date(row.expires_at) < new Date()) {
+                throw new ServerError('This short link has expired', 410);
+            }
+            await db.sequelize.query(
+                `UPDATE short_urls SET clicks = clicks + 1 WHERE short_code = :shortCode`,
+                { replacements: { shortCode } }
+            );
+            return { shortCode, originalUrl: row.original_url, clicks: (row.clicks || 0) + 1 };
+        }
+        throw new ServerError('Short URL not found', 404);
     }
 
     // ══════════════════════════════════════════════════════════════════════════

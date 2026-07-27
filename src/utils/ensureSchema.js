@@ -982,6 +982,93 @@ const REQUIRED_TABLES = [
       "updatedAt"        TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
     )`,
   },
+
+  // ── AUDIT (2026-07-27): "features in tools module lacking column/table,
+  // internal server errors" — Order.js, Review.js and Wishlist.js each map
+  // to a table (marketplace_orders, marketplace_reviews, wishlists) that had
+  // NO entry anywhere in REQUIRED_TABLES. The only trace of them in this file
+  // was a handful of REQUIRED_COLUMNS/REQUIRED_TYPE_FIXES entries that ALTER
+  // columns on tables assumed to already exist. On a database where the real
+  // migrations (marketplace schema migration) never ran — same
+  // never-actually-applied gap documented above for every other table in
+  // this file — these three tables simply don't exist, so every checkout
+  // (Order.create), every review (Review.create), and every wishlist
+  // add/remove throws "relation does not exist" as a 500. Mirrored verbatim
+  // from src/models/Order.js, Review.js, Wishlist.js (field-for-field,
+  // including the explicit camelCase createdAt/updatedAt columns those
+  // models pin via `field:`).
+  {
+    name: 'marketplace_orders',
+    sql: `CREATE TABLE IF NOT EXISTS "marketplace_orders" (
+      "id"               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      "product_id"       UUID NOT NULL,
+      "buyer_id"         INTEGER NOT NULL,
+      "seller_id"        INTEGER NOT NULL,
+      "status"           VARCHAR(20) NOT NULL DEFAULT 'pending',
+      "quantity"         INTEGER NOT NULL DEFAULT 1,
+      "total_price"      DECIMAL(10,2) NOT NULL DEFAULT 0,
+      "currency"         VARCHAR(10) DEFAULT 'KES',
+      "payment_method"   VARCHAR(50),
+      "payment_ref"      VARCHAR(255),
+      "paid_at"          TIMESTAMP WITH TIME ZONE,
+      "shipped_at"       TIMESTAMP WITH TIME ZONE,
+      "delivered_at"     TIMESTAMP WITH TIME ZONE,
+      "delivery_address" JSONB DEFAULT '{}',
+      "tracking_number"  VARCHAR(255),
+      "notes"            TEXT,
+      "metadata"         JSONB DEFAULT '{}',
+      "createdAt"        TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      "updatedAt"        TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+    )`,
+  },
+  {
+    name: 'marketplace_reviews',
+    sql: `CREATE TABLE IF NOT EXISTS "marketplace_reviews" (
+      "id"                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      "product_id"            UUID NOT NULL,
+      "order_id"              UUID,
+      "user_id"               INTEGER NOT NULL,
+      "seller_id"             INTEGER NOT NULL,
+      "rating"                INTEGER NOT NULL,
+      "comment"               TEXT,
+      "images"                TEXT[] DEFAULT '{}',
+      "is_verified_purchase"  BOOLEAN DEFAULT false,
+      "helpful_count"         INTEGER DEFAULT 0,
+      "seller_reply"          TEXT,
+      "seller_replied_at"     TIMESTAMP WITH TIME ZONE,
+      "createdAt"             TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      "updatedAt"             TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      CONSTRAINT "unique_review_per_user_product" UNIQUE ("product_id", "user_id")
+    )`,
+  },
+  {
+    name: 'wishlists',
+    sql: `CREATE TABLE IF NOT EXISTS "wishlists" (
+      "id"              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      "user_id"         INTEGER NOT NULL,
+      "product_id"      UUID NOT NULL,
+      "price_at_add"    DECIMAL(12,2),
+      "notify_on_drop"  BOOLEAN DEFAULT true,
+      "createdAt"       TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      CONSTRAINT "wishlists_user_product_unique" UNIQUE ("user_id", "product_id")
+    )`,
+  },
+  // Backing store for toolsService.shortenURL/getOriginalURL — this feature
+  // used to have no persistence at all (see FIX note in toolsService.js);
+  // every "shortened" link vanished immediately and every redirect went to
+  // a hardcoded example.com.
+  {
+    name: 'short_urls',
+    sql: `CREATE TABLE IF NOT EXISTS "short_urls" (
+      "id"           SERIAL PRIMARY KEY,
+      "short_code"   VARCHAR(64) NOT NULL UNIQUE,
+      "original_url" TEXT NOT NULL,
+      "user_id"      INTEGER,
+      "expires_at"   TIMESTAMP WITH TIME ZONE,
+      "clicks"       INTEGER NOT NULL DEFAULT 0,
+      "createdAt"    TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+    )`,
+  },
 ];
 
 // ─── Columns whose TYPE was wrong from creation (not missing — wrong type) ────
@@ -1171,7 +1258,7 @@ async function fixToolsMarketplaceSchema(sequelize) {
 
     await qi.createTable('tools', {
       id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true, allowNull: false },
-      seller_id: { type: DataTypes.UUID, allowNull: false },
+      seller_id: { type: DataTypes.INTEGER, allowNull: false },
       title: { type: DataTypes.STRING(255), allowNull: false },
       description: { type: DataTypes.TEXT, allowNull: true },
       price: { type: DataTypes.DECIMAL(10, 2), allowNull: false, defaultValue: 0 },
@@ -1186,8 +1273,14 @@ async function fixToolsMarketplaceSchema(sequelize) {
       is_boosted: { type: DataTypes.BOOLEAN, defaultValue: false },
       boost_expires_at: { type: DataTypes.DATE, allowNull: true },
       views: { type: DataTypes.INTEGER, defaultValue: 0 },
-      saved_by: { type: DataTypes.ARRAY(DataTypes.UUID), defaultValue: [] },
-      purchased_by: { type: DataTypes.ARRAY(DataTypes.UUID), defaultValue: [] },
+      // FIX: must match Tool model (INTEGER[]) — Users.id is INTEGER, not
+      // UUID. These were UUID[] here, which is exactly the FK-type mismatch
+      // migrations 20260626_fix_marketplace_fk_types.js and
+      // 20260711_fix_tool_saved_purchased_by_types.js exist to fix; leaving
+      // this rebuild path on UUID[] meant a fresh/legacy-migrated install
+      // would immediately regress the bug those migrations already fixed.
+      saved_by: { type: DataTypes.ARRAY(DataTypes.INTEGER), defaultValue: [] },
+      purchased_by: { type: DataTypes.ARRAY(DataTypes.INTEGER), defaultValue: [] },
       rating: { type: DataTypes.DECIMAL(3, 2), defaultValue: 0 },
       rating_count: { type: DataTypes.INTEGER, defaultValue: 0 },
       status: { type: DataTypes.ENUM('active', 'inactive', 'sold', 'deleted'), defaultValue: 'active', allowNull: false },

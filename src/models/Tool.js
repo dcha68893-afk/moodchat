@@ -80,9 +80,16 @@ module.exports = (sequelize, DataTypes) => {
           // design, tech, cleaning, events, beauty, transport). Without this,
           // Sequelize would reject the insert with a validation error before
           // it ever reached the controller's own whitelist.
+          // FIX (category-not-shown-after-save): kept in sync with the
+          // whitelist in toolsController.createListing — this must be a
+          // superset of every <option value="..."> across all four "Create
+          // Listing" tabs (Service, Physical Product, Digital Item) in
+          // Tools.html, or valid category picks get rejected/rewritten.
           isIn: [['electronics', 'furniture', 'clothing', 'books', 'services', 'digital', 'premium', 'other',
                   'tutoring', 'repair', 'design', 'tech', 'cleaning', 'events', 'beauty', 'transport',
-                  'notes', 'templates', 'ebooks', 'software', 'audio', 'courses']],
+                  'notes', 'templates', 'ebooks', 'software', 'audio', 'courses',
+                  'phones', 'appliances', 'health', 'home', 'fashion', 'computing',
+                  'gaming', 'baby', 'sports', 'supermarket', 'garden']],
         },
       },
       type: {

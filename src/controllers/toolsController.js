@@ -680,7 +680,17 @@ class ToolsController {
                 // FIX (2026-07-22): service subcategories (Service tab dropdown)
                 'tutoring','repair','design','tech','cleaning','events','beauty','transport',
                 // FIX (2026-07-22): digital-item subcategories (Digital Item tab dropdown)
-                'notes','templates','ebooks','software','audio','courses'];
+                'notes','templates','ebooks','software','audio','courses',
+                // FIX (category-not-shown-after-save): the "Physical Product" tab's
+                // #physCategory <select> in Tools.html sends these exact values
+                // (phones/appliances/health/home/fashion/computing/gaming/baby/
+                // sports/supermarket/garden), but none of them were in this
+                // whitelist. Every physical listing silently fell through to the
+                // `normalizedCat` default of 'services' below, so it saved fine
+                // and returned 201, but never showed up under the category the
+                // seller actually picked — it was filed under Services instead.
+                'phones','appliances','health','home','fashion','computing',
+                'gaming','baby','sports','supermarket','garden'];
             const normalizedCat    = validCategories.includes(category) ? category : (normalizedType === 'digital' ? 'digital' : normalizedType === 'premium' ? 'premium' : 'services');
             const validConditions  = ['new','used','refurbished'];
             const normalizedCond   = validConditions.includes(condition) ? condition : 'new';
@@ -1341,6 +1351,25 @@ class ToolsController {
                 totalPages: Math.ceil(count / parseInt(limit)),
             }, 'Seller listings retrieved');
         } catch (e) { _next(next, e, 'getSellerListings'); }
+    }
+    // ── ADMIN CONTACT (WhatsApp "chat with admin" flow) ─────────────────────
+    // FEATURE 5: the Messages/WhatsApp icon in the tools account used to
+    // open a hardcoded wa.me/254700000000 link with no choice and no way to
+    // reach the account's own WhatsApp. This reads the admin's real WhatsApp
+    // number/name from environment variables (set in .env — see
+    // .env.example) instead of a number baked into the frontend JS bundle.
+    async getAdminContact(req, res, next) {
+        try {
+            const whatsapp = (process.env.ADMIN_WHATSAPP_NUMBER || '').replace(/[^\d]/g, '');
+            if (!whatsapp) {
+                throw new AppError('Admin WhatsApp contact is not configured. Set ADMIN_WHATSAPP_NUMBER in .env.', 503);
+            }
+            return ok(res, {
+                whatsapp,
+                name: process.env.ADMIN_NAME || 'Support',
+                defaultMessage: process.env.ADMIN_WHATSAPP_GREETING || 'Hi, I need help with my account.',
+            }, 'Admin contact retrieved');
+        } catch (e) { _next(next, e, 'getAdminContact'); }
     }
 }
 

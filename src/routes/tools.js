@@ -240,6 +240,11 @@ router.post('/payments/process',        marketplaceLimiter, toolsController.proc
 router.post('/payments/mpesa/callback', toolsController.mpesaCallback.bind(toolsController)); // no rate limit — Safaricom push
 
 // ═════════════════════════════════════════════════════════════════════════════
+// ADMIN CONTACT (WhatsApp "chat with admin" icon)
+// ═════════════════════════════════════════════════════════════════════════════
+router.get('/admin-contact', marketplaceLimiter, toolsController.getAdminContact.bind(toolsController));
+
+// ═════════════════════════════════════════════════════════════════════════════
 // FULL ECOMMERCE MARKETPLACE — marketplace.routes.js mounted here
 // Adds: products, wishlist, orders, payments, reviews, seller dashboard,
 //       delivery, categories, admin, image upload, M-Pesa, card payment.
