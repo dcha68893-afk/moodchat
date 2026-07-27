@@ -72,16 +72,30 @@ class UserStatusController {
         deviceInfo
       });
 
-      // Emit WebSocket event for real-time updates
+      // FIX (presence privacy audit): this used to be req.io.emit(...) — a
+      // GLOBAL broadcast to every connected socket in the app, with the
+      // user's real status/isOnline value, no scoping to contacts and no
+      // check of onlineStatusVisibility at all. That's a double bug: (1) it
+      // leaked presence to people who aren't even contacts, and (2)
+      // depending on timing it could race with the properly-scoped,
+      // privacy-aware connect/disconnect broadcast in webSocketService.js,
+      // which is exactly the kind of conflict that produces "sometimes says
+      // online when offline and vice versa". Route this through the same
+      // scoped + privacy-aware broadcaster instead.
       if (req.io) {
-        req.io.emit('status:updated', {
-          userId,
-          status: userStatus.status,
-          customMessage: userStatus.customMessage,
-          lastSeen: userStatus.lastSeen,
-          isOnline: userStatus.isOnline,
-          timestamp: new Date()
-        });
+        try {
+          const ws = require('../services/webSocketService');
+          if (ws && typeof ws._broadcastPresenceToContacts === 'function') {
+            await ws._broadcastPresenceToContacts(userId, 'status:updated', {
+              userId,
+              status: userStatus.status,
+              customMessage: userStatus.customMessage,
+              lastSeen: userStatus.lastSeen,
+              isOnline: userStatus.isOnline,
+              timestamp: new Date()
+            });
+          }
+        } catch (_) {}
       }
 
       res.status(200).json({

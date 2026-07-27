@@ -5,6 +5,66 @@ const getUser = () => db.User || db.models?.Users || null;
 const { ServerError, ValidationError, NotFoundError, ForbiddenError } = require('../utils/errors');
 const logger = require('../utils/logger');
 
+// FIX (presence privacy audit): `User.privacySettings.onlineStatusVisibility`
+// ('everyone' | 'friends' | 'nobody') is saved correctly by
+// profileService.updatePrivacySettings / routes/settings.js, but until this
+// fix NOTHING on the read side ever consulted it. The only privacy check
+// anywhere in this file was for the literal status enum value 'invisible' —
+// a completely separate, always-true-by-default boolean
+// (UserStatus.showOnlineStatus) that nothing ever wrote to. That's why a
+// friend's presence could look right or wrong depending on which code path
+// served it: the actual saved "who can see my online status" setting was
+// write-only and never enforced. This helper is the single place that now
+// enforces it for every read path (single status, bulk status, and both
+// WebSocket broadcast paths reuse the same rule).
+async function getOnlineVisibilityRule(targetUser) {
+    try {
+        const raw = targetUser && targetUser.privacySettings && targetUser.privacySettings.onlineStatusVisibility;
+        if (raw === 'friends' || raw === 'nobody' || raw === 'everyone') return raw;
+        return 'everyone'; // default when unset, matches the field's documented default
+    } catch (_) {
+        return 'everyone';
+    }
+}
+
+function maskPresence(formattedStatus) {
+    return {
+        userId: formattedStatus.userId,
+        id: formattedStatus.id,
+        username: formattedStatus.username,
+        displayName: formattedStatus.displayName,
+        avatar: formattedStatus.avatar,
+        status: 'offline',
+        isOnline: false,
+        customMessage: formattedStatus.customMessage,
+        lastSeen: null,
+        isPrivacyMasked: true
+    };
+}
+
+/**
+ * Applies the target user's saved "who can see my online status" setting
+ * before returning presence data to a requester. Always returns the true
+ * status to the user themselves.
+ */
+async function applyOnlineVisibility(formattedStatus, targetUserId, requesterId, targetUser, friendIdSet) {
+    if (String(targetUserId) === String(requesterId)) return formattedStatus;
+
+    const rule = await getOnlineVisibilityRule(targetUser);
+    if (rule === 'everyone') return formattedStatus;
+    if (rule === 'nobody') return maskPresence(formattedStatus);
+
+    // rule === 'friends'
+    let isFriend;
+    if (friendIdSet) {
+        isFriend = friendIdSet.has(String(targetUserId));
+    } else {
+        const friendService = require('./friendService');
+        isFriend = await friendService.areFriends(targetUserId, requesterId);
+    }
+    return isFriend ? formattedStatus : maskPresence(formattedStatus);
+}
+
 /**
  * User Status Service
  * Handles user online status and presence
@@ -143,7 +203,9 @@ class UserStatusService {
         };
       }
 
-      return formattedStatus;
+      // FIX (presence privacy audit): enforce the saved
+      // onlineStatusVisibility setting — see applyOnlineVisibility above.
+      return applyOnlineVisibility(formattedStatus, userId, requesterId, user);
     } catch (error) {
       if (
         error instanceof ValidationError ||
@@ -188,6 +250,24 @@ class UserStatusService {
       const userMap = new Map(users.map(u => [String(u.id), u]));
       const statusMap = new Map(userStatuses.map(s => [String(s.userId), s]));
 
+      // FIX (presence privacy audit): fetch the requester's accepted friend
+      // ids ONCE instead of one areFriends() query per contact, so the
+      // 'friends'-only visibility rule doesn't turn a 100-contact list load
+      // into 100 extra queries.
+      let friendIdSet = null;
+      try {
+        const Friend = db.Friend || db.models?.Friend;
+        if (Friend) {
+          const rows = await Friend.findAll({
+            where: {
+              status: 'accepted',
+              [Op.or]: [{ requesterId }, { receiverId: requesterId }]
+            }
+          });
+          friendIdSet = new Set(rows.map(r => String(r.requesterId === requesterId || String(r.requesterId) === String(requesterId) ? r.receiverId : r.requesterId)));
+        }
+      } catch (_) { friendIdSet = null; }
+
       const results = [];
       for (const userId of userIds) {
         const user = userMap.get(String(userId));
@@ -202,7 +282,7 @@ class UserStatusService {
           });
         }
 
-        const formattedStatus = this._formatUserStatus(status, user);
+        let formattedStatus = this._formatUserStatus(status, user);
 
         // Handle invisible status
         if (formattedStatus.status === 'invisible' && String(userId) !== String(requesterId)) {
@@ -215,9 +295,13 @@ class UserStatusService {
             lastSeen: formattedStatus.lastSeen,
             isInvisible: true
           });
-        } else {
-          results.push(formattedStatus);
+          continue;
         }
+
+        // FIX (presence privacy audit): enforce the saved
+        // onlineStatusVisibility setting for this contact too.
+        formattedStatus = await applyOnlineVisibility(formattedStatus, userId, requesterId, user, friendIdSet);
+        results.push(formattedStatus);
       }
 
       return results;

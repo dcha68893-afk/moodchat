@@ -1479,6 +1479,36 @@ class WebSocketService {
         try {
             const db = require('../models');
             const sequelize = db.sequelize || db;
+
+            // FIX (presence privacy audit): this used to fan the raw
+            // online/offline payload out to every contact unconditionally,
+            // completely ignoring the "who can see my online status" setting
+            // saved in User.privacySettings.onlineStatusVisibility. Load it
+            // once here so we can mask the payload per-recipient below,
+            // instead of leaking true presence to people the user chose to
+            // hide it from.
+            let visibilityRule = 'everyone';
+            try {
+                const User = db.User || db.models?.Users;
+                const owner = User && await User.findByPk(uid);
+                const raw = owner && owner.privacySettings && owner.privacySettings.onlineStatusVisibility;
+                if (raw === 'friends' || raw === 'nobody' || raw === 'everyone') visibilityRule = raw;
+            } catch (_) {}
+
+            let friendIdSet = null;
+            if (visibilityRule === 'friends') {
+                try {
+                    const Friend = db.Friend || db.models?.Friend;
+                    const FOp = require('sequelize').Op;
+                    const rows = Friend ? await Friend.findAll({
+                        where: { status: 'accepted', [FOp.or]: [{ requesterId: uid }, { receiverId: uid }] }
+                    }) : [];
+                    friendIdSet = new Set(rows.map(r => String(String(r.requesterId) === String(uid) ? r.receiverId : r.requesterId)));
+                } catch (_) { friendIdSet = new Set(); }
+            }
+
+            const maskedPayload = { ...payload, isOnline: false, status: 'offline', lastSeen: null, isPrivacyMasked: true };
+
             const contacts = await sequelize.query(
                 `SELECT DISTINCT cp2."userId" FROM chat_participants cp1
                  JOIN chat_participants cp2 ON cp2."chatId" = cp1."chatId" AND cp2."userId" != cp1."userId"
@@ -1487,10 +1517,15 @@ class WebSocketService {
             );
             for (const row of (contacts || [])) {
                 const cid = row.userId;
-                if (cid) {
-                    io.to(`user:${cid}`).emit(event, payload);
-                    io.to(`user_${cid}`).emit(event, payload);
+                if (!cid) continue;
+                let toSend = payload;
+                if (visibilityRule === 'nobody') {
+                    toSend = maskedPayload;
+                } else if (visibilityRule === 'friends' && friendIdSet && !friendIdSet.has(String(cid))) {
+                    toSend = maskedPayload;
                 }
+                io.to(`user:${cid}`).emit(event, toSend);
+                io.to(`user_${cid}`).emit(event, toSend);
             }
             return true;
         } catch (_) {
