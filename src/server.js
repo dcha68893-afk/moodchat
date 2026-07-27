@@ -2216,7 +2216,18 @@ class DatabaseService {
             
             // Safe schema sync
             await this.syncSchema();
-            
+
+            // FIX-DIAG (avatar/cover-photo-upload-401): surface a misconfigured
+            // Cloudinary cloud_name/credentials as one clear line in the boot
+            // log instead of only as scattered per-upload 401s later. Non-fatal
+            // — the server still starts either way.
+            try {
+                const { validateConfig } = require('./services/cloudinaryService');
+                await validateConfig();
+            } catch (cloudinaryDiagErr) {
+                logger.warn(`Cloudinary config check failed: ${cloudinaryDiagErr.message}`, 'STARTUP');
+            }
+
             // Inspect schema for warnings and get column details
             await this.inspectSchema();
             

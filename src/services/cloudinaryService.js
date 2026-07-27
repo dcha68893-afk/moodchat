@@ -168,6 +168,30 @@ function isConfigured() {
   );
 }
 
+// FIX-DIAG (avatar/cover-photo-upload-401): isConfigured() only checks that
+// the env vars are *present*, not that they're *valid* — a typo'd or
+// nonexistent cloud_name (e.g. CLOUDINARY_CLOUD_NAME=nexora, which is not a
+// real Cloudinary account) passes isConfigured() fine and then fails with a
+// 401 "Invalid cloud_name" on every real upload attempt, buried in
+// per-request error logs with no obvious link back to the env var. This
+// pings Cloudinary once at boot so the misconfiguration shows up as one
+// unmissable line in the startup log instead of a stream of upload 401s.
+async function validateConfig() {
+  const cld = _load();
+  if (!cld) {
+    console.warn('[Cloudinary] \u23ed\ufe0f  Not configured \u2014 CLOUDINARY_URL / CLOUDINARY_CLOUD_NAME not set. Photo uploads will fail with "not configured" errors until this is set on Render.');
+    return { ok: false, reason: 'not_configured' };
+  }
+  try {
+    await cld.api.ping();
+    console.log(`[Cloudinary] \u2705 Config OK \u2014 cloud_name="${cld.config().cloud_name}" reachable`);
+    return { ok: true };
+  } catch (e) {
+    console.error(`[Cloudinary] \u274c MISCONFIGURED \u2014 cloud_name="${cld.config().cloud_name}" was rejected by Cloudinary (${e.message}). Avatar/cover photo uploads will fail for every user until CLOUDINARY_CLOUD_NAME/CLOUDINARY_URL is corrected in Render \u2192 Environment. Get the correct value from your Cloudinary dashboard (Settings \u2192 API Keys \u2192 "Cloud name").`);
+    return { ok: false, reason: 'invalid_credentials', error: e.message };
+  }
+}
+
 module.exports = {
   uploadToCloudinary,
   uploadGroupAvatar,
@@ -175,4 +199,5 @@ module.exports = {
   uploadUserAvatar,
   deleteFromCloudinary,
   isConfigured,
+  validateConfig,
 };
