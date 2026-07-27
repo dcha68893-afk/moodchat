@@ -635,6 +635,20 @@ const updateProfileHandler = asyncHandler(async (req, res) => {
     if (lastName !== undefined) updateData.lastName = lastName;
 
     const { photoUrl } = req.body || {};
+    // FIX (silent-photo-save-failure): every branch below used to swallow
+    // upload failures — log-only in the catch, or just skip setting
+    // updateData.avatar when uploadToCloudinary() returns null (which it
+    // does silently, with no exception, whenever Cloudinary isn't
+    // configured on the server — see cloudinaryService.js _load()). The
+    // handler then fell through to its normal 200 "Profile updated
+    // successfully" response regardless, so a manually-uploaded photo could
+    // silently never reach the database while the UI reported success.
+    // Google-login avatars never hit this path at all (authService.js writes
+    // payload.picture straight into the avatar column), which is why only
+    // manual uploads were affected. Track failures here so the response can
+    // reflect what actually happened.
+    let avatarUploadError = null;
+    let coverUploadError = null;
 
     if (req.file) {
         try {
@@ -645,13 +659,16 @@ const updateProfileHandler = asyncHandler(async (req, res) => {
             // when a real multipart file arrived. The real implementation is
             // uploadUserAvatar() in services/cloudinaryService.js, whose
             // result shape is { url, publicId, ... }, not { secure_url }.
-            const { uploadUserAvatar } = require('../services/cloudinaryService');
+            const { uploadUserAvatar, isConfigured } = require('../services/cloudinaryService');
             const uploadResult = await uploadUserAvatar(req.file.buffer, userId);
             if (uploadResult && uploadResult.url) {
                 updateData.avatar = uploadResult.url;
+            } else {
+                avatarUploadError = isConfigured() ? 'Photo upload failed' : 'Photo upload is not configured on this server';
             }
         } catch (uploadError) {
             console.error('Error uploading avatar:', uploadError);
+            avatarUploadError = 'Photo upload failed';
         }
     } else if (typeof photoUrl === 'string' && photoUrl.startsWith('data:image/')) {
         // Settings is loaded in an iframe that relays every request through
@@ -660,20 +677,25 @@ const updateProfileHandler = asyncHandler(async (req, res) => {
         // so the frontend sends the photo as a base64 data URL instead.
         // Decode it here and route it through the same Cloudinary upload.
         try {
-            const { uploadUserAvatar } = require('../services/cloudinaryService');
+            const { uploadUserAvatar, isConfigured } = require('../services/cloudinaryService');
             const matches = photoUrl.match(/^data:image\/(\w+);base64,(.+)$/);
             if (matches) {
                 const buffer = Buffer.from(matches[2], 'base64');
                 if (buffer.length > 10 * 1024 * 1024) {
-                    return res.status(413).json({ status: 'error', message: 'Photo too large (max 10MB)' });
+                    return res.status(413).json({ status: 'error', success: false, message: 'Photo too large (max 10MB)' });
                 }
                 const uploadResult = await uploadUserAvatar(buffer, userId);
                 if (uploadResult && uploadResult.url) {
                     updateData.avatar = uploadResult.url;
+                } else {
+                    avatarUploadError = isConfigured() ? 'Photo upload failed' : 'Photo upload is not configured on this server';
                 }
+            } else {
+                avatarUploadError = 'Invalid image data';
             }
         } catch (uploadError) {
             console.error('Error uploading avatar from data URL:', uploadError);
+            avatarUploadError = 'Photo upload failed';
         }
     } else if (photoUrl === '') {
         // Explicit removal (removePhoto() sends photoUrl: '')
@@ -686,11 +708,12 @@ const updateProfileHandler = asyncHandler(async (req, res) => {
     const { coverPhotoUrl } = req.body || {};
     if (typeof coverPhotoUrl === 'string' && coverPhotoUrl.startsWith('data:image/')) {
         try {
+            const { isConfigured } = require('../services/cloudinaryService');
             const matches = coverPhotoUrl.match(/^data:image\/(\w+);base64,(.+)$/);
             if (matches) {
                 const buffer = Buffer.from(matches[2], 'base64');
                 if (buffer.length > 10 * 1024 * 1024) {
-                    return res.status(413).json({ status: 'error', message: 'Cover photo too large (max 10MB)' });
+                    return res.status(413).json({ status: 'error', success: false, message: 'Cover photo too large (max 10MB)' });
                 }
                 const uploadResult = await cloudinaryService.uploadToCloudinary(buffer, {
                     folder: 'nexopa/user-covers',
@@ -701,13 +724,43 @@ const updateProfileHandler = asyncHandler(async (req, res) => {
                 });
                 if (uploadResult && uploadResult.url) {
                     updateData.coverPhoto = uploadResult.url;
+                } else {
+                    coverUploadError = isConfigured() ? 'Cover photo upload failed' : 'Photo upload is not configured on this server';
                 }
+            } else {
+                coverUploadError = 'Invalid image data';
             }
         } catch (uploadError) {
             console.error('Error uploading cover photo from data URL:', uploadError);
+            coverUploadError = 'Cover photo upload failed';
         }
     } else if (coverPhotoUrl === '') {
         updateData.coverPhoto = '';
+    }
+
+    // FIX: if this request's ONLY purpose was the photo/cover upload and it
+    // failed, respond with a real error instead of the generic 200 below —
+    // otherwise the frontend (and OfflineQueue) has no way to tell a genuine
+    // failure apart from success. settings-ui.js always sends photoUrl and
+    // coverPhotoUrl as their own dedicated requests (see savePhoto() /
+    // saveCoverPhoto() in settings-ui.js), so if the only field submitted
+    // for this request was the failed image, nothing else in updateData was
+    // ever going to be set — safe to fail the whole request.
+    const requestedOnlyPhoto = avatarUploadError && Object.keys(updateData).length === 0 &&
+        displayName === undefined && username === undefined && bio === undefined &&
+        theme === undefined && language === undefined && firstName === undefined &&
+        lastName === undefined && profileVisibility === undefined && coverPhotoUrl === undefined;
+    const requestedOnlyCover = coverUploadError && Object.keys(updateData).length === 0 &&
+        displayName === undefined && username === undefined && bio === undefined &&
+        theme === undefined && language === undefined && firstName === undefined &&
+        lastName === undefined && profileVisibility === undefined && photoUrl === undefined;
+    if (requestedOnlyPhoto || requestedOnlyCover) {
+        return res.status(502).json({
+            status: 'error',
+            success: false,
+            message: avatarUploadError || coverUploadError,
+            code: 'PHOTO_UPLOAD_FAILED'
+        });
     }
 
     if (Object.keys(updateData).length > 0) {
@@ -760,11 +813,16 @@ const updateProfileHandler = asyncHandler(async (req, res) => {
     _emitSettingsUpdated(req, settingsPayload);
     console.log('[Settings] Saved profile settings for user:', userId);
 
+    const uploadWarnings = {};
+    if (avatarUploadError) uploadWarnings.avatar = avatarUploadError;
+    if (coverUploadError) uploadWarnings.coverPhoto = coverUploadError;
+
     return res.status(200).json({
         success: true,
         status: 'success',
         message: 'Profile updated successfully',
-        data: { profile: updatedUser, settings: settingsPayload }
+        data: { profile: updatedUser, settings: settingsPayload },
+        ...(Object.keys(uploadWarnings).length ? { warnings: uploadWarnings } : {})
     });
 });
 
@@ -1445,4 +1503,3 @@ router.delete('/devices/revoke-all', apiRateLimiter, asyncHandler(async (req, re
 
 
 module.exports = router;
-
