@@ -240,6 +240,19 @@ class WebSocketService {
 
             // join_user_room: moved below with call-room fix (see FIX-CALL-ROOM)
 
+            // FIX (spurious reconnect loop): app.realtime.socket.js's
+            // post-background liveness check emits a custom 'ping' and waits
+            // up to 10s for a 'pong' before concluding the socket is dead and
+            // forcing a full reconnect (see _setupNetworkMonitoring's
+            // visibilitychange handler, reason: 'ping-timeout-visibility').
+            // No handler for 'ping' ever existed on the backend, so that wait
+            // always timed out — even on a perfectly healthy connection with
+            // good internet — and every background/foreground cycle longer
+            // than 10s forced an unnecessary disconnect+reconnect.
+            socket.removeAllListeners('ping').on('ping', () => {
+                socket.emit('pong', { timestamp: Date.now() });
+            });
+
             // FIX-DISCONNECT-COLLISION: this used to be
             // socket.removeAllListeners('disconnect').on('disconnect', ...), which
             // doesn't just clear this handler's own prior registration — it destroys
