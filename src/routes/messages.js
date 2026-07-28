@@ -198,10 +198,13 @@ const messageDeliveryService = require('../services/messageDeliveryService');
 
 router.post('/lifecycle/send', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
   const senderId = req.user.id;
-  const { chatId, content, type, clientMessageId, replyToId } = req.body || {};
+  // FIX-RECEIVERID-GAP: accept receiverId too — this REST route is the
+  // socket-fallback for MessageLifecycleClient.js, which must be able to
+  // start a brand-new conversation the same way the socket path can.
+  const { chatId, receiverId, content, type, clientMessageId, replyToId } = req.body || {};
 
   const { message, alreadyExisted } = await messageDeliveryService.sendMessage({
-    chatId, senderId, content, type, clientMessageId, replyToId,
+    chatId, receiverId, senderId, content, type, clientMessageId, replyToId,
   });
 
   // Best-effort real-time push to recipients — if this REST call is itself
@@ -211,9 +214,13 @@ router.post('/lifecycle/send', apiRateLimiter, chatLimiter, asyncHandler(async (
     try {
       const wsService = require('../services/webSocketService');
       const sequelize = getSequelize();
+      // FIX: must use the RESOLVED chatId (message.chatId) here, not the
+      // original request's chatId — when only receiverId was sent, the
+      // request-body chatId is undefined and parseInt(undefined) is NaN,
+      // which matched zero rows and silently skipped delivery entirely.
       const participants = await sequelize.query(
         `SELECT DISTINCT "userId" FROM chat_participants WHERE "chatId" = :chatId AND "userId" != :senderId`,
-        { replacements: { chatId: parseInt(chatId, 10), senderId: parseInt(senderId, 10) }, type: sequelize.QueryTypes.SELECT }
+        { replacements: { chatId: parseInt(message.chatId, 10), senderId: parseInt(senderId, 10) }, type: sequelize.QueryTypes.SELECT }
       ).catch(() => []);
       for (const { userId: recipientId } of participants) {
         wsService.sendToUser(recipientId, 'msg:new', {

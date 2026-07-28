@@ -43,16 +43,26 @@ function register(wsService, socket, userId) {
 
   // ---- client -> server: send a message -----------------------------------
   socket.on('msg:send', async (payload = {}, cb) => {
-    const { chatId, content, type, clientMessageId, replyToId } = payload;
+    // FIX-RECEIVERID-GAP: accept receiverId alongside chatId. Every "message
+    // this person" entry point from Friends/Calls/Status starts with only a
+    // receiverId (no chatId exists yet) — messageDeliveryService.sendMessage()
+    // now resolves/creates the real direct chat from it, same as the
+    // REST POST /messages path already does.
+    const { chatId, receiverId, content, type, clientMessageId, replyToId } = payload;
     try {
       if (!clientMessageId) {
         socket.emit('msg:send:error', { clientMessageId, error: 'clientMessageId is required' });
         if (typeof cb === 'function') cb({ ok: false, error: 'clientMessageId is required' });
         return;
       }
+      if (!chatId && !receiverId) {
+        socket.emit('msg:send:error', { clientMessageId, error: 'chatId or receiverId is required' });
+        if (typeof cb === 'function') cb({ ok: false, error: 'chatId or receiverId is required' });
+        return;
+      }
 
       const { message, alreadyExisted } = await messageDeliveryService.sendMessage({
-        chatId, senderId: userId, content, type, clientMessageId, replyToId,
+        chatId, receiverId, senderId: userId, content, type, clientMessageId, replyToId,
       });
 
       const ackPayload = {

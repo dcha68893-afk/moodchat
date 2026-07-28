@@ -46,14 +46,93 @@ function getSequelize() {
 
 class MessageDeliveryService {
   /**
+   * FIX-RECEIVERID-GAP (msg:* lifecycle pipeline): this method used to
+   * require an already-resolved `chatId` and had no concept of a
+   * `receiverId` at all. That's fine for replies inside an existing
+   * conversation, but every "message this person" entry point opened from
+   * Friends, Calls, or Status starts with only a receiverId — there is no
+   * chatId yet until a direct chat is found-or-created for that pair. The
+   * REST `POST /messages` route (the path the app actually uses today) has
+   * always handled this correctly; this mirrors that exact find-or-create
+   * logic so the msg:* socket pipeline (messageLifecycleSocket.js's
+   * `msg:send`) can resolve a receiver the same way instead of failing /
+   * parseInt(undefined)-ing into NaN and silently dropping the send.
+   */
+  async resolveOrCreateDirectChat(senderId, receiverId) {
+    const sequelize = getSequelize();
+    const senderIdInt = parseInt(senderId, 10);
+    const receiverIdInt = parseInt(receiverId, 10);
+
+    if (!senderIdInt) throw new ValidationError('Invalid senderId');
+    if (!receiverIdInt) throw new ValidationError('Invalid receiverId');
+    if (receiverIdInt === senderIdInt) throw new ValidationError('Cannot message yourself');
+
+    const [receiverExists] = await sequelize.query(
+      `SELECT id FROM "Users" WHERE id = :receiverId LIMIT 1`,
+      { replacements: { receiverId: receiverIdInt }, type: sequelize.QueryTypes.SELECT }
+    ).catch(() => [null]);
+    if (!receiverExists) throw new ValidationError('Receiver not found');
+
+    const [existing] = await sequelize.query(
+      `SELECT c.id FROM chats c
+       JOIN chat_participants cp1 ON cp1."chatId" = c.id AND cp1."userId" = :senderId
+       JOIN chat_participants cp2 ON cp2."chatId" = c.id AND cp2."userId" = :receiverId
+       WHERE c.type = 'direct' AND c."isActive" = true LIMIT 1`,
+      { replacements: { senderId: senderIdInt, receiverId: receiverIdInt }, type: sequelize.QueryTypes.SELECT }
+    ).catch(() => [null]);
+    if (existing) return existing.id;
+
+    const t = await sequelize.transaction();
+    try {
+      const newChat = await sequelize.query(
+        `INSERT INTO chats (type, "createdBy", "isActive", "isArchived", "createdAt", "updatedAt")
+         VALUES ('direct', :senderId, true, false, NOW(), NOW()) RETURNING id`,
+        { replacements: { senderId: senderIdInt }, type: sequelize.QueryTypes.INSERT, transaction: t }
+      );
+      const chatId = newChat[0][0].id;
+
+      await sequelize.query(
+        `INSERT INTO chat_participants ("chatId", "userId", "joinedAt", "createdAt", "updatedAt")
+         VALUES (:chatId, :senderId, NOW(), NOW(), NOW()),
+                (:chatId, :receiverId, NOW(), NOW(), NOW())`,
+        { replacements: { chatId, senderId: senderIdInt, receiverId: receiverIdInt }, transaction: t }
+      );
+
+      await t.commit();
+      return chatId;
+    } catch (err) {
+      await t.rollback();
+      // Race: two near-simultaneous first messages between the same pair.
+      const [raceCheck] = await sequelize.query(
+        `SELECT c.id FROM chats c
+         JOIN chat_participants cp1 ON cp1."chatId" = c.id AND cp1."userId" = :senderId
+         JOIN chat_participants cp2 ON cp2."chatId" = c.id AND cp2."userId" = :receiverId
+         WHERE c.type = 'direct' AND c."isActive" = true LIMIT 1`,
+        { replacements: { senderId: senderIdInt, receiverId: receiverIdInt }, type: sequelize.QueryTypes.SELECT }
+      ).catch(() => [null]);
+      if (raceCheck) return raceCheck.id;
+      throw err;
+    }
+  }
+
+  /**
    * Create a message idempotently. If clientMessageId was already used by
    * this sender, returns the existing row instead of creating a new one —
    * this is what makes client-side retry/resend safe.
+   *
+   * FIX-RECEIVERID-GAP: `chatId` is no longer strictly required up front —
+   * pass `receiverId` instead when this is a brand-new/pending conversation
+   * (opened from Friends/Calls/Status before any chatId exists) and this
+   * method resolves/creates the real chat first, same as the REST path.
    */
-  async sendMessage({ chatId, senderId, content, type = 'text', clientMessageId, replyToId = null }) {
+  async sendMessage({ chatId, receiverId = null, senderId, content, type = 'text', clientMessageId, replyToId = null }) {
     const sequelize = getSequelize();
 
-    if (!chatId || !senderId) throw new ValidationError('chatId and senderId are required');
+    if (!chatId && receiverId) {
+      chatId = await this.resolveOrCreateDirectChat(senderId, receiverId);
+    }
+
+    if (!chatId || !senderId) throw new ValidationError('chatId (or receiverId) and senderId are required');
     if (!clientMessageId) throw new ValidationError('clientMessageId is required for idempotent send');
     const sanitizedContent = content ? String(content).trim().substring(0, 5000) : '';
     if (type === 'text' && !sanitizedContent) throw new ValidationError('Content cannot be empty for text messages');
