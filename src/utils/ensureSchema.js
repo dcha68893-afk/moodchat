@@ -84,13 +84,59 @@ const REQUIRED_COLUMNS = [
   // query filtering/ordering on createdAt) 500'd with:
   // column "created_at" does not exist. Same idempotent ADD COLUMN IF NOT
   // EXISTS pattern as the rest of this file.
+  // ── Marketplace Orders / Reviews / Payouts / Refunds ────────────────────
+  // FIX-MARKETPLACE-ANALYTICS-500 (round 2): the fix below this comment used
+  // to add snake_case "created_at"/"updated_at" columns, written back when
+  // Order.js was assumed to be a plain `underscored:true` model. Order.js
+  // (and Review.js, Payout.js, Refund.js — same author, same pattern) was
+  // later corrected to explicitly pin `field: 'createdAt'` / `field:
+  // 'updatedAt'` specifically BECAUSE underscored:true was deriving the
+  // wrong column name — see the comment in each of those model files. That
+  // correction was never mirrored here, so this self-heal kept adding
+  // created_at/updated_at (columns Sequelize never actually queries) while
+  // the camelCase createdAt/updatedAt the model actually asks for stayed
+  // missing. Every getSellerAnalytics/getOrders/getSellerOrders/getPayouts/
+  // getSellerReturns call 500'd with "column Order.createdAt does not
+  // exist" / "column \"createdAt\" does not exist" as a result. Fixed to
+  // add the camelCase columns these four models actually use.
   {
-    table: 'marketplace_orders', column: 'created_at',
-    sql: `ALTER TABLE "marketplace_orders" ADD COLUMN IF NOT EXISTS "created_at" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()`,
+    table: 'marketplace_orders', column: 'createdAt',
+    sql: `ALTER TABLE "marketplace_orders" ADD COLUMN IF NOT EXISTS "createdAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()`,
   },
   {
-    table: 'marketplace_orders', column: 'updated_at',
-    sql: `ALTER TABLE "marketplace_orders" ADD COLUMN IF NOT EXISTS "updated_at" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()`,
+    table: 'marketplace_orders', column: 'updatedAt',
+    sql: `ALTER TABLE "marketplace_orders" ADD COLUMN IF NOT EXISTS "updatedAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()`,
+  },
+  {
+    table: 'marketplace_reviews', column: 'createdAt',
+    sql: `ALTER TABLE "marketplace_reviews" ADD COLUMN IF NOT EXISTS "createdAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()`,
+  },
+  {
+    table: 'marketplace_reviews', column: 'updatedAt',
+    sql: `ALTER TABLE "marketplace_reviews" ADD COLUMN IF NOT EXISTS "updatedAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()`,
+  },
+  {
+    table: 'payouts', column: 'createdAt',
+    sql: `ALTER TABLE "payouts" ADD COLUMN IF NOT EXISTS "createdAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()`,
+  },
+  {
+    table: 'payouts', column: 'updatedAt',
+    sql: `ALTER TABLE "payouts" ADD COLUMN IF NOT EXISTS "updatedAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()`,
+  },
+  {
+    table: 'refunds', column: 'createdAt',
+    sql: `ALTER TABLE "refunds" ADD COLUMN IF NOT EXISTS "createdAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()`,
+  },
+  {
+    table: 'refunds', column: 'updatedAt',
+    sql: `ALTER TABLE "refunds" ADD COLUMN IF NOT EXISTS "updatedAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()`,
+  },
+  // wishlists is the one table in this group WITHOUT a field: override —
+  // Wishlist.js uses plain underscored:true, so it really does want
+  // snake_case created_at (and has updatedAt:false, no updated_at at all).
+  {
+    table: 'wishlists', column: 'created_at',
+    sql: `ALTER TABLE "wishlists" ADD COLUMN IF NOT EXISTS "created_at" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()`,
   },
 
   // ── Groups ────────────────────────────────────────────────────────────────
@@ -1049,7 +1095,7 @@ const REQUIRED_TABLES = [
       "product_id"      UUID NOT NULL,
       "price_at_add"    DECIMAL(12,2),
       "notify_on_drop"  BOOLEAN DEFAULT true,
-      "createdAt"       TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      "created_at"      TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
       CONSTRAINT "wishlists_user_product_unique" UNIQUE ("user_id", "product_id")
     )`,
   },
@@ -1067,6 +1113,159 @@ const REQUIRED_TABLES = [
       "expires_at"   TIMESTAMP WITH TIME ZONE,
       "clicks"       INTEGER NOT NULL DEFAULT 0,
       "createdAt"    TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+    )`,
+  },
+
+  // ── AUDIT (2026-07-28): the same "table never actually created" gap as
+  // marketplace_orders/marketplace_reviews/wishlists above, but for the rest
+  // of the marketplace model family (src/models/index.js registers all of
+  // these under "Marketplace"): Cart, Coupon, Wallet, WalletTransaction,
+  // Refund, Payout, SellerProfile. This is exactly what's behind the wider
+  // wave of /api/marketplace/* 500s — orders, seller/analytics,
+  // seller/returns, seller-dashboard/orders, seller/payout all ultimately
+  // touch one of these tables. Mirrored field-for-field from each model
+  // file, respecting each model's own casing convention (most use
+  // underscored:true + explicit camelCase createdAt/updatedAt `field:`
+  // overrides; Coupon.js sets neither, so its physical columns are plain
+  // camelCase).
+  {
+    name: 'marketplace_carts',
+    sql: `CREATE TABLE IF NOT EXISTS "marketplace_carts" (
+      "id"               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      "user_id"          INTEGER NOT NULL,
+      "items"            JSONB NOT NULL DEFAULT '[]',
+      "currency"         VARCHAR(10) NOT NULL DEFAULT 'KES',
+      "coupon_code"      VARCHAR(100),
+      "discount_amount"  DECIMAL(10,2) NOT NULL DEFAULT 0,
+      "expires_at"       TIMESTAMP WITH TIME ZONE,
+      "metadata"         JSONB DEFAULT '{}',
+      "created_at"       TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      "updated_at"       TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      CONSTRAINT "idx_cart_user_unique" UNIQUE ("user_id")
+    )`,
+  },
+  {
+    // Coupon.js declares no `underscored`/`field:` overrides, so its real
+    // columns are plain camelCase, unlike every other table in this file.
+    name: 'coupons',
+    sql: `CREATE TABLE IF NOT EXISTS "coupons" (
+      "id"            SERIAL PRIMARY KEY,
+      "code"          VARCHAR(32) NOT NULL UNIQUE,
+      "type"          VARCHAR(20) NOT NULL DEFAULT 'percent',
+      "value"         DECIMAL(10,2) NOT NULL DEFAULT 0,
+      "minOrderAmt"   DECIMAL(10,2) DEFAULT 0,
+      "maxDiscount"   DECIMAL(10,2),
+      "usageLimit"    INTEGER DEFAULT 9999,
+      "usageCount"    INTEGER DEFAULT 0,
+      "perUserLimit"  INTEGER DEFAULT 1,
+      "startsAt"      TIMESTAMP WITH TIME ZONE,
+      "expiresAt"     TIMESTAMP WITH TIME ZONE,
+      "isActive"      BOOLEAN DEFAULT true,
+      "isPublic"      BOOLEAN DEFAULT true,
+      "userId"        INTEGER,
+      "sellerId"      INTEGER,
+      "categorySlug"  VARCHAR(64),
+      "description"   VARCHAR(255),
+      "metadata"      JSONB DEFAULT '{}',
+      "createdAt"     TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      "updatedAt"     TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+    )`,
+  },
+  {
+    name: 'wallets',
+    sql: `CREATE TABLE IF NOT EXISTS "wallets" (
+      "id"         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      "user_id"    INTEGER NOT NULL UNIQUE,
+      "balance"    DECIMAL(15,2) NOT NULL DEFAULT 0,
+      "currency"   VARCHAR(10) DEFAULT 'KES',
+      "is_frozen"  BOOLEAN DEFAULT false,
+      "metadata"   JSONB DEFAULT '{}',
+      "createdAt"  TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      "updatedAt"  TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+    )`,
+  },
+  {
+    name: 'wallet_transactions',
+    sql: `CREATE TABLE IF NOT EXISTS "wallet_transactions" (
+      "id"             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      "wallet_id"      UUID NOT NULL,
+      "user_id"        INTEGER NOT NULL,
+      "type"           VARCHAR(10) NOT NULL,
+      "amount"         DECIMAL(15,2) NOT NULL,
+      "currency"       VARCHAR(10) DEFAULT 'KES',
+      "balance_after"  DECIMAL(15,2),
+      "order_id"       UUID,
+      "reference"      VARCHAR(255),
+      "description"    TEXT,
+      "metadata"       JSONB DEFAULT '{}',
+      "createdAt"      TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      "updatedAt"      TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+    )`,
+  },
+  {
+    name: 'refunds',
+    sql: `CREATE TABLE IF NOT EXISTS "refunds" (
+      "id"                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      "order_id"          UUID NOT NULL UNIQUE,
+      "buyer_id"          INTEGER NOT NULL,
+      "seller_id"         INTEGER NOT NULL,
+      "amount"            DECIMAL(10,2) NOT NULL,
+      "currency"          VARCHAR(10) DEFAULT 'KES',
+      "reason"            TEXT,
+      "status"            VARCHAR(20) NOT NULL DEFAULT 'pending',
+      "rejection_reason"  TEXT,
+      "approved_by"       INTEGER,
+      "approved_at"       TIMESTAMP WITH TIME ZONE,
+      "rejected_at"       TIMESTAMP WITH TIME ZONE,
+      "processed_at"      TIMESTAMP WITH TIME ZONE,
+      "metadata"          JSONB DEFAULT '{}',
+      "createdAt"         TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      "updatedAt"         TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+    )`,
+  },
+  {
+    name: 'payouts',
+    sql: `CREATE TABLE IF NOT EXISTS "payouts" (
+      "id"            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      "seller_id"     INTEGER NOT NULL,
+      "amount"        DECIMAL(10,2) NOT NULL,
+      "currency"      VARCHAR(10) DEFAULT 'KES',
+      "method"        VARCHAR(30) DEFAULT 'mpesa',
+      "phone"         VARCHAR(30),
+      "bank_account"  VARCHAR(100),
+      "status"        VARCHAR(20) NOT NULL DEFAULT 'pending',
+      "reference"     VARCHAR(255),
+      "requested_at"  TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      "paid_at"       TIMESTAMP WITH TIME ZONE,
+      "disbursed_by"  INTEGER,
+      "notes"         TEXT,
+      "metadata"      JSONB DEFAULT '{}',
+      "createdAt"     TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      "updatedAt"     TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+    )`,
+  },
+  {
+    name: 'seller_profiles',
+    sql: `CREATE TABLE IF NOT EXISTS "seller_profiles" (
+      "id"                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      "user_id"           INTEGER NOT NULL UNIQUE,
+      "business_name"     VARCHAR(255) NOT NULL,
+      "id_number"         VARCHAR(50),
+      "id_type"           VARCHAR(30) DEFAULT 'national_id',
+      "phone"             VARCHAR(30),
+      "bank_name"         VARCHAR(100),
+      "bank_account"      VARCHAR(100),
+      "bank_branch"       VARCHAR(100),
+      "kyc_status"        VARCHAR(20) NOT NULL DEFAULT 'pending_review',
+      "verified"          BOOLEAN DEFAULT false,
+      "verified_at"       TIMESTAMP WITH TIME ZONE,
+      "verified_by"       INTEGER,
+      "rejection_reason"  TEXT,
+      "rejected_at"       TIMESTAMP WITH TIME ZONE,
+      "submitted_at"      TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      "metadata"          JSONB DEFAULT '{}',
+      "createdAt"         TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      "updatedAt"         TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
     )`,
   },
 ];
@@ -1088,6 +1287,8 @@ const REQUIRED_TYPE_FIXES = [
   { table: 'wishlists',           column: 'user_id',       arrayType: false },
   { table: 'tools',               column: 'saved_by',      arrayType: true },
   { table: 'tools',               column: 'purchased_by',  arrayType: true },
+  { table: 'wallets',             column: 'user_id',       arrayType: false },
+  { table: 'wallet_transactions', column: 'user_id',       arrayType: false },
 ];
 
 // ─── Column-level DEFAULTs that were never set at the DB level ────────────────
