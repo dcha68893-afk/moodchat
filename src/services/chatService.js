@@ -116,8 +116,8 @@ class ChatService {
             }
 
             const result = await sequelize.query(
-                `INSERT INTO chats (type, "createdBy", "isActive", "createdAt", "updatedAt")
-                 VALUES ('direct', :userId, true, NOW(), NOW()) RETURNING id`,
+                `INSERT INTO chats (type, "createdBy", "isActive", "isArchived", "createdAt", "updatedAt")
+                 VALUES ('direct', :userId, true, false, NOW(), NOW()) RETURNING id`,
                 { replacements: { userId }, type: sequelize.QueryTypes.INSERT }
             );
             const chatId = result[0][0].id;
