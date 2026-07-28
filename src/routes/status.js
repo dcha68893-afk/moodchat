@@ -845,7 +845,19 @@ router.post(
                 ...(req.body.altText ? { altText: String(req.body.altText).trim() } : {}),
                 ...(req.body.linkUrl ? { linkUrl: String(req.body.linkUrl).trim(), linkLabel: String(req.body.linkLabel || 'Visit').trim() } : {}),
                 ...(req.body.countdown ? { countdown: { targetDate: req.body.countdown, label: req.body.countdownLabel || '' } } : {}),
-                ...(req.body.hashtags ? { hashtags: (Array.isArray(req.body.hashtags) ? req.body.hashtags : [req.body.hashtags]).map(h => h.replace(/^#/, '')) } : {}),
+                ...(req.body.hashtags ? (() => {
+                    // Multipart/form-data uploads (createStatusWithFile) send this as a
+                    // JSON-stringified array; regular JSON POSTs send a real array.
+                    let raw = req.body.hashtags;
+                    if (typeof raw === 'string') {
+                        try { raw = JSON.parse(raw); } catch (_) { raw = [raw]; }
+                    }
+                    const list = (Array.isArray(raw) ? raw : [raw])
+                        .filter(h => typeof h === 'string' && h.trim())
+                        .map(h => h.replace(/^#/, '').trim().toLowerCase())
+                        .slice(0, 10);
+                    return list.length > 0 ? { hashtags: list } : {};
+                })() : {}),
                 allowReplies: allowReplies !== false,
                 allowedUserIds: allowList,
                 selectedFriendIds: allowList,
