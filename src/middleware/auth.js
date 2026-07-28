@@ -311,7 +311,24 @@ const adminOnly = (req, res, next) => {
             errorCode: 'NOT_AUTHENTICATED'
         });
     }
-    if (req.user.role !== 'admin') {
+
+    // FIX (admin-not-recognized): role is normally set on the users row and
+    // baked into the JWT at login (see authController.login's ADMIN BOOTSTRAP
+    // block, which promotes the account matching ADMIN_EMAIL/ADMIN_USERNAME
+    // in .env to role='admin'). But a token issued BEFORE that promotion ran
+    // still carries the old role — this fallback reads the admin identity
+    // straight from .env so admin access works immediately without forcing
+    // a re-login, while the DB-side promotion (permanent fix) happens on
+    // next login.
+    const adminEmail    = (process.env.ADMIN_EMAIL    || '').toLowerCase().trim();
+    const adminUsername = (process.env.ADMIN_USERNAME || '').toLowerCase().trim();
+    const reqEmail      = (req.user.email    || '').toLowerCase().trim();
+    const reqUsername   = (req.user.username || '').toLowerCase().trim();
+    const matchesEnvAdmin =
+        (adminEmail    && reqEmail    && reqEmail    === adminEmail) ||
+        (adminUsername && reqUsername && reqUsername === adminUsername);
+
+    if (req.user.role !== 'admin' && !matchesEnvAdmin) {
         return res.status(403).json({
             success: false,
             message: 'Admin access required.',

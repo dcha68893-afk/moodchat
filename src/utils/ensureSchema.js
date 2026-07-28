@@ -74,6 +74,14 @@ const REQUIRED_COLUMNS = [
     table: 'Users', column: 'coverPhoto',
     sql: `ALTER TABLE "Users" ADD COLUMN IF NOT EXISTS "coverPhoto" TEXT`,
   },
+  {
+    // FIX-500 (/api/marketplace/loyalty and /loyalty/redeem): loyaltyPoints
+    // was referenced by marketplace.controller.js but never existed on this
+    // table — every request threw "column Users.loyaltyPoints does not
+    // exist" (500). See models/Users.js for the matching model attribute.
+    table: 'Users', column: 'loyaltyPoints',
+    sql: `ALTER TABLE "Users" ADD COLUMN IF NOT EXISTS "loyaltyPoints" INTEGER NOT NULL DEFAULT 0`,
+  },
 
   // ── Marketplace Orders ───────────────────────────────────────────────────
   // FIX-MARKETPLACE-ANALYTICS-500: Order.js (underscored:true, timestamps:true)
@@ -1266,6 +1274,28 @@ const REQUIRED_TABLES = [
       "metadata"          JSONB DEFAULT '{}',
       "createdAt"         TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
       "updatedAt"         TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+    )`,
+  },
+  {
+    // FIX (contact-us-goes-nowhere): the login page's "Contact Us" form used
+    // to just fake a success message client-side with no backend at all —
+    // see index.html's contactSendBtn handler. This table durably stores
+    // every submission (independent of whether the chat-delivery step to the
+    // admin's message inbox succeeds), and is what routes/contact.js reads
+    // for the admin-facing inbox view.
+    name: 'contact_messages',
+    sql: `CREATE TABLE IF NOT EXISTS "contact_messages" (
+      "id"                SERIAL PRIMARY KEY,
+      "sender_id"         INTEGER,
+      "name"              VARCHAR(150) NOT NULL,
+      "email"             VARCHAR(255) NOT NULL,
+      "subject"           VARCHAR(50) NOT NULL,
+      "message"           TEXT NOT NULL,
+      "status"            VARCHAR(20) NOT NULL DEFAULT 'new',
+      "delivered_to_chat" BOOLEAN NOT NULL DEFAULT false,
+      "chat_id"           INTEGER,
+      "created_at"        TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      "updated_at"        TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
     )`,
   },
 ];

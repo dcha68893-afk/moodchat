@@ -141,6 +141,9 @@ const ROUTE_MAPPING = {
   'smart-groups.js': '/groups',
   // FIX: invites.js was missing — group invite links returned 404
   'invites.js': '/invites',
+  // FIX (contact-us-goes-nowhere): new "Contact Us" backend — public submit
+  // endpoint plus admin-only inbox (handled inside routes/contact.js itself).
+  'contact.js': '/contact',
 };
 
 // ===== HELPER FUNCTIONS =====
@@ -208,6 +211,14 @@ function isPublicRoute(mountPath, filename) {
   // authenticateToken here adds a double-auth that breaks every request
   // to Group OS endpoints. Mount without wrapper — internal auth is sufficient.
   if (filename === 'smart-groups.js') {
+    return true;
+  }
+
+  // FIX (contact-us-goes-nowhere): contact.js must allow anonymous visitors
+  // to POST a message without a token. It applies its own
+  // optionalAuthenticateToken (submit) / authenticateToken+adminOnly (admin
+  // inbox) internally — see routes/contact.js.
+  if (filename === 'contact.js') {
     return true;
   }
   

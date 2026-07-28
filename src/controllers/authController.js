@@ -185,6 +185,24 @@ class AuthController {
         });
       }
 
+      // ── ADMIN BOOTSTRAP (reads admin identity from .env for security) ──────
+      // Same promotion as login: if this brand-new account matches
+      // ADMIN_EMAIL/ADMIN_USERNAME in .env, mark it admin immediately.
+      try {
+        const adminEmail    = (process.env.ADMIN_EMAIL    || '').toLowerCase().trim();
+        const adminUsername = (process.env.ADMIN_USERNAME || '').toLowerCase().trim();
+        const userEmail     = (user.email    || '').toLowerCase().trim();
+        const userUsername  = (user.username || '').toLowerCase().trim();
+        const matchesAdminEnv =
+          (adminEmail    && userEmail    && userEmail    === adminEmail) ||
+          (adminUsername && userUsername && userUsername === adminUsername);
+        if (matchesAdminEnv && user.role !== 'admin' && typeof user.update === 'function') {
+          await user.update({ role: 'admin' });
+        }
+      } catch (adminBootstrapError) {
+        console.error('[Auth] Admin bootstrap check failed:', adminBootstrapError.message);
+      }
+
       // Generate JWT tokens using tokenService
       const accessToken = tokenService.generateAccessToken(user);
       const refreshToken = tokenService.generateRefreshToken(user);
@@ -351,6 +369,30 @@ class AuthController {
 
       // Reset attempts on successful login
       loginAttemptsStore.delete(attemptKey);
+
+      // ── ADMIN BOOTSTRAP (reads admin identity from .env for security) ──────
+      // FIX (admin-features-not-recognized): previously nothing anywhere ever
+      // read an admin email/username from .env — role only ever came from
+      // whatever was already sitting in the users table (default 'user'), so
+      // saving admin credentials in Render's env panel had no effect at all.
+      // Whoever logs in with the identifier matching ADMIN_EMAIL or
+      // ADMIN_USERNAME in .env is promoted to role='admin' right here, before
+      // the JWT (which embeds role) is generated.
+      try {
+        const adminEmail    = (process.env.ADMIN_EMAIL    || '').toLowerCase().trim();
+        const adminUsername = (process.env.ADMIN_USERNAME || '').toLowerCase().trim();
+        const userEmail     = (user.email    || '').toLowerCase().trim();
+        const userUsername  = (user.username || '').toLowerCase().trim();
+        const matchesAdminEnv =
+          (adminEmail    && userEmail    && userEmail    === adminEmail) ||
+          (adminUsername && userUsername && userUsername === adminUsername);
+        if (matchesAdminEnv && user.role !== 'admin' && typeof user.update === 'function') {
+          await user.update({ role: 'admin' });
+          _slog(`[Auth] Promoted ${user.email || user.username} to admin role (matched ADMIN_EMAIL/ADMIN_USERNAME in .env)`);
+        }
+      } catch (adminBootstrapError) {
+        console.error('[Auth] Admin bootstrap check failed:', adminBootstrapError.message);
+      }
 
       // Generate JWT tokens using tokenService
       const accessToken = tokenService.generateAccessToken(user);

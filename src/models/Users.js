@@ -285,6 +285,18 @@ module.exports = (sequelize, DataTypes) => {
         defaultValue: 'light',
         allowNull: false,
       },
+      // FIX-500 (/api/marketplace/loyalty): this column never existed anywhere
+      // (not on this model, not in ensureSchema.js) even though
+      // marketplace.controller.js's getLoyalty()/redeemLoyalty() has always
+      // queried Users.findByPk(userId, { attributes: ['id','loyaltyPoints',...] }).
+      // Postgres threw "column Users.loyaltyPoints does not exist" -> 500 on
+      // every loyalty-points request. See ensureSchema.js for the matching
+      // ALTER TABLE ... ADD COLUMN IF NOT EXISTS healer.
+      loyaltyPoints: {
+        type: DataTypes.INTEGER,
+        defaultValue: 0,
+        allowNull: false,
+      },
       language: {
         type: DataTypes.STRING(10),
         defaultValue: 'en',

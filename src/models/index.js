@@ -170,6 +170,8 @@ const MODEL_WHITELIST = [
   'Wallet', 'WalletTransaction', 'Refund', 'Payout', 'SellerProfile',
   // ── Account security ────────────────────────────────────────────────────────
   'PasswordHistory',
+  // ── Support / Contact Us ─────────────────────────────────────────────────────
+  'ContactMessage',
   // ── Group OS ────────────────────────────────────────────────────────────────
   'GroupTask', 'GroupTaskAssignment',
   'GroupEvent', 'GroupAttendance',
@@ -1963,6 +1965,7 @@ module.exports = {
   get Coupon()        { return db.models.Coupon        || null; },
   get Refund()        { return db.models.Refund        || null; },
   get SellerProfile() { return db.models.SellerProfile || null; },
+  get ContactMessage() { return db.models.ContactMessage || null; },
   get AuditLog()      { return db.models.AuditLog      || null; },
   get Payout()        { return db.models.Payout        || null; },
   // ── Marketplace operational status ───────────────────────────────────────
