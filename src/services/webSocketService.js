@@ -1643,7 +1643,7 @@ class WebSocketService {
             const sequelize = db.sequelize || db;
             if (!sequelize) return false;
             const members = await sequelize.query(
-                'SELECT "userId" FROM "GroupMembers" WHERE "groupId" = :groupId',
+                'SELECT "userId" FROM "GroupMembers" WHERE "groupId" = :groupId AND "leftAt" IS NULL',
                 { replacements: { groupId }, type: sequelize.QueryTypes.SELECT }
             );
             const groupPayload = { ...payload, groupId, timestamp: payload.timestamp || new Date().toISOString() };
