@@ -233,11 +233,31 @@ class MessageService {
                     if (blockedUserIds.has(String(userId))) continue;
                     // Skip sender — they already see optimistic message in their own UI
                     if (String(userId) === String(senderId)) continue;
+                    // FORENSIC: log how many sockets are actually sitting in each room
+                    // at the moment of emit. A push notification is delivered by a
+                    // separate service (pushNotificationService) independent of these
+                    // rooms, so "notification arrived, message never displayed" is
+                    // exactly the symptom you'd see if a recipient's socket had
+                    // dropped out of both rooms (reconnect race, stale room after a
+                    // network blip) while push still fired normally. If this log
+                    // ever shows 0 for a user who was actually online, that's the
+                    // smoking gun — compare its timestamp against that user's
+                    // frontend `[FORENSIC] UI_RENDER_CHECK` console line for the
+                    // same message.
+                    try {
+                        const _r1 = io.sockets.adapter.rooms.get(`user:${userId}`);
+                        const _r2 = io.sockets.adapter.rooms.get(`user_${userId}`);
+                        console.log(`[MessageService][FORENSIC] EMIT_TARGET | chatId=${chatId} | uid=${userId} | user:${userId}_size=${_r1 ? _r1.size : 0} | user_${userId}_size=${_r2 ? _r2.size : 0} | msgId=${payload.id} | ts=${Date.now()}`);
+                    } catch (_) {}
                     io.to(`user:${userId}`).emit('message:new', payloadWithId);
                     io.to(`user_${userId}`).emit('message:new', payloadWithId);
                 }
                 // FIX Bug 5: Do NOT emit to chat:X / chat_X rooms — that would duplicate all above
-                console.log(`[MessageService] ✅ Real-time delivery: chatId=${chatId}, recipients=${participants.length - 1} (sender excluded)`);
+                // FIX: `participants` already excludes the sender (see the SQL query's
+                // `"userId" != :senderId` filter above), so subtracting 1 here undercounted
+                // the actual recipient list by one in every log line — misleading during
+                // exactly the kind of live-repro debugging this log exists for.
+                console.log(`[MessageService] ✅ Real-time delivery: chatId=${chatId}, recipients=${participants.length}`);
             } else {
                 // Fallback to raw WebSocket service
                 // FIX: only emit 'message:new' (canonical) — sendToUser already targets all 4 room variants
