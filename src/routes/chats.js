@@ -430,7 +430,7 @@ router.post(
             
             // Verify other user exists
             const otherUser = await User.findByPk(otherUserId, {
-                attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'socketIds', 'settings']
+                attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'settings']
             });
             
             if (!otherUser) {
@@ -663,7 +663,7 @@ router.post(
             // Verify all participants exist
             const participants = await User.findAll({
                 where: { id: allParticipants },
-                attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'socketIds']
+                attributes: ['id', 'username', 'avatar', 'firstName', 'lastName']
             });
             
             if (participants.length !== allParticipants.length) {
@@ -949,7 +949,7 @@ router.post(
             // Verify new participants exist
             const newParticipants = await User.findAll({
                 where: { id: newParticipantIds },
-                attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'socketIds']
+                attributes: ['id', 'username', 'avatar', 'firstName', 'lastName']
             });
             
             if (newParticipants.length !== newParticipantIds.length) {
@@ -994,7 +994,7 @@ router.post(
                 const existingUserIds = Array.from(existingParticipantIds);
                 const existingUsers = await User.findAll({
                     where: { id: existingUserIds },
-                    attributes: ['id', 'socketIds']
+                    attributes: ['id']
                 });
                 
                 // ✅ FIX: emit group:participants-added to existing members
@@ -1116,7 +1116,7 @@ router.delete(
             await participant.destroy();
             
             const removedUser = await User.findByPk(targetUserId, {
-                attributes: ['id', 'username', 'avatar', 'socketIds']
+                attributes: ['id', 'username', 'avatar']
             });
             const currentUser = await User.findByPk(currentUserId, {
                 attributes: ['id', 'username', 'avatar']
@@ -1125,7 +1125,11 @@ router.delete(
             // Broadcast to remaining participants
             if (req.io && removedUser && currentUser) {
                 // Notify removed user
-                if (removedUser.socketIds && Array.isArray(removedUser.socketIds) && removedUser.socketIds.length > 0) {
+                // FIX: this guard used to gate on removedUser.socketIds, which was never
+                // populated (User model has no such field — see the attributes-array fix
+                // above) so the notification silently never fired. emitToUser() resolves
+                // delivery itself via wsService rooms; it doesn't need socketIds at all.
+                {
                 // ✅ FIX 12e: emitToUser replaces stale socketIds loop
                 await emitToUser(req.io, removedUser.id || removedUser.userId, 'group:removed', {
                             chatId: chat.id,
@@ -1147,7 +1151,7 @@ router.delete(
                 const remainingUserIds = remainingParticipants.map(p => p.userId);
                 const remainingUsers = await User.findAll({
                     where: { id: remainingUserIds },
-                    attributes: ['id', 'socketIds']
+                    attributes: ['id']
                 });
                 
                 // ✅ FIX: emit group:participant-removed via Promise.allSettled
@@ -1247,7 +1251,7 @@ router.post(
             await participant.destroy();
             
             const currentUser = await User.findByPk(userId, {
-                attributes: ['id', 'username', 'avatar', 'socketIds']
+                attributes: ['id', 'username', 'avatar']
             });
             
             // Broadcast to remaining participants
@@ -1260,7 +1264,7 @@ router.post(
                 const remainingUserIds = remainingParticipants.map(p => p.userId);
                 const remainingUsers = await User.findAll({
                     where: { id: remainingUserIds },
-                    attributes: ['id', 'socketIds']
+                    attributes: ['id']
                 });
                 
                 // ✅ FIX: emit group:left via Promise.allSettled
