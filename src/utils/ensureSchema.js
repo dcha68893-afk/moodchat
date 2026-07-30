@@ -511,6 +511,36 @@ const REQUIRED_COLUMNS = [
     table: 'Calls', column: 'scheduledTitle',
     sql: `ALTER TABLE "Calls" ADD COLUMN IF NOT EXISTS "scheduledTitle" VARCHAR(200)`,
   },
+
+  // ── ChatParticipant ──────────────────────────────────────────────────────
+  // FIX (POST /api/chats/start 500 on every call — "Failed to start direct
+  // chat" storm in console): src/models/ChatParticipant.js has isMuted/
+  // mutedUntil/isPinned/pinnedAt columns (chat-pinning feature, comment says
+  // "replaces localStorage kyn_pinned_chats_v1") but no migration ever
+  // created them and — unlike every other table in this app — chat_participants
+  // had zero entries in this registry, so they were silently missing on the
+  // live table. sequelize.sync() never ALTERs an existing table (see the note
+  // on the Messages section above), so any INSERT (ChatParticipant.create /
+  // bulkCreate) fails with "column ... does not exist" the moment Sequelize
+  // needs a DB default for one of these — which is every new participant row,
+  // including the ones POST /chats/start creates when starting a brand-new
+  // direct chat.
+  {
+    table: 'chat_participants', column: 'isMuted',
+    sql: `ALTER TABLE "chat_participants" ADD COLUMN IF NOT EXISTS "isMuted" BOOLEAN NOT NULL DEFAULT false`,
+  },
+  {
+    table: 'chat_participants', column: 'mutedUntil',
+    sql: `ALTER TABLE "chat_participants" ADD COLUMN IF NOT EXISTS "mutedUntil" TIMESTAMP WITH TIME ZONE`,
+  },
+  {
+    table: 'chat_participants', column: 'isPinned',
+    sql: `ALTER TABLE "chat_participants" ADD COLUMN IF NOT EXISTS "isPinned" BOOLEAN NOT NULL DEFAULT false`,
+  },
+  {
+    table: 'chat_participants', column: 'pinnedAt',
+    sql: `ALTER TABLE "chat_participants" ADD COLUMN IF NOT EXISTS "pinnedAt" TIMESTAMP WITH TIME ZONE`,
+  },
 ];
 
 // ─── Tables that must exist (created if missing) ──────────────────────────────
