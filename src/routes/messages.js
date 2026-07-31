@@ -942,6 +942,38 @@ router.post('/', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
           recipientIds.map(uid => wsService.sendToUser(uid, 'message:new', populatedMessage))
         );
 
+        // FIX-LIFECYCLE-DEADCODE: MessageLifecycleClient.js (frontend) already has a
+        // direct, race-free socket listener on 'msg:new' that bypasses the old
+        // 'message:new' relay/claim system entirely — that's the whole point of the
+        // msg:* lifecycle rebuild (see messageLifecycleSocket.js's header and
+        // MESSAGE_LIFECYCLE_REBUILD.md). That listener only ever fires for messages
+        // sent via the newer socket-based msg:send handler, and the Send-button flow
+        // was never rewired to use it (left as a deliberate follow-up in the rebuild
+        // doc) — sends still land here, on the REST route, which only ever emitted
+        // the old 'message:new'. Net effect: every message actually sent by the app
+        // goes straight through the exact relay/claim race the rebuild exists to
+        // route around, and the new listener has been silently dead code since it
+        // shipped — this is very likely why delivery still looks intermittent/
+        // asymmetric between users. Emitting 'msg:new' here too (same payload shape
+        // messageLifecycleSocket.js's pushToRecipients() sends) activates that
+        // already-built, already-tested resilient path as a real parallel safety
+        // net, with zero changes to the send/compose side (E2E, attachments, etc.
+        // untouched). MessageLifecycleClient dedupes by serverId, so this can never
+        // cause a duplicate row or a duplicate render on its own.
+        recipientIds.forEach(uid => {
+          wsService.sendToUser(uid, 'msg:new', {
+            serverId: populatedMessage.id,
+            chatId: populatedMessage.chatId,
+            senderId: populatedMessage.senderId,
+            content: populatedMessage.content,
+            type: populatedMessage.type,
+            sender: populatedMessage.sender,
+            replyToId: populatedMessage.replyToId,
+            createdAt: populatedMessage.createdAt,
+            sentAt: populatedMessage.sentAt,
+          }).catch(() => {});
+        });
+
         // ── FORENSIC LOG: BROADCASTED ─────────────────────────────────────────
         const _delivered = deliveryResults.filter(r => r.status === 'fulfilled' && r.value === true).length;
         const _failed    = deliveryResults.length - _delivered;
@@ -1539,6 +1571,23 @@ router.post('/bulk', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) 
           if (typeof wsService.broadcastToChat === 'function') {
             wsService.broadcastToChat(chatId, 'message:new', populatedMessage, []);
           }
+          // FIX-LIFECYCLE-DEADCODE: see matching comment on the single-message send
+          // path above — same reasoning, same shim, so bulk/share sends also engage
+          // MessageLifecycleClient's race-free listener instead of relying solely on
+          // the old relay/claim system.
+          recipientIds.forEach(uid => {
+            wsService.sendToUser(uid, 'msg:new', {
+              serverId: populatedMessage.id,
+              chatId: populatedMessage.chatId,
+              senderId: populatedMessage.senderId,
+              content: populatedMessage.content,
+              type: populatedMessage.type,
+              sender: populatedMessage.sender,
+              replyToId: null,
+              createdAt: populatedMessage.createdAt,
+              sentAt: populatedMessage.sentAt,
+            }).catch(() => {});
+          });
         } catch (notifyErr) {
           console.warn('[bulk] Realtime delivery failed for chatId=' + chatId + ':', notifyErr.message);
         }
