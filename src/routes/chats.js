@@ -443,28 +443,71 @@ router.post(
             // FIX: enforce lastSeen privacy — otherUser.lastSeen is read below
             // in two places without ever checking this user's privacy setting.
             await applyLastSeenPrivacy(otherUser, userId);
-            
-            // Check if direct chat already exists
-            const existingParticipant1 = await ChatParticipant.findAll({
-                where: { userId: userId },
-                attributes: ['chatId']
-            });
-            
-            const existingParticipant2 = await ChatParticipant.findAll({
-                where: { userId: otherUserId },
-                attributes: ['chatId']
-            });
-            
-            const userChatIds = new Set(existingParticipant1.map(p => p.chatId));
-            const otherChatIds = new Set(existingParticipant2.map(p => p.chatId));
-            
-            // Find common chat IDs
-            const commonChatIds = [...userChatIds].filter(id => otherChatIds.has(id));
-            
-            if (commonChatIds.length > 0) {
+
+            // FIX-DUPLICATE-CHAT-RACE: everything from here through the
+            // Chat.create() below used to run as a plain check-then-create with
+            // no locking at all. When BOTH users in a pair open a chat with
+            // each other at close to the same time — e.g. both click
+            // "Message" from the friends list, or one opens from a call/status
+            // reply while the other opens from friends, which is exactly the
+            // "opened from a source other than chat history" case — their two
+            // HTTP requests can interleave: both run the "does a common chat
+            // already exist?" lookup before either has finished creating one,
+            // both see "no existing chat", and both independently create a
+            // BRAND NEW Chat row for the same two users. The result is two
+            // separate direct-chat rows between the same pair: whichever row
+            // each user's client ends up bound to receives only that row's
+            // messages, so messages from the user bound to row #2 never reach
+            // the user bound to row #1 (and vice depending on timing) even
+            // though the push notification — which targets the user directly,
+            // not the chat row — still fires normally. That mismatch (in-app
+            // message missing, notification present) is the exact symptom.
+            //
+            // Fix: take a Postgres advisory transaction lock keyed on the
+            // sorted pair of user IDs before doing the lookup. The second of
+            // two concurrent requests for the same pair now blocks until the
+            // first commits its transaction (which includes the Chat.create()
+            // below), then proceeds and finds the just-created chat via the
+            // normal lookup instead of creating a duplicate. The lock is
+            // released automatically at transaction end (xact-scoped), so it
+            // can never be leaked by a crashed request.
+            const _uidNum   = parseInt(userId, 10);
+            const _otherNum = parseInt(otherUserId, 10);
+            const _lockA = Math.min(_uidNum, _otherNum);
+            const _lockB = Math.max(_uidNum, _otherNum);
+
+            const t = await db.sequelize.transaction();
+            try {
+                await db.sequelize.query(
+                    'SELECT pg_advisory_xact_lock(:a, :b)',
+                    { replacements: { a: _lockA, b: _lockB }, transaction: t }
+                );
+
+                // Check if direct chat already exists (now serialized per-pair —
+                // only one request at a time can be past this point for a given
+                // pair of users).
+                const existingParticipant1 = await ChatParticipant.findAll({
+                    where: { userId: userId },
+                    attributes: ['chatId'],
+                    transaction: t
+                });
+
+                const existingParticipant2 = await ChatParticipant.findAll({
+                    where: { userId: otherUserId },
+                    attributes: ['chatId'],
+                    transaction: t
+                });
+
+                const userChatIds = new Set(existingParticipant1.map(p => p.chatId));
+                const otherChatIds = new Set(existingParticipant2.map(p => p.chatId));
+
+                // Find common chat IDs
+                const commonChatIds = [...userChatIds].filter(id => otherChatIds.has(id));
+
+                if (commonChatIds.length > 0) {
                 // Check if any common chat is a direct chat
                 for (const chatId of commonChatIds) {
-                    const chat = await Chat.findByPk(chatId);
+                    const chat = await Chat.findByPk(chatId, { transaction: t });
                     if (chat && chat.type === 'direct') {
                         // FIX (duplicate-chat-on-remessage): this used to require
                         // chat.isActive === true, so once a chat had been soft-
@@ -474,10 +517,15 @@ router.post(
                         // the same two users. Reactivate the existing thread
                         // instead of forking a duplicate.
                         if (chat.isActive === false) {
-                            await chat.update({ isActive: true, deletedAt: null, deletedBy: null });
+                            await chat.update({ isActive: true, deletedAt: null, deletedBy: null }, { transaction: t });
                         }
                         const displayName = [otherUser.firstName, otherUser.lastName].filter(Boolean).join(' ').trim() || otherUser.username;
-                        
+
+                        // FIX-DUPLICATE-CHAT-RACE: release the advisory lock now
+                        // that we've confirmed which chat this pair belongs to —
+                        // no writes are pending after this point in this branch.
+                        await t.commit();
+
                         return res.status(200).json({
                             status: 'success',
                             success: true,
@@ -510,7 +558,7 @@ router.post(
                     }
                 }
             }
-            
+
             // No existing direct chat found - create new one
             const newChat = await Chat.create({
                 type: 'direct',
@@ -518,8 +566,8 @@ router.post(
                 isActive: true,
                 createdAt: new Date(),
                 updatedAt: new Date()
-            });
-            
+            }, { transaction: t });
+
             // Add participants
             await ChatParticipant.bulkCreate([
                 {
@@ -536,8 +584,15 @@ router.post(
                     createdAt: new Date(),
                     updatedAt: new Date()
                 }
-            ]);
-            
+            ], { transaction: t });
+
+            // FIX-DUPLICATE-CHAT-RACE: commit + release the advisory lock now
+            // that the new chat and both participants are durably written. Any
+            // concurrent request for this same pair that was blocked on the
+            // lock will now unblock, re-run its own lookup, and find THIS chat
+            // instead of creating a second one.
+            await t.commit();
+
             const displayName = [otherUser.firstName, otherUser.lastName].filter(Boolean).join(' ').trim() || otherUser.username;
             
             // Broadcast to both users
@@ -603,6 +658,15 @@ router.post(
                     }
                 }
             });
+            } catch (lockedSectionError) {
+                // FIX-DUPLICATE-CHAT-RACE: roll back the advisory-lock
+                // transaction on any failure inside the locked section so the
+                // lock is released immediately instead of waiting for the
+                // request to time out, then let the outer handler below send
+                // the actual error response.
+                try { await t.rollback(); } catch (_) {}
+                throw lockedSectionError;
+            }
         } catch (error) {
             console.error('[Chats] Error starting direct chat:', error.message);
             console.error('[Chats] Stack:', error.stack);
