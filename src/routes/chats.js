@@ -502,7 +502,27 @@ router.post(
                 const otherChatIds = new Set(existingParticipant2.map(p => p.chatId));
 
                 // Find common chat IDs
-                const commonChatIds = [...userChatIds].filter(id => otherChatIds.has(id));
+                // FIX-NONDETERMINISTIC-CHAT-PICK: this used to be
+                // `[...userChatIds].filter(...)`, whose order follows
+                // Postgres's row-scan order for the REQUESTING user's own
+                // ChatParticipant rows — a query with no ORDER BY, and
+                // therefore an order Postgres is free to change per call and
+                // per user (their two participant sets can easily be scanned
+                // in different physical orders). Combined with any pair that
+                // still has more than one common direct chat (e.g. a
+                // not-yet-merged leftover from the old race — see
+                // scripts/mergeDuplicateDirectChats.js), this meant WHICH of
+                // the duplicate chats got returned depended on who called
+                // /start and could stay consistently different per user:
+                // one user's calls kept resolving to the empty duplicate
+                // (no history), the other user's kept resolving to the real
+                // one (full history) — a stable-looking bug that's actually
+                // just an arbitrary, unordered pick. Sort ascending so BOTH
+                // users always land on the same, oldest chat — the one most
+                // likely to hold the real history — regardless of scan order.
+                const commonChatIds = [...userChatIds]
+                    .filter(id => otherChatIds.has(id))
+                    .sort((a, b) => a - b);
 
                 if (commonChatIds.length > 0) {
                 // Check if any common chat is a direct chat
