@@ -711,90 +711,26 @@ router.post('/', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
       }
     }
 
-    // Find or create direct chat when no chatId given
+    // Find or create direct chat when no chatId given.
+    // CONSOLIDATION: this used to be a second, independent copy of the same
+    // find-or-create-direct-chat transaction that messageDeliveryService.js
+    // already implements correctly (resolveOrCreateDirectChat, originally
+    // written for the /lifecycle/send path). Two live implementations of
+    // conversation resolution meant "message a friend from Search" (this
+    // route) and "message a friend from a retried socket send"
+    // (/lifecycle/send) could theoretically diverge. Both routes now call
+    // the exact same function, so there is exactly one Conversation Engine,
+    // not two — see README/audit notes for the equivalent frontend rule.
     if (!chatId && receiverId) {
       const safeReceiverId = safeInt(receiverId);
-      if (!safeReceiverId) {
-        return res.status(400).json({ success: false, message: 'Invalid receiverId' });
-      }
-      if (safeReceiverId === senderId) {
-        return res.status(400).json({ success: false, message: 'Cannot message yourself' });
-      }
-
-      // Check if user exists
-      const receiverExists = await sequelize.query(
-        `SELECT id FROM "Users" WHERE id = :receiverId LIMIT 1`,
-        { replacements: { receiverId: safeReceiverId }, type: sequelize.QueryTypes.SELECT }
-      );
-      
-      if (!receiverExists || receiverExists.length === 0) {
-        return res.status(404).json({ success: false, message: 'Receiver not found' });
-      }
-
-      const existing = await sequelize.query(
-        // BUG-002 FIX: Added c.isActive = true filter. Without it, a soft-deleted
-        // or inactive direct chat (isActive=false) could be returned here, causing
-        // all new messages to route into a dead conversation that GET /chats excludes.
-        `SELECT c.id FROM chats c
-         JOIN chat_participants cp1 ON cp1."chatId" = c.id AND cp1."userId" = :senderId
-         JOIN chat_participants cp2 ON cp2."chatId" = c.id AND cp2."userId" = :receiverId
-         WHERE c.type = 'direct' AND c."isActive" = true LIMIT 1`,
-        { replacements: { senderId, receiverId: safeReceiverId }, type: sequelize.QueryTypes.SELECT }
-      );
-
-      if (existing && existing.length > 0) {
-        chatId = existing[0].id;
-      } else {
-        // FIX-ORPHAN-CHAT: chat creation + participant insert used to be two
-        // independent, unprotected statements. A crash/dropped connection
-        // between them left an orphaned chat row with zero participants —
-        // invisible to every query (nothing joins chat_participants on it)
-        // but permanently occupying a row that can never be joined or cleaned
-        // up through the app. Wrapped in a transaction so both succeed or
-        // neither does.
-        const chatCreateTxn = await sequelize.transaction();
-        try {
-          const newChat = await sequelize.query(
-            // BUG-001 FIX: Explicitly set isActive=true and isArchived=false.
-            // Previously omitted — DB column had no DEFAULT so they stored as NULL,
-            // and GET /chats filters WHERE "isArchived" = false (NULL != false in SQL),
-            // making non-friend chats invisible in the sidebar immediately after creation.
-            `INSERT INTO chats (type, "createdBy", "isActive", "isArchived", "createdAt", "updatedAt")
-             VALUES ('direct', :senderId, true, false, NOW(), NOW()) RETURNING id`,
-            { replacements: { senderId }, type: sequelize.QueryTypes.INSERT, transaction: chatCreateTxn }
-          );
-          chatId = newChat[0][0].id;
-
-          await sequelize.query(
-            `INSERT INTO chat_participants ("chatId", "userId", "joinedAt", "createdAt", "updatedAt")
-             VALUES (:chatId, :senderId, NOW(), NOW(), NOW()),
-                    (:chatId, :receiverId, NOW(), NOW(), NOW())`,
-            { replacements: { chatId, senderId, receiverId: safeReceiverId }, transaction: chatCreateTxn }
-          );
-
-          await chatCreateTxn.commit();
-        } catch (chatCreateErr) {
-          await chatCreateTxn.rollback();
-          // FIX-RACE: two near-simultaneous first messages between the same pair
-          // can both reach here and both try to create the direct chat — the
-          // loser's insert may fail on a unique constraint (or the transaction
-          // may just be redundant). Re-check for the chat the winner created
-          // instead of surfacing a 500 to a request that's actually fine.
-          const raceCheck = await sequelize.query(
-            `SELECT c.id FROM chats c
-             JOIN chat_participants cp1 ON cp1."chatId" = c.id AND cp1."userId" = :senderId
-             JOIN chat_participants cp2 ON cp2."chatId" = c.id AND cp2."userId" = :receiverId
-             WHERE c.type = 'direct' AND c."isActive" = true LIMIT 1`,
-            { replacements: { senderId, receiverId: safeReceiverId }, type: sequelize.QueryTypes.SELECT }
-          ).catch(() => []);
-          if (raceCheck && raceCheck.length > 0) {
-            chatId = raceCheck[0].id;
-          } else {
-            throw chatCreateErr;
-          }
-        }
+      try {
+        chatId = await messageDeliveryService.resolveOrCreateDirectChat(senderId, safeReceiverId);
+      } catch (resolveErr) {
+        const status = /not found/i.test(resolveErr.message) ? 404 : 400;
+        return res.status(status).json({ success: false, message: resolveErr.message || 'Could not resolve conversation' });
       }
     }
+
 
     if (!chatId) {
       return res.status(400).json({ success: false, message: 'chatId or receiverId is required' });

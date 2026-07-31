@@ -160,10 +160,29 @@ class UnifiedRuntimeOrchestrator extends EventEmitter {
     // CRITICAL FIX: For time-sensitive events (calls, messages), ALWAYS try
     // direct Socket.IO first — never let them go to the offline queue silently.
     // The HTR offline queue is for true offline users, not latency optimization.
+    // FIX-MSG-LIFECYCLE-SILENT-QUEUE: 'msg:new' / 'msg:delivered' are the
+    // event names routes/messages.js's /lifecycle/send and
+    // sockets/messageLifecycleSocket.js actually emit (see
+    // MessageLifecycleClient.js on the frontend, which listens for exactly
+    // these). They were missing from this list entirely, so every message
+    // sent through that path — a REST/socket pipeline that exists
+    // specifically so brand-new conversations opened from Friends/Calls/
+    // Status can be started the same way the older 'message:new' path can —
+    // was classified as "non-time-sensitive", sent through the HTR
+    // offline-queue path instead of straight to Socket.IO/raw-WebSocket, and
+    // because a queued result still counts as `{ok:true}`, the caller never
+    // saw an error. The recipient's live chat panel simply never received
+    // the message until their next reconnect/history sync. Confirmed via a
+    // real two-user WebSocket test: 'message:new' arrived instantly,
+    // 'msg:new' from the same conversation, same connection, did not arrive
+    // at all. Adding the exact event names here — not a prefix rule, to
+    // avoid accidentally reclassifying an unrelated future 'msg:*' event —
+    // fixes it without touching the routing logic itself.
     const timesSensitive = [
       'call:incoming', 'incoming_call', 'call_incoming', 'call_initiated',
       'message:new', 'new_message', 'group:message', 'new_group_message',
       'call:ended', 'call:accepted', 'call:rejected',
+      'msg:new', 'msg:delivered',
     ].includes(event) || normEv.startsWith('call:') || normEv.startsWith('message:');
 
     if (timesSensitive) {
