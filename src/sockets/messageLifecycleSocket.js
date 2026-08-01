@@ -92,6 +92,15 @@ function register(wsService, socket, userId) {
     if (!serverId) return;
     try {
       await messageDeliveryService.markDelivered(serverId, userId);
+      // FIX-ACK-EVENT-MISMATCH: this is the ack event the client actually
+      // sends on real receipt (confirmed live in traffic — 'msg:delivered_ack',
+      // not 'message:delivery_ack'). The 10s ack-timeout armed in messages.js
+      // was only ever wired to clear on 'message:delivery_ack', which nothing
+      // emits, so it fired 'delivery_timeout' on every single message exactly
+      // 10s after this real ack already confirmed delivery. Clear it here too.
+      if (typeof wsService.clearMessageDeliveryTimeout === 'function') {
+        wsService.clearMessageDeliveryTimeout(serverId);
+      }
       const senderId = await getSenderIdForMessage(serverId);
       if (senderId) {
         await wsService.sendToUser(senderId, 'msg:delivered', {
