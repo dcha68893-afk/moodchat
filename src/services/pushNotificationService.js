@@ -132,11 +132,23 @@ async function sendToSubscription(subscription, payload) {
     await webpush.sendNotification(subscription, JSON.stringify(payload));
     return true;
   } catch (err) {
-    if (err.statusCode === 410 || err.statusCode === 404) {
-      // Subscription expired — caller should delete it
+    // FIX-VAPID-MISMATCH-PRUNE: 410/404 = subscription genuinely expired/gone.
+    // 401/403/400 = the push service rejected the request because it was
+    // signed with a VAPID key that doesn't match the one this subscription
+    // was registered under — exactly what happens if the server ever
+    // restarted without persistent VAPID_PUBLIC_KEY/VAPID_PRIVATE_KEY env
+    // vars (see getVapidKeys() above: falls back to a brand-new random
+    // keypair on every restart otherwise). That subscription is just as
+    // permanently dead as an expired one until the client re-subscribes —
+    // previously these fell through to the generic branch below and were
+    // never pruned, so the server kept retrying the same broken
+    // subscription on every single message, forever, silently swallowing
+    // the failure as "Send error: Received unexpected response code".
+    if ([410, 404, 401, 403, 400].includes(err.statusCode)) {
+      console.warn(`[PushService] Subscription unusable (HTTP ${err.statusCode}) — pruning`);
       return 'expired';
     }
-    console.error('[PushService] Send error:', err.message);
+    console.error(`[PushService] Send error (HTTP ${err.statusCode || '?'}):`, err.message);
     return false;
   }
 }
