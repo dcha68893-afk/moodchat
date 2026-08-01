@@ -5150,7 +5150,20 @@ class Application {
                         // 10-20s. pingTimeout must comfortably exceed worst-case RTT or the
                         // server force-disconnects clients that are still alive but slow.
                         // pingInterval must still beat Render's 55s idle-close window.
-                        pingTimeout:    90000,   // was 60000 — tolerate slow pong replies on 1KB/s links
+                        // FIX-ZOMBIE-SOCKET-PRESENCE (was 90000): a pong reply is a handful
+                        // of bytes — even a genuinely slow 1KB/s link returns it in a couple
+                        // seconds, not 90. The old value meant a connection that had ALREADY
+                        // died (network handoff, backgrounded tab, OS suspend) could still
+                        // sit in the room registry looking "online" for up to ~115s
+                        // (pingTimeout+pingInterval), during which every delivery check
+                        // trusted that stale membership and skipped the push-notification
+                        // fallback — see the FIX-ZOMBIE-SOCKET-PUSH-FALLBACK ack-timeout
+                        // safety net in messages.js/webSocketService.js, which now also
+                        // catches this case independently, but there's no reason to leave
+                        // this window needlessly wide on top of that. 30s keeps real
+                        // slow-link tolerance (50% above engine.io's own 20s default) while
+                        // roughly halving the worst-case false-"online" duration.
+                        pingTimeout:    30000,   // was 90000
                         pingInterval:   25000,   // was 20000 — still well under Render's 55s idle cutoff
                         upgradeTimeout: 45000,   // was 30000 — give slow links more time to upgrade to WS
                         connectTimeout: 60000,   // was 45000 — handshake itself can be slow at 1KB/s
