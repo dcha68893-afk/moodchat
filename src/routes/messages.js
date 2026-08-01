@@ -984,24 +984,31 @@ router.post('/', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
           .map((r, i) => ({ uid: recipientIds[i], delivered: r.status === 'fulfilled' && r.value === true }))
           .filter(r => !r.delivered).map(r => r.uid);
 
+        // FIX-ZOMBIE-SOCKET-PUSH-FALLBACK: extracted so the SAME push logic can
+        // also run later, off the real message:delivery_ack timeout below, for
+        // recipients the room-membership check wrongly called "delivered" (see
+        // matching comment on scheduleMessageDeliveryTimeout in webSocketService.js).
+        const _pushFallback = async (uids) => {
+          if (!uids.length) return;
+          try {
+            const pushSvc = require('../services/pushNotificationService');
+            const sRows   = await sequelize.query(
+              `SELECT username, avatar FROM "Users" WHERE id=:id LIMIT 1`,
+              { replacements: { id: senderId }, type: sequelize.QueryTypes.SELECT }
+            );
+            const notifContent = messageType === 'text' ? (content || '').slice(0, 100) : `Sent a ${messageType}`;
+            await Promise.allSettled(uids.map(uid =>
+              pushSvc.notifyNewMessage(uid, {
+                senderName: sRows?.[0]?.username || 'Someone',
+                senderAvatar: sRows?.[0]?.avatar || null,
+                content: notifContent, chatId, messageId,
+              }, sequelize)
+            ));
+          } catch (_pe) { console.warn('[messages.js] Push error (non-fatal):', _pe.message); }
+        };
+
         if (_offlineRecipients.length > 0) {
-          setImmediate(async () => {
-            try {
-              const pushSvc = require('../services/pushNotificationService');
-              const sRows   = await sequelize.query(
-                `SELECT username, avatar FROM "Users" WHERE id=:id LIMIT 1`,
-                { replacements: { id: senderId }, type: sequelize.QueryTypes.SELECT }
-              );
-              const notifContent = messageType === 'text' ? (content || '').slice(0, 100) : `Sent a ${messageType}`;
-              await Promise.allSettled(_offlineRecipients.map(uid =>
-                pushSvc.notifyNewMessage(uid, {
-                  senderName: sRows?.[0]?.username || 'Someone',
-                  senderAvatar: sRows?.[0]?.avatar || null,
-                  content: notifContent, chatId, messageId,
-                }, sequelize)
-              ));
-            } catch (_pe) { console.warn('[messages.js] Push error (non-fatal):', _pe.message); }
-          });
+          setImmediate(() => _pushFallback(_offlineRecipients));
         }
 
         // ── DELIVERY LOGS ───────────────────────────────────────────────────
@@ -1130,29 +1137,25 @@ router.post('/', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
           messageId, chatId, timestamp: Date.now()
         }).catch(() => {});
 
-        // FIX-MSG-DELIVERY-FALSE-TIMEOUT-ROOT-CAUSE: this used to schedule the
-        // fragile 10s timeout for EVERY recipient unconditionally, regardless of
-        // whether deliveryResults above already confirmed the socket emit reached
-        // a live, joined room (_delivered/_failed, computed a few lines up). That
-        // timeout is only cleared by a full client round trip — receiver's iframe
-        // must run handleRealtimePayload(), call ackMessageDelivered(), which
-        // posts an API_REQUEST to the parent shell, which fetches
-        // /messages/mark-delivered/batch — all inside 10 seconds. Any hop being
-        // slow (iframe still booting, parent shell busy, tab backgrounded/throttled
-        // by the browser) meant the timer fired and pushed a false
-        // 'message:delivery_failed' to the sender EVEN THOUGH the FORENSIC log
-        // two lines above already shows delivered=1/1 for that exact message.
-        // We already have transport-level proof of delivery here — don't demand a
-        // second, independent, time-boxed proof on top of it. Only arm the
-        // uncertain-delivery timer for recipients the socket layer could NOT
-        // confirm (the same set used for push notifications below).
-        const _unconfirmedRecipientIds = deliveryResults
-          .map((r, i) => ({ uid: recipientIds[i], delivered: r.status === 'fulfilled' && r.value === true }))
-          .filter(r => !r.delivered)
-          .map(r => r.uid);
-        for (const rid of _unconfirmedRecipientIds) {
+        // FIX-MSG-DELIVERY-FALSE-TIMEOUT-ROOT-CAUSE (superseded — see
+        // FIX-ZOMBIE-SOCKET-PUSH-FALLBACK above and in webSocketService.js):
+        // this used to only arm scheduleMessageDeliveryTimeout for recipients
+        // deliveryResults already called "unconfirmed", on the reasoning that a
+        // confirmed room-emit was itself sufficient proof of delivery and a
+        // second, independent, ack-based proof was redundant. It isn't: Socket.IO
+        // can report a room as having a member for up to pingTimeout+pingInterval
+        // (90s+25s here) after the underlying connection actually died — so
+        // "delivered: true" from the room snapshot can be a false positive, and
+        // that's exactly the gap that let messages vanish silently for a receiver
+        // whose socket had gone stale. The real message:delivery_ack round trip
+        // is the only trustworthy signal; arm it for every recipient, always, and
+        // let a genuine 10s silence trigger the same push-notification fallback
+        // used for recipients that were reported offline outright.
+        for (const rid of recipientIds) {
           if (typeof wsService.scheduleMessageDeliveryTimeout === 'function') {
-            wsService.scheduleMessageDeliveryTimeout(messageId, chatId, senderId);
+            wsService.scheduleMessageDeliveryTimeout(messageId, chatId, senderId, {
+              onTimeout: () => _pushFallback([rid]),
+            });
           }
         }
 

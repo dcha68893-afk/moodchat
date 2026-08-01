@@ -1366,7 +1366,7 @@ class WebSocketService {
      * Call this right after emitting 'new_message' to the receiver.
      * Cleared when receiver's socket fires 'message:delivery_ack'.
      */
-    scheduleMessageDeliveryTimeout(messageId, chatId, senderId) {
+    scheduleMessageDeliveryTimeout(messageId, chatId, senderId, options = {}) {
         if (!this._msgTimeouts) this._msgTimeouts = new Map();
         const key = `msg:${messageId}`;
         if (this._msgTimeouts.has(key)) return;
@@ -1376,6 +1376,17 @@ class WebSocketService {
                 messageId, chatId, reason: 'delivery_timeout', timestamp: Date.now(),
             }).catch(() => {});
             console.warn(`[WSService] ⚠️  Message ${messageId} undelivered after 10s — sender notified`);
+            // FIX-ZOMBIE-SOCKET-PUSH-FALLBACK: this timer used to only fire when
+            // deliveryResults already reported delivery as failed — but a Socket.IO
+            // room can still show a member for up to ~pingTimeout+pingInterval after
+            // the underlying connection is actually dead (see pingTimeout: 90000 in
+            // server.js), so "delivered: true" at send-time is not reliable proof.
+            // No message:delivery_ack in 10s IS real proof — the receiver's client
+            // never actually processed it, whatever the room snapshot said. Push
+            // now, on the one signal that's actually trustworthy.
+            if (typeof options.onTimeout === 'function') {
+                try { await options.onTimeout(); } catch (_) {}
+            }
         }, 10_000);
         this._msgTimeouts.set(key, t);
     }
