@@ -5,6 +5,22 @@ const { Sequelize, Op } = require('sequelize');
 const fs = require('fs');
 const path = require('path');
 const WebSocket = require('ws');
+const dns = require('dns');
+
+// FIX-IPV6-ENETUNREACH: Render's containers have no outbound IPv6 route, but
+// Node's default DNS resolution (`dns.lookup`) returns whichever record the
+// resolver prefers — for many Supabase/managed-Postgres hosts that's the
+// AAAA (IPv6) record. That produced the exact production symptom seen in
+// login: every query failed with
+//   "connect ENETUNREACH <ipv6-address>:5432 - Local (:::0)"
+// before it ever reached Postgres, because the TCP connect itself couldn't
+// route over IPv6 from Render's network.
+// Fix: force `pg` (via a custom `lookup` passed through to node's
+// `net.connect`) to resolve the DB host as IPv4 only. This is safe for any
+// standard dual-stack Postgres host (Supabase direct or pooler) and has no
+// effect on hosts that only ever had an IPv4 address.
+const forceIPv4Lookup = (hostname, options, callback) =>
+  dns.lookup(hostname, { family: 4 }, callback);
 
 // ===== DATABASE CONFIGURATION =====
 const env = process.env.NODE_ENV || 'development';
@@ -30,12 +46,16 @@ const getDbConfig = () => {
         acquire: parseInt(process.env.DB_POOL_ACQUIRE) || 30000,
         idle: parseInt(process.env.DB_POOL_IDLE) || 10000
       },
-      dialectOptions: (process.env.DB_SSL === 'true' || process.env.RENDER || process.env.RENDER_SERVICE_ID) ? {
-        ssl: {
-          require: true,
-          rejectUnauthorized: false,
-        },
-      } : {},
+      dialectOptions: {
+        ...((process.env.DB_SSL === 'true' || process.env.RENDER || process.env.RENDER_SERVICE_ID) ? {
+          ssl: {
+            require: true,
+            rejectUnauthorized: false,
+          },
+        } : {}),
+        // FIX-IPV6-ENETUNREACH: see comment near forceIPv4Lookup above.
+        lookup: forceIPv4Lookup,
+      },
     };
   }
   
@@ -71,12 +91,16 @@ const getDbConfig = () => {
       acquire: parseInt(process.env.DB_POOL_ACQUIRE) || 30000,
       idle: parseInt(process.env.DB_POOL_IDLE) || 10000
     },
-    dialectOptions: (process.env.DB_SSL === 'true' || process.env.RENDER || process.env.RENDER_SERVICE_ID) ? {
-      ssl: {
-        require: true,
-        rejectUnauthorized: false,
-      },
-    } : {},
+    dialectOptions: {
+      ...((process.env.DB_SSL === 'true' || process.env.RENDER || process.env.RENDER_SERVICE_ID) ? {
+        ssl: {
+          require: true,
+          rejectUnauthorized: false,
+        },
+      } : {}),
+      // FIX-IPV6-ENETUNREACH: see comment near forceIPv4Lookup above.
+      lookup: forceIPv4Lookup,
+    },
   };
 };
 
