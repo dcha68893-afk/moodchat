@@ -1,4 +1,4 @@
-const _slog = (...a) => { if (process.env.DEBUG_SERVER) _slog(...a); };
+const _slog = (...a) => { if (process.env.DEBUG_SERVER) console.log(...a); };
 // controllers/authController.js - COMPLETE FIXED VERSION
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');

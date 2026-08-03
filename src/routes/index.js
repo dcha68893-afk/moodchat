@@ -1,4 +1,4 @@
-const _slog = (...a) => { if (process.env.DEBUG_SERVER) _slog(...a); };
+const _slog = (...a) => { if (process.env.DEBUG_SERVER) console.log(...a); };
 // src/routes/index.js - MAIN ROUTER AGGREGATION
 // FIXED: Auth routes are now properly mounted (removed from ignored files)
 // FIXED: All routes are correctly mounted with proper auth

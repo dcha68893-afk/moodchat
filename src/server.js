@@ -130,7 +130,7 @@ if (this.environment === 'production' || this.isRender) {
     _slog('🛡️ CORS: Configuring for PRODUCTION environment');
     
     // Primary Render frontend URL
-    const renderFrontend = 'https://nexopa.onrender.com';
+    const renderFrontend = 'https://nexipa.onrender.com';
     this.allowedOrigins.add(renderFrontend);
     this.allowedOrigins.add(renderFrontend + '/'); // With trailing slash
     _slog(`✅ CORS: Allowed production frontend: ${renderFrontend}`);
@@ -151,10 +151,10 @@ if (this.environment === 'production' || this.isRender) {
         });
     }
     
-    // CRITICAL: Ensure nexopa.onrender.com is always allowed
-    if (!this.allowedOrigins.has('https://nexopa.onrender.com')) {
-        this.allowedOrigins.add('https://nexopa.onrender.com');
-        _slog(`✅ CORS: Explicitly added nexopa.onrender.com`);
+    // CRITICAL: Ensure nexipa.onrender.com is always allowed
+    if (!this.allowedOrigins.has('https://nexipa.onrender.com')) {
+        this.allowedOrigins.add('https://nexipa.onrender.com');
+        _slog(`✅ CORS: Explicitly added nexipa.onrender.com`);
     }
     
     // Additional security for production: Remove any insecure origins
@@ -240,7 +240,7 @@ if (this.environment === 'production' || this.isRender) {
         
         // Also allow production frontend in development for testing
         if (process.env.ALLOW_PRODUCTION_IN_DEV === 'true') {
-            this.allowedOrigins.add('https://nexopa.onrender.com');
+            this.allowedOrigins.add('https://nexipa.onrender.com');
             _slog('⚠️  CORS: Allowing production frontend in development (ALLOW_PRODUCTION_IN_DEV=true)');
         }
         
@@ -4367,7 +4367,7 @@ class Application {
                 logger.warn('DB_SYNC_FORCE is TRUE in production - THIS WILL DROP ALL TABLES!', 'SECURITY');
             }
             
-            const productionFrontend = 'https://nexopa.onrender.com';
+            const productionFrontend = 'https://nexipa.onrender.com';
             if (!corsManager.isOriginAllowed(productionFrontend)) {
                 logger.warn(`Production frontend ${productionFrontend} may not be allowed by CORS`, 'SECURITY');
             }
@@ -4405,8 +4405,8 @@ class Application {
                         isAllowed = true;
                     }
                     // Also check for Render frontend explicitly
-                    else if (origin === 'https://nexopa.onrender.com' ||
-                             origin === 'https://nexopa.onrender.com/' ||
+                    else if (origin === 'https://nexipa.onrender.com' ||
+                             origin === 'https://nexipa.onrender.com/' ||
                              origin.includes('localhost:5500') ||
                              origin.includes('127.0.0.1:5500')) {
                         isAllowed = true;
@@ -4447,7 +4447,7 @@ class Application {
             // Override end to ensure CORS headers are always set
             res.end = function(...args) {
                 const origin = req.headers.origin;
-                if (origin && (origin === 'https://nexopa.onrender.com' ||
+                if (origin && (origin === 'https://nexipa.onrender.com' ||
                                origin.includes('localhost:5500') ||
                                origin.includes('127.0.0.1:5500'))) {
                     res.setHeader('Access-Control-Allow-Origin', origin);
@@ -4459,7 +4459,7 @@ class Application {
             // Override json to ensure CORS headers
             res.json = function(data) {
                 const origin = req.headers.origin;
-                if (origin && (origin === 'https://nexopa.onrender.com' ||
+                if (origin && (origin === 'https://nexipa.onrender.com' ||
                                origin.includes('localhost:5500') ||
                                origin.includes('127.0.0.1:5500'))) {
                     res.setHeader('Access-Control-Allow-Origin', origin);
@@ -4471,7 +4471,7 @@ class Application {
             // Override send to ensure CORS headers
             res.send = function(data) {
                 const origin = req.headers.origin;
-                if (origin && (origin === 'https://nexopa.onrender.com' ||
+                if (origin && (origin === 'https://nexipa.onrender.com' ||
                                origin.includes('localhost:5500') ||
                                origin.includes('127.0.0.1:5500'))) {
                     res.setHeader('Access-Control-Allow-Origin', origin);

@@ -1,4 +1,4 @@
-const _slog = (...a) => { if (process.env.DEBUG_SERVER) _slog(...a); };
+const _slog = (...a) => { if (process.env.DEBUG_SERVER) console.log(...a); };
 ﻿// src/routes/auth.js - CORRECTED VERSION
 require('dotenv').config();
 const express = require('express');

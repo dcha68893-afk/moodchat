@@ -1,4 +1,4 @@
-const _slog = (...a) => { if (process.env.DEBUG_SERVER) _slog(...a); };
+const _slog = (...a) => { if (process.env.DEBUG_SERVER) console.log(...a); };
 // models/index.js - COMPLETE AUTO-MIGRATION WITH TABLE CREATION
 // Version: 3.0.0 - Creates missing tables and columns automatically
 const { Sequelize, Op } = require('sequelize');

@@ -1,4 +1,4 @@
-const _slog = (...a) => { if (process.env.DEBUG_SERVER) _slog(...a); };
+const _slog = (...a) => { if (process.env.DEBUG_SERVER) console.log(...a); };
 // groupMembersService.js
 // ============================================================
 // FIXED: This file was completely missing, causing groupMembersController.js
