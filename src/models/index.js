@@ -1,11 +1,23 @@
 const _slog = (...a) => { if (process.env.DEBUG_SERVER) console.log(...a); };
 // models/index.js - COMPLETE AUTO-MIGRATION WITH TABLE CREATION
-// Version: 3.0.0 - Creates missing tables and columns automatically
+// Version: 3.0.1 - Creates missing tables and columns automatically
 const { Sequelize, Op } = require('sequelize');
 const fs = require('fs');
 const path = require('path');
 const WebSocket = require('ws');
 const dns = require('dns');
+
+// FIX-IPV6-ENETUNREACH-2 (2026-08-03): the `forceIPv4Lookup` /
+// `dialectOptions.lookup` approach below does NOT actually work — verified
+// against pg@8's own source (lib/connection.js): pg calls
+// `this.stream.connect(port, host)` directly and never reads/forwards a
+// `lookup` option to node's `net.connect`, so Sequelize's `dialectOptions.lookup`
+// is silently ignored by the underlying driver. That's why ENETUNREACH on the
+// IPv6 address was still happening even with that "fix" in place.
+// The fix that actually works: force IPv4-first resolution at the process's
+// default DNS resolver, which is what `net.Socket.connect(port, host)` falls
+// back to when no explicit lookup/family is honored.
+dns.setDefaultResultOrder('ipv4first');
 
 // FIX-IPV6-ENETUNREACH: Render's containers have no outbound IPv6 route, but
 // Node's default DNS resolution (`dns.lookup`) returns whichever record the
@@ -15,10 +27,9 @@ const dns = require('dns');
 //   "connect ENETUNREACH <ipv6-address>:5432 - Local (:::0)"
 // before it ever reached Postgres, because the TCP connect itself couldn't
 // route over IPv6 from Render's network.
-// Fix: force `pg` (via a custom `lookup` passed through to node's
-// `net.connect`) to resolve the DB host as IPv4 only. This is safe for any
-// standard dual-stack Postgres host (Supabase direct or pooler) and has no
-// effect on hosts that only ever had an IPv4 address.
+// NOTE: kept below for backward compatibility / documentation purposes only —
+// it has no real effect since pg ignores dialectOptions.lookup (see note
+// above). The actual fix is the dns.setDefaultResultOrder('ipv4first') call.
 const forceIPv4Lookup = (hostname, options, callback) =>
   dns.lookup(hostname, { family: 4 }, callback);
 

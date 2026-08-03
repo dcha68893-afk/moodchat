@@ -2,6 +2,12 @@
 // Supabase PostgreSQL connection layer
 // ONLY this file is modified — all services, routes, and queries remain unchanged.
 
+// FIX (2026-08-03): Force IPv4-first DNS resolution. Root cause of
+// "ENETUNREACH <ipv6-address>:5432" connection failures: the DB host
+// resolves to both an IPv6 (AAAA) and IPv4 (A) address, Node preferred
+// IPv6 by default, and this environment has no outbound IPv6 route.
+require('dns').setDefaultResultOrder('ipv4first');
+
 const { Sequelize } = require('sequelize');
 const pg = require('pg');
 
@@ -78,6 +84,9 @@ function getSequelizeInstance() {
       statement_timeout: 10000,
       query_timeout: 10000,
       idle_in_transaction_session_timeout: 10000,
+      // Force IPv4 at the socket level (belt-and-braces alongside the
+      // dns.setDefaultResultOrder('ipv4first') call above).
+      family: 4,
       // SSL configuration for Render PostgreSQL - SSL is required
       ssl: {
         require: true,

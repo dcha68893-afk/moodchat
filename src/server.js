@@ -5,7 +5,13 @@
 // ENHANCED: Professional model diagnostics with column names and table details
 // OPTIMIZED: Connection pool (max:20, min:5), Login response caching (30s TTL)
 // OPTIMIZED: Response compression, Query timeout (30s), UV_THREADPOOL_SIZE=16
+// FIX (2026-08-03): Force IPv4-first DNS resolution, absolute first line,
+// before any other module (including models/index.js) is required. Login
+// was failing with "ENETUNREACH <ipv6>:5432" because the DB host resolves
+// to both an IPv6 and IPv4 address and this environment has no outbound
+// IPv6 route — Node was picking the unreachable IPv6 address by default.
 // =========================================================================
+require('dns').setDefaultResultOrder('ipv4first');
 // ========== ABSOLUTE FIRST LINE - LOAD ENVIRONMENT ==========
 const path = require('path');
 const fs = require('fs');
