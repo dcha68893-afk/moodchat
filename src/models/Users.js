@@ -193,6 +193,27 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: false,
         defaultValue: 'local',
       },
+      // E2E-WRAP-SECRET FIX (Phase 5 forensic audit): root cause of "Manual
+      // login fails encryption, Google login works" — js/e2e-encryption.js
+      // derives the key that wraps/unwraps the user's local E2E private key
+      // from a password stashed in sessionStorage at login. Manual login has
+      // a real typed password to stash; Google login never had one (the
+      // backend generates a random, never-returned password for Google-only
+      // accounts, per loginWithGoogle() below) — so KynectaE2E.init() was
+      // never called at all for Google users, and encryptForChat() silently
+      // fell back to returning PLAINTEXT (see its `if (!_enabled) return
+      // plaintext` guard). That's why Google "worked": it was never actually
+      // encrypting. Manual users hit real encryption and could hit a real
+      // decrypt failure. This column is a stable, random, backend-issued
+      // secret independent of the account password, generated lazily on
+      // first login by authService's _ensureE2EWrapSecret() and returned
+      // ONLY from register()/login()/loginWithGoogle() (see toJSON() below,
+      // which strips it from every other response) so both login paths can
+      // derive the exact same kind of local wrap key.
+      e2eWrapSecret: {
+        type: DataTypes.STRING(64),
+        allowNull: true,
+      },
       // AUTH-X FIX: resetToken / resetTokenExpiry were missing from model definition
       // but used in forgot-password and verify-email routes. Without these columns
       // Sequelize silently ignores user.update({ resetToken: ... }) calls,
@@ -411,6 +432,13 @@ module.exports = (sequelize, DataTypes) => {
     delete values.resetToken;
     delete values.resetTokenExpiry;
     delete values.mfaSecret;
+    // E2E-WRAP-SECRET FIX: never leak this through the generic serializer —
+    // it must only ever reach the account's own client, and only via the
+    // explicit re-attachment authService.js does right after register()/
+    // login()/loginWithGoogle() call toJSON(). Every other place a user
+    // object gets serialized (friend lists, group members, search, etc.)
+    // must not include it.
+    delete values.e2eWrapSecret;
     return values;
   };
 

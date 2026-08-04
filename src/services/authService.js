@@ -53,6 +53,22 @@ class AuthService {
     }
   }
 
+  // E2E-WRAP-SECRET FIX: lazily issues a stable, random, per-account secret
+  // (independent of the login password) that the frontend uses to wrap the
+  // local E2E private key, generated once and reused on every future login.
+  // Persisted so it survives password changes. Never touches this.User's
+  // toJSON() output except right here where callers explicitly re-attach it.
+  async _ensureE2EWrapSecret(user) {
+    if (user.e2eWrapSecret) return user.e2eWrapSecret;
+    const secret = crypto.randomBytes(32).toString('hex');
+    try {
+      await user.update({ e2eWrapSecret: secret });
+    } catch (e) {
+      console.warn('⚠️ [AuthService] Failed to persist e2eWrapSecret:', e.message);
+    }
+    return secret;
+  }
+
   async register(userData, deviceInfo = {}) {
     try {
       console.log("🔧 [AuthService] Register called with:", { 
@@ -108,6 +124,10 @@ class AuthService {
 
           const userWithoutPassword = user.toJSON();
           delete userWithoutPassword.password;
+          // E2E-WRAP-SECRET FIX: attach explicitly — toJSON() strips it for
+          // every other caller (see Users.js), this is the one place it
+          // should reach the client, right after their own registration.
+          userWithoutPassword.e2eWrapSecret = await this._ensureE2EWrapSecret(user);
 
           return {
             success: true,
@@ -190,6 +210,9 @@ class AuthService {
       // Prepare response
       const userWithoutPassword = user.toJSON();
       delete userWithoutPassword.password;
+      // E2E-WRAP-SECRET FIX: see register() above for why this is attached
+      // explicitly here instead of relying on toJSON().
+      userWithoutPassword.e2eWrapSecret = await this._ensureE2EWrapSecret(user);
 
       return {
         success: true,
@@ -298,6 +321,12 @@ class AuthService {
 
       const userWithoutPassword = user.toJSON();
       delete userWithoutPassword.password;
+      // E2E-WRAP-SECRET FIX: this is the actual fix for the reported bug —
+      // Google logins previously never received any password-equivalent
+      // secret, so the frontend never initialized E2E encryption for them
+      // at all and silently sent/stored their messages as plaintext. See
+      // register() above and Users.js for the full explanation.
+      userWithoutPassword.e2eWrapSecret = await this._ensureE2EWrapSecret(user);
 
       return {
         success: true,

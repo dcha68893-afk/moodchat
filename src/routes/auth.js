@@ -37,6 +37,34 @@ const { authenticateToken } = require('../middleware/auth');
 // avoiding inconsistent verification if JWT_SECRET and JWT_ACCESS_SECRET differ.
 const JWT_SECRET = process.env.JWT_ACCESS_SECRET || process.env.JWT_SECRET;
 
+// E2E-WRAP-SECRET FIX (Phase 5 forensic audit): root cause of "Manual login
+// fails encryption, Google login works". js/e2e-encryption.js derives the key
+// that wraps the user's local E2E private key from a password stashed in
+// sessionStorage at login. Manual login has a real typed password to stash;
+// Google login never had one (loginWithGoogle() generates a random password
+// server-side and never returns it) — so the frontend never called
+// KynectaE2E.init() for Google users at all, and encryptForChat() silently
+// fell back to returning PLAINTEXT. That's why Google "worked": it was never
+// actually encrypting anything. Manual users hit the real crypto path and
+// could hit a genuine failure there instead.
+//
+// NOTE: authService.js's login()/register()/loginWithGoogle() also generate
+// this now, but /register and /login below have their own independent
+// implementations that never call authService at all (only /google does,
+// via loginWithGoogle further down) — so this needs its own lazy-issue call
+// right here to actually take effect for the endpoints the frontend uses.
+const crypto = require('crypto');
+async function ensureE2EWrapSecret(user) {
+    if (user.e2eWrapSecret) return user.e2eWrapSecret;
+    const secret = crypto.randomBytes(32).toString('hex');
+    try {
+        await user.update({ e2eWrapSecret: secret });
+    } catch (e) {
+        console.warn('⚠️ [Auth] Failed to persist e2eWrapSecret:', e.message);
+    }
+    return secret;
+}
+
 _slog('✅ AUTH ROUTER LOADED - FIXED VERSION');
 
 // REGISTER ENDPOINT
@@ -179,7 +207,9 @@ router.post('/register', asyncHandler(async (req, res) => {
                 email:    newUser.email,
                 avatar:   newUser.avatar || null,
                 role:     newUser.role   || 'user',
-                isVerified: newUser.isVerified || false
+                isVerified: newUser.isVerified || false,
+                // E2E-WRAP-SECRET FIX: see note near the top of this file.
+                e2eWrapSecret: await ensureE2EWrapSecret(newUser)
             }
         });
     } catch (error) {
@@ -350,7 +380,13 @@ router.post('/login', asyncHandler(async (req, res) => {
                 username: user.username,
                 email:    user.email,
                 avatar:   user.avatar || null,
-                role:     user.role   || 'user'
+                role:     user.role   || 'user',
+                // E2E-WRAP-SECRET FIX: see note near the top of this file —
+                // this is the field manual login was already correctly able
+                // to derive a substitute for client-side (the typed
+                // password); returning it here too converges both login
+                // paths onto the same, more robust mechanism.
+                e2eWrapSecret: await ensureE2EWrapSecret(user)
             }
         });
     } catch (error) {
@@ -395,7 +431,14 @@ router.post('/google', asyncHandler(async (req, res) => {
             username: result.user.username,
             email:    result.user.email,
             avatar:   result.user.avatar || null,
-            role:     result.user.role || 'user'
+            role:     result.user.role || 'user',
+            // E2E-WRAP-SECRET FIX: THIS is the actual root-cause fix for
+            // "Manual login fails encryption, Google login works" — see the
+            // note near the top of this file. authService.loginWithGoogle()
+            // already generates/returns e2eWrapSecret on result.user; it
+            // just needs to survive this route's narrow response mapping
+            // instead of being dropped like the rest of result.user was.
+            e2eWrapSecret: result.user.e2eWrapSecret
         }
     });
 }));
@@ -1085,7 +1128,13 @@ router.post('/2fa/challenge', asyncHandler(async (req, res) => {
                 username: user.username,
                 email:    user.email,
                 avatar:   user.avatar || null,
-                role:     user.role   || 'user'
+                role:     user.role   || 'user',
+                // E2E-WRAP-SECRET FIX: same gap as /login and /register —
+                // without this, MFA-enabled accounts would fall through to
+                // finalizeLoginSuccess()'s password fallback instead of the
+                // stable secret, which is harmless but inconsistent. See the
+                // note near the top of this file.
+                e2eWrapSecret: await ensureE2EWrapSecret(user)
             }
         });
     } catch (e) {
