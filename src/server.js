@@ -5,13 +5,7 @@
 // ENHANCED: Professional model diagnostics with column names and table details
 // OPTIMIZED: Connection pool (max:20, min:5), Login response caching (30s TTL)
 // OPTIMIZED: Response compression, Query timeout (30s), UV_THREADPOOL_SIZE=16
-// FIX (2026-08-03): Force IPv4-first DNS resolution, absolute first line,
-// before any other module (including models/index.js) is required. Login
-// was failing with "ENETUNREACH <ipv6>:5432" because the DB host resolves
-// to both an IPv6 and IPv4 address and this environment has no outbound
-// IPv6 route — Node was picking the unreachable IPv6 address by default.
 // =========================================================================
-require('dns').setDefaultResultOrder('ipv4first');
 // ========== ABSOLUTE FIRST LINE - LOAD ENVIRONMENT ==========
 const path = require('path');
 const fs = require('fs');
@@ -20,6 +14,30 @@ const BACKEND_ROOT_DIR = path.resolve(__dirname, '..');
 const DEFAULT_ENV_PATH = path.resolve(BACKEND_ROOT_DIR, '.env');
 
 dotenv.config({ path: process.env.ENV_PATH || DEFAULT_ENV_PATH });
+
+// FIX-IPV6-ENETUNREACH: Render's containers have no outbound IPv6 route, but
+// our Postgres host (Supabase) is dual-stack, and Node's default DNS
+// resolution order can hand back the AAAA (IPv6) record first. `pg` (the
+// Postgres driver) opens a bare net.Socket and dials whatever host string
+// it's given — it does NOT support a per-connection dialectOptions.lookup
+// override (verified against pg@8.20 source: lib/stream.js / connection.js
+// call `new net.Socket()` then `.connect(port, host)` with no options
+// object), so the only reliable fix is this process-wide DNS preference.
+// This was the root cause of every login (and any other DB query) failing
+// in production with:
+//   "connect ENETUNREACH <ipv6-address>:5432 - Local (:::0)"
+// Must run before ANY module that might open a DB connection is required
+// below (models/index.js creates the Sequelize/pg pool at require-time).
+try {
+  require('dns').setDefaultResultOrder('ipv4first');
+  console.log('[Network] ✅ DNS default result order set to ipv4first (fixes Render/Supabase IPv6 ENETUNREACH)');
+} catch (dnsOrderErr) {
+  // setDefaultResultOrder requires Node >=17.0.0 / stable in >=18.x.
+  // package.json already pins engines.node to >=18.0.0, so this should
+  // never actually throw in this deployment, but never let a missing API
+  // crash boot — log loudly instead so it's visible in Render logs.
+  console.warn('[Network] ⚠️ Could not set DNS result order (Node <17?):', dnsOrderErr.message);
+}
 
 // Set UV_THREADPOOL_SIZE for better concurrent operations
 process.env.UV_THREADPOOL_SIZE = process.env.UV_THREADPOOL_SIZE || '16';

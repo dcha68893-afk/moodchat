@@ -34,6 +34,17 @@
 
 require('dotenv').config();
 
+// FIX-IPV6-ENETUNREACH: same root cause and fix as src/server.js — see the
+// writeup there. sequelize-cli db:migrate runs as its own separate `node`
+// process (invoked by `npm run db:migrate`), so server.js's DNS fix never
+// applies to it; it needs its own copy here, before resolveConnection()
+// below ever gets used to open a connection.
+try {
+  require('dns').setDefaultResultOrder('ipv4first');
+} catch (_dnsOrderErr) {
+  // Node <17 fallback: never block migrations over this, just proceed.
+}
+
 function resolveConnection() {
   if (process.env.SUPABASE_DB_URL) {
     return {
