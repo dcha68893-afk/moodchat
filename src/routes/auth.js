@@ -617,11 +617,20 @@ router.post('/logout', authenticateToken, asyncHandler(async (req, res) => {
         await tokenService.invalidateRefreshToken(refreshToken);
     }
 
-    // PHASE15 FIX: Also revoke ALL refresh tokens for this user so every device
-    // is forced to re-authenticate. This prevents a logged-out session on one device
-    // from being replayed on another device that still holds the same refresh token.
+    // FIX (logout on one device silently logged out every other device
+    // too): this used to run unconditionally on every /logout call,
+    // revoking every refresh token this user has anywhere — even though
+    // this backend otherwise fully supports independent multi-device
+    // sessions (per-device token rows, GET /auth/sessions listing them,
+    // hasKnownDevice() new-device alerts). Every actual frontend logout call
+    // site never sent `refreshToken` in the body either (fixed separately in
+    // js/api.core.js), so this blanket branch was in practice the ONLY thing
+    // that ever ran — meaning logging out on your phone silently logged out
+    // your laptop too, every time. Kept as an explicit opt-in
+    // (`{ everywhere: true }`) for a real "log out of all devices" action
+    // instead of removing the capability outright.
     const userId = req.user?.userId || req.user?.id;
-    if (userId) {
+    if (userId && req.body.everywhere === true) {
         try {
             const TokenModel = tokenService.getTokenModel();
             if (TokenModel) {
@@ -633,7 +642,9 @@ router.post('/logout', authenticateToken, asyncHandler(async (req, res) => {
         } catch (revokeErr) {
             console.warn('[Auth] Could not revoke all refresh tokens on logout (non-fatal):', revokeErr.message);
         }
+    }
 
+    if (userId) {
         // Update user status to offline
         try {
             const db = require('../models');

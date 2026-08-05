@@ -521,7 +521,19 @@ async function addMissingColumns() {
       { name: 'last_active', type: Sequelize.DATE, allowNull: true },
       { name: 'is_online', type: Sequelize.BOOLEAN, defaultValue: false, allowNull: false },
       { name: 'avatar', type: Sequelize.STRING(255), allowNull: true },
-      { name: 'bio', type: Sequelize.TEXT, allowNull: true }
+      { name: 'bio', type: Sequelize.TEXT, allowNull: true },
+      // FIX (BUG: "column e2eWrapSecret does not exist" on Google login):
+      // I added this column to the Users Sequelize model (and a migrations/
+      // file) for the E2E-wrap-secret fix, but this hardcoded requiredColumns
+      // map — not the model definition, and not the migrations/ folder — is
+      // what actually runs at boot (see the block comment above this
+      // function: sequelize.sync() runs with alter:false, so it never alters
+      // existing tables, and migrations/ is never invoked by the app). The
+      // model having the field was necessary but not sufficient; it also had
+      // to be listed here for the real Postgres/MySQL column to ever get
+      // created. Root cause of the console error you saw right after that
+      // fix shipped.
+      { name: 'e2eWrapSecret', type: Sequelize.STRING(64), allowNull: true }
     ],
     'chats': [
       { name: 'name', type: Sequelize.STRING(100), allowNull: true },

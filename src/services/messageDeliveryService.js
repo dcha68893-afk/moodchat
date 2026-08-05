@@ -82,8 +82,52 @@ class MessageDeliveryService {
     ).catch(() => [null]);
     if (existing) return existing.id;
 
+    // FIX-DUPLICATE-CHAT-RACE (this function was a THIRD, independent
+    // reimplementation of the exact same find-or-create-direct-chat logic
+    // that chats.js's POST /start route already had to fix with a Postgres
+    // advisory lock — see the long comment there. This copy never got that
+    // fix, and it's the one actually used by the real send path (POST
+    // /messages when only receiverId is given, i.e. every "message a friend
+    // from Friends/Calls/Status, not from Chat History" send, AND the
+    // realtime msg:send socket handler per this file's own docstring above).
+    // Without the lock: two near-simultaneous first-messages between the
+    // same pair (both users tapping "Message" around the same time, or one
+    // sending immediately after opening from a non-history source while the
+    // other's request is still in flight) both pass the "does a chat already
+    // exist?" SELECT before either has committed a new one — there's no
+    // unique constraint on (participant pair) to make the second INSERT
+    // fail, so both commit successfully as two SEPARATE chat rows. Each
+    // user's subsequent messages/socket delivery bind to whichever row their
+    // own client resolved, so messages from the user bound to row #2 never
+    // reach the user bound to row #1 (or vice versa) — while push
+    // notifications, which target the user directly rather than a specific
+    // chat row, still fire normally. That exact mismatch (message missing
+    // in-app, notification present) is what was reported. Apply the same
+    // advisory-lock pattern used at chats.js's /start route.
+    const _lockA = Math.min(senderIdInt, receiverIdInt);
+    const _lockB = Math.max(senderIdInt, receiverIdInt);
+
     const t = await sequelize.transaction();
     try {
+      await sequelize.query(
+        'SELECT pg_advisory_xact_lock(:a, :b)',
+        { replacements: { a: _lockA, b: _lockB }, transaction: t }
+      );
+
+      // Re-check now that we hold the lock — a concurrent request for this
+      // exact pair may have committed its own chat while we were waiting.
+      const [existingAfterLock] = await sequelize.query(
+        `SELECT c.id FROM chats c
+         JOIN chat_participants cp1 ON cp1."chatId" = c.id AND cp1."userId" = :senderId
+         JOIN chat_participants cp2 ON cp2."chatId" = c.id AND cp2."userId" = :receiverId
+         WHERE c.type = 'direct' AND c."isActive" = true LIMIT 1`,
+        { replacements: { senderId: senderIdInt, receiverId: receiverIdInt }, type: sequelize.QueryTypes.SELECT, transaction: t }
+      ).catch(() => [null]);
+      if (existingAfterLock) {
+        await t.commit();
+        return existingAfterLock.id;
+      }
+
       const newChat = await sequelize.query(
         `INSERT INTO chats (type, "createdBy", "isActive", "isArchived", "createdAt", "updatedAt")
          VALUES ('direct', :senderId, true, false, NOW(), NOW()) RETURNING id`,
@@ -102,7 +146,8 @@ class MessageDeliveryService {
       return chatId;
     } catch (err) {
       await t.rollback();
-      // Race: two near-simultaneous first messages between the same pair.
+      // Belt-and-suspenders: keep the old post-rollback recheck too, in case
+      // of a genuine constraint error unrelated to the race itself.
       const [raceCheck] = await sequelize.query(
         `SELECT c.id FROM chats c
          JOIN chat_participants cp1 ON cp1."chatId" = c.id AND cp1."userId" = :senderId
