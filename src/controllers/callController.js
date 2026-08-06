@@ -75,34 +75,26 @@ async function wsNotifyCallInitiated(userId, data) {
 /**
  * Find or create a direct 1:1 chat between two users.
  * Falls back to null (safe) so the call can still proceed without a chatId.
+ *
+ * ROOT-CAUSE FIX (calls-message-invisible): this used to be a fourth,
+ * independent reimplementation of find-or-create-direct-chat — with two
+ * bugs neither of the other three copies had:
+ *   1. It created chats with type: 'private', while every other part of
+ *      the app (Chat History, the messages send path, notifications)
+ *      only ever queries for type: 'direct'. A chat created here was
+ *      therefore permanently invisible to the normal messaging pipeline
+ *      — not a race, a guaranteed miss, every single time a call's
+ *      "message" flow touched a pair of users with no prior direct chat.
+ *   2. It had no locking, so even if the type had matched, concurrent
+ *      requests for the same pair could still create two rows.
+ * Fix: delegate to messageDeliveryService.resolveOrCreateDirectChat,
+ * the same locked, type:'direct' resolver POST /messages already uses.
+ * One Conversation Engine, not four.
  */
 async function findOrCreateDirectChat(userId1, userId2) {
   try {
-    const Chat            = db.Chats || db.Chat;
-    const ChatParticipant = db.ChatParticipants || db.ChatParticipant;
-    if (!Chat || !ChatParticipant) return null;
-
-    const { Op } = require('sequelize');
-
-    const existing = await Chat.findOne({
-      where: { type: 'private' },
-      include: [{
-        model:    ChatParticipant,
-        as:       'participants',
-        where:    { userId: { [Op.in]: [parseInt(userId1, 10), parseInt(userId2, 10)] } },
-        required: true,
-      }],
-      having: db.sequelize.literal('COUNT(DISTINCT "participants"."userId") = 2'),
-      group:  ['"Chats"."id"'],
-    });
-    if (existing) return existing.id;
-
-    const chat = await Chat.create({ type: 'private', name: null, createdBy: parseInt(userId1, 10) });
-    await ChatParticipant.bulkCreate([
-      { chatId: chat.id, userId: parseInt(userId1, 10), role: 'member' },
-      { chatId: chat.id, userId: parseInt(userId2, 10), role: 'member' },
-    ]);
-    return chat.id;
+    const messageDeliveryService = require('../services/messageDeliveryService');
+    return await messageDeliveryService.resolveOrCreateDirectChat(userId1, userId2);
   } catch (err) {
     logger.warn('[callController] findOrCreateDirectChat error (non-fatal):', err.message);
     return null;

@@ -104,32 +104,26 @@ class ChatService {
             );
             if (users.length < 2) throw new NotFoundError('One or both users not found');
 
-            const existing = await sequelize.query(
+            // ROOT-CAUSE FIX (calls/status/friends-message-invisible, applies
+            // here too): this was a fourth independent find-or-create-direct-
+            // chat with no locking — a plain check-then-insert race. Delegate
+            // to messageDeliveryService.resolveOrCreateDirectChat, the single
+            // locked, type:'direct' resolver every other entry point
+            // (POST /messages, calls, status replies) now shares, so two
+            // requests for the same pair can never create two rows here
+            // either, regardless of which entry point they came through.
+            const messageDeliveryService = require('./messageDeliveryService');
+            const existingBefore = await sequelize.query(
                 `SELECT c.id FROM chats c
                  JOIN chat_participants cp1 ON cp1."chatId" = c.id AND cp1."userId" = :userId
                  JOIN chat_participants cp2 ON cp2."chatId" = c.id AND cp2."userId" = :targetUserId
                  WHERE c.type = 'direct' AND c."isActive" = true LIMIT 1`,
                 { replacements: { userId, targetUserId }, type: sequelize.QueryTypes.SELECT }
             );
-            if (existing && existing.length > 0) {
-                return { chat: await ChatService.getChatDetails(existing[0].id, userId), isNew: false };
-            }
+            const isNew = !(existingBefore && existingBefore.length > 0);
+            const chatId = await messageDeliveryService.resolveOrCreateDirectChat(userId, targetUserId);
 
-            const result = await sequelize.query(
-                `INSERT INTO chats (type, "createdBy", "isActive", "isArchived", "createdAt", "updatedAt")
-                 VALUES ('direct', :userId, true, false, NOW(), NOW()) RETURNING id`,
-                { replacements: { userId }, type: sequelize.QueryTypes.INSERT }
-            );
-            const chatId = result[0][0].id;
-
-            await sequelize.query(
-                `INSERT INTO chat_participants ("chatId", "userId", "joinedAt", "createdAt", "updatedAt")
-                 VALUES (:chatId, :userId, NOW(), NOW(), NOW()),
-                        (:chatId, :targetUserId, NOW(), NOW(), NOW())`,
-                { replacements: { chatId, userId, targetUserId } }
-            );
-
-            return { chat: await ChatService.getChatDetails(chatId, userId), isNew: true };
+            return { chat: await ChatService.getChatDetails(chatId, userId), isNew };
         } catch (error) {
             logger.error('Create direct chat failed:', error);
             throw error;

@@ -1985,43 +1985,29 @@ router.post('/:statusId/reply', authenticateToken, [
         mediaUrl: status.mediaUrl || null,
     });
 
-    // Find or create direct chat between sender and status owner
-    const Chat     = db.Chat     || db.Chats     || db.Conversation || db.Conversations;
-    const Message  = db.Message  || db.Messages  || db.ChatMessage  || db.ChatMessages;
-    const ChatParticipant = db.ChatParticipant || db.ChatParticipants;
-
+    // Find or create direct chat between sender and status owner.
+    //
+    // ROOT-CAUSE FIX (status-reply-message-invisible): this used to be a
+    // third, independent, UNLOCKED find-or-create-direct-chat — no
+    // pg_advisory_xact_lock, so two near-simultaneous status replies (or a
+    // status reply racing an ordinary message send) between the same pair
+    // could each pass the "does a chat exist?" check before either
+    // committed, creating two separate direct-chat rows for the same
+    // pair. Each user's later messages then bind to whichever row their
+    // own client resolved — so a status reply from one side could land in
+    // a chat row the other side's app never looks at, while their push
+    // notification (which targets the user directly, not a chat row)
+    // still fires normally. Delegate to the same locked, type:'direct'
+    // resolver POST /messages and the call flow now use.
+    const Message = db.Message || db.Messages || db.ChatMessage || db.ChatMessages;
     if (!Message) return res.status(503).json({ success: false, message: 'Message service unavailable' });
 
+    const messageDeliveryService = require('../services/messageDeliveryService');
     let chatId = null;
-    if (Chat && ChatParticipant) {
-        // Find a direct chat that has BOTH users as participants
-        const { QueryTypes } = require('sequelize');
-        const rawDb = db.sequelize;
-
-        if (rawDb) {
-            const rows = await rawDb.query(
-                `SELECT c.id FROM "Chats" c
-                 JOIN "ChatParticipants" cp1 ON cp1."chatId" = c.id AND cp1."userId" = :senderId
-                 JOIN "ChatParticipants" cp2 ON cp2."chatId" = c.id AND cp2."userId" = :ownerId
-                 WHERE c.type = 'direct' LIMIT 1`,
-                { replacements: { senderId, ownerId }, type: QueryTypes.SELECT }
-            ).catch(() => []);
-            if (rows.length) chatId = rows[0].id;
-        }
-
-        if (!chatId) {
-            const newChat = await Chat.create({
-                type: 'direct', createdBy: senderId, isActive: true,
-                createdAt: new Date(), updatedAt: new Date(),
-            }).catch(() => null);
-            if (newChat) {
-                chatId = newChat.id;
-                await ChatParticipant.bulkCreate([
-                    { chatId, userId: senderId, joinedAt: new Date() },
-                    { chatId, userId: ownerId,  joinedAt: new Date() },
-                ]).catch(() => {});
-            }
-        }
+    try {
+        chatId = await messageDeliveryService.resolveOrCreateDirectChat(senderId, ownerId);
+    } catch (resolveErr) {
+        return res.status(400).json({ success: false, message: resolveErr.message || 'Could not resolve conversation' });
     }
 
     const message = await Message.create({

@@ -877,7 +877,6 @@ async function removeReaction(statusId, userId) {
 async function replyToStatus(statusId, senderId, recipientId, replyText) {
     const db = require('../models');
     const { Status } = getModels();
-    const Chat = db.Chat || db.Chats || db.Conversation || db.Conversations;
     const Message = db.Message || db.Messages || db.ChatMessage || db.ChatMessages;
 
     if (!Status) throw serverErr('Status model unavailable');
@@ -889,47 +888,21 @@ async function replyToStatus(statusId, senderId, recipientId, replyText) {
 
         const ownerId = status.userId;
 
-        // Find or create a direct chat between sender and status owner
-        let chat = null;
-        if (Chat) {
-            chat = await Chat.findOne({
-                where: {
-                    type: 'direct',
-                    [Op.or]: [
-                        { createdBy: senderId },
-                        { createdBy: ownerId }
-                    ]
-                },
-                include: Chat.associations?.chatParticipants
-                    ? [{ association: Chat.associations.chatParticipants, where: { userId: [senderId, ownerId] } }]
-                    : []
-            });
-
-            if (!chat) {
-                // Simple fallback: find any chat that has both users as participants
-                const allChats = await Chat.findAll({ where: { type: 'direct' } });
-                // We'll just create a new one if none found via a simpler lookup
-                chat = await Chat.create({
-                    type: 'direct',
-                    createdBy: senderId,
-                    isActive: true,
-                    createdAt: new Date(),
-                    updatedAt: new Date(),
-                });
-                // Add participants if model exists
-                const ChatParticipant = db.ChatParticipant || db.ChatParticipants;
-                if (ChatParticipant) {
-                    await ChatParticipant.bulkCreate([
-                        { chatId: chat.id, userId: senderId, joinedAt: new Date() },
-                        { chatId: chat.id, userId: ownerId, joinedAt: new Date() },
-                    ]);
-                }
-            }
-        }
+        // ROOT-CAUSE FIX (status-reply-message-invisible): this was a second
+        // (in addition to routes/status.js's own copy — also fixed) broken,
+        // unlocked find-or-create-direct-chat. Its lookup query couldn't
+        // actually match an existing 2-participant chat (the `where`
+        // required createdBy to be senderId OR ownerId, then filtered
+        // participants inconsistently across DB dialects), so it fell
+        // through to `Chat.create()` almost every time — a fresh duplicate
+        // direct chat per reply, invisible to the receiver's real thread.
+        // Delegate to the single locked, type:'direct' resolver instead.
+        const messageDeliveryService = require('./messageDeliveryService');
+        const chatId = await messageDeliveryService.resolveOrCreateDirectChat(senderId, ownerId);
 
         // Create the message with status reference
         const message = await Message.create({
-            chatId: chat ? chat.id : null,
+            chatId,
             senderId,
             receiverId: ownerId,
             content: replyText,
@@ -948,7 +921,7 @@ async function replyToStatus(statusId, senderId, recipientId, replyText) {
         return {
             success: true,
             message,
-            chatId: chat ? chat.id : null,
+            chatId,
             recipientId: ownerId,
             statusPreview: {
                 id: status.id,
