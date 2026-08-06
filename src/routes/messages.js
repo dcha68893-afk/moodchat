@@ -1154,6 +1154,7 @@ router.post('/', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
         for (const rid of recipientIds) {
           if (typeof wsService.scheduleMessageDeliveryTimeout === 'function') {
             wsService.scheduleMessageDeliveryTimeout(messageId, chatId, senderId, {
+              recipientUserId: rid,
               onTimeout: () => _pushFallback([rid]),
             });
           }

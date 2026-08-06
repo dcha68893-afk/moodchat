@@ -460,8 +460,18 @@ class WebSocketService {
             // were instead being stamped optimistically at send time (see
             // messages.js), which is a false positive. Both writes are best-effort
             // and non-fatal — a DB hiccup here must never block notifying the sender.
-            socket.removeAllListeners('message:delivery_ack').on('message:delivery_ack', async ({ messageId, chatId, senderId } = {}) => {
-                if (!messageId || !senderId) return;
+            socket.removeAllListeners('message:delivery_ack').on('message:delivery_ack', async (raw = {}) => {
+                const { messageId, chatId, senderId } = raw;
+                // DIAGNOSTIC (temporary — undelivered-after-10s investigation): log the
+                // exact raw payload every time this fires, including the reject case,
+                // so a still-open one-directional delivery issue can be pinned to a
+                // specific missing/malformed field instead of guessed at. Safe to
+                // remove once the remaining cause is confirmed.
+                if (!messageId || !senderId) {
+                    console.warn('[WSService] 🔴 delivery_ack REJECTED — missing required field. raw payload:', JSON.stringify(raw));
+                    return;
+                }
+                console.log(`[WSService] ✅ delivery_ack accepted mid=${messageId} chatId=${chatId} from uid=${userId} for senderId=${senderId}`);
                 this.clearMessageDeliveryTimeout(messageId);
                 try {
                     const sequelize = db.sequelize || db;
@@ -1375,7 +1385,12 @@ class WebSocketService {
             await this.sendToUser(senderId, 'message:delivery_failed', {
                 messageId, chatId, reason: 'delivery_timeout', timestamp: Date.now(),
             }).catch(() => {});
-            console.warn(`[WSService] ⚠️  Message ${messageId} undelivered after 10s — sender notified`);
+            // DIAGNOSTIC (temporary — undelivered-after-10s investigation): include
+            // which recipient was expected to ack and never did, so this line can be
+            // matched directly against that recipient's own browser console for the
+            // same messageId to see exactly what _attemptAckDelivery did (or didn't)
+            // do on their end.
+            console.warn(`[WSService] ⚠️  Message ${messageId} undelivered after 10s — expected ack from uid=${options.recipientUserId ?? '(unknown)'}, sender=${senderId} notified`);
             // FIX-ZOMBIE-SOCKET-PUSH-FALLBACK: this timer used to only fire when
             // deliveryResults already reported delivery as failed — but a Socket.IO
             // room can still show a member for up to ~pingTimeout+pingInterval after
