@@ -270,6 +270,28 @@ class AuthService {
       const googleId = payload.sub;
       const email = payload.email.toLowerCase().trim();
 
+      // ROOT-CAUSE FIX (google-user-shows-"User"-everywhere): given_name and
+      // family_name are OPTIONAL fields in a Google ID token — Google only
+      // guarantees `name` (the full display name) will be present. Some
+      // account types/consent flows never populate given_name/family_name
+      // at all. This code only ever read those two optional fields, so for
+      // any such account firstName/lastName were stored as null, and every
+      // downstream `[firstName, lastName].filter(Boolean).join(' ') ||
+      // username` computation (friend list, QR code generation, message
+      // sender name, etc.) fell through to the auto-generated username —
+      // or, if that generation also degraded to its own last-resort
+      // fallback, to the literal string "user"/"User" seen throughout the
+      // app. Fall back to splitting `payload.name` when given_name/
+      // family_name are missing, so a real name is captured whenever
+      // Google provides one in any form.
+      let googleGivenName = payload.given_name || null;
+      let googleFamilyName = payload.family_name || null;
+      if (!googleGivenName && !googleFamilyName && payload.name) {
+        const nameParts = payload.name.trim().split(/\s+/);
+        googleGivenName = nameParts[0] || null;
+        googleFamilyName = nameParts.length > 1 ? nameParts.slice(1).join(' ') : null;
+      }
+
       // Match an existing account by googleId first, then by email so a user
       // who registered with email/password can also sign in with Google.
       let user = await this.User.findOne({ where: { googleId } });
@@ -281,11 +303,19 @@ class AuthService {
         const updates = { lastSeen: new Date(), status: 'online' };
         if (!user.googleId) updates.googleId = googleId;
         if (!user.isVerified) updates.isVerified = true;
+        // ROOT-CAUSE FIX (same as above): also backfill firstName/lastName
+        // on an EXISTING account if they're still empty from a previous
+        // sign-in that hit this gap — otherwise a user created before this
+        // fix stays stuck showing "User" forever, even after the fix ships.
+        if (!user.firstName && !user.lastName && (googleGivenName || googleFamilyName)) {
+          updates.firstName = googleGivenName;
+          updates.lastName = googleFamilyName;
+        }
         await user.update(updates);
       } else {
         // Derive a unique username from the Google profile since Nexopa
         // requires one; fall back to appending part of the Google id on collision.
-        const base = (payload.given_name || email.split('@')[0])
+        const base = (googleGivenName || payload.name || email.split('@')[0])
           .toLowerCase().replace(/[^a-z0-9_]/g, '') || 'user';
         let username = base;
         let suffix = 0;
@@ -303,8 +333,8 @@ class AuthService {
           username,
           email,
           password: randomPassword, // hashed by the model's beforeCreate hook
-          firstName: payload.given_name || null,
-          lastName: payload.family_name || null,
+          firstName: googleGivenName,
+          lastName: googleFamilyName,
           avatar: payload.picture || `https://ui-avatars.com/api/?name=${encodeURIComponent(username)}&background=random&color=fff`,
           isActive: true,
           isVerified: true,
