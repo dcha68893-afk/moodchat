@@ -148,21 +148,53 @@ router.get('/keys', asyncHandler(async (req, res) => {
 }));
 
 // GET /api/encryption/keys/:userId — fetch another user's public key
+//
+// FIX-NEW-CHAT-KEY-403 (paired with the frontend's no-plaintext-fallback
+// fix): this used to ONLY allow the fetch if a chat_participants row
+// already existed between requester and target. That row is created the
+// moment the first message is sent — so for a conversation started from
+// Friends/Calls/Status (i.e. every brand-new chat), the very first attempt
+// to fetch the recipient's key for that all-important first message had
+// nothing to authorize against and got a 403. The frontend used to treat a
+// 403 as "transient, retry a few times then give up and send in plaintext"
+// — silently downgrading security for exactly the case (a first message to
+// someone) where getting it right matters most. Now that the frontend
+// waits indefinitely instead of giving up, a permanent 403 here would mean
+// a new conversation's first message could never send at all. Fix the
+// actual authorization gap instead of relying on the client to paper over
+// it: an accepted friendship is real proof these two people are allowed to
+// message each other, and — per this app's own flow — is a precondition
+// for a Friends-list chat to exist in the first place. Allow either an
+// existing shared chat OR an accepted friendship.
+async function _canSeeEncryptionKey(requesterId, targetId, sequelize) {
+  const [rel] = await sequelize.query(
+    `SELECT 1 FROM chat_participants cp1
+     JOIN chat_participants cp2 ON cp2."chatId"=cp1."chatId" AND cp2."userId"=:targetId
+     WHERE cp1."userId"=:requesterId LIMIT 1`,
+    { replacements: { requesterId, targetId } }
+  );
+  if (rel && rel.length > 0) return true;
+
+  const [friend] = await sequelize.query(
+    `SELECT 1 FROM friends
+     WHERE status = 'accepted'
+       AND ((requester_id = :requesterId AND receiver_id = :targetId)
+         OR (requester_id = :targetId AND receiver_id = :requesterId))
+     LIMIT 1`,
+    { replacements: { requesterId, targetId } }
+  );
+  return !!(friend && friend.length > 0);
+}
+
 router.get('/keys/:userId', asyncHandler(async (req, res) => {
   const targetId  = parseInt(req.params.userId, 10);
   if (!targetId)  return res.status(400).json({ status: 'error', message: 'Invalid userId' });
 
   const sequelize = getSequelize();
 
-  // Verify friendship/chat relationship before exposing key
-  const [rel] = await sequelize.query(
-    `SELECT 1 FROM chat_participants cp1
-     JOIN chat_participants cp2 ON cp2."chatId"=cp1."chatId" AND cp2."userId"=:targetId
-     WHERE cp1."userId"=:requesterId LIMIT 1`,
-    { replacements: { requesterId: req.user.id, targetId } }
-  );
-  if (!rel || rel.length === 0) {
-    return res.status(403).json({ status: 'error', message: 'No shared conversation' });
+  const authorized = await _canSeeEncryptionKey(req.user.id, targetId, sequelize);
+  if (!authorized) {
+    return res.status(403).json({ status: 'error', message: 'No shared conversation or friendship' });
   }
 
   const rows = await sequelize.query(
@@ -295,15 +327,10 @@ router.get('/prekeys/:userId', asyncHandler(async (req, res) => {
 
   const sequelize = getSequelize();
 
-  // Same relationship check the existing /keys/:userId route uses.
-  const [rel] = await sequelize.query(
-    `SELECT 1 FROM chat_participants cp1
-     JOIN chat_participants cp2 ON cp2."chatId"=cp1."chatId" AND cp2."userId"=:targetId
-     WHERE cp1."userId"=:requesterId LIMIT 1`,
-    { replacements: { requesterId: req.user.id, targetId } }
-  );
-  if (!rel || rel.length === 0) {
-    return res.status(403).json({ status: 'error', message: 'No shared conversation' });
+  // FIX-NEW-CHAT-KEY-403: same relationship-vs-friendship fix as /keys/:userId above.
+  const authorized = await _canSeeEncryptionKey(req.user.id, targetId, sequelize);
+  if (!authorized) {
+    return res.status(403).json({ status: 'error', message: 'No shared conversation or friendship' });
   }
 
   const [identityRows, spkRows] = await Promise.all([
