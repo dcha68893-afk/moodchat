@@ -676,11 +676,18 @@ router.get('/', apiRateLimiter, asyncHandler(async (req, res) => {
 // ============================================================================
 router.post('/', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
   try {
-    const { receiverId, content, type = 'text', chatId: existingChatId, replyToId, localId: clientLocalId, linkPreview, metadata: clientMetadata } = req.body;
+    const { receiverId, content, type = 'text', chatId: existingChatId, replyToId, localId: clientLocalId, linkPreview, metadata: clientMetadata, traceId: clientTraceId } = req.body;
     const senderId = req.user.id;
 
+    // PHASE24 FORENSIC: use the client-generated traceId when present so this
+    // one message can be grepped end-to-end across sender client, server, and
+    // receiver client logs. Generate a server-side one as a fallback only —
+    // this should be rare and indicates the client is running a stale build
+    // without the traceId patch.
+    const _traceId = clientTraceId || ('msgtrace_srv_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8));
+
     // ── FORENSIC LOG: SEND_START ──────────────────────────────────────────────
-    _flog(`[FORENSIC] SEND_START | senderId=${senderId} | chatId=${existingChatId||'?'} | receiverId=${receiverId||'?'} | localId=${clientLocalId||'?'} | contentLen=${(content||'').length} | ts=${Date.now()}`);
+    _flog(`[FORENSIC][${_traceId}] SEND_START | senderId=${senderId} | chatId=${existingChatId||'?'} | receiverId=${receiverId||'?'} | localId=${clientLocalId||'?'} | contentLen=${(content||'').length} | ts=${Date.now()}`);
 
     // Validate content
     if (!content || content.trim().length === 0) {
@@ -747,7 +754,7 @@ router.post('/', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
     }
 
     // ── FORENSIC LOG: BACKEND_RECEIVED ───────────────────────────────────────
-    _flog(`[FORENSIC] BACKEND_RECEIVED | senderId=${senderId} | chatId=${chatId} | localId=${clientLocalId||'?'} | ts=${Date.now()}`);
+    _flog(`[FORENSIC][${_traceId}] BACKEND_RECEIVED | senderId=${senderId} | chatId=${chatId} | localId=${clientLocalId||'?'} | ts=${Date.now()}`);
 
     // ── IDEMPOTENCY: If a localId was provided, check if this message was already saved.
     // FIX-AUDIT: Old check used content-match which incorrectly dedupes two DIFFERENT
@@ -850,7 +857,31 @@ router.post('/', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
       await t.commit();
 
       // ── FORENSIC LOG: DB_SAVED ──────────────────────────────────────────────
-      _flog(`[FORENSIC] DB_SAVED | messageId=${messageId} | chatId=${chatId} | senderId=${senderId} | ts=${Date.now()}`);
+      _flog(`[FORENSIC][${_traceId}] DB_SAVED | messageId=${messageId} | chatId=${chatId} | senderId=${senderId} | ts=${Date.now()}`);
+
+      // ── PHASE24 STAGE 7: DATABASE VERIFICATION ───────────────────────────
+      // Never trust that a committed INSERT is actually readable — re-SELECT
+      // the row by its own returned id, outside the transaction, the same way
+      // any other request (a refresh, a different device) would read it. If
+      // this ever comes back empty/mismatched despite t.commit() having
+      // resolved, that is proof of a replication-lag / read-replica /
+      // connection-pool routing issue, not an application bug.
+      try {
+        const _verifyRows = await sequelize.query(
+          `SELECT id, "chatId", "senderId", content, type, "createdAt" FROM "Messages" WHERE id = :messageId LIMIT 1`,
+          { replacements: { messageId }, type: sequelize.QueryTypes.SELECT }
+        );
+        const _v = _verifyRows && _verifyRows[0];
+        if (!_v) {
+          console.error(`[FORENSIC][${_traceId}] STAGE7_DB_VERIFY_FAILED | messageId=${messageId} | reason=row_not_found_after_commit | ts=${Date.now()}`);
+        } else if (String(_v.chatId) !== String(chatId) || String(_v.senderId) !== String(senderId)) {
+          console.error(`[FORENSIC][${_traceId}] STAGE7_DB_VERIFY_MISMATCH | messageId=${messageId} | expectedChatId=${chatId} actualChatId=${_v.chatId} | expectedSenderId=${senderId} actualSenderId=${_v.senderId} | ts=${Date.now()}`);
+        } else {
+          _flog(`[FORENSIC][${_traceId}] STAGE7_DB_VERIFIED | messageId=${messageId} | chatId=${_v.chatId} | senderId=${_v.senderId} | createdAt=${_v.createdAt} | ts=${Date.now()}`);
+        }
+      } catch (_verifyErr) {
+        console.error(`[FORENSIC][${_traceId}] STAGE7_DB_VERIFY_ERROR | messageId=${messageId} | error=${_verifyErr.message} | ts=${Date.now()}`);
+      }
 
       senderRows = await sequelize.query(
         `SELECT id, username, avatar FROM "Users" WHERE id = :senderId`,
@@ -879,6 +910,7 @@ router.post('/', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
     const populatedMessage = {
       id:          messageId,
       localId:     clientLocalId || null,
+      traceId:     _traceId,
       chatId,
       senderId,
       content:     safeContent,
@@ -932,7 +964,7 @@ router.post('/', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
 
         // ── FORENSIC LOG: TRANSPORT_SELECTED ─────────────────────────────────
         const _htrAvail = !!global.__HybridTransportRuntime;
-        _flog(`[FORENSIC] TRANSPORT_SELECTED | messageId=${messageId} | transport=${_htrAvail?'HTR+SocketIO':'SocketIO'} | recipients=${recipientIds.join(',')} | ts=${Date.now()}`);
+        _flog(`[FORENSIC][${_traceId}] TRANSPORT_SELECTED | messageId=${messageId} | transport=${_htrAvail?'HTR+SocketIO':'SocketIO'} | recipients=${recipientIds.join(',')} | ts=${Date.now()}`);
 
         // Emit message:new to RECIPIENTS ONLY (not sender) — sender already has optimistic message
         // FIX: Sending message:new to the sender caused double-render and dedup collisions.
@@ -963,6 +995,7 @@ router.post('/', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
         recipientIds.forEach(uid => {
           wsService.sendToUser(uid, 'msg:new', {
             serverId: populatedMessage.id,
+            traceId: populatedMessage.traceId,
             chatId: populatedMessage.chatId,
             senderId: populatedMessage.senderId,
             content: populatedMessage.content,
@@ -974,10 +1007,27 @@ router.post('/', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
           }).catch(() => {});
         });
 
+        // ── PHASE24 FORENSIC: DUAL_EMIT_WARNING ─────────────────────────────
+        // This route fires BOTH 'message:new' and 'msg:new' for the exact
+        // same message, to every recipient, in the same tick — two
+        // independent client-side listeners (the legacy relay/claim path
+        // and MessageLifecycleClient.js's newer race-free path) can each
+        // act on the same message. If receiver-side logs for this traceId
+        // show both a 'message:new' and a 'msg:new' RECEIVE stage, and the
+        // receiver's dedup-by-serverId is not filtering one of them out
+        // before render, that is the concrete root cause of duplicate or
+        // dropped renders on the receiving side. Left in place as a
+        // documented, correlatable fact rather than removed blind — the
+        // rebuild doc explicitly wants msg:new active as a safety net, so
+        // this log exists to prove whether it is actually safe.
+        if (recipientIds.length > 0) {
+          _flog(`[FORENSIC][${_traceId}] DUAL_EMIT | messageId=${messageId} | events=message:new,msg:new | recipients=${recipientIds.join(',')} | ts=${Date.now()}`);
+        }
+
         // ── FORENSIC LOG: BROADCASTED ─────────────────────────────────────────
         const _delivered = deliveryResults.filter(r => r.status === 'fulfilled' && r.value === true).length;
         const _failed    = deliveryResults.length - _delivered;
-        _flog(`[FORENSIC] BROADCASTED | messageId=${messageId} | chatId=${chatId} | recipients=${recipientIds.join(',')} | delivered=${_delivered}/${deliveryResults.length} | failed=${_failed} | ts=${Date.now()}`);
+        _flog(`[FORENSIC][${_traceId}] BROADCASTED | messageId=${messageId} | chatId=${chatId} | recipients=${recipientIds.join(',')} | delivered=${_delivered}/${deliveryResults.length} | failed=${_failed} | ts=${Date.now()}`);
 
         // ── PUSH NOTIFICATIONS: send to offline recipients ──────────────────
         const _offlineRecipients = deliveryResults
