@@ -312,16 +312,30 @@ class CallSignalingService extends EventEmitter {
     // Push TURN credentials to caller
     this._pushTURNConfig(callerId);
 
-    // Notify target via existing wsService.notifyCallInitiated()
-    await this._wsService.notifyCallInitiated(targetUserId, {
-      callId,
-      callerId:  String(callerId),
-      callType:  callData.callType || 'audio',
-      callerName: callData.callerName || null,
-      timestamp: Date.now(),
-    });
+    // FIX-DUPLICATE-INCOMING-CALL: callers that already sent a 'call:incoming'
+    // notification themselves (e.g. the REST /calls route, which calls
+    // callService.initiateCall() first — that already emits call:incoming to
+    // the callee) pass { skipNotify: true } here. Without this flag, the
+    // callee's socket received the SAME call:incoming event a second (or
+    // third) time — from callService.initiateCall(), then again from the
+    // route's own direct notifyUser() call, then AGAIN from here — producing
+    // multiple concurrent "incoming call" UI instances client-side, repeated
+    // WebRTC renegotiation, and the stale-state resets / postMessage storms
+    // seen on the client for a single call. This service still needs to run
+    // (it sets up the signaling room used by webrtc:signal routing), it just
+    // should not re-notify the callee when someone upstream already did.
+    if (!callData.skipNotify) {
+      // Notify target via existing wsService.notifyCallInitiated()
+      await this._wsService.notifyCallInitiated(targetUserId, {
+        callId,
+        callerId:  String(callerId),
+        callType:  callData.callType || 'audio',
+        callerName: callData.callerName || null,
+        timestamp: Date.now(),
+      });
+    }
 
-    this._logger.log(`[CallSignaling] Call initiated: ${callId} ${callerId}→${targetUserId}`);
+    this._logger.log(`[CallSignaling] Call initiated: ${callId} ${callerId}→${targetUserId}${callData.skipNotify ? ' (notify skipped — already sent upstream)' : ''}`);
     this.emit('call:initiated', { callId, callerId, targetUserId });
     return callId;
   }

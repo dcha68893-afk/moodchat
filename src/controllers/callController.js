@@ -243,19 +243,18 @@ class CallController {
         || req.user.username
         || `User ${callerId}`;
 
-      console.log(`[callController] 📞 CALLING wsNotifyCallInitiated → receiverId=${calleeId} callerName="${callerDisplayName}"`);
-      await wsNotifyCallInitiated(parseInt(calleeId, 10), {
-        callId:       call.id,
-        callerId,
-        callerName:   callerDisplayName,
-        callerAvatar: (call.callerInfo && call.callerInfo.avatar) || req.user.avatar || null,
-        callType:     type,   // top-level alias expected by calls-ui
-        type:         type,
-        isGroupCall:  false,
-        chatId:       chatId ? parseInt(chatId, 10) : null,
-        timestamp:    Date.now(),
-      });
-      console.log(`[callController] ✅ wsNotifyCallInitiated sent for call=${call.id}`);
+      // FIX-DUPLICATE-INCOMING-CALL: removed the second wsNotifyCallInitiated()
+      // call that used to be here. callService.initiateCall() (above, see
+      // `const call = ...`) already emits both 'call:incoming' and
+      // 'call_incoming' straight to calleeId with a fully-resolved payload.
+      // Calling wsNotifyCallInitiated() again duplicated that notification —
+      // the callee's client received the same incoming call twice from this
+      // path alone (and more, when combined with the equivalent duplicate in
+      // routes/calls.js for the main REST call-initiation route), which is
+      // what produced repeated/duplicate "incoming call" UI and the
+      // associated WebRTC renegotiation churn. callService.initiateCall() is
+      // now the single source of truth for this notification.
+      console.log(`[callController] ✅ call initiated via callService (single notify) for call=${call.id}`);
 
       return res.status(201).json({
         success:  true,

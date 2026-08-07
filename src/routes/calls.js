@@ -392,9 +392,19 @@ router.post('/', apiRateLimiter, callInitiationLimiter, asyncHandler(async (req,
       });
     }
 
-    await notifyUser(req.io, targetId, 'call_incoming', _callIncomingPayload);
-    // FIX: Also emit canonical 'call:incoming' (the frontend listens on this too)
-    await notifyUser(req.io, targetId, 'call:incoming', _callIncomingPayload);
+    // FIX-DUPLICATE-INCOMING-CALL: do NOT emit call_incoming/call:incoming here.
+    // callService.initiateCall() (called just above, see `const call = ...`)
+    // already sends both 'call:incoming' and 'call_incoming' to targetId with
+    // a fully-resolved payload (caller name/avatar, callee name/avatar, etc).
+    // Re-emitting the same two events here — on top of the further re-emit
+    // that used to also happen via CallSignalingService.initiateCall() below —
+    // meant the callee's client received up to 5 separate "incoming call"
+    // notifications for one real call. That is what caused calls to appear to
+    // ring/duplicate on their own, repeated WebRTC renegotiation, and the
+    // "ignoring stale/duplicate incoming-call event" guards firing rapidly
+    // client-side. callService.initiateCall() is now the single source of
+    // truth for this notification; this route only needs to send the
+    // caller-side confirmation and the initiated_ack below.
 
     // FIX-CALLID-MISMATCH: the actual call flow goes through this REST route,
     // not CallSignalingService's socket.on('call:initiate') listener — so
@@ -420,11 +430,17 @@ router.post('/', apiRateLimiter, callInitiationLimiter, asyncHandler(async (req,
         if (_sigSvc && typeof _sigSvc.initiateCall === 'function') {
             // Only call initiateCall if it hasn't already been triggered via socket
             // (socket path: client emits call:initiate → CallSignalingService handles it)
-            // HTTP path: no socket event yet, so we call directly
+            // HTTP path: no socket event yet, so we call directly.
+            // FIX-DUPLICATE-INCOMING-CALL: skipNotify:true — callService.initiateCall()
+            // above already sent call:incoming/call_incoming to targetId. This call
+            // exists only to set up CallSignalingService's signaling room (needed for
+            // webrtc:signal routing); it must NOT re-notify the callee, or they get a
+            // second/third duplicate "incoming call" event for the same call.
             await _sigSvc.initiateCall(userId, targetId, {
                 callId:    call.id,
                 callType,
                 callerName: _callIncomingPayload.callerName,
+                skipNotify: true,
             }).catch(() => {});
         }
     } catch(_) {}
@@ -511,9 +527,12 @@ router.post('/initiate', apiRateLimiter, callInitiationLimiter, asyncHandler(asy
       timestamp:    Date.now(),
     };
 
-    // Emit BOTH naming conventions — calls-core.js uses call:incoming, legacy uses call_incoming
-    await notifyUser(req.io, targetId, 'call_incoming', _initPayload);
-    await notifyUser(req.io, targetId, 'call:incoming', _initPayload);
+    // FIX-DUPLICATE-INCOMING-CALL: removed the redundant direct notifyUser()
+    // emissions that used to be here. callService.initiateCall() (above) is
+    // the single source of truth and already sends both 'call:incoming' and
+    // 'call_incoming' to targetId — see the matching fix in the POST '/'
+    // handler above for the full explanation of why the duplicate emission
+    // was causing repeated/duplicate incoming-call events client-side.
 
     // FIX-CALLID-MISMATCH: same fix as the '/' route above — this alias route
     // creates real calls too, and without this ack the frontend never
