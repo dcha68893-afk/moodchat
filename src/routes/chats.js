@@ -492,7 +492,7 @@ async function resolveOrCreateDirectChat(userId, otherUser, req) {
                     displayName: req.user?.username || 'User'
                 }
             };
-            await emitToUser(req.io, otherUserId, 'chat:created', otherUserChatData);
+            await emitToUser(req.io, otherUser.id, 'chat:created', otherUserChatData);
         }
 
         return { chat: newChat, isNew: true };
