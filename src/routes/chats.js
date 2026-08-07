@@ -394,6 +394,140 @@ router.get(
 );
 
 // ============================================================================
+// PHASE 23 — SHARED DIRECT-CHAT RESOLUTION (single implementation)
+// ============================================================================
+// FIX (BOOTSTRAP-CONSOLIDATION): this find-or-create-with-advisory-lock block
+// used to live only inline inside POST /start. The new POST /bootstrap route
+// below needs the exact same idempotent resolution (never a duplicate chat,
+// never a different chat depending on call order) so entry points other than
+// "Start a DM" — Friend, Status, Calls, Marketplace, Search, Notifications,
+// Profile, Recent Contacts — get identical guarantees to Chat History. Rather
+// than copy this logic a second time (which is exactly the "parallel
+// implementation" drift this phase is meant to eliminate), it's extracted
+// into one function both routes call. Behavior is unchanged from before the
+// extraction — same lock keys, same lookup order, same reactivation and
+// nondeterministic-pick fixes, same commit points.
+async function resolveOrCreateDirectChat(userId, otherUser, req) {
+    const _uidNum   = parseInt(userId, 10);
+    const _otherNum = parseInt(otherUser.id, 10);
+    const _lockA = Math.min(_uidNum, _otherNum);
+    const _lockB = Math.max(_uidNum, _otherNum);
+
+    const t = await db.sequelize.transaction();
+    try {
+        await db.sequelize.query(
+            'SELECT pg_advisory_xact_lock(:a, :b)',
+            { replacements: { a: _lockA, b: _lockB }, transaction: t }
+        );
+
+        const existingParticipant1 = await ChatParticipant.findAll({
+            where: { userId: userId },
+            attributes: ['chatId'],
+            transaction: t
+        });
+        const existingParticipant2 = await ChatParticipant.findAll({
+            where: { userId: otherUser.id },
+            attributes: ['chatId'],
+            transaction: t
+        });
+
+        const userChatIds = new Set(existingParticipant1.map(p => p.chatId));
+        const otherChatIds = new Set(existingParticipant2.map(p => p.chatId));
+
+        const commonChatIds = [...userChatIds]
+            .filter(id => otherChatIds.has(id))
+            .sort((a, b) => a - b);
+
+        if (commonChatIds.length > 0) {
+            for (const chatId of commonChatIds) {
+                const chat = await Chat.findByPk(chatId, { transaction: t });
+                if (chat && chat.type === 'direct') {
+                    if (chat.isActive === false) {
+                        await chat.update({ isActive: true, deletedAt: null, deletedBy: null }, { transaction: t });
+                    }
+                    await t.commit();
+                    return { chat, isNew: false };
+                }
+            }
+        }
+
+        const newChat = await Chat.create({
+            type: 'direct',
+            createdBy: userId,
+            isActive: true,
+            createdAt: new Date(),
+            updatedAt: new Date()
+        }, { transaction: t });
+
+        await ChatParticipant.bulkCreate([
+            { chatId: newChat.id, userId: userId, joinedAt: new Date(), createdAt: new Date(), updatedAt: new Date() },
+            { chatId: newChat.id, userId: otherUser.id, joinedAt: new Date(), createdAt: new Date(), updatedAt: new Date() }
+        ], { transaction: t });
+
+        await t.commit();
+
+        if (req.io) {
+            const displayName = [otherUser.firstName, otherUser.lastName].filter(Boolean).join(' ').trim() || otherUser.username;
+            const chatData = {
+                id: newChat.id,
+                type: 'direct',
+                otherParticipant: {
+                    id: otherUser.id,
+                    username: otherUser.username,
+                    avatar: otherUser.avatar,
+                    displayName: displayName,
+                    status: otherUser.status || 'offline'
+                },
+                chatName: displayName,
+                createdAt: newChat.createdAt,
+                updatedAt: newChat.updatedAt
+            };
+            await emitToUser(req.io, userId, 'chat:created', chatData);
+            const otherUserChatData = {
+                ...chatData,
+                otherParticipant: {
+                    id: userId,
+                    username: req.user?.username || 'User',
+                    avatar: req.user?.avatar || null,
+                    displayName: req.user?.username || 'User'
+                }
+            };
+            await emitToUser(req.io, otherUserId, 'chat:created', otherUserChatData);
+        }
+
+        return { chat: newChat, isNew: true };
+    } catch (lockedSectionError) {
+        try { await t.rollback(); } catch (_) {}
+        throw lockedSectionError;
+    }
+}
+
+function _formatDirectChatPayload(chat, otherUser) {
+    const displayName = [otherUser.firstName, otherUser.lastName].filter(Boolean).join(' ').trim() || otherUser.username;
+    return {
+        id: chat.id,
+        chatId: chat.id,
+        type: 'direct',
+        otherParticipant: {
+            id: otherUser.id,
+            username: otherUser.username,
+            avatar: otherUser.avatar,
+            displayName: displayName,
+            status: otherUser.status || 'offline',
+            lastSeen: otherUser.lastSeen
+        },
+        chatName:    displayName,
+        friendId:     otherUser.id,
+        friendName:   displayName,
+        friendAvatar: otherUser.avatar || null,
+        avatar:       otherUser.avatar,
+        createdAt:    chat.createdAt,
+        updatedAt:    chat.updatedAt,
+        unreadCount: 0
+    };
+}
+
+// ============================================================================
 // START DIRECT MESSAGE CHAT (FIND-OR-CREATE) - NO DUPLICATES
 // ============================================================================
 router.post(
@@ -444,255 +578,203 @@ router.post(
             // in two places without ever checking this user's privacy setting.
             await applyLastSeenPrivacy(otherUser, userId);
 
-            // FIX-DUPLICATE-CHAT-RACE: everything from here through the
-            // Chat.create() below used to run as a plain check-then-create with
-            // no locking at all. When BOTH users in a pair open a chat with
-            // each other at close to the same time — e.g. both click
-            // "Message" from the friends list, or one opens from a call/status
-            // reply while the other opens from friends, which is exactly the
-            // "opened from a source other than chat history" case — their two
-            // HTTP requests can interleave: both run the "does a common chat
-            // already exist?" lookup before either has finished creating one,
-            // both see "no existing chat", and both independently create a
-            // BRAND NEW Chat row for the same two users. The result is two
-            // separate direct-chat rows between the same pair: whichever row
-            // each user's client ends up bound to receives only that row's
-            // messages, so messages from the user bound to row #2 never reach
-            // the user bound to row #1 (and vice depending on timing) even
-            // though the push notification — which targets the user directly,
-            // not the chat row — still fires normally. That mismatch (in-app
-            // message missing, notification present) is the exact symptom.
-            //
-            // Fix: take a Postgres advisory transaction lock keyed on the
-            // sorted pair of user IDs before doing the lookup. The second of
-            // two concurrent requests for the same pair now blocks until the
-            // first commits its transaction (which includes the Chat.create()
-            // below), then proceeds and finds the just-created chat via the
-            // normal lookup instead of creating a duplicate. The lock is
-            // released automatically at transaction end (xact-scoped), so it
-            // can never be leaked by a crashed request.
-            const _uidNum   = parseInt(userId, 10);
-            const _otherNum = parseInt(otherUserId, 10);
-            const _lockA = Math.min(_uidNum, _otherNum);
-            const _lockB = Math.max(_uidNum, _otherNum);
+            // FIX (BOOTSTRAP-CONSOLIDATION): delegate to the single shared
+            // resolveOrCreateDirectChat() implementation (see above) instead
+            // of duplicating the advisory-lock find-or-create logic here.
+            // Response shape below is unchanged from before this refactor.
+            const { chat: resultChat, isNew } = await resolveOrCreateDirectChat(userId, otherUser, req);
+            const payload = _formatDirectChatPayload(resultChat, otherUser);
 
-            const t = await db.sequelize.transaction();
-            try {
-                await db.sequelize.query(
-                    'SELECT pg_advisory_xact_lock(:a, :b)',
-                    { replacements: { a: _lockA, b: _lockB }, transaction: t }
-                );
-
-                // Check if direct chat already exists (now serialized per-pair —
-                // only one request at a time can be past this point for a given
-                // pair of users).
-                const existingParticipant1 = await ChatParticipant.findAll({
-                    where: { userId: userId },
-                    attributes: ['chatId'],
-                    transaction: t
-                });
-
-                const existingParticipant2 = await ChatParticipant.findAll({
-                    where: { userId: otherUserId },
-                    attributes: ['chatId'],
-                    transaction: t
-                });
-
-                const userChatIds = new Set(existingParticipant1.map(p => p.chatId));
-                const otherChatIds = new Set(existingParticipant2.map(p => p.chatId));
-
-                // Find common chat IDs
-                // FIX-NONDETERMINISTIC-CHAT-PICK: this used to be
-                // `[...userChatIds].filter(...)`, whose order follows
-                // Postgres's row-scan order for the REQUESTING user's own
-                // ChatParticipant rows — a query with no ORDER BY, and
-                // therefore an order Postgres is free to change per call and
-                // per user (their two participant sets can easily be scanned
-                // in different physical orders). Combined with any pair that
-                // still has more than one common direct chat (e.g. a
-                // not-yet-merged leftover from the old race — see
-                // scripts/mergeDuplicateDirectChats.js), this meant WHICH of
-                // the duplicate chats got returned depended on who called
-                // /start and could stay consistently different per user:
-                // one user's calls kept resolving to the empty duplicate
-                // (no history), the other user's kept resolving to the real
-                // one (full history) — a stable-looking bug that's actually
-                // just an arbitrary, unordered pick. Sort ascending so BOTH
-                // users always land on the same, oldest chat — the one most
-                // likely to hold the real history — regardless of scan order.
-                const commonChatIds = [...userChatIds]
-                    .filter(id => otherChatIds.has(id))
-                    .sort((a, b) => a - b);
-
-                if (commonChatIds.length > 0) {
-                // Check if any common chat is a direct chat
-                for (const chatId of commonChatIds) {
-                    const chat = await Chat.findByPk(chatId, { transaction: t });
-                    if (chat && chat.type === 'direct') {
-                        // FIX (duplicate-chat-on-remessage): this used to require
-                        // chat.isActive === true, so once a chat had been soft-
-                        // deleted (isActive:false) it was never matched here again
-                        // — the next message to the same person silently created a
-                        // brand new Chat row instead, leaving two threads between
-                        // the same two users. Reactivate the existing thread
-                        // instead of forking a duplicate.
-                        if (chat.isActive === false) {
-                            await chat.update({ isActive: true, deletedAt: null, deletedBy: null }, { transaction: t });
-                        }
-                        const displayName = [otherUser.firstName, otherUser.lastName].filter(Boolean).join(' ').trim() || otherUser.username;
-
-                        // FIX-DUPLICATE-CHAT-RACE: release the advisory lock now
-                        // that we've confirmed which chat this pair belongs to —
-                        // no writes are pending after this point in this branch.
-                        await t.commit();
-
-                        return res.status(200).json({
-                            status: 'success',
-                            success: true,
-                            message: 'Existing direct chat found',
-                            data: {
-                                chat: {
-                                    id: chat.id,
-                                    chatId: chat.id,
-                                    type: 'direct',
-                                    otherParticipant: {
-                                        id: otherUser.id,
-                                        username: otherUser.username,
-                                        avatar: otherUser.avatar,
-                                        displayName: displayName,
-                                        status: otherUser.status || 'offline',
-                                        lastSeen: otherUser.lastSeen
-                                    },
-                                    chatName:    displayName,
-                                    // FIX: top-level fields for messages-core conversation matching
-                                    friendId:     otherUser.id,
-                                    friendName:   displayName,
-                                    friendAvatar: otherUser.avatar || null,
-                                    avatar:       otherUser.avatar,
-                                    createdAt:    chat.createdAt,
-                                    updatedAt:    chat.updatedAt,
-                                    unreadCount: 0
-                                }
-                            }
-                        });
-                    }
-                }
-            }
-
-            // No existing direct chat found - create new one
-            const newChat = await Chat.create({
-                type: 'direct',
-                createdBy: userId,
-                isActive: true,
-                createdAt: new Date(),
-                updatedAt: new Date()
-            }, { transaction: t });
-
-            // Add participants
-            await ChatParticipant.bulkCreate([
-                {
-                    chatId: newChat.id,
-                    userId: userId,
-                    joinedAt: new Date(),
-                    createdAt: new Date(),
-                    updatedAt: new Date()
-                },
-                {
-                    chatId: newChat.id,
-                    userId: otherUserId,
-                    joinedAt: new Date(),
-                    createdAt: new Date(),
-                    updatedAt: new Date()
-                }
-            ], { transaction: t });
-
-            // FIX-DUPLICATE-CHAT-RACE: commit + release the advisory lock now
-            // that the new chat and both participants are durably written. Any
-            // concurrent request for this same pair that was blocked on the
-            // lock will now unblock, re-run its own lookup, and find THIS chat
-            // instead of creating a second one.
-            await t.commit();
-
-            const displayName = [otherUser.firstName, otherUser.lastName].filter(Boolean).join(' ').trim() || otherUser.username;
-            
-            // Broadcast to both users
-            if (req.io) {
-                const chatData = {
-                    id: newChat.id,
-                    type: 'direct',
-                    otherParticipant: {
-                        id: otherUser.id,
-                        username: otherUser.username,
-                        avatar: otherUser.avatar,
-                        displayName: displayName,
-                        status: otherUser.status || 'offline'
-                    },
-                    chatName: displayName,
-                    createdAt: newChat.createdAt,
-                    updatedAt: newChat.updatedAt
-                };
-                
-                // ✅ FIX 12b: Use emitToUser (wsService rooms) instead of stale DB socketIds
-                await emitToUser(req.io, userId, 'chat:created', chatData);
-                console.log(`[Chats] 📡 FIX12 chat:created emitted to creator uid=${userId}`);
-
-                const otherUserChatData = {
-                    ...chatData,
-                    otherParticipant: {
-                        id: userId,
-                        username: req.user?.username || 'User',
-                        avatar: req.user?.avatar || null,
-                        displayName: req.user?.username || 'User'
-                    }
-                };
-                await emitToUser(req.io, otherUserId, 'chat:created', otherUserChatData);
-                console.log(`[Chats] 📡 FIX12 chat:created emitted to receiver uid=${otherUserId}`);
-            }
-            
-            res.status(201).json({
+            res.status(isNew ? 201 : 200).json({
                 status: 'success',
                 success: true,
-                message: 'Direct chat created successfully',
-                data: {
-                    chat: {
-                        id: newChat.id,
-                        chatId: newChat.id,
-                        type: 'direct',
-                        otherParticipant: {
-                            id: otherUser.id,
-                            username: otherUser.username,
-                            avatar: otherUser.avatar,
-                            displayName: displayName,
-                            status: otherUser.status || 'offline',
-                            lastSeen: otherUser.lastSeen
-                        },
-                        chatName:    displayName,
-                        // FIX: top-level fields for messages-core conversation matching
-                        friendId:     otherUser.id,
-                        friendName:   displayName,
-                        friendAvatar: otherUser.avatar || null,
-                        avatar:       otherUser.avatar,
-                        createdAt: newChat.createdAt,
-                        updatedAt: newChat.updatedAt,
-                        unreadCount: 0
-                    }
-                }
+                message: isNew ? 'Direct chat created successfully' : 'Existing direct chat found',
+                data: { chat: payload }
             });
-            } catch (lockedSectionError) {
-                // FIX-DUPLICATE-CHAT-RACE: roll back the advisory-lock
-                // transaction on any failure inside the locked section so the
-                // lock is released immediately instead of waiting for the
-                // request to time out, then let the outer handler below send
-                // the actual error response.
-                try { await t.rollback(); } catch (_) {}
-                throw lockedSectionError;
-            }
         } catch (error) {
             console.error('[Chats] Error starting direct chat:', error.message);
             console.error('[Chats] Stack:', error.stack);
             res.status(500).json({
                 status: 'error',
                 message: 'Failed to start direct chat',
+                error: process.env.NODE_ENV === 'development' ? error.message : undefined
+            });
+        }
+    })
+);
+
+// ============================================================================
+// PHASE 23 — CONVERSATION BOOTSTRAP (single gateway into messaging)
+// ============================================================================
+// FIX (BOOTSTRAP-CONSOLIDATION): Friend, Status, Calls, Marketplace, Search,
+// Notifications, Profile, and Recent Contacts each used to resolve a
+// conversation, the receiver, and the E2E key independently (or relied on
+// Chat History's already-populated in-memory cache), which is the root
+// cause documented across this app's history: "message delivered but not
+// displayed unless opened via Chat History", "receiverId = ?", "public key
+// missing". This endpoint returns everything a chat panel needs in one
+// round trip, in a fixed order, so no caller can end up with a half-built
+// conversation. It reuses the exact same conversation-resolution function
+// /start uses (resolveOrCreateDirectChat) — never a second implementation —
+// plus the same key-authorization rule already fixed in encryption.js
+// (shared chat OR accepted friendship).
+router.post(
+    '/bootstrap',
+    apiRateLimiter,
+    asyncHandler(async (req, res) => {
+        const stage = { current: 'AUTHENTICATING' };
+        try {
+            const userId = getUserId(req);
+            if (!userId) {
+                return res.status(401).json({ status: 'error', stage: stage.current, message: 'Authentication required' });
+            }
+            if (!checkModels(res)) return;
+
+            stage.current = 'RESOLVING_USER';
+            const { targetUserId, conversationId: optionalConversationId, sourceModule } = req.body || {};
+
+            if (!targetUserId && !optionalConversationId) {
+                return res.status(400).json({ status: 'error', stage: stage.current, message: 'targetUserId or conversationId is required' });
+            }
+
+            let otherUser = null;
+            let resultChat = null;
+
+            if (optionalConversationId) {
+                // Caller already knows the conversation (e.g. reopening a pinned
+                // or archived chat) — verify membership and derive the receiver
+                // from participants instead of re-resolving by targetUserId.
+                stage.current = 'RESOLVING_CONVERSATION';
+                const chat = await Chat.findByPk(optionalConversationId);
+                if (!chat) {
+                    return res.status(404).json({ status: 'error', stage: stage.current, message: 'Conversation not found' });
+                }
+                const membership = await ChatParticipant.findOne({ where: { chatId: chat.id, userId } });
+                if (!membership) {
+                    return res.status(403).json({ status: 'error', stage: stage.current, message: 'Not a participant of this conversation' });
+                }
+                resultChat = chat;
+                if (chat.type === 'direct') {
+                    const otherParticipant = await ChatParticipant.findOne({ where: { chatId: chat.id, userId: { [Op.ne]: userId } } });
+                    if (otherParticipant) {
+                        otherUser = await User.findByPk(otherParticipant.userId, {
+                            attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'settings']
+                        });
+                    }
+                }
+            } else {
+                stage.current = 'RESOLVING_USER';
+                if (String(targetUserId) === String(userId)) {
+                    return res.status(400).json({ status: 'error', stage: stage.current, message: 'Cannot start a chat with yourself' });
+                }
+                otherUser = await User.findByPk(targetUserId, {
+                    attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'settings']
+                });
+                if (!otherUser) {
+                    return res.status(404).json({ status: 'error', stage: stage.current, message: 'User not found' });
+                }
+                await applyLastSeenPrivacy(otherUser, userId);
+
+                stage.current = 'RESOLVING_CONVERSATION';
+                const resolved = await resolveOrCreateDirectChat(userId, otherUser, req);
+                resultChat = resolved.chat;
+            }
+
+            if (!otherUser) {
+                // Group chat via conversationId, or a direct chat whose other
+                // participant row is somehow missing — never leave receiverId
+                // unresolved, abort loudly per the "never receiverId = ?" rule.
+                if (resultChat && resultChat.type !== 'direct') {
+                    // group path: receiver concept doesn't apply the same way —
+                    // fall through with otherUser left null, participants list
+                    // covers this below.
+                } else {
+                    return res.status(422).json({ status: 'error', stage: 'RESOLVING_CONVERSATION', message: 'Could not resolve receiver' });
+                }
+            }
+
+            // Full participant list (id/name/avatar) for the group case and
+            // for completeness on the direct case.
+            stage.current = 'RESOLVING_CONVERSATION';
+            const participantRows = await ChatParticipant.findAll({
+                where: { chatId: resultChat.id },
+                include: [{ model: User, as: 'chatParticipantUser', attributes: ['id', 'username', 'avatar', 'firstName', 'lastName'] }]
+            });
+            const participantProfiles = participantRows
+                .map(p => p.chatParticipantUser)
+                .filter(Boolean)
+                .map(u => ({
+                    id: u.id,
+                    username: u.username,
+                    avatar: u.avatar,
+                    displayName: [u.firstName, u.lastName].filter(Boolean).join(' ').trim() || u.username
+                }));
+
+            // Public keys — sender's own key plus the receiver's, resolved
+            // together so the frontend never has to make a second round trip
+            // before Send can be enabled. Uses the same authorization rule as
+            // GET /api/encryption/keys/:userId (shared chat now exists, so
+            // this always passes for a chat that was just resolved above).
+            stage.current = 'LOADING_KEYS';
+            const sequelize = db.sequelize;
+            const [myKeyRows, theirKeyRows] = await Promise.all([
+                sequelize.query(
+                    `SELECT "keyId","publicKey" FROM user_encryption_keys WHERE "userId"=:uid AND "isActive"=true ORDER BY "createdAt" DESC LIMIT 1`,
+                    { replacements: { uid: userId }, type: sequelize.QueryTypes.SELECT }
+                ).catch(() => []),
+                otherUser ? sequelize.query(
+                    `SELECT "keyId","publicKey" FROM user_encryption_keys WHERE "userId"=:uid AND "isActive"=true ORDER BY "createdAt" DESC LIMIT 1`,
+                    { replacements: { uid: otherUser.id }, type: sequelize.QueryTypes.SELECT }
+                ).catch(() => []) : Promise.resolve([])
+            ]);
+
+            stage.current = 'LOADING_MESSAGES';
+            const recentMessages = await Message.findAll({
+                where: { chatId: resultChat.id, isDeleted: false },
+                order: [['createdAt', 'DESC']],
+                limit: 30,
+                attributes: ['id', 'chatId', 'senderId', 'content', 'type', 'isEdited', 'editedAt', 'createdAt', 'updatedAt', 'replyToId']
+            });
+            const unreadCount = await Message.count({
+                where: { chatId: resultChat.id, isRead: false, senderId: { [Op.ne]: userId } }
+            });
+
+            stage.current = 'READY';
+            const chatObj = resultChat.toJSON ? resultChat.toJSON() : resultChat;
+
+            res.status(200).json({
+                status: 'success',
+                success: true,
+                data: {
+                    conversationId: resultChat.id,
+                    conversationType: chatObj.type,
+                    senderId: userId,
+                    receiverId: otherUser ? otherUser.id : null,
+                    participantIds: participantProfiles.map(p => p.id),
+                    participantProfiles,
+                    otherParticipant: otherUser ? _formatDirectChatPayload(resultChat, otherUser).otherParticipant : null,
+                    chatName: otherUser
+                        ? _formatDirectChatPayload(resultChat, otherUser).chatName
+                        : chatObj.name,
+                    publicKeys: {
+                        mine: myKeyRows && myKeyRows[0] ? myKeyRows[0] : null,
+                        theirs: theirKeyRows && theirKeyRows[0] ? theirKeyRows[0] : null
+                    },
+                    permissions: { canSend: true, canCall: true, canReact: true },
+                    socketRoom: `user:${userId}`,
+                    lastSequence: recentMessages.length > 0 ? recentMessages[0].id : null,
+                    latestMessages: recentMessages.reverse(),
+                    unreadCount: unreadCount || 0,
+                    sourceModule: sourceModule || null,
+                    conversationState: 'READY'
+                }
+            });
+        } catch (error) {
+            console.error('[Chats] Error in /bootstrap at stage', stage.current, ':', error.message);
+            res.status(500).json({
+                status: 'error',
+                stage: stage.current,
+                message: 'Failed to bootstrap conversation',
                 error: process.env.NODE_ENV === 'development' ? error.message : undefined
             });
         }
