@@ -64,6 +64,18 @@ module.exports = (sequelize, DataTypes) => {
         defaultValue: [],
         allowNull: false,
       },
+      // FIX-GROUP-MODULES-500: smartGroupService.ModuleService.getEnabled/
+      // setEnabled (GET/PUT /api/groups/:groupId/modules — the "Group OS"
+      // tabs) read/write Groups.enabledModules, but this column never
+      // existed on the model or in any migration, so every request threw a
+      // Postgres "column Groups.enabledModules does not exist" error,
+      // surfaced to the client as a 500. See the paired migration that adds
+      // the actual database column.
+      enabledModules: {
+        type: DataTypes.ARRAY(DataTypes.STRING),
+        defaultValue: ['tasks', 'events', 'polls', 'notes', 'files'],
+        allowNull: false,
+      },
       location: {
         type: DataTypes.STRING(100),
         allowNull: true,

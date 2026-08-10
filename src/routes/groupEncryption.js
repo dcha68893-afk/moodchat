@@ -47,13 +47,19 @@ const asyncHandler = require('express-async-handler');
 
 function getDb() { return require('../models/index'); }
 
-// Shared membership check: is `userId` a current (isActive) member of `groupId`?
+// Shared membership check: is `userId` a current (active) member of `groupId`?
+// FIX-GROUP-ENCRYPTION-KEYS-500: GroupMembers has no `isActive` column — every
+// query here threw a Postgres "column does not exist" error, which surfaced
+// as a 500 on GET /api/group-encryption/:groupId/keys (and the /distribute,
+// /my-generation, /rotate-notify routes below it). The rest of the codebase
+// (groupService.js, smartGroupService.js, etc.) all use `leftAt: null` as the
+// "currently a member" condition — match that convention here too.
 async function assertActiveMember(groupId, userId) {
     const db = getDb();
     const GroupMembers = db.models?.GroupMembers;
     if (!GroupMembers) throw new Error('GroupMembers model unavailable');
     const membership = await GroupMembers.findOne({
-        where: { groupId, userId, isActive: true },
+        where: { groupId, userId, leftAt: null },
     });
     return !!membership;
 }

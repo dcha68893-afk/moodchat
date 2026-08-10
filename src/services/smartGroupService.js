@@ -685,17 +685,32 @@ async function _runAISummary(groupId, type) {
 // ══════════════════════════════════════════════════════════════════════════
 // MODULES CONFIG
 // ══════════════════════════════════════════════════════════════════════════
+const _DEFAULT_MODULES = ['tasks','events','polls','notes','files'];
+
 const ModuleService = {
   async getEnabled(groupId) {
     const G = _m('Groups') || _m('Group');
-    const g = await G?.findByPk(groupId, { attributes: ['enabledModules'] });
-    return g?.enabledModules || ['tasks','events','polls','notes','files'];
+    try {
+      const g = await G?.findByPk(groupId, { attributes: ['enabledModules'] });
+      return g?.enabledModules || _DEFAULT_MODULES;
+    } catch (e) {
+      // FIX-GROUP-MODULES-500: falls back to the default set instead of a
+      // 500 if the enabledModules column migration hasn't been deployed yet
+      // (see migrations/20260810000001-add-group-enabled-modules.js).
+      _log?.('warn', `[ModuleService] getEnabled(${groupId}) fell back to defaults: ${e.message}`);
+      return _DEFAULT_MODULES;
+    }
   },
 
   async setEnabled(groupId, userId, modules) {
     await _assertRole(groupId, userId, ['admin','owner']);
     const G = _m('Groups') || _m('Group');
-    await G?.update({ enabledModules: modules }, { where: { id: groupId } });
+    try {
+      await G?.update({ enabledModules: modules }, { where: { id: groupId } });
+    } catch (e) {
+      _log?.('warn', `[ModuleService] setEnabled(${groupId}) failed to persist: ${e.message}`);
+      return { success: false, message: 'Could not save module settings — please try again shortly.' };
+    }
     _broadcast(groupId, 'group:modules:updated', { modules });
     return { success: true, modules };
   },
