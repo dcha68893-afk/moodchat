@@ -4,6 +4,12 @@
 /** @type {import('sequelize-cli').Migration} */
 module.exports = {
   async up(queryInterface, Sequelize) {
+    const __tables = await queryInterface.showAllTables();
+    const __exists = __tables.some(t => String(t).toLowerCase() === 'readreceipts');
+    if (__exists) {
+      console.log('[Migration] Skipping duplicate migration — ReadReceipts table already exists (created by the correctly-named 20260118... migration).');
+      return;
+    }
     // Check if table exists
     const tableExists = await queryInterface.tableExists('ReadReceipts');
     
