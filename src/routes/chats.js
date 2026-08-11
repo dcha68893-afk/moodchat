@@ -401,53 +401,105 @@ router.get(
 // below needs the exact same idempotent resolution (never a duplicate chat,
 // never a different chat depending on call order) so entry points other than
 // "Start a DM" — Friend, Status, Calls, Marketplace, Search, Notifications,
-// Profile, Recent Contacts — get identical guarantees to Chat History.
-//
-// FIX (CONSOLIDATE-DIRECT-CHAT-RESOLUTION): the actual lock-and-resolve logic
-// used to be duplicated a SECOND time in messageDeliveryService.js (used by
-// the direct-send path). Both copies were correct, but two hand-maintained
-// copies of the same critical section is exactly the drift that caused real
-// bugs here before. Both now delegate to the single shared implementation in
-// directChatResolver.js. This wrapper keeps chats.js's existing signature and
-// return shape ({chat, isNew}) so /start and /bootstrap below need no changes,
-// and keeps the chat:created socket emission here — that's caller-specific
-// (needs the requesting user's own display info for the other side's
-// payload), not something the shared resolver should own.
-// ============================================================================
+// Profile, Recent Contacts — get identical guarantees to Chat History. Rather
+// than copy this logic a second time (which is exactly the "parallel
+// implementation" drift this phase is meant to eliminate), it's extracted
+// into one function both routes call. Behavior is unchanged from before the
+// extraction — same lock keys, same lookup order, same reactivation and
+// nondeterministic-pick fixes, same commit points.
 async function resolveOrCreateDirectChat(userId, otherUser, req) {
-    const { resolveOrCreateDirectChat: _sharedResolve } = require('../services/directChatResolver');
-    const result = await _sharedResolve({ userId, otherUserId: otherUser.id, otherUser });
+    const _uidNum   = parseInt(userId, 10);
+    const _otherNum = parseInt(otherUser.id, 10);
+    const _lockA = Math.min(_uidNum, _otherNum);
+    const _lockB = Math.max(_uidNum, _otherNum);
 
-    if (result.isNew && req.io) {
-        const displayName = [otherUser.firstName, otherUser.lastName].filter(Boolean).join(' ').trim() || otherUser.username;
-        const chatData = {
-            id: result.chat.id,
-            type: 'direct',
-            otherParticipant: {
-                id: otherUser.id,
-                username: otherUser.username,
-                avatar: otherUser.avatar,
-                displayName: displayName,
-                status: otherUser.status || 'offline'
-            },
-            chatName: displayName,
-            createdAt: result.chat.createdAt,
-            updatedAt: result.chat.updatedAt
-        };
-        await emitToUser(req.io, userId, 'chat:created', chatData);
-        const otherUserChatData = {
-            ...chatData,
-            otherParticipant: {
-                id: userId,
-                username: req.user?.username || 'User',
-                avatar: req.user?.avatar || null,
-                displayName: req.user?.username || 'User'
+    const t = await db.sequelize.transaction();
+    try {
+        await db.sequelize.query(
+            'SELECT pg_advisory_xact_lock(:a, :b)',
+            { replacements: { a: _lockA, b: _lockB }, transaction: t }
+        );
+
+        const existingParticipant1 = await ChatParticipant.findAll({
+            where: { userId: userId },
+            attributes: ['chatId'],
+            transaction: t
+        });
+        const existingParticipant2 = await ChatParticipant.findAll({
+            where: { userId: otherUser.id },
+            attributes: ['chatId'],
+            transaction: t
+        });
+
+        const userChatIds = new Set(existingParticipant1.map(p => p.chatId));
+        const otherChatIds = new Set(existingParticipant2.map(p => p.chatId));
+
+        const commonChatIds = [...userChatIds]
+            .filter(id => otherChatIds.has(id))
+            .sort((a, b) => a - b);
+
+        if (commonChatIds.length > 0) {
+            for (const chatId of commonChatIds) {
+                const chat = await Chat.findByPk(chatId, { transaction: t });
+                if (chat && chat.type === 'direct') {
+                    if (chat.isActive === false) {
+                        await chat.update({ isActive: true, deletedAt: null, deletedBy: null }, { transaction: t });
+                    }
+                    await t.commit();
+                    return { chat, isNew: false };
+                }
             }
-        };
-        await emitToUser(req.io, otherUser.id, 'chat:created', otherUserChatData);
-    }
+        }
 
-    return { chat: result.chat, isNew: result.isNew };
+        const newChat = await Chat.create({
+            type: 'direct',
+            createdBy: userId,
+            isActive: true,
+            createdAt: new Date(),
+            updatedAt: new Date()
+        }, { transaction: t });
+
+        await ChatParticipant.bulkCreate([
+            { chatId: newChat.id, userId: userId, joinedAt: new Date(), createdAt: new Date(), updatedAt: new Date() },
+            { chatId: newChat.id, userId: otherUser.id, joinedAt: new Date(), createdAt: new Date(), updatedAt: new Date() }
+        ], { transaction: t });
+
+        await t.commit();
+
+        if (req.io) {
+            const displayName = [otherUser.firstName, otherUser.lastName].filter(Boolean).join(' ').trim() || otherUser.username;
+            const chatData = {
+                id: newChat.id,
+                type: 'direct',
+                otherParticipant: {
+                    id: otherUser.id,
+                    username: otherUser.username,
+                    avatar: otherUser.avatar,
+                    displayName: displayName,
+                    status: otherUser.status || 'offline'
+                },
+                chatName: displayName,
+                createdAt: newChat.createdAt,
+                updatedAt: newChat.updatedAt
+            };
+            await emitToUser(req.io, userId, 'chat:created', chatData);
+            const otherUserChatData = {
+                ...chatData,
+                otherParticipant: {
+                    id: userId,
+                    username: req.user?.username || 'User',
+                    avatar: req.user?.avatar || null,
+                    displayName: req.user?.username || 'User'
+                }
+            };
+            await emitToUser(req.io, otherUser.id, 'chat:created', otherUserChatData);
+        }
+
+        return { chat: newChat, isNew: true };
+    } catch (lockedSectionError) {
+        try { await t.rollback(); } catch (_) {}
+        throw lockedSectionError;
+    }
 }
 
 function _formatDirectChatPayload(chat, otherUser) {
