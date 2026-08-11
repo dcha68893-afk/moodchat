@@ -473,7 +473,11 @@ class GroupController {
     // ── UPDATE MEMBER ROLE ─────────────────────────────────────────────────
     async updateMemberRole(req, res, next) {
         try {
-            const { groupId, memberId } = req.params;
+            // FIX: route is defined as '/:groupId/members/:userId/role', so the
+            // member being updated arrives as req.params.userId — not
+            // req.params.memberId (which was always undefined and made every
+            // request fail with "Group ID and Member ID are required").
+            const { groupId, userId: memberId } = req.params;
             const userId = getUserId(req);
             const { role } = req.body;
             if (!groupId || !memberId) throw new AppError('Group ID and Member ID are required', 400);

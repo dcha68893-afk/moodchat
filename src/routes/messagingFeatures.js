@@ -626,6 +626,25 @@ router.put('/chats/:chatId/mute', asyncHandler(async (req, res) => {
   res.json({ status: 'success', message: muted ? `Chat muted${mutedUntil ? ` until ${mutedUntil.toISOString()}` : ' indefinitely'}` : 'Chat unmuted' });
 }));
 
+// FIX: frontend's toggleMute() sends DELETE to unmute (PUT to mute), but only
+// the PUT route existed, so unmuting always 404'd. Add the DELETE alias —
+// same effect as PUT with muted=false.
+router.delete('/chats/:chatId/mute', asyncHandler(async (req, res) => {
+  const userId = req.user.id;
+  const chatId = safeInt(req.params.chatId);
+  if (!chatId) return res.status(400).json({ status: 'error', message: 'Invalid chat ID' });
+
+  const sequelize = getSequelize();
+  await sequelize.query(
+    `UPDATE chat_participants
+     SET "isMuted"=false, "mutedUntil"=NULL, "updatedAt"=NOW()
+     WHERE "chatId"=:chatId AND "userId"=:userId`,
+    { replacements: { chatId, userId } }
+  );
+
+  res.json({ status: 'success', message: 'Chat unmuted' });
+}));
+
 // ────────────────────────────────────────────────────────────────────────────
 // FULL-TEXT SEARCH  (uses GIN tsvector index added in migration)
 // GET /api/messaging/chats/:chatId/search?q=...

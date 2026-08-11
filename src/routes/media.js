@@ -43,17 +43,48 @@ const storage = multer.diskStorage({
   }
 });
 
-// File filter based on config
+// FIX-GROUP-FILE-TYPES-REJECTED: the allow-list only ever covered a
+// handful of image/video/audio mimetypes plus PDF/plain-text — there was
+// effectively no support for real document formats (docx/xlsx/pptx/doc/
+// xls/ppt/csv/zip/rtf), common phone-native formats (HEIC/HEIF photos,
+// .mov videos), or several common audio codecs (AAC/FLAC/M4A). Any of
+// these being sent as a group attachment ("documents, voice, music, video
+// and others") was rejected with a 400 before ever reaching the message
+// send step.
+const DOCUMENT_FILE_TYPES = [
+  'application/pdf', 'text/plain', 'text/csv', 'application/rtf',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document', // .docx
+  'application/vnd.ms-excel',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',       // .xlsx
+  'application/vnd.ms-powerpoint',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation', // .pptx
+  'application/zip', 'application/x-zip-compressed', 'application/json',
+];
+const IMAGE_FILE_TYPES = [
+  'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp',
+  'image/svg+xml', 'image/heic', 'image/heif', // HEIC/HEIF = default iPhone photo format
+];
+const VIDEO_FILE_TYPES = [
+  'video/mp4', 'video/mpeg', 'video/webm',
+  'video/quicktime',   // .mov — default iPhone video format
+  'video/x-msvideo',   // .avi
+  'video/x-matroska',  // .mkv
+  'video/3gpp',
+];
+const AUDIO_FILE_TYPES = [
+  'audio/mpeg', 'audio/wav', 'audio/x-wav', 'audio/mp4', 'audio/ogg',
+  'audio/webm', 'audio/aac', 'audio/flac', 'audio/x-m4a', 'audio/3gpp',
+];
 // FIX-VOICE-UPLOAD-BLOCKED: UPLOAD_ALLOWED_TYPES (env var or the default below)
 // was being used as the *entire* allow-list, so if it's set to an images-only
 // value (as it is in production), voice notes recorded via MediaRecorder
 // (audio/webm, sometimes audio/ogg) — a core app feature, not an optional one —
 // get rejected outright with "File type audio/webm is not allowed". These are
 // unioned in regardless of what the config specifies.
-const CORE_FEATURE_FILE_TYPES = [
-  'audio/webm', 'audio/ogg', 'audio/mp4', 'audio/mpeg', 'audio/wav', 'audio/x-wav',
-  'video/mp4', 'video/webm'
-];
+const CORE_FEATURE_FILE_TYPES = Array.from(new Set([
+  ...DOCUMENT_FILE_TYPES, ...IMAGE_FILE_TYPES, ...VIDEO_FILE_TYPES, ...AUDIO_FILE_TYPES,
+]));
 const ALLOWED_FILE_TYPES = Array.from(new Set([
   ...(config.uploadAllowedTypes?.split(',') || [
     'image/jpeg',
@@ -114,7 +145,7 @@ router.post(
         fileType = 'video';
       } else if (req.file.mimetype.startsWith('audio/')) {
         fileType = 'audio';
-      } else if (req.file.mimetype === 'application/pdf') {
+      } else if (DOCUMENT_FILE_TYPES.includes(req.file.mimetype)) {
         fileType = 'document';
       }
 

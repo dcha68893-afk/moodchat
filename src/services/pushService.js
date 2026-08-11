@@ -171,7 +171,11 @@ async function pushGroupMessage(groupId, message, groupName = 'Group') {
       include: [{
         model: User,
         as:    'groupMemberUser',
-        attributes: ['id', 'fcmToken', 'pushToken', 'settings'],
+        // FIX: 'pushToken' isn't a real column on Users (only fcmToken is) —
+        // requesting it here made Postgres reject the whole query with
+        // "column groupMemberUser.pushToken does not exist", silently
+        // killing all group push notifications.
+        attributes: ['id', 'fcmToken', 'settings'],
         required: false,
       }],
     });
@@ -186,7 +190,7 @@ async function pushGroupMessage(groupId, message, groupName = 'Group') {
     const tokens = [];
     members.forEach(m => {
       const u = m.groupMemberUser;
-      const token = u?.fcmToken || u?.pushToken;
+      const token = u?.fcmToken;
       if (!token) return;
       const notif = u?.settings?.notifications || {};
       if (notif.enableNotifications === false) return;
@@ -225,7 +229,7 @@ async function pushGroupMessage(groupId, message, groupName = 'Group') {
       const invalidSet = new Set(result.invalidTokens);
       const invalidUserIds = tokens.filter(t => invalidSet.has(t.token)).map(t => t.memberId);
       if (invalidUserIds.length) {
-        await User.update({ fcmToken: null, pushToken: null }, { where: { id: invalidUserIds } });
+        await User.update({ fcmToken: null }, { where: { id: invalidUserIds } });
       }
     }
 

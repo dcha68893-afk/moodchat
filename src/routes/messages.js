@@ -676,7 +676,7 @@ router.get('/', apiRateLimiter, asyncHandler(async (req, res) => {
 // ============================================================================
 router.post('/', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
   try {
-    const { receiverId, content, type = 'text', chatId: existingChatId, replyToId, localId: clientLocalId, linkPreview, metadata: clientMetadata, traceId: clientTraceId } = req.body;
+    const { receiverId, content, type = 'text', chatId: existingChatId, replyToId, replyToLocalId, localId: clientLocalId, linkPreview, metadata: clientMetadata, traceId: clientTraceId } = req.body;
     const senderId = req.user.id;
 
     // PHASE24 FORENSIC: use the client-generated traceId when present so this
@@ -755,6 +755,47 @@ router.post('/', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
 
     // ── FORENSIC LOG: BACKEND_RECEIVED ───────────────────────────────────────
     _flog(`[FORENSIC][${_traceId}] BACKEND_RECEIVED | senderId=${senderId} | chatId=${chatId} | localId=${clientLocalId||'?'} | ts=${Date.now()}`);
+
+    // ── REPLY-TO RECONCILIATION (temp/local ID → real ID) ──────────────────
+    // FIX (reply-first-time-fails): when a user replies to a message that
+    // hasn't been confirmed by the server yet — e.g. replying to their own
+    // just-sent message within the same second, or the very first exchange
+    // in a brand-new chat — the client only has a locally-generated ID
+    // (format 'msg_<timestamp>_...', non-numeric) for that message.
+    // safeInt() on that string always returns null (parseInt can't parse
+    // it), so the reply link was silently dropped — the message itself
+    // still sent, but arrived on both sides with no reply-to context at
+    // all, which is what looked like "reply doesn't go through". Resolve
+    // replyToLocalId against the same metadata->>'localId' index the
+    // idempotency check below already uses, now that chatId is finalized
+    // (it wasn't yet at the point of the original safeReplyToId numeric
+    // check above, for a brand-new conversation created via receiverId).
+    let finalReplyToId = safeReplyToId;
+    if (!finalReplyToId && replyToLocalId) {
+      try {
+        const resolved = await sequelize.query(
+          `SELECT id FROM "Messages"
+           WHERE "chatId" = :chatId AND metadata->>'localId' = :replyToLocalId
+             AND "isDeleted" = false
+           ORDER BY "createdAt" DESC LIMIT 1`,
+          { replacements: { chatId, replyToLocalId: String(replyToLocalId) }, type: sequelize.QueryTypes.SELECT }
+        );
+        if (resolved && resolved.length > 0) {
+          finalReplyToId = resolved[0].id;
+          _flog(`[FORENSIC][${_traceId}] REPLY_RECONCILED | replyToLocalId=${replyToLocalId} -> replyToId=${finalReplyToId} | ts=${Date.now()}`);
+        } else {
+          // Genuine race — the parent message's own INSERT hasn't committed
+          // yet (reply composed within the same instant). Don't fail this
+          // send over it: it still goes through as a normal message, just
+          // without a durable reply-to link in the DB. The sender's own
+          // bubble still shows the reply preview locally either way (see
+          // sendMessageToBackend in messages-core.operations.js, which
+          // keeps the full replyTo snapshot client-side regardless of
+          // server-side resolution).
+          _flog(`[FORENSIC][${_traceId}] REPLY_UNRESOLVED | replyToLocalId=${replyToLocalId} | parent not in DB yet, sending without link | ts=${Date.now()}`);
+        }
+      } catch (_reconcileErr) { /* non-fatal — send proceeds without the reply link */ }
+    }
 
     // ── IDEMPOTENCY: If a localId was provided, check if this message was already saved.
     // FIX-AUDIT: Old check used content-match which incorrectly dedupes two DIFFERENT
@@ -842,7 +883,7 @@ router.post('/', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
          VALUES (:chatId,:senderId,:content,:type,'{}',:replyToId,:metadata,:expiresAt,false,false,false,NOW(),NULL,NOW(),NOW())
          RETURNING id,"chatId","senderId",content,type,"replyToId","createdAt"`,
         {
-          replacements: { chatId, senderId, content: safeContent, type: messageType, replyToId: safeReplyToId, metadata: JSON.stringify(msgMetadata), expiresAt: _msgExpiresAt },
+          replacements: { chatId, senderId, content: safeContent, type: messageType, replyToId: finalReplyToId, metadata: JSON.stringify(msgMetadata), expiresAt: _msgExpiresAt },
           type: sequelize.QueryTypes.INSERT,
           transaction: t,
         }
@@ -894,14 +935,14 @@ router.post('/', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
 
     // ✅ FIX: Fetch replyTo content so receiver gets preview immediately
     let replyToData = null;
-    if (safeReplyToId) {
+    if (finalReplyToId) {
       try {
         const replyRows = await sequelize.query(
           `SELECT m.id, m.content, m.type, m."senderId", u.username as "senderName"
            FROM "Messages" m
            LEFT JOIN "Users" u ON u.id = m."senderId"
            WHERE m.id = :replyToId AND m."isDeleted" = false LIMIT 1`,
-          { replacements: { replyToId: safeReplyToId }, type: sequelize.QueryTypes.SELECT }
+          { replacements: { replyToId: finalReplyToId }, type: sequelize.QueryTypes.SELECT }
         );
         if (replyRows && replyRows.length > 0) replyToData = replyRows[0];
       } catch(_) {}
@@ -916,7 +957,7 @@ router.post('/', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
       content:     safeContent,
       type:        messageType,
       reactions:   {},
-      replyToId:   safeReplyToId || null,
+      replyToId:   finalReplyToId || null,
       replyTo:     replyToData || null,
       metadata:    msgMetadata || {},
       status:      'sent',

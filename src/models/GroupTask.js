@@ -11,6 +11,12 @@ module.exports = (sequelize, DataTypes) => {
     dueDate:     { type: DataTypes.DATE },
     parentTaskId:{ type: DataTypes.INTEGER },
     attachments: { type: DataTypes.JSONB, defaultValue: [] },
+    // FIX-GROUP-TASKS-METADATA: TaskService.addComment/getComments (comments
+    // thread for a task) reads/writes this column, but it was never declared
+    // here or added by any migration, causing every comments request to fail
+    // with "column \"metadata\" does not exist". See the paired migration
+    // 2026999990016_fix_group_module_missing_columns.js that adds the column.
+    metadata:    { type: DataTypes.JSONB, defaultValue: {} },
     isRecurring: { type: DataTypes.BOOLEAN, defaultValue: false },
     recurringRule:{ type: DataTypes.STRING(100) },
     deletedAt:   { type: DataTypes.DATE },
