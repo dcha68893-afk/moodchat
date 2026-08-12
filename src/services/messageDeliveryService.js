@@ -90,8 +90,17 @@ class MessageDeliveryService {
    * pass `receiverId` instead when this is a brand-new/pending conversation
    * (opened from Friends/Calls/Status before any chatId exists) and this
    * method resolves/creates the real chat first, same as the REST path.
+   *
+   * CONSOLIDATE-MESSAGE-PROTOCOL (point 1 of the messaging-architecture
+   * cleanup): `metadata` and `expiresAt` were added so this is the ONE
+   * INSERT path for every caller, including the feature-rich REST
+   * `POST /messages` route (link previews, disappearing-message timers,
+   * arbitrary client metadata) — that route used to run its own,
+   * independent INSERT with a slightly different column set instead of
+   * calling this. Optional and additive: existing callers that don't pass
+   * these fields behave exactly as before.
    */
-  async sendMessage({ chatId, receiverId = null, senderId, content, type = 'text', clientMessageId, replyToId = null }) {
+  async sendMessage({ chatId, receiverId = null, senderId, content, type = 'text', clientMessageId, replyToId = null, metadata = null, expiresAt = null }) {
     const sequelize = getSequelize();
 
     // FIX-STALE-CHAT-ID (identity-resolution consolidation): previously,
@@ -160,25 +169,50 @@ class MessageDeliveryService {
     ).catch(() => [null]);
     if (!participant) throw new ValidationError('Sender is not a participant in this chat');
 
-    const [rows] = await sequelize.query(
-      `INSERT INTO "Messages"
-         ("chatId","senderId",content,type,reactions,metadata,"isEdited","isDeleted","replyToId",
-          "clientMessageId","status","deliveryAttempts","sentAt","deliveredAt","createdAt","updatedAt")
-       VALUES (:chatId,:senderId,:content,:type,'{}',:metadata,false,false,:replyToId,
-               :clientMessageId,'sent',0,NOW(),NULL,NOW(),NOW())
-       RETURNING *`,
-      {
-        replacements: {
-          chatId: chatIdInt, senderId: senderIdInt, content: sanitizedContent, type,
-          // FIX-DUAL-IDEMPOTENCY-SYSTEMS: also store the id under metadata.localId
-          // (the shape routes/messages.js's idempotency check and, historically,
-          // some frontend read paths expect), not just in the clientMessageId
-          // column, so a message created here is recognizable by either system.
-          replyToId: replyToId || null, clientMessageId, metadata: JSON.stringify({ localId: clientMessageId }),
-        },
-        type: sequelize.QueryTypes.INSERT,
+    // FIX-DUAL-IDEMPOTENCY-SYSTEMS: also store the id under metadata.localId
+    // (the shape the REST idempotency check and some frontend read paths
+    // expect), not just in the clientMessageId column, so a message created
+    // here is recognizable by either system. Callers (e.g. POST /messages)
+    // can pass their own richer metadata (linkPreview, poll data, etc.) —
+    // localId is merged in without clobbering it.
+    const mergedMetadata = { ...(metadata && typeof metadata === 'object' ? metadata : {}), localId: clientMessageId };
+
+    let rows;
+    try {
+      [rows] = await sequelize.query(
+        `INSERT INTO "Messages"
+           ("chatId","senderId",content,type,reactions,metadata,"isEdited","isDeleted","replyToId",
+            "clientMessageId","expiresAt","status","deliveryAttempts","sentAt","deliveredAt","createdAt","updatedAt")
+         VALUES (:chatId,:senderId,:content,:type,'{}',:metadata,false,false,:replyToId,
+                 :clientMessageId,:expiresAt,'sent',0,NOW(),NULL,NOW(),NOW())
+         RETURNING *`,
+        {
+          replacements: {
+            chatId: chatIdInt, senderId: senderIdInt, content: sanitizedContent, type,
+            replyToId: replyToId || null, clientMessageId, metadata: JSON.stringify(mergedMetadata),
+            expiresAt: expiresAt || null,
+          },
+          type: sequelize.QueryTypes.INSERT,
+        }
+      );
+    } catch (insertErr) {
+      // FIX-DUAL-IDEMPOTENCY-SYSTEMS: the pre-check above is a plain SELECT
+      // with no atomic guarantee — two near-simultaneous identical retries
+      // (e.g. one over REST, one over the msg:* socket, for the same
+      // logical send) could both pass it before either INSERT commits. The
+      // real unique index on (senderId, clientMessageId) is the atomic
+      // backstop; treat that specific failure as "already sent" instead of
+      // surfacing a 500 for what is actually a successful duplicate send.
+      const isUniqueViolation = insertErr && (insertErr.name === 'SequelizeUniqueConstraintError' || /duplicate key value/i.test(insertErr.message || ''));
+      if (isUniqueViolation) {
+        const [dup] = await sequelize.query(
+          `SELECT * FROM "Messages" WHERE "senderId" = :senderId AND "clientMessageId" = :clientMessageId LIMIT 1`,
+          { replacements: { senderId: senderIdInt, clientMessageId }, type: sequelize.QueryTypes.SELECT }
+        ).catch(() => [null]);
+        if (dup) return { message: dup, alreadyExisted: true };
       }
-    );
+      throw insertErr;
+    }
 
     if (!rows || !rows[0] || !rows[0].id) {
       throw new ServerError('Failed to create message - database returned invalid data');

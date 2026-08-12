@@ -80,7 +80,22 @@ function register(wsService, socket, userId) {
       // send that already delivered the first time.
       if (alreadyExisted) return;
 
-      await pushToRecipients(wsService, message, userId);
+      // ADAPTER-WRAP (point 1): msg:send is the canonical send path, but the
+      // frontend still has several listeners bound to the legacy 'message:new'
+      // event (app.realtime.socket.js, mesh-messages-bridge.js, etc. — see
+      // MESSAGE_LIFECYCLE_REBUILD.md's own note that this rewiring was left
+      // as a follow-up and never done, meaning messages sent through this
+      // exact handler previously never reached those listeners at all).
+      // Re-emit the identical payload pushToRecipients() already built and
+      // sent as 'msg:new' — no second query, no second payload shape.
+      const result = await pushToRecipients(wsService, message, userId);
+      if (result && result.recipients) {
+        for (const recipientId of result.recipients) {
+          wsService.sendToUser(recipientId, 'message:new', {
+            ...result.payload, id: message.id,
+          }).catch(() => {});
+        }
+      }
     } catch (err) {
       socket.emit('msg:send:error', { clientMessageId, error: err.message });
       if (typeof cb === 'function') cb({ ok: false, error: err.message });
@@ -166,11 +181,10 @@ async function pushToRecipients(wsService, message, senderId) {
     { replacements: { chatId: chatIdInt, senderId: senderIdInt }, type: sequelize.QueryTypes.SELECT }
   ).catch(() => []);
 
-  if (!participants || participants.length === 0) return;
-
   const payload = {
     serverId: message.id,
     chatId: message.chatId,
+    conversationId: message.chatId,
     senderId: message.senderId,
     content: message.content,
     type: message.type,
@@ -181,9 +195,19 @@ async function pushToRecipients(wsService, message, senderId) {
     status: 'sent',
   };
 
-  for (const { userId: recipientId } of participants) {
+  if (!participants || participants.length === 0) return { recipients: [], payload };
+
+  const recipients = participants.map(p => p.userId);
+  for (const recipientId of recipients) {
     await wsService.sendToUser(recipientId, 'msg:new', payload).catch(() => {});
   }
+
+  // CONSOLIDATE-MESSAGE-PROTOCOL: return the exact recipient list + payload
+  // used for the canonical 'msg:new' emit so any legacy-event adapter (see
+  // webSocketService.js's 'message:send' handler) re-emits the SAME data
+  // under 'message:new' instead of re-querying participants and re-building
+  // its own payload — one lookup, one payload, two event names.
+  return { recipients, payload };
 }
 
 async function getSenderIdForMessage(messageId) {

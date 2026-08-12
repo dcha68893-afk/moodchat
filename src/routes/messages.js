@@ -1097,62 +1097,47 @@ router.post('/', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
         const _htrAvail = !!global.__HybridTransportRuntime;
         _flog(`[FORENSIC][${_traceId}] TRANSPORT_SELECTED | messageId=${messageId} | transport=${_htrAvail?'HTR+SocketIO':'SocketIO'} | recipients=${recipientIds.join(',')} | ts=${Date.now()}`);
 
-        // Emit message:new to RECIPIENTS ONLY (not sender) — sender already has optimistic message
-        // FIX: Sending message:new to the sender caused double-render and dedup collisions.
-        // sendToUser() already emits to all room name variants (user:X, user_X, user:Xstr, user_Xstr)
-        // FIX-010: Single canonical 'message:new' event per recipient
-        const deliveryResults = await Promise.allSettled(
-          recipientIds.map(uid => wsService.sendToUser(uid, 'message:new', populatedMessage))
-        );
+        // CONSOLIDATE-MESSAGE-PROTOCOL (point 1): 'message:new' and 'msg:new'
+        // used to be built from two SEPARATELY CONSTRUCTED payload objects
+        // (populatedMessage vs. a hand-picked field subset) — the exact kind
+        // of drift that lets the two protocols silently diverge (a field
+        // present on one, missing/renamed on the other) and was flagged here
+        // as a live, unresolved risk ("DUAL_EMIT_WARNING"). There is now ONE
+        // canonical payload, built once, reused for both emits. 'msg:new' is
+        // canonical (this is what MessageLifecycleClient.js's race-free
+        // listener consumes); 'message:new' is kept ONLY as a thin adapter
+        // for the frontend's still-active legacy listeners (app.realtime.
+        // socket.js, mesh-messages-bridge.js, etc. — see MESSAGE_LIFECYCLE_
+        // REBUILD.md) and carries the identical data, not a re-derived copy.
+        const canonicalPayload = {
+          serverId:   populatedMessage.id,
+          id:         populatedMessage.id,
+          traceId:    populatedMessage.traceId,
+          chatId:     populatedMessage.chatId,
+          conversationId: populatedMessage.chatId,
+          senderId:   populatedMessage.senderId,
+          content:    populatedMessage.content,
+          type:       populatedMessage.type,
+          sender:     populatedMessage.sender,
+          replyToId:  populatedMessage.replyToId,
+          replyTo:    populatedMessage.replyTo,
+          metadata:   populatedMessage.metadata,
+          status:     'sent',
+          createdAt:  populatedMessage.createdAt,
+          sentAt:     populatedMessage.sentAt,
+          deliveredAt: null,
+        };
 
-        // FIX-LIFECYCLE-DEADCODE: MessageLifecycleClient.js (frontend) already has a
-        // direct, race-free socket listener on 'msg:new' that bypasses the old
-        // 'message:new' relay/claim system entirely — that's the whole point of the
-        // msg:* lifecycle rebuild (see messageLifecycleSocket.js's header and
-        // MESSAGE_LIFECYCLE_REBUILD.md). That listener only ever fires for messages
-        // sent via the newer socket-based msg:send handler, and the Send-button flow
-        // was never rewired to use it (left as a deliberate follow-up in the rebuild
-        // doc) — sends still land here, on the REST route, which only ever emitted
-        // the old 'message:new'. Net effect: every message actually sent by the app
-        // goes straight through the exact relay/claim race the rebuild exists to
-        // route around, and the new listener has been silently dead code since it
-        // shipped — this is very likely why delivery still looks intermittent/
-        // asymmetric between users. Emitting 'msg:new' here too (same payload shape
-        // messageLifecycleSocket.js's pushToRecipients() sends) activates that
-        // already-built, already-tested resilient path as a real parallel safety
-        // net, with zero changes to the send/compose side (E2E, attachments, etc.
-        // untouched). MessageLifecycleClient dedupes by serverId, so this can never
-        // cause a duplicate row or a duplicate render on its own.
+        // sendToUser() already emits to all room-name variants for the uid.
+        const deliveryResults = await Promise.allSettled(
+          recipientIds.map(uid => wsService.sendToUser(uid, 'msg:new', canonicalPayload))
+        );
         recipientIds.forEach(uid => {
-          wsService.sendToUser(uid, 'msg:new', {
-            serverId: populatedMessage.id,
-            traceId: populatedMessage.traceId,
-            chatId: populatedMessage.chatId,
-            senderId: populatedMessage.senderId,
-            content: populatedMessage.content,
-            type: populatedMessage.type,
-            sender: populatedMessage.sender,
-            replyToId: populatedMessage.replyToId,
-            createdAt: populatedMessage.createdAt,
-            sentAt: populatedMessage.sentAt,
-          }).catch(() => {});
+          wsService.sendToUser(uid, 'message:new', canonicalPayload).catch(() => {});
         });
 
-        // ── PHASE24 FORENSIC: DUAL_EMIT_WARNING ─────────────────────────────
-        // This route fires BOTH 'message:new' and 'msg:new' for the exact
-        // same message, to every recipient, in the same tick — two
-        // independent client-side listeners (the legacy relay/claim path
-        // and MessageLifecycleClient.js's newer race-free path) can each
-        // act on the same message. If receiver-side logs for this traceId
-        // show both a 'message:new' and a 'msg:new' RECEIVE stage, and the
-        // receiver's dedup-by-serverId is not filtering one of them out
-        // before render, that is the concrete root cause of duplicate or
-        // dropped renders on the receiving side. Left in place as a
-        // documented, correlatable fact rather than removed blind — the
-        // rebuild doc explicitly wants msg:new active as a safety net, so
-        // this log exists to prove whether it is actually safe.
         if (recipientIds.length > 0) {
-          _flog(`[FORENSIC][${_traceId}] DUAL_EMIT | messageId=${messageId} | events=message:new,msg:new | recipients=${recipientIds.join(',')} | ts=${Date.now()}`);
+          _flog(`[FORENSIC][${_traceId}] BROADCAST_PAYLOAD_UNIFIED | messageId=${messageId} | events=msg:new(canonical),message:new(adapter) | recipients=${recipientIds.join(',')} | ts=${Date.now()}`);
         }
 
         // ── FORENSIC LOG: BROADCASTED ─────────────────────────────────────────

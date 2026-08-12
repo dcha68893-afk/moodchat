@@ -803,26 +803,25 @@ class WebSocketService {
 
                     socket.emit('message:send:ack', { localId: msLocalId, messageId: message.id, chatId: message.chatId, sentAt: message.sentAt || message.createdAt });
 
-                    // Push to recipients through the one canonical mechanism
-                    // (sendToUser + offline-queue fallback), reusing the exact same
-                    // helper the msg:* pipeline uses — see messageLifecycleSocket.js.
-                    // Emits both 'msg:new' (canonical) and legacy 'message:new'
-                    // (below) so clients still on the old event name keep working
-                    // during the transition.
+                    // ADAPTER-WRAP (point 1): this handler used to run its own
+                    // second participant lookup + broadcast loop for legacy
+                    // 'message:new', built from a separately hand-picked field
+                    // subset — the same payload-drift risk fixed in POST
+                    // /messages (see BROADCAST_PAYLOAD_UNIFIED there). It's now
+                    // a thin adapter: pushToRecipients() (the msg:* pipeline's
+                    // single canonical delivery function, shared with
+                    // messageLifecycleSocket.js's own msg:send handler) does
+                    // the one participant lookup and the one 'msg:new' emit;
+                    // this just re-emits the exact same payload it returns
+                    // under the legacy event name, for clients not yet on
+                    // msg:*. No second query, no second payload shape.
                     const { pushToRecipients } = require('../sockets/messageLifecycleSocket');
-                    await pushToRecipients(this, message, userId).catch(() => {});
-                    if (message.chatId) {
-                        const sequelize = require('../models').sequelize;
-                        const legacyRecipients = await sequelize.query(
-                            `SELECT DISTINCT "userId" FROM chat_participants WHERE "chatId" = :chatId AND "userId" != :senderId`,
-                            { replacements: { chatId: parseInt(message.chatId, 10), senderId: parseInt(userId, 10) }, type: sequelize.QueryTypes.SELECT }
-                        ).catch(() => []);
-                        for (const { userId: recipientId } of (legacyRecipients || [])) {
+                    const canonicalPayload = await pushToRecipients(this, message, userId).catch(() => null);
+                    if (canonicalPayload && canonicalPayload.recipients) {
+                        for (const recipientId of canonicalPayload.recipients) {
                             this.sendToUser(recipientId, 'message:new', {
-                                id: message.id, chatId: message.chatId, conversationId: message.chatId,
-                                senderId: message.senderId, content: message.content, type: message.type,
-                                sender: message.sender || null, replyToId: message.replyToId || null,
-                                createdAt: message.createdAt, sentAt: message.sentAt, deliveredAt: null,
+                                ...canonicalPayload.payload,
+                                id: message.id, conversationId: message.chatId,
                             }).catch(() => {});
                         }
                     }
@@ -1230,23 +1229,48 @@ class WebSocketService {
 
     // ── SOCKET ID LOOKUP ──────────────────────────────────────────────────────
 
+    // Thin backward-compat alias — getActiveSocketsForUser() (below) is now
+    // the single canonical implementation; kept so any other existing caller
+    // of getSocketIdsForUser() doesn't need to change.
     async getSocketIdsForUser(userId) {
-        const uid = parseInt(userId, 10);
-        if (!uid) return [];
-
-        const inMemory = this.onlineUsers.get(uid);
-        if (inMemory && inMemory.size > 0) return Array.from(inMemory);
-
-        if (User && typeof User.findByPk === 'function') {
-            try {
-                const user = await User.findByPk(uid, { attributes: ['id', 'socketIds'] });
-                return Array.isArray(user && user.socketIds) ? user.socketIds.filter(Boolean) : [];
-            } catch (_) {}
-        }
-        return [];
+        const { socketIds } = await this.getActiveSocketsForUser(userId);
+        return socketIds;
     }
 
     // ── SEND TO USER ──────────────────────────────────────────────────────────
+
+    /**
+     * CONSOLIDATE-DELIVERY-PATH (point 4 of the messaging-architecture
+     * cleanup): the single canonical way to find where a user is actually
+     * reachable right now. Every recipient-delivery call site should resolve
+     * "how do I reach this user" through this one function instead of each
+     * re-deriving its own room-name variants (there is only ever one pair,
+     * `user:{id}` / `user_{id}` — see FIX-AUDIT above) or its own socket-id
+     * lookup. Returns { rooms, socketIds } — rooms for the normal broadcast
+     * path, socketIds as the fallback for a socket that connected but hasn't
+     * joined its rooms yet (see sendToUser below).
+     */
+    async getActiveSocketsForUser(userId) {
+        const uid = parseInt(userId, 10);
+        if (!uid) return { rooms: [], socketIds: [] };
+        const io = this.getIO();
+        const rooms = [`user:${uid}`, `user_${uid}`];
+
+        const inMemory = this.onlineUsers.get(uid);
+        if (inMemory && inMemory.size > 0) {
+            return { rooms, socketIds: Array.from(inMemory), io };
+        }
+        // Fallback: no in-memory record (e.g. after a server restart) — the
+        // same DB lookup getSocketIdsForUser() used to do on its own.
+        if (User && typeof User.findByPk === 'function') {
+            try {
+                const user = await User.findByPk(uid, { attributes: ['id', 'socketIds'] });
+                const socketIds = Array.isArray(user && user.socketIds) ? user.socketIds.filter(Boolean) : [];
+                return { rooms, socketIds, io };
+            } catch (_) { /* fall through to empty */ }
+        }
+        return { rooms, socketIds: [], io };
+    }
 
     async sendToUser(userId, event, data = {}) {
         const uid = parseInt(userId, 10);
@@ -1308,10 +1332,9 @@ class WebSocketService {
         // since Socket.IO room names are always strings. The previous 4-entry
         // array therefore emitted to only 2 actually-distinct room names, each
         // twice — doubling socket I/O across the whole platform for zero benefit.
-        const rooms = [
-            `user:${uid}`,
-            `user_${uid}`,
-        ];
+        // getActiveSocketsForUser() is the single canonical definition of
+        // "where does this user's traffic go" — see its doc comment above.
+        const { rooms } = await this.getActiveSocketsForUser(uid);
         for (const room of rooms) {
             try {
                 const roomSet = io.sockets?.adapter?.rooms?.get(room);
@@ -1329,7 +1352,7 @@ class WebSocketService {
         // This handles the race where the socket connected but hasn't joined user:X rooms yet.
         // When delivered=true (room emit worked), skip this block to prevent duplicate delivery.
         if (!delivered) {
-            const socketIds = await this.getSocketIdsForUser(uid);
+            const { socketIds } = await this.getActiveSocketsForUser(uid);
             for (const sid of socketIds) {
                 if (!this._isSocketAliveInAdapter(io, sid)) {
                     const set = this.onlineUsers.get(uid);
