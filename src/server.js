@@ -5312,7 +5312,19 @@ class Application {
                     }, 1000);
 
                     // ── PHASE 3: WEBRTC CALL ENGINE ───────────────────────────────────────
-                    setTimeout(() => {
+                    // FIX-SPOF: Phase 3 (CallSignalingService) is the ONLY thing that
+                    // relays WebRTC offers/answers/ICE candidates in normal operation —
+                    // webSocketService.js's handlers for those events only exist as a
+                    // fallback for when this init fails (see FIX-SPOF note there). This
+                    // used to try exactly once, 2s after boot, and swallow any failure
+                    // with a bare console.warn — meaning a single transient error (DB
+                    // hiccup, dependency not ready yet, etc.) would silently degrade
+                    // every video/audio call for the lifetime of the process, with
+                    // nothing in the logs louder than a warning to notice by. Now it
+                    // retries with backoff and logs loudly (not just warn) if it never
+                    // recovers, so this is actually visible instead of silently eating
+                    // calls.
+                    const _initPhase3WithRetry = (attempt = 1, maxAttempts = 5) => {
                         try {
                             const { initPhase3 } = require('./services/phase3/phase3.bootstrap');
                             global.__phase3 = initPhase3(this.io, this.app, {
@@ -5321,10 +5333,22 @@ class Application {
                             });
                             logger.success('Nexopa Phase 3 — WebRTC Call Engine ✅', 'PHASE3');
                         } catch (err) {
-                            console.warn('[Phase3] Init failed (non-fatal):', err.message);
-                            global.__phase3 = {};
+                            if (attempt < maxAttempts) {
+                                const delay = Math.min(2000 * attempt, 15000);
+                                console.warn(`[Phase3] Init failed (attempt ${attempt}/${maxAttempts}), retrying in ${delay}ms:`, err.message);
+                                setTimeout(() => _initPhase3WithRetry(attempt + 1, maxAttempts), delay);
+                            } else {
+                                // Loud on purpose: this is not "non-fatal" from the user's
+                                // point of view — every call on this process will fall back
+                                // to webSocketService's relay (functional, but without Phase
+                                // 3's dedup/ack/monitoring). Surface it clearly so it gets
+                                // noticed and fixed rather than silently tolerated forever.
+                                console.error(`[Phase3] ❌ FAILED TO INITIALIZE after ${maxAttempts} attempts — WebRTC signaling is running on the fallback relay in webSocketService.js, not the real Phase 3 CallSignalingService. Last error:`, err);
+                                global.__phase3 = {};
+                            }
                         }
-                    }, 2000);
+                    };
+                    setTimeout(() => _initPhase3WithRetry(), 2000);
 
                     // ── PHASE 4: SOCIAL ECOSYSTEM ─────────────────────────────────────────
                     setTimeout(() => {

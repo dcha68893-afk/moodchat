@@ -675,29 +675,68 @@ class WebSocketService {
                 });
             });
 
-            // ── PHASE14 FIX P0: WebRTC socket-level signaling relay ───────────
-            // FIX: this handler (and the three below it — webrtc_signal,
-            // call:webrtc_offer, call:webrtc_answer) is now a deliberate
-            // no-op. CallSignalingService (Phase 3) owns these events —
-            // it re-registers all four with socket.removeAllListeners(...)
-            // .on(...) once it initializes, which normally wipes out
-            // whatever was bound here first. So in steady-state operation
-            // these were already dead code. The problem: if Phase 3 ever
-            // fails to initialize for any reason, the app silently falls
-            // back to THIS implementation with no visible error — and this
-            // version relays each offer/answer to 4 different room-name
-            // variants under 2 different event names apiece, which is
-            // exactly the kind of duplicate delivery that breaks WebRTC
-            // (a second setRemoteDescription() on an already-negotiating
-            // connection throws and drops the call). Rather than relying on
-            // initialization-order luck to keep this dead, these are now
-            // genuinely inert so CallSignalingService is the only possible
-            // source of these events regardless of init timing.
-            socket.removeAllListeners('webrtc:signal').on('webrtc:signal', () => {
-                console.warn('[WSService] webrtc:signal received but CallSignalingService should own this — Phase 3 may not be initialized');
+            // ── PHASE14 FIX P0 / FIX-SPOF (this pass): WebRTC socket-level
+            // signaling relay ───────────────────────────────────────────────
+            // These four handlers (webrtc:signal, webrtc_signal,
+            // call:webrtc_offer, call:webrtc_answer) were previously turned
+            // into deliberate no-ops on the theory that CallSignalingService
+            // (Phase 3) always re-registers them afterward via
+            // socket.removeAllListeners(...).on(...), so leaving a real
+            // implementation here risked duplicate delivery.
+            //
+            // That's true ONLY once Phase 3 has actually finished
+            // initializing for this process. Phase 3 is booted from
+            // server.js inside `setTimeout(..., 2000)` wrapped in a bare
+            // try/catch that just does `console.warn` on failure — no
+            // retry, no alerting, no process exit. If that init throws for
+            // any reason (a transient DB/Redis error, a bad deploy, a
+            // dependency race), CallSignalingService's listeners are never
+            // registered, and every socket that connects to this process —
+            // for the rest of its uptime — permanently gets these no-op
+            // stubs instead. The offer/answer/ICE relay silently does
+            // nothing: the call UI still opens (it doesn't wait on WebRTC
+            // state), the local camera still renders (getUserMedia has
+            // nothing to do with signaling), but the far side never
+            // receives an SDP offer/answer or any ICE candidate, so the
+            // peer connection never reaches "connected" and no remote
+            // track ever arrives — i.e. exactly "I can see myself but not
+            // my friend," with no error surfaced anywhere.
+            //
+            // Fix: make these real, working relays (mirroring
+            // CallSignalingService's single-path delivery — one emit per
+            // event, no duplicate room fan-out) instead of no-ops. When
+            // Phase 3 initializes normally, its removeAllListeners(...)
+            // .on(...) call still cleanly replaces these with its own
+            // (identical) handlers, so there's no behavior change and no
+            // duplicate-delivery risk in the normal case. The only thing
+            // that changes is what happens when Phase 3 fails to init:
+            // calls keep working via this relay instead of silently dying.
+            const _relaySignal = (eventName) => async (payload, ack) => {
+                const targetUserId = payload && (payload.targetUserId || payload.tgt);
+                if (!targetUserId) {
+                    if (typeof ack === 'function') ack({ delivered: false, reason: 'invalid_payload' });
+                    return;
+                }
+                try {
+                    const delivered = await this.sendToUser(targetUserId, eventName, {
+                        ...payload,
+                        senderId: userId,
+                        timestamp: payload.timestamp || Date.now(),
+                    });
+                    if (typeof ack === 'function') ack({ delivered: !!delivered });
+                } catch (err) {
+                    console.warn(`[WSService] fallback relay for ${eventName} failed:`, err.message);
+                    if (typeof ack === 'function') ack({ delivered: false, reason: 'relay_error' });
+                }
+            };
+
+            socket.removeAllListeners('webrtc:signal').on('webrtc:signal', async (data) => {
+                if (!data || !data.targetUserId) return;
+                console.warn('[WSService] webrtc:signal relayed via fallback — CallSignalingService (Phase 3) has not taken over this socket yet');
+                await _relaySignal('webrtc:signal')(data);
             });
 
-            socket.removeAllListeners('webrtc_signal').on('webrtc_signal', () => {});
+            socket.removeAllListeners('webrtc_signal').on('webrtc_signal', _relaySignal('webrtc_signal'));
 
             // FIX-DISCONNECT-COLLISION: removeAllListeners('call:heartbeat') here
             // used to be wiped by CallSignalingService's own
@@ -743,11 +782,52 @@ class WebSocketService {
             });
             }
 
-            // ── PHASE14 FIX: call:webrtc_offer / call:webrtc_answer relay ────
-            // See the no-op note above — CallSignalingService owns these now.
-            socket.removeAllListeners('call:webrtc_offer').on('call:webrtc_offer', () => {});
+            // ── PHASE14 FIX / FIX-SPOF: call:webrtc_offer / call:webrtc_answer
+            // relay ─────────────────────────────────────────────────────────
+            // See the fallback-relay note above the webrtc:signal handler —
+            // these are real relays now instead of no-ops, so a Phase 3 init
+            // failure degrades to "still works" instead of "silently drops
+            // every offer/answer forever." CallSignalingService still owns
+            // and overwrites these the moment it initializes successfully.
+            socket.removeAllListeners('call:webrtc_offer').on('call:webrtc_offer', async ({ callId, targetUserId: tgt, offer } = {}, ack) => {
+                if (!callId || !tgt || !offer) {
+                    if (typeof ack === 'function') ack({ delivered: false, reason: 'invalid_payload' });
+                    return;
+                }
+                const delivered = await this.sendToUser(tgt, 'call:webrtc_offer', {
+                    callId, offer, callerId: userId, timestamp: Date.now(),
+                }).catch(() => false);
+                console.warn(`[WSService] call:webrtc_offer relayed via fallback for call ${callId} — CallSignalingService (Phase 3) has not taken over this socket yet`);
+                if (typeof ack === 'function') ack({ delivered: !!delivered });
+            });
 
-            socket.removeAllListeners('call:webrtc_answer').on('call:webrtc_answer', () => {});
+            socket.removeAllListeners('call:webrtc_answer').on('call:webrtc_answer', async ({ callId, targetUserId: tgt, answer } = {}, ack) => {
+                if (!callId || !tgt || !answer) {
+                    if (typeof ack === 'function') ack({ delivered: false, reason: 'invalid_payload' });
+                    return;
+                }
+                const delivered = await this.sendToUser(tgt, 'call:webrtc_answer', {
+                    callId, answer, accepterId: userId, timestamp: Date.now(),
+                }).catch(() => false);
+                console.warn(`[WSService] call:webrtc_answer relayed via fallback for call ${callId} — CallSignalingService (Phase 3) has not taken over this socket yet`);
+                if (typeof ack === 'function') ack({ delivered: !!delivered });
+            });
+
+            // call:ice_candidate had no fallback at all before (only
+            // CallSignalingService ever registered it) — if Phase 3 failed to
+            // init, ICE candidates threw "no listener" or were just never
+            // sent by a client checking for one, on top of the offer/answer
+            // gap above. Give it the same fallback treatment for consistency.
+            socket.removeAllListeners('call:ice_candidate').on('call:ice_candidate', async ({ callId, targetUserId: tgt, candidate } = {}, ack) => {
+                if (!callId || !tgt || !candidate) {
+                    if (typeof ack === 'function') ack({ delivered: false, reason: 'invalid_payload' });
+                    return;
+                }
+                const delivered = await this.sendToUser(tgt, 'call:ice_candidate', {
+                    callId, candidate, senderId: userId, timestamp: Date.now(),
+                }).catch(() => false);
+                if (typeof ack === 'function') ack({ delivered: !!delivered });
+            });
 
             // ── PHASE14 FIX P0: message:send socket handler ───────────────────
             // CONSOLIDATE-MESSAGE-PROTOCOL (fix for two-protocols-coexisting):
