@@ -100,6 +100,47 @@ let _prekeysReady = ensurePrekeyTables();
 router.use((req, res, next) => { _prekeysReady.then(() => next()).catch(() => next()); });
 router.use((req, res, next) => { _encKeysReady.then(() => next()).catch(() => next()); });
 
+// ── FIX (KEY-ANNOUNCEMENT / ITEM 5,6,7 — WebSocket key push): previously the
+// only way another user's client ever learned about a public key was a REST
+// GET the moment IT needed to encrypt/decrypt something — there was no push
+// path at all. That means (a) a friend who had just registered their very
+// first key stayed invisible to you until you happened to open/send to them
+// again, and (b) a friend who rotated their key (new device, cleared
+// storage, reinstall) left every other client silently encrypting against a
+// now-stale cached key until a decrypt failure forced a re-fetch. Push both
+// events over the socket to everyone currently authorized to see this key —
+// the same "accepted friend" relationship /keys/:userId already gates reads
+// on (see _canSeeEncryptionKey above) — the instant registration succeeds.
+async function _getFriendIds(userId, sequelize) {
+  const rows = await sequelize.query(
+    `SELECT CASE WHEN requester_id = :userId THEN receiver_id ELSE requester_id END AS "friendId"
+     FROM friends
+     WHERE status = 'accepted' AND (requester_id = :userId OR receiver_id = :userId)`,
+    { replacements: { userId }, type: sequelize.QueryTypes.SELECT }
+  );
+  return (rows || []).map(r => r.friendId).filter(Boolean);
+}
+
+async function _broadcastKeyEvent(userId, eventName, data, sequelize) {
+  let wsService;
+  try { wsService = require('../services/webSocketService'); } catch (_) { return; }
+  if (!wsService || typeof wsService.sendToUser !== 'function') return;
+
+  const payload = { userId, ...data, timestamp: Date.now() };
+
+  // The owner's own other devices/tabs — so a second logged-in session
+  // treats the freshly (re)registered key as canonical too.
+  try { await wsService.sendToUser(userId, eventName, payload); } catch (_) {}
+
+  let friendIds = [];
+  try { friendIds = await _getFriendIds(userId, sequelize); } catch (e) {
+    console.warn('[encryption.js] _broadcastKeyEvent: friend lookup failed:', e.message);
+  }
+  for (const fid of friendIds) {
+    try { await wsService.sendToUser(fid, eventName, payload); } catch (_) {}
+  }
+}
+
 // POST /api/encryption/keys — register or update public key
 router.post('/keys', asyncHandler(async (req, res) => {
   const userId    = req.user.id;
@@ -113,6 +154,18 @@ router.post('/keys', asyncHandler(async (req, res) => {
   }
 
   const sequelize = getSequelize();
+
+  // FIX (KEY-ANNOUNCEMENT): look up whatever was active BEFORE this write so
+  // we can tell friends whether this is a brand-new identity (e2e:key_available)
+  // or a rotation replacing a key they may already have cached
+  // (e2e:key_rotated) — the two need different client-side handling (a
+  // rotation should also purge any stale cached key derived from the old
+  // one; see js/e2e-encryption.js's _handleKeyAnnouncement).
+  const previousActive = await sequelize.query(
+    `SELECT "keyId" FROM user_encryption_keys WHERE "userId"=:userId AND "isActive"=true LIMIT 1`,
+    { replacements: { userId }, type: sequelize.QueryTypes.SELECT }
+  );
+  const isRotation = !!(previousActive && previousActive.length && previousActive[0].keyId !== keyId);
 
   // Deactivate old keys
   await sequelize.query(
@@ -128,6 +181,15 @@ router.post('/keys', asyncHandler(async (req, res) => {
        SET "publicKey"=:publicKey, "isActive"=true, "updatedAt"=NOW()`,
     { replacements: { userId, publicKey, keyId } }
   );
+
+  // Fire-and-forget: never let a slow/failed socket push delay or fail the
+  // HTTP response the registering client is waiting on to confirm E2E_READY.
+  _broadcastKeyEvent(
+    userId,
+    isRotation ? 'e2e:key_rotated' : 'e2e:key_available',
+    { publicKey, keyId },
+    sequelize
+  ).catch(() => {});
 
   res.status(201).json({ status: 'success', data: { keyId }, message: 'Public key registered' });
 }));
