@@ -1,78 +1,38 @@
-/**
- * callService.js — Sequelize/PostgreSQL call service
- * FIXED VERSION — patches:
- *  1. answerCall: was checking startedAt (null) for timeout instead of createdAt/metadata.ringStartedAt
- *  2. FIX-003: All WS emits now use ONE canonical colon-style event name (call:xxx only)
- *     so calls-core.js socket listeners get them regardless of naming convention.
- *  3. getCallDetails(callId) — accepts 1-arg form used by callController.getCallDetails
- *  4. _forceCleanupStaleCallsForUsers — emits 'call_force_ended' + 'CALL_FORCE_ENDED' (postMessage)
- *  5. isUserOnline check deferred to wsService so it can't crash on undefined
- */
-
-'use strict';
-
 const { Op } = require('sequelize');
-const db      = require('../models');
-const Call    = db.Calls || db.Call;
-const User    = db.Users || db.User;
-const Chat    = db.Chats || db.Chat;
+const db = require('../models');
+const Call = db.Calls || db.Call;
+const User = db.Users || db.User;
+const Chat = db.Chats || db.Chat;
 
-const MAX_CALL_DURATION           = parseInt(process.env.MAX_CALL_DURATION)           || 3600;
-const CALL_TIMEOUT_SECONDS        = parseInt(process.env.CALL_TIMEOUT_SECONDS)        || 180; // must match RING_TIMEOUT_MS in routes/calls.js (3 min)
-const MAX_GROUP_CALL_PARTICIPANTS = parseInt(process.env.MAX_GROUP_CALL_PARTICIPANTS)  || 10;
+const MAX_CALL_DURATION = parseInt(process.env.MAX_CALL_DURATION) || 3600;
+const CALL_TIMEOUT_SECONDS = parseInt(process.env.CALL_TIMEOUT_SECONDS) || 180;
+const MAX_GROUP_CALL_PARTICIPANTS = parseInt(process.env.MAX_GROUP_CALL_PARTICIPANTS) || 10;
 
-// FIX-DUPLICATE-CALL-RACE: initiateCall() checks "is this callee already in
-// an active call" (a Call.findOne()) and then, several lines later, creates
-// a new Call row -- with no atomicity between the two. Two initiateCall()
-// calls for the same callee landing close together (a double-tap on the
-// call button, or two different callers dialing the same person at nearly
-// the same instant) could both pass the check before either had committed
-// its Call.create(), producing two separate Call rows -- duplicate ringing
-// and duplicate call-history entries for what should be a single call
-// attempt. This in-process lock, keyed by calleeId, serializes concurrent
-// initiateCall() calls for the same callee so the second one always sees
-// the first one's freshly-created row. NOTE: this closes the race for a
-// single Node process; if this service is ever horizontally scaled across
-// multiple instances, the same race can still occur across processes and
-// would need a distributed lock (e.g. a Postgres advisory lock or Redis
-// SETNX) instead.
-const _initiateCallLocks = new Map(); // calleeId -> Promise chain
+const _initiateCallLocks = new Map();
 async function _withCalleeLock(calleeId, fn) {
   const key = String(calleeId);
-  const prev = _initiateCallLocks.get(key) || Promise.resolve();
+  const previous = _initiateCallLocks.get(key) || Promise.resolve();
   let release;
   const gate = new Promise(resolve => { release = resolve; });
-  _initiateCallLocks.set(key, prev.then(() => gate));
-  await prev;
+  const chain = previous.then(() => gate);
+  _initiateCallLocks.set(key, chain);
+  await previous;
   try {
     return await fn();
   } finally {
     release();
-    if (_initiateCallLocks.get(key) === undefined || _initiateCallLocks.get(key) === prev.then(() => gate)) {
-      // Best-effort cleanup so the map doesn't grow unboundedly; safe even
-      // if another caller has already queued behind us (they hold their own
-      // reference to the promise chain, not this map entry).
-      _initiateCallLocks.delete(key);
-    }
+    if (_initiateCallLocks.get(key) === chain) _initiateCallLocks.delete(key);
   }
 }
 
-// Lazy-require helper — avoids circular dependency at startup
 let _wsService = null;
 function ws() {
   if (!_wsService) {
     try { _wsService = require('./webSocketService'); } catch (_) {}
   }
   return _wsService;
-
 }
 
-// FIX-003: Emit ONE canonical colon-style event per participant.
-// Previous triple-emit (call:ended + call_ended + original) caused:
-//   - Phone ringing twice (two call:incoming events)
-//   - Black screen on 2nd call (UI destroyed twice by two call:ended events)
-//   - ICE candidate handlers firing twice → broken peer connection
-// Frontend calls-core.js must listen for colon-style events only.
 function _normalizeCallEvent(event) {
   if (!event) return event;
   if (event.includes(':')) return event;
@@ -80,54 +40,37 @@ function _normalizeCallEvent(event) {
   return event;
 }
 
+// SINGLE EVENT CONTRACT: the call system emits one canonical colon-style event
+// per lifecycle signal. Compatibility aliases are intentionally not emitted
+// here because multiple event names delivered through the same transport were
+// being consumed by different call engines and caused duplicate UI/WebRTC work.
 async function emitToAll(participants, event, data) {
   const wsService = ws();
-  const colonEvent     = _normalizeCallEvent(event);                          // e.g. call:accepted
-  const underscoreEvent = colonEvent.replace(/:/g, '_');                      // e.g. call_accepted
-  const resolvedIo = global.__socketIO || (wsService && wsService.getIO && wsService.getIO()) || null;
-
-  if (!resolvedIo && !wsService) {
-    console.warn(`[CallService] emitToAll: no delivery channel for event=${colonEvent}`);
-    return false;
-  }
-
-  // Build deduplicated set of event names to emit (both colon and underscore forms)
-  const eventNames = [...new Set([colonEvent, underscoreEvent, event])].filter(Boolean);
+  const canonicalEvent = _normalizeCallEvent(event);
+  const io = global.__socketIO || (wsService && wsService.getIO && wsService.getIO()) || null;
+  if (!io && !(wsService && typeof wsService.sendToUser === 'function')) return false;
 
   let delivered = false;
-  for (const participant of participants) {
-    const uid = typeof participant === 'object' ? (participant.id || participant.userId) : participant;
+  for (const participant of participants || []) {
+    const uid = parseInt(typeof participant === 'object' ? (participant.id || participant.userId) : participant, 10);
     if (!uid) continue;
-    const uidInt = parseInt(uid, 10);
-    const uidStr = String(uidInt);
-
-    if (resolvedIo) {
-      try {
-        const rooms = [`user:${uidInt}`, `user_${uidInt}`, `user:${uidStr}`, `user_${uidStr}`];
-        for (const evName of eventNames) {
-          for (const room of rooms) {
-            resolvedIo.to(room).emit(evName, data);
-          }
-        }
-        console.log(`[CallService] emitToAll: [${eventNames.join('|')}] → uid:${uidInt}`);
+    try {
+      if (wsService && typeof wsService.sendToUser === 'function') {
+        await wsService.sendToUser(uid, canonicalEvent, data);
         delivered = true;
-      } catch (e) {
-        console.warn(`[CallService] emit error uid=${uidInt}:`, e.message);
+      } else if (io) {
+        io.to(`user:${uid}`).emit(canonicalEvent, data);
+        io.to(`user_${uid}`).emit(canonicalEvent, data);
+        delivered = true;
       }
-    } else if (wsService && typeof wsService.sendToUser === 'function') {
-      for (const evName of eventNames) {
-        try { await wsService.sendToUser(uidInt, evName, data); delivered = true; } catch (_) {}
-      }
+    } catch (err) {
+      console.warn(`[CallService] emit ${canonicalEvent} → ${uid} failed:`, err.message);
     }
   }
   return delivered;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-
 class CallService {
-
-  // ── _buildIncludes ──────────────────────────────────────────────────────────
   _buildIncludes() {
     const includes = [];
     try {
@@ -141,768 +84,294 @@ class CallService {
     return includes;
   }
 
-  // ── initiateCall ────────────────────────────────────────────────────────────
   async initiateCall(callerId, calleeId, callType = 'audio', chatId = null) {
-    // CRITICAL SECURITY: Validate all required fields
     if (!callerId || !calleeId) throw new Error('callerId and calleeId are required');
-    if (callerId === undefined || callerId === null || calleeId === undefined || calleeId === null) {
-      throw new Error('Invalid callerId or calleeId - undefined/null not allowed');
-    }
     if (!['audio', 'video'].includes(callType)) throw new Error('Invalid call type');
-    
-    // ── FORENSIC LOG: CALL_START ──────────────────────────────────────────────
-    console.log(`[CALL] CALL_START | callerId=${callerId} | calleeId=[REDACTED] | type=${callType} | ts=${Date.now()}`);
-    
-    // CRITICAL SECURITY: Prevent self-calls
-    if (callerId === calleeId) {
-      throw new Error('Cannot call yourself');
-    }
+    if (parseInt(callerId, 10) === parseInt(calleeId, 10)) throw new Error('Cannot call yourself');
 
     const [caller, callee] = await Promise.all([
-      User.findByPk(parseInt(callerId), { attributes: ['id', 'username', 'avatar', 'email'] }),
-      User.findByPk(parseInt(calleeId), { attributes: ['id', 'username', 'avatar', 'email'] }),
+      User.findByPk(parseInt(callerId, 10), { attributes: ['id', 'username', 'avatar', 'email'] }),
+      User.findByPk(parseInt(calleeId, 10), { attributes: ['id', 'username', 'avatar', 'email'] }),
     ]);
     if (!caller) throw new Error('Caller not found');
     if (!callee) throw new Error('Callee not found');
 
-    // Auto-cleanup stale calls for both parties first — runs before busy-check
-    await this._forceCleanupStaleCallsForUsers([parseInt(callerId), parseInt(calleeId)]);
+    await this._forceCleanupStaleCallsForUsers([parseInt(callerId, 10), parseInt(calleeId, 10)]);
 
-    // FIX-DUPLICATE-CALL-RACE: the "is callee already busy" check and the
-    // Call.create() below must be atomic with respect to other concurrent
-    // initiateCall() calls for the same callee, or two near-simultaneous
-    // requests can both pass the check and both create a Call row. See
-    // _withCalleeLock definition near the top of this file for details.
-    const { activeCall, call } = await _withCalleeLock(calleeId, async () => {
-    // Check callee not already in a GENUINE in-progress call
-    // We only block if the call is actively in-progress AND recent (< CALL_TIMEOUT_SECONDS)
-    const activeCall = await Call.findOne({
-      where: {
-        participants: { [Op.contains]: [parseInt(calleeId)] },
-        status:       { [Op.in]: ['ringing', 'initiated', 'in-progress'] },
-      },
-      order: [['createdAt', 'DESC']],  // most recent first
-    });
-    if (activeCall) {
-      const callAge = (Date.now() - new Date(activeCall.createdAt).getTime()) / 1000;
-      const wasAnswered = activeCall.answeredBy && activeCall.answeredBy.length > 0;
-      // FIX-NO-AUTO-END-ANSWERED-CALL-ON-NEW-CALL: this used to force-end ANY
-      // call older than CALL_TIMEOUT_SECONDS "regardless of status" the
-      // moment someone else tried to call one of its participants — which
-      // meant a perfectly healthy, answered call running longer than 3
-      // minutes got torn down mid-conversation by an unrelated incoming call
-      // attempt. Age alone doesn't make a call stale; only "never answered
-      // and still sitting there" does. A call that was actually answered
-      // must only end when caller/receiver hang up, no matter how old it is.
-      if (callAge >= CALL_TIMEOUT_SECONDS && !wasAnswered) {
-        await activeCall.update({ status: 'missed', endedAt: new Date() });
-        await emitToAll(activeCall.participants || [], 'call_force_ended', {
-          callId: activeCall.id, reason: 'timeout_on_new_call', timestamp: new Date()
-        });
-        console.log(`[CallService] Auto-cleaned stale blocking call ${activeCall.id} (age=${Math.round(callAge)}s)`);
-      } else if (activeCall.status === 'in-progress') {
-        // Only block if callee is genuinely IN a live call (not just ringing)
-        throw new Error('Callee is already in an active call');
-      } else {
-        // status is 'ringing' or 'initiated' and < timeout — cancel the old one to allow new call
-        await activeCall.update({ status: 'cancelled', endedAt: new Date() });
-        await emitToAll(activeCall.participants || [], 'call_force_ended', {
-          callId: activeCall.id, reason: 'replaced_by_new_call', timestamp: new Date()
-        });
-        console.log(`[CallService] Cancelled old ringing call ${activeCall.id} to allow new call`);
+    const { call } = await _withCalleeLock(calleeId, async () => {
+      const activeCall = await Call.findOne({
+        where: {
+          participants: { [Op.contains]: [parseInt(calleeId, 10)] },
+          status: { [Op.in]: ['ringing', 'initiated', 'in-progress'] },
+        },
+        order: [['createdAt', 'DESC']],
+      });
+
+      if (activeCall) {
+        const age = (Date.now() - new Date(activeCall.createdAt).getTime()) / 1000;
+        const answered = Array.isArray(activeCall.answeredBy) && activeCall.answeredBy.length > 0;
+        if (activeCall.status === 'in-progress') {
+          throw new Error('Callee is already in an active call');
+        }
+        if (age >= CALL_TIMEOUT_SECONDS && !answered) {
+          await activeCall.update({ status: 'missed', endedAt: new Date() });
+          await emitToAll(activeCall.participants, 'call:force_ended', { callId: activeCall.id, reason: 'timeout_on_new_call', timestamp: Date.now() });
+        } else {
+          await activeCall.update({ status: 'cancelled', endedAt: new Date() });
+          await emitToAll(activeCall.participants, 'call:force_ended', { callId: activeCall.id, reason: 'replaced_by_new_call', timestamp: Date.now() });
+        }
       }
-    }
 
-    const allParticipants = [parseInt(callerId), parseInt(calleeId)];
-
-    const call = await Call.create({
-      callerId:     parseInt(callerId),
-      receiverId:   parseInt(calleeId),
-      chatId:       chatId ? parseInt(chatId) : null,
-      type:         callType,
-      status:       'ringing',
-      isGroupCall:  false,
-      participants: allParticipants,
-      answeredBy:   [],
-      declinedBy:   [],
-      readBy:       [],
-      startedAt:    null,
-      metadata:     { ringStartedAt: new Date().toISOString() },
+      return {
+        call: await Call.create({
+          callerId: parseInt(callerId, 10),
+          receiverId: parseInt(calleeId, 10),
+          chatId: chatId ? parseInt(chatId, 10) : null,
+          type: callType,
+          status: 'ringing',
+          isGroupCall: false,
+          participants: [parseInt(callerId, 10), parseInt(calleeId, 10)],
+          answeredBy: [],
+          declinedBy: [],
+          readBy: [],
+          startedAt: null,
+          metadata: { ringStartedAt: new Date().toISOString() },
+        }),
+      };
     });
 
-      return { activeCall, call };
-    });
-
-    // ✅ FIX: Emit call:incoming to callee NOW — this was completely missing and is why
-    // receivers never saw incoming calls.  Also emit to caller as confirmation.
-    const formatted = this._format(call, caller, callee);
-    // ── FIX: callerName / callerAvatar MUST be top-level for calls-ui.js
-    //    AND callType alias added (frontend checks callType not type)
-    const callerDisplayName = (caller.firstName
-      ? `${caller.firstName}${caller.lastName ? ' ' + caller.lastName : ''}`.trim()
-      : null) || caller.username || 'Unknown';
-    // FIX-CALLER-NAME-FLIP: calleeName/calleeAvatar were missing from this payload.
-    // This same payload is sent BACK to the caller as the 'call:initiated' confirmation.
-    // The caller-side UI (calls.html CALL_INITIATED handler) picks the first of
-    // userName/calleeName/receiverName/callerName it finds — with calleeName absent it
-    // fell through to callerName (the caller's OWN name), so the "who am I calling"
-    // name flipped from the real callee name to the caller's own name/"User" right
-    // after the call was placed. Adding calleeName/calleeAvatar here fixes that.
-    const calleeDisplayName = (callee.firstName
-      ? `${callee.firstName}${callee.lastName ? ' ' + callee.lastName : ''}`.trim()
-      : null) || callee.username || 'User';
-    const callPayload = {
-      callId:       call.id,
-      callerId:     parseInt(callerId),
-      receiverId:   parseInt(calleeId),
-      callType:     callType,   // ← alias: UI checks callType
-      type:         callType,
-      status:       'ringing',
-      callerName:   callerDisplayName,     // ← top-level critical for UI
-      callerAvatar: caller.avatar || null, // ← top-level critical for UI
-      calleeName:   calleeDisplayName,     // ← FIX: needed by caller's own "calling..." screen
-      calleeAvatar: callee.avatar || null, // ← FIX: same reason
-      caller:       { id: caller.id, username: caller.username, avatar: caller.avatar, displayName: callerDisplayName },
-      callee:       { id: callee.id, username: callee.username, avatar: callee.avatar, displayName: calleeDisplayName },
-      chatId:       call.chatId,
-      isGroupCall:  false,
-      timestamp:    Date.now(),
-    };
-
-    const svc = ws();
-    if (svc) {
-      // ── FORENSIC LOG: CALL_SIGNAL_SENT ──────────────────────────────────────
-      console.log(`[CALL] SIGNAL_SENT | callId=${call.id} | ts=${Date.now()}`);
-      // FIX: emit only 2 events — canonical colon-style (primary) + one legacy underscore (backward compat)
-      // Triple-emit was causing double-ring and black screen on 2nd call.
-      await svc.sendToUser(parseInt(calleeId), 'call:incoming',  callPayload);
-      await svc.sendToUser(parseInt(calleeId), 'call_incoming',  callPayload);
-      console.log(`[CALL] SIGNAL_SENT_COMPLETE | ts=${Date.now()}`);
-      // Confirmation to caller
-      await svc.sendToUser(parseInt(callerId), 'call:initiated', callPayload);
-      await svc.sendToUser(parseInt(callerId), 'call_initiated', callPayload);
-      console.log(`[CallService] ✅ EMITTED call:initiated to caller ${callerId}`);
-    } else {
-      console.warn('[CallService] ⚠️  webSocketService not available — call:incoming NOT emitted');
-    }
-
-    return formatted;
-  }
-
-  // ── answerCall ──────────────────────────────────────────────────────────────
-  async answerCall(callId, userId, sdpAnswer = null) {
-    if (!callId || !userId) throw new Error('callId and userId are required');
-
-    const call = await Call.findOne({
-      where: {
-        id:           callId,
-        participants: { [Op.contains]: [parseInt(userId)] },
-        status:       { [Op.in]: ['ringing', 'initiated'] },
-      },
-    });
-    if (!call) throw new Error('Call not found or not in ringing state');
-
-    // BUG FIX: use createdAt (always set) for ring-timeout, not startedAt (null until answered)
-    const ringStart = (call.metadata && call.metadata.ringStartedAt)
-      ? new Date(call.metadata.ringStartedAt)
-      : new Date(call.createdAt);
-    const elapsed = (Date.now() - ringStart.getTime()) / 1000;
-
-    if (elapsed > CALL_TIMEOUT_SECONDS) {
-      call.status  = 'missed';
-      call.endedAt = new Date();
-      await call.save();
-      throw new Error('Call has timed out');
-    }
-
-    if (!call.answeredBy.includes(parseInt(userId))) {
-      call.answeredBy = [...call.answeredBy, parseInt(userId)];
-    }
-    call.status    = 'in-progress';
-    call.startedAt = new Date();   // now set — this is actual call start time
-    if (sdpAnswer) call.sdpAnswer = sdpAnswer;
-
-    // ── FORENSIC LOG: WEBRTC_CONNECTED ───────────────────────────────────────
-    console.log(`[CALL] WEBRTC_CONNECTED | callId=${callId} | sdpAnswer=${sdpAnswer?'present':'none'} | ts=${Date.now()}`);
-    await call.save();
-
-    // FIX 7/8: Re-fetch with user associations so callerName/calleeName are available
-    //           These are required by calls-ui.js handleCallAccepted name resolution chain
-    let callWithUsers = call;
-    try {
-      const includes = this._buildIncludes();
-      if (includes.length > 0) {
-        const fetched = await Call.findOne({
-          where: { id: call.id },
-          include: includes,
-        });
-        if (fetched) callWithUsers = fetched;
-      }
-    } catch (fetchErr) {
-      console.warn('[CallService] answerCall: could not re-fetch with users:', fetchErr.message);
-    }
-
-    const callerDisplayName =
-      (callWithUsers.callInitiatorUser && (callWithUsers.callInitiatorUser.displayName || callWithUsers.callInitiatorUser.username)) ||
-      callWithUsers.callerName || 'Caller';
-    const calleeDisplayName =
-      (callWithUsers.callTargetUser && (callWithUsers.callTargetUser.displayName || callWithUsers.callTargetUser.username)) ||
-      callWithUsers.calleeName || 'User';
-    const callerAvatarUrl =
-      (callWithUsers.callInitiatorUser && callWithUsers.callInitiatorUser.avatar) || null;
-    const calleeAvatarUrl =
-      (callWithUsers.callTargetUser && callWithUsers.callTargetUser.avatar) || null;
-
-    const eventData = {
-      callId:       call.id,
-      callerId:     call.callerId,
-      receiverId:   call.receiverId,
-      callType:     call.type,
-      type:         call.type,
-      participants: call.participants || [],
-      answeredBy:   call.answeredBy || [],
-      status:       'in-progress',
-      startedAt:    call.startedAt,
-      timestamp:    Date.now(),
-      // FIX 7: Always include caller/callee names at top-level for frontend name resolution
-      callerName:   callerDisplayName,
-      calleeName:   calleeDisplayName,
-      receiverName: calleeDisplayName,
-      userName:     calleeDisplayName,      // generic fallback used by older UI code
-      callerAvatar: callerAvatarUrl,
-      calleeAvatar: calleeAvatarUrl,
-      // Structured user objects for rich UI
-      callerInfo:   callWithUsers.callInitiatorUser || null,
-      calleeInfo:   callWithUsers.callTargetUser    || null,
-    };
-    await emitToAll(call.participants, 'call_accepted', eventData);   // matches calls-core.js CALL_ACCEPTED
-    await emitToAll(call.participants, 'call_answered', eventData);
-
-    return this._format(call);
-  }
-
-  // ── rejectCall ──────────────────────────────────────────────────────────────
-  async rejectCall(callId, userId) {
-    if (!callId || !userId) throw new Error('callId and userId are required');
-
-    const call = await Call.findOne({
-      where: {
-        id:           callId,
-        participants: { [Op.contains]: [parseInt(userId)] },
-        status:       { [Op.in]: ['ringing', 'initiated'] },
-      },
-    });
-    if (!call) throw new Error('Call not found or not in ringing state');
-    if (call.callerId === parseInt(userId)) throw new Error('Caller cannot reject — use cancel instead');
-
-    if (!call.declinedBy.includes(parseInt(userId))) {
-      call.declinedBy = [...call.declinedBy, parseInt(userId)];
-    }
-
-    const remaining = call.participants.filter(pid => pid !== call.callerId && !call.declinedBy.includes(pid));
-    if (remaining.length === 0) {
-      call.status  = 'missed';
-      call.endedAt = new Date();
-    }
-    await call.save();
-
-    const eventData = {
-      callId:     call.id,
-      callerId:   call.callerId,
-      receiverId: call.receiverId,
-      callType:   call.type,
-      participants: call.participants || [],
-      declinedBy: call.declinedBy,
-      status:     call.status,
-      reason:     'declined',
-      timestamp:  Date.now(),
-    };
-    await emitToAll(call.participants, 'call_rejected', eventData);
-
-    return this._format(call);
-  }
-
-  // ── cancelCall ──────────────────────────────────────────────────────────────
-  async cancelCall(callId, userId) {
-    if (!callId || !userId) throw new Error('callId and userId are required');
-
-    const call = await Call.findOne({
-      where: {
-        id:       callId,
-        callerId: parseInt(userId),
-        status:   { [Op.in]: ['ringing', 'initiated'] },
-      },
-    });
-    if (!call) throw new Error('Call not found or cannot be cancelled');
-
-    call.status  = 'cancelled';
-    call.endedAt = new Date();
-    await call.save();
-
-    const eventData = {
-      callId:    call.id,
-      callerId:  call.callerId,
-      receiverId: call.receiverId,
-      callType:  call.type,
-      participants: call.participants || [],
-      status:    'cancelled',
-      endedAt:   call.endedAt,
+    const callerDisplayName = caller.username || 'Caller';
+    const calleeDisplayName = callee.username || 'User';
+    const payload = {
+      callId: call.id,
+      callerId: parseInt(callerId, 10),
+      receiverId: parseInt(calleeId, 10),
+      callType,
+      type: callType,
+      status: 'ringing',
+      callerName: callerDisplayName,
+      callerAvatar: caller.avatar || null,
+      calleeName: calleeDisplayName,
+      calleeAvatar: callee.avatar || null,
+      caller: { id: caller.id, username: caller.username, avatar: caller.avatar, displayName: callerDisplayName },
+      callee: { id: callee.id, username: callee.username, avatar: callee.avatar, displayName: calleeDisplayName },
+      chatId: call.chatId,
+      isGroupCall: false,
       timestamp: Date.now(),
     };
-    // CALL_CANCELLED is what calls-ui.js watches for to dismiss the incoming modal
-    await emitToAll(call.participants, 'call_cancelled', eventData);
+
+    const svc = ws();
+    if (!svc || typeof svc.sendToUser !== 'function') {
+      throw new Error('Call signaling service unavailable');
+    }
+
+    // Exactly one incoming event and one caller acknowledgement.
+    await svc.sendToUser(parseInt(calleeId, 10), 'call:incoming', payload);
+    await svc.sendToUser(parseInt(callerId, 10), 'call:initiated', payload);
 
     return this._format(call);
   }
 
-  // ── endCall ─────────────────────────────────────────────────────────────────
+  async answerCall(callId, userId, sdpAnswer = null) {
+    if (!callId || !userId) throw new Error('callId and userId are required');
+    const call = await Call.findOne({ where: { id: callId, participants: { [Op.contains]: [parseInt(userId, 10)] }, status: { [Op.in]: ['ringing', 'initiated'] } } });
+    if (!call) throw new Error('Call not found or not in ringing state');
+    const ringStart = call.metadata?.ringStartedAt ? new Date(call.metadata.ringStartedAt) : new Date(call.createdAt);
+    if ((Date.now() - ringStart.getTime()) / 1000 > CALL_TIMEOUT_SECONDS) {
+      await call.update({ status: 'missed', endedAt: new Date() });
+      throw new Error('Call has timed out');
+    }
+    const answeredBy = Array.isArray(call.answeredBy) ? call.answeredBy : [];
+    if (!answeredBy.includes(parseInt(userId, 10))) answeredBy.push(parseInt(userId, 10));
+    await call.update({ answeredBy, status: 'in-progress', startedAt: new Date(), ...(sdpAnswer ? { sdpAnswer } : {}) });
+    const fresh = await Call.findOne({ where: { id: call.id }, include: this._buildIncludes() });
+    const source = fresh || call;
+    await emitToAll(call.participants, 'call:accepted', {
+      callId: call.id, callerId: call.callerId, receiverId: call.receiverId, callType: call.type, type: call.type,
+      participants: call.participants || [], answeredBy, status: 'in-progress', startedAt: call.startedAt,
+      callerName: source.callInitiatorUser?.username || 'Caller', calleeName: source.callTargetUser?.username || 'User',
+      callerAvatar: source.callInitiatorUser?.avatar || null, calleeAvatar: source.callTargetUser?.avatar || null,
+      timestamp: Date.now(),
+    });
+    return this._format(call);
+  }
+
+  async rejectCall(callId, userId) {
+    const call = await Call.findOne({ where: { id: callId, participants: { [Op.contains]: [parseInt(userId, 10)] }, status: { [Op.in]: ['ringing', 'initiated'] } } });
+    if (!call) throw new Error('Call not found or not in ringing state');
+    if (call.callerId === parseInt(userId, 10)) throw new Error('Caller cannot reject — use cancel instead');
+    const declinedBy = Array.isArray(call.declinedBy) ? call.declinedBy : [];
+    if (!declinedBy.includes(parseInt(userId, 10))) declinedBy.push(parseInt(userId, 10));
+    await call.update({ declinedBy, status: 'rejected', endedAt: new Date() });
+    await emitToAll(call.participants, 'call:rejected', { callId: call.id, callerId: call.callerId, receiverId: call.receiverId, callType: call.type, participants: call.participants || [], declinedBy, status: 'rejected', reason: 'declined', timestamp: Date.now() });
+    return this._format(call);
+  }
+
+  async cancelCall(callId, userId) {
+    const call = await Call.findOne({ where: { id: callId, callerId: parseInt(userId, 10), status: { [Op.in]: ['ringing', 'initiated'] } } });
+    if (!call) throw new Error('Call not found or cannot be cancelled');
+    await call.update({ status: 'cancelled', endedAt: new Date() });
+    await emitToAll(call.participants, 'call:cancelled', { callId: call.id, callerId: call.callerId, receiverId: call.receiverId, callType: call.type, participants: call.participants || [], status: 'cancelled', endedAt: call.endedAt, timestamp: Date.now() });
+    return this._format(call);
+  }
+
   async endCall(callId, userId) {
-    if (!callId || !userId) throw new Error('callId and userId are required');
-
-    const call = await Call.findOne({
-      where: {
-        id: callId,
-        [Op.or]: [
-          { participants: { [Op.contains]: [parseInt(userId)] } },
-          { callerId:   parseInt(userId) },
-          { receiverId: parseInt(userId) },
-        ],
-      },
-    });
+    const call = await Call.findOne({ where: { id: callId, [Op.or]: [{ participants: { [Op.contains]: [parseInt(userId, 10)] } }, { callerId: parseInt(userId, 10) }, { receiverId: parseInt(userId, 10) }] } });
     if (!call) throw new Error('Call not found or not in progress');
-
-    // Already ended — return without error
-    if (['completed', 'missed', 'cancelled', 'rejected', 'failed'].includes(call.status)) {
-      return this._format(call);
-    }
-
-    const endedAt  = new Date();
-    const start    = call.startedAt ? new Date(call.startedAt) : endedAt;
-    const duration = Math.floor((endedAt - start) / 1000);
-
-    // PHASE15 FIX: Removed MAX_CALL_DURATION throw. Previously a call that lasted
-    // exactly at or over 3600s would throw an error, causing endCall() to fail silently.
-    // The call would remain in 'in-progress' in the DB, no call:ended event would be
-    // emitted, and both sides would be stuck with no way to end the call.
-    // Now we simply clamp the duration to MAX_CALL_DURATION and allow the save.
-    const clampedDuration = Math.min(duration, MAX_CALL_DURATION);
-
-    call.status   = (call.answeredBy && call.answeredBy.length > 0) ? 'completed' : 'missed';
-    call.endedAt  = endedAt;
-    call.duration = clampedDuration;
-    await call.save();
-
-    const eventData = {
-      callId:     call.id,
-      callerId:   call.callerId,
-      receiverId: call.receiverId,
-      callType:   call.type,
-      participants: call.participants || [],
-      status:     call.status,
-      duration:   call.duration,
-      endedAt:    call.endedAt,
-      timestamp:  Date.now(),
-    };
-    // Emit both call_ended and call_force_ended so every listener in calls-core / calls-ui is hit
-    await emitToAll(call.participants, 'call_ended',        eventData);
-    await emitToAll(call.participants, 'call_force_ended',  { ...eventData, forceEnd: true });
-
+    if (['completed', 'missed', 'cancelled', 'rejected', 'failed'].includes(call.status)) return this._format(call);
+    const endedAt = new Date();
+    const startedAt = call.startedAt ? new Date(call.startedAt) : endedAt;
+    const duration = Math.min(Math.max(0, Math.floor((endedAt - startedAt) / 1000)), MAX_CALL_DURATION);
+    const status = Array.isArray(call.answeredBy) && call.answeredBy.length ? 'completed' : 'missed';
+    await call.update({ status, endedAt, duration });
+    await emitToAll(call.participants, 'call:ended', { callId: call.id, callerId: call.callerId, receiverId: call.receiverId, callType: call.type, participants: call.participants || [], status, duration, endedAt, timestamp: Date.now() });
     return this._format(call);
   }
 
-  // ── joinCall ────────────────────────────────────────────────────────────────
   async joinCall(callId, userId) {
-    if (!callId || !userId) throw new Error('callId and userId are required');
-
-    const call = await Call.findOne({
-      where: {
-        id:     callId,
-        status: 'in-progress',
-      },
-    });
+    const call = await Call.findOne({ where: { id: callId, status: 'in-progress' } });
     if (!call) throw new Error('Call not found or not in progress');
-
-    // Add user to participants if not already there
-    if (!call.participants.includes(parseInt(userId))) {
-      call.participants = [...call.participants, parseInt(userId)];
-    }
-    if (!call.answeredBy.includes(parseInt(userId))) {
-      call.answeredBy = [...call.answeredBy, parseInt(userId)];
-    }
+    if (!call.participants.includes(parseInt(userId, 10))) call.participants = [...call.participants, parseInt(userId, 10)];
+    if (!call.answeredBy.includes(parseInt(userId, 10))) call.answeredBy = [...call.answeredBy, parseInt(userId, 10)];
     await call.save();
-
     return this._format(call);
   }
 
-  // ── leaveCall ───────────────────────────────────────────────────────────────
   async leaveCall(callId, userId) {
-    if (!callId || !userId) throw new Error('callId and userId are required');
-
-    const call = await Call.findOne({
-      where: {
-        id:           callId,
-        participants: { [Op.contains]: [parseInt(userId)] },
-        status:       'in-progress',
-      },
-    });
+    const call = await Call.findOne({ where: { id: callId, participants: { [Op.contains]: [parseInt(userId, 10)] }, status: 'in-progress' } });
     if (!call) throw new Error('Call not found or not in progress');
-
-    call.answeredBy = (call.answeredBy || []).filter(id => id !== parseInt(userId));
-
-    if (call.answeredBy.length === 0) {
-      call.status  = 'completed';
-      call.endedAt = new Date();
-      if (call.startedAt) {
-        call.duration = Math.floor((new Date() - new Date(call.startedAt)) / 1000);
-      }
-      await emitToAll(call.participants, 'call_ended', {
-        callId:    call.id,
-        status:    'completed',
-        duration:  call.duration,
-        timestamp: Date.now(),
-      });
+    call.answeredBy = (call.answeredBy || []).filter(id => id !== parseInt(userId, 10));
+    if (!call.answeredBy.length) {
+      call.status = 'completed'; call.endedAt = new Date();
+      call.duration = call.startedAt ? Math.floor((Date.now() - new Date(call.startedAt).getTime()) / 1000) : 0;
+      await emitToAll(call.participants, 'call:ended', { callId: call.id, status: 'completed', duration: call.duration, timestamp: Date.now() });
     }
-
     await call.save();
     return this._format(call);
   }
 
-  // ── addIceCandidate ─────────────────────────────────────────────────────────
   async addIceCandidate(callId, userId, candidate) {
-    if (!callId || !userId) throw new Error('callId and userId are required');
-    if (!candidate) throw new Error('ICE candidate is required');
-
-    const call = await Call.findOne({
-      where: { id: callId, participants: { [Op.contains]: [parseInt(userId)] } },
-    });
+    if (!callId || !userId || !candidate) throw new Error('callId, userId and candidate are required');
+    const call = await Call.findOne({ where: { id: callId, participants: { [Op.contains]: [parseInt(userId, 10)] } } });
     if (!call) throw new Error('Call not found or user not a participant');
-
-    // Persist the candidate
-    call.iceCandidates = [...(call.iceCandidates || []), { userId: parseInt(userId), candidate, timestamp: new Date() }];
+    call.iceCandidates = [...(call.iceCandidates || []), { userId: parseInt(userId, 10), candidate, timestamp: new Date() }];
     await call.save();
-
-    // ── CRITICAL FIX: Relay ICE candidate to the OTHER participants via WS ──
-    // Without this relay the ICE negotiation never completes → no audio.
     const svc = ws();
     if (svc && typeof svc.sendToUser === 'function') {
-      const otherParticipants = (call.participants || []).filter(pid => pid !== parseInt(userId));
-      const icePayload = {
-        callId:    callId,
-        candidate: candidate,
-        from:      parseInt(userId),
-        timestamp: Date.now(),
-      };
-      for (const pid of otherParticipants) {
-        try { svc.sendToUser(pid, 'ice_candidate',      icePayload); } catch (_) {}
-        try { svc.sendToUser(pid, 'call:ice_candidate', icePayload); } catch (_) {}
-        try { svc.sendToUser(pid, 'call_ice_candidate', icePayload); } catch (_) {}
+      for (const pid of (call.participants || []).filter(id => parseInt(id, 10) !== parseInt(userId, 10))) {
+        await svc.sendToUser(parseInt(pid, 10), 'webrtc:signal', { callId, type: 'candidate', candidate, senderId: parseInt(userId, 10), timestamp: Date.now() });
       }
     }
-
     return { success: true };
   }
 
-  // ── getCallDetails ──────────────────────────────────────────────────────────
-  // FIX: callController calls getCallDetails(callId) with ONE arg; accept both forms.
   async getCallDetails(callId, userId) {
-    if (!callId) throw new Error('callId is required');
-
     const where = { id: callId };
-    if (userId) {
-      where.participants = { [Op.contains]: [parseInt(userId)] };
-    }
-
+    if (userId) where.participants = { [Op.contains]: [parseInt(userId, 10)] };
     const call = await Call.findOne({ where, include: this._buildIncludes() });
     if (!call) throw new Error('Call not found or access denied');
     return this._format(call);
   }
 
-  // ── getUserCalls ────────────────────────────────────────────────────────────
   async getUserCalls(userId, options = {}) {
-    if (!userId) throw new Error('userId is required');
-
     const { status, limit = 50, offset = 0 } = options;
-    const whereClause = {
-      [Op.or]: [
-        { callerId:    parseInt(userId) },
-        { receiverId:  parseInt(userId) },
-        { participants: { [Op.contains]: [parseInt(userId)] } },
-      ],
-    };
+    const whereClause = { [Op.or]: [{ callerId: parseInt(userId, 10) }, { receiverId: parseInt(userId, 10) }, { participants: { [Op.contains]: [parseInt(userId, 10)] } }] };
     if (status) whereClause.status = status;
-
-    const { count, rows } = await Call.findAndCountAll({
-      where: whereClause,
-      include: this._buildIncludes(),
-      order: [['createdAt', 'DESC']],
-      limit:  parseInt(limit),
-      offset: parseInt(offset),
-      distinct: true,
-    });
-
+    const { count, rows } = await Call.findAndCountAll({ where: whereClause, include: this._buildIncludes(), order: [['createdAt', 'DESC']], limit: parseInt(limit), offset: parseInt(offset), distinct: true });
     return { calls: rows.map(c => this._format(c)), total: count };
   }
 
-  // ── initiateGroupCall ───────────────────────────────────────────────────────
   async initiateGroupCall(callerId, participantIds, callType = 'audio', chatId = null) {
     if (!callerId || !Array.isArray(participantIds)) throw new Error('callerId and participantIds are required');
-
-    const allIds = [...new Set([parseInt(callerId), ...participantIds.map(Number)])];
-    if (allIds.length > MAX_GROUP_CALL_PARTICIPANTS)
-      throw new Error(`Group call cannot have more than ${MAX_GROUP_CALL_PARTICIPANTS} participants`);
+    const allIds = [...new Set([parseInt(callerId, 10), ...participantIds.map(Number)])];
+    if (allIds.length > MAX_GROUP_CALL_PARTICIPANTS) throw new Error(`Group call cannot have more than ${MAX_GROUP_CALL_PARTICIPANTS} participants`);
     if (!['audio', 'video'].includes(callType)) throw new Error('Invalid call type');
-
     await this._forceCleanupStaleCallsForUsers(allIds);
-
-    // FIX-DUPLICATE-CALL-RACE: same class of bug as initiateCall() above.
-    // Locking on callerId (rather than all participants) covers the common
-    // case — a double-tap/double-submit of "start group call" by the same
-    // person — without the deadlock risk of acquiring a multi-key lock
-    // across an arbitrary, possibly-overlapping set of participant IDs.
-    const { active, call } = await _withCalleeLock(`group:${callerId}`, async () => {
-    const active = await Call.findOne({
-      where: {
-        participants: { [Op.overlap]: allIds },
-        status:       { [Op.in]: ['ringing', 'initiated', 'in-progress'] },
-      },
+    const { call } = await _withCalleeLock(`group:${callerId}`, async () => {
+      const active = await Call.findOne({ where: { participants: { [Op.overlap]: allIds }, status: { [Op.in]: ['ringing', 'initiated', 'in-progress'] } } });
+      if (active) throw new Error('One or more participants are already in a call');
+      return { call: await Call.create({ callerId: parseInt(callerId, 10), chatId: chatId ? parseInt(chatId, 10) : null, type: callType, status: 'ringing', isGroupCall: true, participants: allIds, answeredBy: [], declinedBy: [], readBy: [], startedAt: null, metadata: { ringStartedAt: new Date().toISOString() } }) };
     });
-    if (active) throw new Error('One or more participants are already in a call');
-
-    const call = await Call.create({
-      callerId:     parseInt(callerId),
-      chatId:       chatId ? parseInt(chatId) : null,
-      type:         callType,
-      status:       'ringing',
-      isGroupCall:  true,
-      participants: allIds,
-      answeredBy:   [],
-      declinedBy:   [],
-      readBy:       [],
-      startedAt:    new Date(),
-      metadata:     { ringStartedAt: new Date().toISOString() },
-    });
-
-      return { active, call };
-    });
-
     return this._format(call);
   }
 
-  // ── getActiveCalls ──────────────────────────────────────────────────────────
   async getActiveCalls(userId) {
-    if (!userId) throw new Error('userId is required');
     await this._cleanupTimedOut();
-
-    const calls = await Call.findAll({
-      where: {
-        participants: { [Op.contains]: [parseInt(userId)] },
-        status:       { [Op.in]: ['ringing', 'initiated', 'in-progress'] },
-      },
-      include: this._buildIncludes(),
-      order:  [['createdAt', 'DESC']],
-    });
+    const calls = await Call.findAll({ where: { participants: { [Op.contains]: [parseInt(userId, 10)] }, status: { [Op.in]: ['ringing', 'initiated', 'in-progress'] } }, include: this._buildIncludes(), order: [['createdAt', 'DESC']] });
     return calls.map(c => this._format(c));
   }
 
-  // ── getCallHistory ──────────────────────────────────────────────────────────
   async getCallHistory(userId, page = 1, limit = 20) {
-    if (!userId) throw new Error('userId is required');
-    page  = parseInt(page);
-    limit = parseInt(limit);
-    if (page < 1 || limit < 1 || limit > 100) throw new Error('Invalid pagination parameters');
-
-    const { count, rows } = await Call.findAndCountAll({
-      where: {
-        participants: { [Op.contains]: [parseInt(userId)] },
-        endedAt:      { [Op.ne]: null },
-      },
-      include: this._buildIncludes(),
-      order:   [['endedAt', 'DESC']],
-      offset:  (page - 1) * limit,
-      limit,
-    });
-
-    return {
-      calls: rows.map(c => this._format(c)),
-      pagination: {
-        currentPage: page,
-        totalPages:  Math.ceil(count / limit),
-        totalCalls:  count,
-        hasNext:     page < Math.ceil(count / limit),
-        hasPrevious: page > 1,
-      },
-    };
+    page = parseInt(page); limit = parseInt(limit);
+    const { count, rows } = await Call.findAndCountAll({ where: { participants: { [Op.contains]: [parseInt(userId, 10)] }, endedAt: { [Op.ne]: null } }, include: this._buildIncludes(), order: [['endedAt', 'DESC']], offset: (page - 1) * limit, limit });
+    return { calls: rows.map(c => this._format(c)), pagination: { currentPage: page, totalPages: Math.ceil(count / limit), totalCalls: count, hasNext: page < Math.ceil(count / limit), hasPrevious: page > 1 } };
   }
 
-  // ── getCallById ─────────────────────────────────────────────────────────────
   async getCallById(callId, userId) {
-    if (!callId || !userId) throw new Error('callId and userId are required');
-    const call = await Call.findOne({
-      where: {
-        id:           callId,
-        participants: { [Op.contains]: [parseInt(userId)] },
-      },
-      include: this._buildIncludes(),
-    });
+    const call = await Call.findOne({ where: { id: callId, participants: { [Op.contains]: [parseInt(userId, 10)] } }, include: this._buildIncludes() });
     if (!call) throw new Error('Call not found or access denied');
     return this._format(call);
   }
 
-  // ── getMissedCalls ──────────────────────────────────────────────────────────
   async getMissedCalls(userId, limit = 50) {
-    if (!userId) throw new Error('userId is required');
-    const calls = await Call.findAll({
-      where: {
-        receiverId: parseInt(userId),
-        status:     'missed',
-        createdAt:  { [Op.gte]: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) },
-      },
-      include: this._buildIncludes(),
-      order:   [['createdAt', 'DESC']],
-      limit:   parseInt(limit),
-    });
+    const calls = await Call.findAll({ where: { receiverId: parseInt(userId, 10), status: 'missed', createdAt: { [Op.gte]: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) } }, include: this._buildIncludes(), order: [['createdAt', 'DESC']], limit: parseInt(limit) });
     return calls.map(c => this._format(c));
   }
 
-  // ── markCallAsRead ──────────────────────────────────────────────────────────
   async markCallAsRead(callId, userId) {
-    if (!callId || !userId) throw new Error('callId and userId are required');
-    const call = await Call.findOne({
-      where: { id: callId, participants: { [Op.contains]: [parseInt(userId)] } },
-    });
+    const call = await Call.findOne({ where: { id: callId, participants: { [Op.contains]: [parseInt(userId, 10)] } } });
     if (!call) throw new Error('Call not found or access denied');
-    if (!call.readBy) call.readBy = [];
-    if (!call.readBy.includes(parseInt(userId))) {
-      call.readBy = [...call.readBy, parseInt(userId)];
-      await call.save();
-    }
+    call.readBy = call.readBy || [];
+    if (!call.readBy.includes(parseInt(userId, 10))) { call.readBy.push(parseInt(userId, 10)); await call.save(); }
     return { success: true };
   }
 
-  // ── _forceCleanupStaleCallsForUsers ─────────────────────────────────────────
-  // FIX-NO-AUTO-END-ANSWERED-CALL: this used to match status 'in-progress'
-  // too and force-end it purely on createdAt age, with no regard for whether
-  // the call was actually answered and is still ongoing. That's exactly the
-  // kind of write-race window that can end a genuinely live call: if
-  // answerCall() has flipped status to 'in-progress' but a concurrent read
-  // here still sees the pre-answer row (or simply runs a beat before that
-  // write lands), an active call gets torn down just because someone else
-  // tried to call one of its participants. A connected call must only ever
-  // end because the caller/receiver hung up. We now exclude 'in-progress'
-  // from the query entirely and, as a second layer of defense, re-check
-  // answeredBy on anything we do find before touching it.
   async _forceCleanupStaleCallsForUsers(userIds) {
     try {
-      const stale = await Call.findAll({
-        where: {
-          [Op.or]: userIds.map(id => ({ participants: { [Op.contains]: [id] } })),
-          status:    { [Op.in]: ['ringing', 'initiated'] },
-          createdAt: { [Op.lt]: new Date(Date.now() - CALL_TIMEOUT_SECONDS * 1000) },
-        },
-      });
+      const stale = await Call.findAll({ where: { [Op.or]: userIds.map(id => ({ participants: { [Op.contains]: [id] } })), status: { [Op.in]: ['ringing', 'initiated'] }, createdAt: { [Op.lt]: new Date(Date.now() - CALL_TIMEOUT_SECONDS * 1000) } } });
       for (const call of stale) {
-        const wasAnswered = call.answeredBy && call.answeredBy.length > 0;
-        if (wasAnswered) continue; // never force-end a call someone actually answered
+        if ((call.answeredBy || []).length) continue;
         await call.update({ status: 'missed', endedAt: new Date() });
-        emitToAll(call.participants, 'call_force_ended', {
-          callId:    call.id,
-          reason:    'stale_cleanup',
-          timestamp: new Date(),
-        });
+        await emitToAll(call.participants, 'call:force_ended', { callId: call.id, reason: 'stale_cleanup', timestamp: Date.now() });
       }
     } catch (err) {
-      console.warn('[CallService] _forceCleanupStaleCallsForUsers error (non-fatal):', err.message);
+      console.warn('[CallService] stale cleanup failed:', err.message);
     }
   }
 
-  // ── _cleanupTimedOut ────────────────────────────────────────────────────────
   async _cleanupTimedOut() {
     try {
-      const cutoff      = new Date(Date.now() - CALL_TIMEOUT_SECONDS * 1000);
-      const timedOut    = await Call.findAll({
-        where: {
-          status:    { [Op.in]: ['ringing', 'initiated'] },
-          createdAt: { [Op.lt]: cutoff },
-          endedAt:   null,
-        },
-        include: this._buildIncludes(),
-      });
-
+      const cutoff = new Date(Date.now() - CALL_TIMEOUT_SECONDS * 1000);
+      const timedOut = await Call.findAll({ where: { status: { [Op.in]: ['ringing', 'initiated'] }, createdAt: { [Op.lt]: cutoff }, endedAt: null }, include: this._buildIncludes() });
       for (const call of timedOut) {
-        call.status  = 'missed';
-        call.endedAt = new Date();
-        await call.save();
-
-        const data = { callId: call.id, callType: call.type, timestamp: new Date() };
-        // Notify callee
-        if (call.receiverId) {
-          emitToAll([call.receiverId], 'call_missed', {
-            ...data,
-            callerId:   call.callerId,
-            callerName: call.callInitiatorUser && call.callInitiatorUser.username || 'Unknown',
-          });
-        }
-        // Notify caller
-        emitToAll([call.callerId], 'call_timeout', {
-          ...data,
-          calleeId:   call.receiverId,
-          calleeName: call.callTargetUser && call.callTargetUser.username || 'Unknown',
-        });
-        // Force-end on both sides so UI resets
-        emitToAll(call.participants, 'call_force_ended', { ...data, reason: 'timeout' });
-      }
-
-      if (timedOut.length > 0) {
-        console.log(`[CallService] Cleaned up ${timedOut.length} timed-out calls`);
+        await call.update({ status: 'missed', endedAt: new Date() });
+        await emitToAll(call.participants, 'call:missed', { callId: call.id, callType: call.type, callerId: call.callerId, receiverId: call.receiverId, timestamp: Date.now() });
+        await emitToAll(call.participants, 'call:force_ended', { callId: call.id, reason: 'timeout', timestamp: Date.now() });
       }
     } catch (err) {
-      console.error('[CallService] _cleanupTimedOut error:', err.message);
+      console.error('[CallService] timeout cleanup failed:', err.message);
     }
   }
 
-  // ── _format ─────────────────────────────────────────────────────────────────
   _format(call) {
     const obj = call.toJSON ? call.toJSON() : { ...(call.dataValues || call) };
-
-    if (obj.startedAt && obj.endedAt) {
-      obj.duration = obj.duration || Math.floor((new Date(obj.endedAt) - new Date(obj.startedAt)) / 1000);
-    }
-
-    obj.participants    = obj.participants    || [];
-    obj.answeredBy      = obj.answeredBy      || [];
-    obj.declinedBy      = obj.declinedBy      || [];
-    obj.readBy          = obj.readBy          || [];
-    obj.callerInfo      = obj.callInitiatorUser || null;
-    obj.calleeInfo      = obj.callTargetUser    || null;
-    obj.isMissed        = obj.status === 'missed';
-    obj.displayDuration = obj.duration > 0
-      ? `${Math.floor(obj.duration / 60)}:${String(obj.duration % 60).padStart(2, '0')}`
-      : '0:00';
-
+    if (obj.startedAt && obj.endedAt) obj.duration = obj.duration || Math.floor((new Date(obj.endedAt) - new Date(obj.startedAt)) / 1000);
+    obj.participants = obj.participants || [];
+    obj.answeredBy = obj.answeredBy || [];
+    obj.declinedBy = obj.declinedBy || [];
+    obj.readBy = obj.readBy || [];
+    obj.callerInfo = obj.callInitiatorUser || null;
+    obj.calleeInfo = obj.callTargetUser || null;
+    obj.isMissed = obj.status === 'missed';
+    obj.displayDuration = obj.duration > 0 ? `${Math.floor(obj.duration / 60)}:${String(obj.duration % 60).padStart(2, '0')}` : '0:00';
     obj.otherParticipants = [];
     if (obj.callInitiatorUser) obj.otherParticipants.push({ ...obj.callInitiatorUser, displayName: obj.callInitiatorUser.username });
-    if (obj.callTargetUser)    obj.otherParticipants.push({ ...obj.callTargetUser,    displayName: obj.callTargetUser.username    });
-
-    // FIX-PHASE15: Always populate top-level callerName / callerAvatar so the
-    // receiver's calls-ui.js can display the real name regardless of which code
-    // path triggered the emit. Without these fields the UI falls back to "user 1".
-    if (!obj.callerName && obj.callInitiatorUser) {
-      const u = obj.callInitiatorUser;
-      const first = u.firstName || '';
-      const last  = u.lastName  || '';
-      obj.callerName   = (first + (last ? ' ' + last : '')).trim() || u.username || null;
-      obj.callerAvatar = u.avatar || null;
-    }
-    if (!obj.calleeName && obj.callTargetUser) {
-      const u = obj.callTargetUser;
-      const first = u.firstName || '';
-      const last  = u.lastName  || '';
-      obj.calleeName   = (first + (last ? ' ' + last : '')).trim() || u.username || null;
-      obj.calleeAvatar = u.avatar || null;
-    }
-    // Alias callType for frontends that check callType instead of type
+    if (obj.callTargetUser) obj.otherParticipants.push({ ...obj.callTargetUser, displayName: obj.callTargetUser.username });
+    if (!obj.callerName && obj.callInitiatorUser) obj.callerName = obj.callInitiatorUser.username || null;
+    if (!obj.callerAvatar && obj.callInitiatorUser) obj.callerAvatar = obj.callInitiatorUser.avatar || null;
+    if (!obj.calleeName && obj.callTargetUser) obj.calleeName = obj.callTargetUser.username || null;
+    if (!obj.calleeAvatar && obj.callTargetUser) obj.calleeAvatar = obj.callTargetUser.avatar || null;
     if (!obj.callType && obj.type) obj.callType = obj.type;
-
     return obj;
   }
 }
