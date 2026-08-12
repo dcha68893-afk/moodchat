@@ -94,7 +94,35 @@ class MessageDeliveryService {
   async sendMessage({ chatId, receiverId = null, senderId, content, type = 'text', clientMessageId, replyToId = null }) {
     const sequelize = getSequelize();
 
-    if (!chatId && receiverId) {
+    // FIX-STALE-CHAT-ID (identity-resolution consolidation): previously,
+    // whenever a chatId was already present in the payload it was trusted
+    // unconditionally and receiverId was only consulted when chatId was
+    // completely absent. That is unsafe: a client can hold a stale/incorrect
+    // chatId (e.g. a cached pending-conversation id that got reused, or a
+    // chatId for a different, previously-opened conversation) alongside a
+    // perfectly correct receiverId for who the user actually meant to
+    // message. In that situation the stale chatId silently won and the
+    // message could be written into the wrong conversation. When BOTH are
+    // supplied, verify the given chatId actually is the direct chat between
+    // (senderId, receiverId); if it isn't (or the check can't confirm it),
+    // fall back to the canonical resolver instead of trusting the chatId
+    // blindly. When only one of the two is supplied, behavior is unchanged.
+    if (chatId && receiverId) {
+      const chatIdIntCheck = parseInt(chatId, 10);
+      const receiverIdIntCheck = parseInt(receiverId, 10);
+      const senderIdIntCheck = parseInt(senderId, 10);
+      const [match] = await sequelize.query(
+        `SELECT c.id FROM chats c
+         WHERE c.id = :chatId AND c.type = 'direct'
+           AND EXISTS (SELECT 1 FROM chat_participants WHERE "chatId" = c.id AND "userId" = :senderId)
+           AND EXISTS (SELECT 1 FROM chat_participants WHERE "chatId" = c.id AND "userId" = :receiverId)
+         LIMIT 1`,
+        { replacements: { chatId: chatIdIntCheck, senderId: senderIdIntCheck, receiverId: receiverIdIntCheck }, type: sequelize.QueryTypes.SELECT }
+      ).catch(() => [null]);
+      if (!match) {
+        chatId = await this.resolveOrCreateDirectChat(senderId, receiverId);
+      }
+    } else if (!chatId && receiverId) {
       chatId = await this.resolveOrCreateDirectChat(senderId, receiverId);
     }
 
@@ -108,8 +136,16 @@ class MessageDeliveryService {
 
     // Idempotency check FIRST — if this exact (sender, clientMessageId) pair
     // already produced a message, return it rather than inserting again.
+    //
+    // FIX-DUAL-IDEMPOTENCY-SYSTEMS: also check metadata->>'localId' — the
+    // key the REST POST /messages route's idempotency check uses — so a
+    // retry that happens to go out over the OTHER transport (REST vs this
+    // socket path) with the same underlying id is still recognized as a
+    // duplicate instead of creating a second row. See the matching fix in
+    // routes/messages.js for the reverse direction.
     const [existing] = await sequelize.query(
-      `SELECT * FROM "Messages" WHERE "senderId" = :senderId AND "clientMessageId" = :clientMessageId LIMIT 1`,
+      `SELECT * FROM "Messages" WHERE "senderId" = :senderId
+         AND ("clientMessageId" = :clientMessageId OR metadata->>'localId' = :clientMessageId) LIMIT 1`,
       { replacements: { senderId: senderIdInt, clientMessageId }, type: sequelize.QueryTypes.SELECT }
     ).catch(() => [null]);
 
@@ -128,13 +164,17 @@ class MessageDeliveryService {
       `INSERT INTO "Messages"
          ("chatId","senderId",content,type,reactions,metadata,"isEdited","isDeleted","replyToId",
           "clientMessageId","status","deliveryAttempts","sentAt","deliveredAt","createdAt","updatedAt")
-       VALUES (:chatId,:senderId,:content,:type,'{}','{}',false,false,:replyToId,
+       VALUES (:chatId,:senderId,:content,:type,'{}',:metadata,false,false,:replyToId,
                :clientMessageId,'sent',0,NOW(),NULL,NOW(),NOW())
        RETURNING *`,
       {
         replacements: {
           chatId: chatIdInt, senderId: senderIdInt, content: sanitizedContent, type,
-          replyToId: replyToId || null, clientMessageId,
+          // FIX-DUAL-IDEMPOTENCY-SYSTEMS: also store the id under metadata.localId
+          // (the shape routes/messages.js's idempotency check and, historically,
+          // some frontend read paths expect), not just in the clientMessageId
+          // column, so a message created here is recognizable by either system.
+          replyToId: replyToId || null, clientMessageId, metadata: JSON.stringify({ localId: clientMessageId }),
         },
         type: sequelize.QueryTypes.INSERT,
       }

@@ -201,72 +201,30 @@ class MessageService {
                 }
             } catch(_) { /* friendService unavailable – deliver to all */ }
 
-            // Get Socket.IO instance directly for reliable delivery
-            const io = ws.getIO();
-            if (io) {
-                // FIX-ROOT-CAUSE-MESSAGE-DUPLICATE: this block previously emitted
-                // the SAME message up to 7 times to a single recipient:
-                //   - `user:${userId}` and `user:${strUid}` are the exact same
-                //     room name (String(userId) template-concatenates identically
-                //     to userId itself), so those two calls were pure duplicates.
-                //     Same for `user_${userId}` / `user_${strUid}`.
-                //   - A second, different event name ('new_message') was also
-                //     emitted to the same room on top of 'message:new'.
-                //   - Then a full extra loop looked up every actual socket id for
-                //     the user and emitted BOTH event names directly to each
-                //     socket — duplicating the room emits again, since every
-                //     open socket for that user is already a member of both
-                //     `user:<id>` and `user_<id>` at connection time (see
-                //     webSocketService.js's join calls).
-                // Sockets do reliably join both `user:<id>` and `user_<id>` (two
-                // genuinely different room names — not a coercion artifact), so
-                // emitting once to each of those two is the actual minimum
-                // needed for delivery; everything else here was pure duplication.
-                // The frontend's real safety net is its own chatId:messageId
-                // dedup in messages-core.js, not the `_broadcastId` this used to
-                // add — nothing in the frontend ever reads that field, so it's
-                // kept here only for forward compatibility, not relied upon.
-                const _broadcastId = `msg_${payload.id || payload.messageId || Date.now()}_${chatId}`;
-                const payloadWithId = { ...payload, _broadcastId };
-                for (const { userId } of participants) {
-                    // CRITICAL: skip blocked users
-                    if (blockedUserIds.has(String(userId))) continue;
-                    // Skip sender — they already see optimistic message in their own UI
-                    if (String(userId) === String(senderId)) continue;
-                    // FORENSIC: log how many sockets are actually sitting in each room
-                    // at the moment of emit. A push notification is delivered by a
-                    // separate service (pushNotificationService) independent of these
-                    // rooms, so "notification arrived, message never displayed" is
-                    // exactly the symptom you'd see if a recipient's socket had
-                    // dropped out of both rooms (reconnect race, stale room after a
-                    // network blip) while push still fired normally. If this log
-                    // ever shows 0 for a user who was actually online, that's the
-                    // smoking gun — compare its timestamp against that user's
-                    // frontend `[FORENSIC] UI_RENDER_CHECK` console line for the
-                    // same message.
-                    try {
-                        const _r1 = io.sockets.adapter.rooms.get(`user:${userId}`);
-                        const _r2 = io.sockets.adapter.rooms.get(`user_${userId}`);
-                        console.log(`[MessageService][FORENSIC] EMIT_TARGET | chatId=${chatId} | uid=${userId} | user:${userId}_size=${_r1 ? _r1.size : 0} | user_${userId}_size=${_r2 ? _r2.size : 0} | msgId=${payload.id} | ts=${Date.now()}`);
-                    } catch (_) {}
-                    io.to(`user:${userId}`).emit('message:new', payloadWithId);
-                    io.to(`user_${userId}`).emit('message:new', payloadWithId);
-                }
-                // FIX Bug 5: Do NOT emit to chat:X / chat_X rooms — that would duplicate all above
-                // FIX: `participants` already excludes the sender (see the SQL query's
-                // `"userId" != :senderId` filter above), so subtracting 1 here undercounted
-                // the actual recipient list by one in every log line — misleading during
-                // exactly the kind of live-repro debugging this log exists for.
-                console.log(`[MessageService] ✅ Real-time delivery: chatId=${chatId}, recipients=${participants.length}`);
-            } else {
-                // Fallback to raw WebSocket service
-                // FIX: only emit 'message:new' (canonical) — sendToUser already targets all 4 room variants
-                for (const { userId } of participants) {
-                    if (String(userId) === String(senderId)) continue; // skip sender
-                    await ws.sendToUser(userId, 'message:new', payload);
-                }
-                console.log(`[MessageService] ⚠️ Fallback WS delivery: chatId=${chatId}, recipients=${participants.length}`);
+            // FIX-CONSOLIDATE-DELIVERY-MECHANISM: this used to have two entirely
+            // separate delivery implementations — a raw io.to(room).emit() loop
+            // here (used whenever the Socket.IO instance was reachable) and a
+            // ws.sendToUser() fallback loop (used only if it wasn't). The raw
+            // io.to() path bypassed wsService.sendToUser() entirely, which meant
+            // it also bypassed everything sendToUser() is responsible for:
+            // verifying the room actually has members before counting a send as
+            // "delivered", the per-socket-id fallback for a receiver whose
+            // socket hasn't joined its room yet, and — the part that actually
+            // matters for "recipient was offline and the message just vanished"
+            // — enqueueOfflineMessage()/flushOfflineMessages(), which is what
+            // guarantees a message reaches an offline recipient once they
+            // reconnect. Routing every send through sendToUser() means there is
+            // now exactly one place that decides whether a message was
+            // delivered and exactly one place responsible for offline delivery,
+            // instead of two independently-maintained copies that can drift.
+            for (const { userId } of participants) {
+                // CRITICAL: skip blocked users
+                if (blockedUserIds.has(String(userId))) continue;
+                // Skip sender — they already see optimistic message in their own UI
+                if (String(userId) === String(senderId)) continue;
+                await ws.sendToUser(userId, 'message:new', payload).catch(() => {});
             }
+            console.log(`[MessageService] ✅ Real-time delivery via sendToUser(): chatId=${chatId}, recipients=${participants.length}`);
         } catch (err) {
             // Real-time failure is non-fatal — message is already saved
             console.error('[MessageService] Real-time delivery error:', err.message);

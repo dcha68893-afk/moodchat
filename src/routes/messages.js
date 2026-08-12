@@ -736,6 +736,38 @@ router.post('/', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
         const status = /not found/i.test(resolveErr.message) ? 404 : 400;
         return res.status(status).json({ success: false, message: resolveErr.message || 'Could not resolve conversation' });
       }
+    } else if (chatId && receiverId) {
+      // FIX-STALE-CHAT-ID (same class of bug already fixed in
+      // messageDeliveryService.sendMessage() for the socket path — this
+      // REST route had an identical gap): a chatId supplied alongside a
+      // receiverId used to be trusted unconditionally, with receiverId
+      // only ever consulted when chatId was completely absent. A client
+      // holding a stale/incorrect chatId (a cached pending-conversation id
+      // that got reused, or the id of a different, previously-opened
+      // conversation) next to a correct receiverId would silently have the
+      // message written into the wrong conversation. Not currently
+      // reachable from this app's own frontend (which never sends both
+      // fields in the same request today), but this route is a public API
+      // surface — any other caller doing so would hit it. Verify the given
+      // chatId actually is the direct chat between (senderId, receiverId);
+      // if not, resolve the canonical one instead of trusting it blindly.
+      const safeReceiverId = safeInt(receiverId);
+      const [match] = await sequelize.query(
+        `SELECT c.id FROM chats c
+         WHERE c.id = :chatId AND c.type = 'direct'
+           AND EXISTS (SELECT 1 FROM chat_participants WHERE "chatId" = c.id AND "userId" = :senderId)
+           AND EXISTS (SELECT 1 FROM chat_participants WHERE "chatId" = c.id AND "userId" = :receiverId)
+         LIMIT 1`,
+        { replacements: { chatId, senderId, receiverId: safeReceiverId }, type: sequelize.QueryTypes.SELECT }
+      ).catch(() => [null]);
+      if (!match) {
+        try {
+          chatId = await messageDeliveryService.resolveOrCreateDirectChat(senderId, safeReceiverId);
+        } catch (resolveErr) {
+          const status = /not found/i.test(resolveErr.message) ? 404 : 400;
+          return res.status(status).json({ success: false, message: resolveErr.message || 'Could not resolve conversation' });
+        }
+      }
     }
 
 
@@ -801,12 +833,28 @@ router.post('/', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
     // FIX-AUDIT: Old check used content-match which incorrectly dedupes two DIFFERENT
     // messages that happen to share identical text within the window. Correct fix:
     // store localId in metadata JSONB at insert time (below) and query by it here.
+    //
+    // FIX-DUAL-IDEMPOTENCY-SYSTEMS: this route's idempotency key has always
+    // lived in metadata->>'localId' (a plain SELECT check, no DB constraint
+    // behind it), while messageDeliveryService.sendMessage() (used by
+    // msg:send and the legacy message:send socket path) dedupes via a
+    // dedicated `clientMessageId` column that has an actual unique index
+    // (see migration 2026999990013). Two non-interoperating idempotency
+    // systems meant a retry that happened to go out over the other
+    // transport wouldn't be recognized as a duplicate of one sent via this
+    // route, and this route's own check was a plain SELECT-then-INSERT with
+    // no atomic guarantee — two near-simultaneous identical requests could
+    // both pass the check before either INSERT committed. Both gaps are
+    // closed below: this route now also writes clientLocalId into the
+    // `clientMessageId` column (so a socket-side retry with the same id is
+    // recognized), and the INSERT is wrapped to catch that column's unique
+    // constraint as an atomic backstop if this pre-check race still occurs.
     if (clientLocalId) {
       try {
         const existing = await sequelize.query(
           `SELECT id, "chatId", "senderId", content, type, "createdAt" FROM "Messages"
            WHERE "senderId" = :senderId AND "chatId" = :chatId
-             AND metadata->>'localId' = :localId
+             AND (metadata->>'localId' = :localId OR "clientMessageId" = :localId)
              AND "createdAt" > NOW() - INTERVAL '10 minutes'
            ORDER BY "createdAt" DESC LIMIT 1`,
           { replacements: { senderId, chatId, localId: String(clientLocalId) }, type: sequelize.QueryTypes.SELECT }
@@ -864,30 +912,67 @@ router.post('/', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
     } catch (_) { /* non-fatal — message sends without an expiry if this lookup fails */ }
 
     try {
-      const msgResult = await sequelize.query(
-        // BUG-012 FIX: Explicitly include isRead, isDeleted, isEdited boolean fields.
-        // Without these, raw INSERT leaves NULLs at DB level (model defaultValues only
-        // apply to ORM inserts, not raw SQL). GET /chats counts WHERE isRead = false —
-        // NULL != false — so unread counts were always 0 for all new messages.
-        // FIX-FALSE-DELIVERY (forensic clue 3): "deliveredAt" used to be stamped
-        // NOW() right here, at INSERT time — before the message had even been
-        // handed to Socket.IO, let alone actually reached the receiver. That made
-        // every message look "delivered" the instant it was sent, regardless of
-        // whether the receiver was online, in the right room, or ever got it.
-        // socket.emit() succeeding only proves the emit call didn't throw — it is
-        // not proof of delivery. "deliveredAt" is now left NULL at insert time and
-        // is only ever set later, from the real two-phase ack in
-        // webSocketService.js's 'message:delivery_ack' handler (fired only after
-        // the receiver's client has actually received and stored the message).
-        `INSERT INTO "Messages" ("chatId","senderId",content,type,reactions,"replyToId",metadata,"expiresAt","isRead","isDeleted","isEdited","sentAt","deliveredAt","createdAt","updatedAt")
-         VALUES (:chatId,:senderId,:content,:type,'{}',:replyToId,:metadata,:expiresAt,false,false,false,NOW(),NULL,NOW(),NOW())
-         RETURNING id,"chatId","senderId",content,type,"replyToId","createdAt"`,
-        {
-          replacements: { chatId, senderId, content: safeContent, type: messageType, replyToId: finalReplyToId, metadata: JSON.stringify(msgMetadata), expiresAt: _msgExpiresAt },
-          type: sequelize.QueryTypes.INSERT,
-          transaction: t,
+      let msgResult;
+      try {
+        msgResult = await sequelize.query(
+          // BUG-012 FIX: Explicitly include isRead, isDeleted, isEdited boolean fields.
+          // Without these, raw INSERT leaves NULLs at DB level (model defaultValues only
+          // apply to ORM inserts, not raw SQL). GET /chats counts WHERE isRead = false —
+          // NULL != false — so unread counts were always 0 for all new messages.
+          // FIX-FALSE-DELIVERY (forensic clue 3): "deliveredAt" used to be stamped
+          // NOW() right here, at INSERT time — before the message had even been
+          // handed to Socket.IO, let alone actually reached the receiver. That made
+          // every message look "delivered" the instant it was sent, regardless of
+          // whether the receiver was online, in the right room, or ever got it.
+          // socket.emit() succeeding only proves the emit call didn't throw — it is
+          // not proof of delivery. "deliveredAt" is now left NULL at insert time and
+          // is only ever set later, from the real two-phase ack in
+          // webSocketService.js's 'message:delivery_ack' handler (fired only after
+          // the receiver's client has actually received and stored the message).
+          //
+          // FIX-DUAL-IDEMPOTENCY-SYSTEMS: clientLocalId is now also written into
+          // the dedicated `clientMessageId` column (which has a real unique index
+          // on (senderId, clientMessageId) — see migration 2026999990013), not
+          // just into metadata. This makes the same id recognizable regardless of
+          // whether a retry goes out over this REST route or the msg:* socket
+          // path, and gives this INSERT an atomic uniqueness guarantee the
+          // metadata-only check above can't provide on its own.
+          `INSERT INTO "Messages" ("chatId","senderId",content,type,reactions,"replyToId",metadata,"clientMessageId","expiresAt","isRead","isDeleted","isEdited","status","sentAt","deliveredAt","createdAt","updatedAt")
+           VALUES (:chatId,:senderId,:content,:type,'{}',:replyToId,:metadata,:clientMessageId,:expiresAt,false,false,false,'sent',NOW(),NULL,NOW(),NOW())
+           RETURNING id,"chatId","senderId",content,type,"replyToId","createdAt"`,
+          {
+            replacements: { chatId, senderId, content: safeContent, type: messageType, replyToId: finalReplyToId, metadata: JSON.stringify(msgMetadata), clientMessageId: clientLocalId ? String(clientLocalId) : null, expiresAt: _msgExpiresAt },
+            type: sequelize.QueryTypes.INSERT,
+            transaction: t,
+          }
+        );
+      } catch (insertErr) {
+        // FIX-DUAL-IDEMPOTENCY-SYSTEMS: the pre-check above is a plain SELECT
+        // with no atomic guarantee — two near-simultaneous identical retries
+        // could both pass it before either INSERT commits. If that happens,
+        // the second INSERT now hits the real unique index on
+        // (senderId, clientMessageId) instead of creating a duplicate row.
+        // Treat that specific failure as "already sent" and look the real
+        // row up, instead of surfacing a 500 for what is actually a
+        // successful, already-delivered send.
+        const isUniqueViolation = insertErr && (insertErr.name === 'SequelizeUniqueConstraintError' || /duplicate key value/i.test(insertErr.message || ''));
+        if (isUniqueViolation && clientLocalId) {
+          await t.rollback();
+          const [dup] = await sequelize.query(
+            `SELECT id, "chatId", "senderId", content, type, "createdAt" FROM "Messages"
+             WHERE "senderId" = :senderId AND "clientMessageId" = :localId LIMIT 1`,
+            { replacements: { senderId, localId: String(clientLocalId) }, type: sequelize.QueryTypes.SELECT }
+          ).catch(() => [null]);
+          if (dup) {
+            _flog(`[messages.js] Idempotency race caught by unique index - returning existing message id=${dup.id} for localId=${clientLocalId}`);
+            return res.status(201).json({
+              success: true, message: 'Message sent successfully (idempotent)',
+              data: { message: { ...dup, localId: clientLocalId } }
+            });
+          }
         }
-      );
+        throw insertErr;
+      }
       messageId = msgResult[0][0].id;
 
       await sequelize.query(
@@ -929,7 +1014,12 @@ router.post('/', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
         { replacements: { senderId }, type: sequelize.QueryTypes.SELECT }
       );
     } catch (txErr) {
-      await t.rollback();
+      // FIX-DOUBLE-ROLLBACK: the unique-violation branch above may already
+      // have called t.rollback() itself (to free the transaction before
+      // doing an independent duplicate-lookup query) before re-throwing.
+      // Calling rollback a second time on an already-finished Sequelize
+      // transaction throws its own error, which would mask the real one.
+      try { await t.rollback(); } catch (_alreadyFinished) { /* already rolled back above — fine */ }
       throw txErr;
     }
 

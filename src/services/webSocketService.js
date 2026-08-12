@@ -460,6 +460,18 @@ class WebSocketService {
             // were instead being stamped optimistically at send time (see
             // messages.js), which is a false positive. Both writes are best-effort
             // and non-fatal — a DB hiccup here must never block notifying the sender.
+            // FIX-DUPLICATE-ACK-CONTRACTS (consolidation): this handler used to run
+            // its own, independent copy of the "mark delivered" UPDATE + INSERT
+            // INTO message_delivery_logs SQL — a second, hand-maintained
+            // implementation of exactly what messageDeliveryService.markDelivered()
+            // (used by the msg:* pipeline's msg:delivered_ack handler, see
+            // messageLifecycleSocket.js) already does. Two independent copies of
+            // the same "recipient confirmed receipt" write is exactly the kind of
+            // drift that already caused problems elsewhere in this codebase (see
+            // directChatResolver.js's consolidation note) — a fix landing in one
+            // copy and not the other. This legacy event name is kept (older
+            // clients still emit it) but now delegates to the single shared
+            // implementation instead of maintaining its own SQL.
             socket.removeAllListeners('message:delivery_ack').on('message:delivery_ack', async (raw = {}) => {
                 const { messageId, chatId, senderId } = raw;
                 // DIAGNOSTIC (temporary — undelivered-after-10s investigation): log the
@@ -474,17 +486,8 @@ class WebSocketService {
                 console.log(`[WSService] ✅ delivery_ack accepted mid=${messageId} chatId=${chatId} from uid=${userId} for senderId=${senderId}`);
                 this.clearMessageDeliveryTimeout(messageId);
                 try {
-                    const sequelize = db.sequelize || db;
-                    await sequelize.query(
-                        `UPDATE "Messages" SET "deliveredAt" = NOW() WHERE id = :messageId AND "deliveredAt" IS NULL`,
-                        { replacements: { messageId } }
-                    );
-                    await sequelize.query(
-                        `INSERT INTO message_delivery_logs ("messageId","userId","chatId","event","createdAt")
-                         VALUES (:messageId,:userId,:chatId,'delivered',NOW())
-                         ON CONFLICT ("messageId","userId","event") DO NOTHING`,
-                        { replacements: { messageId, userId, chatId: chatId || null } }
-                    );
+                    const messageDeliveryService = require('./messageDeliveryService');
+                    await messageDeliveryService.markDelivered(messageId, userId);
                 } catch (_persistErr) {
                     console.warn('[WSService] delivery_ack persistence failed (non-fatal):', _persistErr.message);
                 }
@@ -747,24 +750,85 @@ class WebSocketService {
             socket.removeAllListeners('call:webrtc_answer').on('call:webrtc_answer', () => {});
 
             // ── PHASE14 FIX P0: message:send socket handler ───────────────────
+            // CONSOLIDATE-MESSAGE-PROTOCOL (fix for two-protocols-coexisting):
+            // this handler used to run its own separate creation path —
+            // messageService.createMessage(), which internally does its own
+            // participant-lookup + raw io.to() broadcast (no idempotency key,
+            // no offline-queue fallback, no shared identity-resolution
+            // validation) — completely independent from the msg:* lifecycle
+            // pipeline's messageDeliveryService.sendMessage(). Two live,
+            // independently-maintained "create + deliver a message" code
+            // paths is the exact drift risk called out across this codebase's
+            // other consolidation fixes (directChatResolver.js,
+            // messageDeliveryService's markDelivered, etc.) — a correctness
+            // fix landing in one path and not the other. This legacy event
+            // name is kept (older clients still emit 'message:send' instead
+            // of 'msg:send'), but now delegates to the same canonical,
+            // idempotent creation path and the same canonical delivery
+            // mechanism (sendToUser, with its offline-queue fallback) as
+            // everything else.
             socket.removeAllListeners('message:send').on('message:send', async (payload = {}) => {
+                const { localId: msLocalId } = payload || {};
                 try {
-                    const { chatId: msChatId, content: msContent, type: msType = 'text', replyToId: msReplyId, localId: msLocalId } = payload;
-                    if (!msChatId || !msContent) {
-                        socket.emit('message:send:error', { localId: msLocalId, error: 'chatId and content are required' });
+                    const { chatId: msChatId, receiverId: msReceiverId, content: msContent, type: msType = 'text', replyToId: msReplyId } = payload;
+                    if ((!msChatId && !msReceiverId) || !msContent) {
+                        socket.emit('message:send:error', { localId: msLocalId, error: 'chatId (or receiverId) and content are required' });
                         return;
                     }
-                    const messageService = require('./messageService');
-                    const msg = await messageService.createMessage({
-                        chatId: parseInt(msChatId, 10), senderId: userId,
-                        content: String(msContent).trim().substring(0, 5000), type: msType,
-                        replyToId: msReplyId ? parseInt(msReplyId, 10) : null
+
+                    const messageDeliveryService = require('./messageDeliveryService');
+                    // FIX-DUAL-IDEMPOTENCY-SYSTEMS: use the caller's raw localId
+                    // directly as the clientMessageId (no transport-specific
+                    // prefix) — the unique index is already scoped per-sender
+                    // (senderId, clientMessageId), so there's no collision risk
+                    // between different users, and using the exact same id the
+                    // client generated means a retry of the same logical send
+                    // is recognized as a duplicate no matter which transport
+                    // (this legacy socket event, msg:send, or REST) it goes out
+                    // over. Falls back to a random one-shot id only when the
+                    // caller didn't supply a localId at all.
+                    const clientMessageId = msLocalId
+                        ? String(msLocalId)
+                        : `nolocalid:${userId}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+
+                    const { message } = await messageDeliveryService.sendMessage({
+                        chatId: msChatId ? parseInt(msChatId, 10) : undefined,
+                        receiverId: msReceiverId ? parseInt(msReceiverId, 10) : undefined,
+                        senderId: userId,
+                        content: String(msContent).trim().substring(0, 5000),
+                        type: msType,
+                        clientMessageId,
+                        replyToId: msReplyId ? parseInt(msReplyId, 10) : null,
                     });
-                    socket.emit('message:send:ack', { localId: msLocalId, messageId: msg.id, chatId: msChatId, sentAt: msg.sentAt || msg.createdAt });
+
+                    socket.emit('message:send:ack', { localId: msLocalId, messageId: message.id, chatId: message.chatId, sentAt: message.sentAt || message.createdAt });
+
+                    // Push to recipients through the one canonical mechanism
+                    // (sendToUser + offline-queue fallback), reusing the exact same
+                    // helper the msg:* pipeline uses — see messageLifecycleSocket.js.
+                    // Emits both 'msg:new' (canonical) and legacy 'message:new'
+                    // (below) so clients still on the old event name keep working
+                    // during the transition.
+                    const { pushToRecipients } = require('../sockets/messageLifecycleSocket');
+                    await pushToRecipients(this, message, userId).catch(() => {});
+                    if (message.chatId) {
+                        const sequelize = require('../models').sequelize;
+                        const legacyRecipients = await sequelize.query(
+                            `SELECT DISTINCT "userId" FROM chat_participants WHERE "chatId" = :chatId AND "userId" != :senderId`,
+                            { replacements: { chatId: parseInt(message.chatId, 10), senderId: parseInt(userId, 10) }, type: sequelize.QueryTypes.SELECT }
+                        ).catch(() => []);
+                        for (const { userId: recipientId } of (legacyRecipients || [])) {
+                            this.sendToUser(recipientId, 'message:new', {
+                                id: message.id, chatId: message.chatId, conversationId: message.chatId,
+                                senderId: message.senderId, content: message.content, type: message.type,
+                                sender: message.sender || null, replyToId: message.replyToId || null,
+                                createdAt: message.createdAt, sentAt: message.sentAt, deliveredAt: null,
+                            }).catch(() => {});
+                        }
+                    }
                 } catch (err) {
-                    const { localId: msErrLocalId } = payload || {};
                     console.warn('[WSService] message:send socket error:', err.message);
-                    socket.emit('message:send:error', { localId: msErrLocalId, error: err.message });
+                    socket.emit('message:send:error', { localId: msLocalId, error: err.message });
                 }
             });
 
@@ -1277,8 +1341,17 @@ class WebSocketService {
         }
 
         // FIX-OFFLINE-QUEUE: If not delivered and it's a message event, enqueue for retry
+        // FIX-MSG-NEW-NOT-QUEUED: 'msg:new' (the canonical msg:* lifecycle event —
+        // see messageLifecycleSocket.js / MESSAGE_LIFECYCLE_REBUILD.md) was missing
+        // from this whitelist. Every OTHER message event name got queued for an
+        // offline recipient and replayed on reconnect via flushOfflineMessages();
+        // 'msg:new' silently did not, so any consumer relying solely on the msg:*
+        // pipeline never received a message that arrived while it was offline,
+        // even though the sender's copy was safely durable in Postgres the whole
+        // time. Added here so both protocols get the same offline-delivery guarantee
+        // until the app fully cuts over to one canonical event.
         if (!delivered) {
-            const _queueableEvents = ['new_message', 'message:new', 'message_received', 'chat:message'];
+            const _queueableEvents = ['new_message', 'message:new', 'msg:new', 'message_received', 'chat:message'];
             if (_queueableEvents.includes(event)) {
                 this.enqueueOfflineMessage(uid, event, data);
             }
@@ -1427,10 +1500,38 @@ class WebSocketService {
         const uid = String(userId);
         const queue = this._offlineQueue.get(uid);
         if (!queue || queue.length === 0) return;
+
+        // FIX-OFFLINE-QUEUE-RACE: this used to delete the queue key from the
+        // Map BEFORE attempting any delivery — i.e. the durable record of
+        // "these messages are still owed to this user" was destroyed up
+        // front, on the assumption every send below would succeed. If the
+        // process crashed/restarted mid-loop, or an individual sendToUser()
+        // attempt failed (it can — e.g. the socket disconnects again
+        // mid-flush), those messages were gone for good: silently dropped,
+        // exactly the "messages disappear" symptom this queue exists to
+        // prevent.
+        //
+        // Fix: detach the array from the map first so a concurrent flush
+        // for the same user can't double-process it, but keep our own
+        // reference so nothing is lost if this async function never
+        // finishes. sendToUser() already re-enqueues (via
+        // enqueueOfflineMessage) anything it fails to deliver — including
+        // during this very flush, into a fresh queue entry for `uid` — so
+        // we don't also delete/overwrite that fresh entry afterwards; we
+        // only ever remove the *original* snapshot we already detached.
         this._offlineQueue.delete(uid);
              _flog(`[WSService] 🚀 Flushing ${queue.length} queued msgs to uid=${uid}`);
+        let failures = 0;
         for (const item of queue) {
-            await this.sendToUser(userId, item.event, item.payload).catch(() => {});
+            try {
+                const ok = await this.sendToUser(userId, item.event, item.payload);
+                if (!ok) failures++;
+            } catch (_) {
+                failures++;
+            }
+        }
+        if (failures > 0) {
+            _flog(`[WSService] ⚠️ Flush for uid=${uid} had ${failures}/${queue.length} delivery failure(s) — those were re-queued by sendToUser() for the next reconnect.`);
         }
     }
 

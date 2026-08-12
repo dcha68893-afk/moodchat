@@ -148,6 +148,14 @@ function register(wsService, socket, userId) {
   });
 }
 
+// CONSOLIDATE-MESSAGE-PROTOCOL: exported so any other entry point that
+// creates a message through messageDeliveryService (currently: this
+// module's msg:send handler, and the legacy message:send handler in
+// webSocketService.js) pushes it to recipients through this exact same
+// function, instead of each keeping its own hand-rolled copy of "look up
+// participants, build the payload, call sendToUser per recipient". That
+// duplication is what let the msg:* and message:* protocols drift apart
+// in the first place.
 async function pushToRecipients(wsService, message, senderId) {
   const sequelize = require('../models').sequelize;
   const chatIdInt = parseInt(message.chatId, 10);
@@ -187,4 +195,4 @@ async function getSenderIdForMessage(messageId) {
   return row ? row.senderId : null;
 }
 
-module.exports = { register };
+module.exports = { register, pushToRecipients };
