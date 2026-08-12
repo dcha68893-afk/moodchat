@@ -1376,7 +1376,7 @@ class WebSocketService {
         if (!delivered) {
             const _queueableEvents = ['new_message', 'message:new', 'msg:new', 'message_received', 'chat:message'];
             if (_queueableEvents.includes(event)) {
-                this.enqueueOfflineMessage(uid, event, data);
+                this.enqueueOfflineMessage(uid, event, data).catch(() => {});
             }
         }
 
@@ -1508,53 +1508,117 @@ class WebSocketService {
         if (t) { clearTimeout(t); this._msgTimeouts.delete(`msg:${messageId}`); }
     }
 
-    // ── FIX-OFFLINE-QUEUE: Store messages for offline users; flush on reconnect ─
-    enqueueOfflineMessage(targetUserId, event, payload) {
-        if (!this._offlineQueue) this._offlineQueue = new Map();
-        const uid = String(targetUserId);
-        if (!this._offlineQueue.has(uid)) this._offlineQueue.set(uid, []);
-        const q = this._offlineQueue.get(uid);
-        if (q.length < 200) q.push({ event, payload, queuedAt: Date.now() });
-             _flog(`[WSService] 📦 Queued offline msg for uid=${uid} (total: ${q.length})`);
+    // ── FIX-OFFLINE-QUEUE (item 7 — durable backend offline queue) ────────────
+    // Was: a plain in-memory Map (userId -> array). A process restart
+    // (deploy / crash / autoscale recycle on Render) silently dropped every
+    // queued message for every offline user — nothing on disk recorded that
+    // a delivery was still owed. Now backed by the `offline_message_queue`
+    // Postgres table (migration 2026999990017): a row is written and
+    // committed BEFORE this function returns, so a message is never "only
+    // in RAM" while waiting for its recipient to reconnect. Rows are only
+    // deleted after sendToUser() reports a confirmed successful delivery.
+    // Falls back to the previous in-memory Map only if the DB write itself
+    // fails (e.g. migration not yet applied), so this degrades instead of
+    // throwing inside sendToUser()'s fire-and-forget call site.
+    async enqueueOfflineMessage(targetUserId, event, payload) {
+        const uid = parseInt(targetUserId, 10);
+        if (!uid || !event) return;
+        try {
+            const sequelize = require('../models').sequelize;
+            // Cap per-user backlog at 200 undelivered rows (same limit the
+            // old in-memory queue enforced) so a long-offline user can't
+            // grow this table unboundedly — drop the oldest once at cap.
+            const [[{ count }]] = await sequelize.query(
+                `SELECT COUNT(*)::int AS count FROM offline_message_queue WHERE "userId" = :uid AND "deliveredAt" IS NULL`,
+                { replacements: { uid } }
+            );
+            if (count >= 200) {
+                await sequelize.query(
+                    `DELETE FROM offline_message_queue WHERE id = (
+                       SELECT id FROM offline_message_queue
+                       WHERE "userId" = :uid AND "deliveredAt" IS NULL
+                       ORDER BY "queuedAt" ASC LIMIT 1
+                     )`,
+                    { replacements: { uid } }
+                );
+            }
+            await sequelize.query(
+                `INSERT INTO offline_message_queue ("userId", event, payload, "queuedAt", "createdAt", "updatedAt")
+                 VALUES (:uid, :event, :payload, NOW(), NOW(), NOW())`,
+                { replacements: { uid, event, payload: JSON.stringify(payload || {}) } }
+            );
+            _flog(`[WSService] 📦 Queued (durable) offline msg for uid=${uid} event=${event}`);
+        } catch (dbErr) {
+            console.warn('[WSService] offline_message_queue insert failed — falling back to in-memory queue for this item:', dbErr.message);
+            if (!this._offlineQueueFallback) this._offlineQueueFallback = new Map();
+            const key = String(uid);
+            if (!this._offlineQueueFallback.has(key)) this._offlineQueueFallback.set(key, []);
+            const q = this._offlineQueueFallback.get(key);
+            if (q.length < 200) q.push({ event, payload, queuedAt: Date.now() });
+        }
     }
 
     async flushOfflineMessages(userId) {
-        if (!this._offlineQueue) return;
-        const uid = String(userId);
-        const queue = this._offlineQueue.get(uid);
-        if (!queue || queue.length === 0) return;
+        const uid = parseInt(userId, 10);
+        if (!uid) return;
 
-        // FIX-OFFLINE-QUEUE-RACE: this used to delete the queue key from the
-        // Map BEFORE attempting any delivery — i.e. the durable record of
-        // "these messages are still owed to this user" was destroyed up
-        // front, on the assumption every send below would succeed. If the
-        // process crashed/restarted mid-loop, or an individual sendToUser()
-        // attempt failed (it can — e.g. the socket disconnects again
-        // mid-flush), those messages were gone for good: silently dropped,
-        // exactly the "messages disappear" symptom this queue exists to
-        // prevent.
-        //
-        // Fix: detach the array from the map first so a concurrent flush
-        // for the same user can't double-process it, but keep our own
-        // reference so nothing is lost if this async function never
-        // finishes. sendToUser() already re-enqueues (via
-        // enqueueOfflineMessage) anything it fails to deliver — including
-        // during this very flush, into a fresh queue entry for `uid` — so
-        // we don't also delete/overwrite that fresh entry afterwards; we
-        // only ever remove the *original* snapshot we already detached.
-        this._offlineQueue.delete(uid);
-             _flog(`[WSService] 🚀 Flushing ${queue.length} queued msgs to uid=${uid}`);
-        let failures = 0;
-        for (const item of queue) {
-            try {
-                const ok = await this.sendToUser(userId, item.event, item.payload);
-                if (!ok) failures++;
-            } catch (_) {
-                failures++;
+        try {
+            const sequelize = require('../models').sequelize;
+            const rows = await sequelize.query(
+                `SELECT id, event, payload FROM offline_message_queue
+                 WHERE "userId" = :uid AND "deliveredAt" IS NULL
+                 ORDER BY "queuedAt" ASC LIMIT 500`,
+                { replacements: { uid }, type: sequelize.QueryTypes.SELECT }
+            );
+
+            if (rows && rows.length > 0) {
+                _flog(`[WSService] 🚀 Flushing ${rows.length} durably-queued msgs to uid=${uid}`);
+                let failures = 0;
+                for (const row of rows) {
+                    try {
+                        const payload = typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload;
+                        const ok = await this.sendToUser(userId, row.event, payload);
+                        if (ok) {
+                            // Only mark delivered on confirmed success — a failed
+                            // send leaves the row untouched (deliveredAt still
+                            // NULL) for the next reconnect/flush to retry, same
+                            // "never delete before confirmed delivery" guarantee
+                            // the old in-memory version aimed for but couldn't
+                            // actually keep across a process restart.
+                            await sequelize.query(
+                                `UPDATE offline_message_queue SET "deliveredAt" = NOW(), "updatedAt" = NOW() WHERE id = :id`,
+                                { replacements: { id: row.id } }
+                            );
+                        } else {
+                            await sequelize.query(
+                                `UPDATE offline_message_queue SET attempts = attempts + 1, "updatedAt" = NOW() WHERE id = :id`,
+                                { replacements: { id: row.id } }
+                            ).catch(() => {});
+                            failures++;
+                        }
+                    } catch (_) {
+                        failures++;
+                    }
+                }
+                if (failures > 0) {
+                    _flog(`[WSService] ⚠️ Flush for uid=${uid} had ${failures}/${rows.length} delivery failure(s) — left queued for next reconnect.`);
+                }
             }
+        } catch (dbErr) {
+            console.warn('[WSService] offline_message_queue flush query failed:', dbErr.message);
         }
-        if (failures > 0) {
-            _flog(`[WSService] ⚠️ Flush for uid=${uid} had ${failures}/${queue.length} delivery failure(s) — those were re-queued by sendToUser() for the next reconnect.`);
+
+        // Drain the in-memory fallback queue too, in case any items landed
+        // there while the DB was briefly unreachable.
+        if (this._offlineQueueFallback) {
+            const key = String(uid);
+            const queue = this._offlineQueueFallback.get(key);
+            if (queue && queue.length > 0) {
+                this._offlineQueueFallback.delete(key);
+                for (const item of queue) {
+                    try { await this.sendToUser(userId, item.event, item.payload); } catch (_) {}
+                }
+            }
         }
     }
 
