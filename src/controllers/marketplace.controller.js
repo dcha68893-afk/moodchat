@@ -941,8 +941,18 @@ class MarketplaceController {
         try {
             const O = Model.Order;
             if (!O) return ok(res, { tracking: null });
-            const order = await O.findByPk(req.params.id, { attributes: ['id','status','trackingNumber','shippedAt','deliveredAt','metadata'] });
+            // FIX (Audit #23 - IDOR): this used to fetch and return tracking info for ANY
+            // order id with no ownership check — any authenticated user could read another
+            // buyer's delivery status/tracking number just by guessing/incrementing the id.
+            // Added buyerId/sellerId to the attribute list (they weren't selected before) and
+            // the same ownership check used by getOrder/updateOrderStatus in this file.
+            const order = await O.findByPk(req.params.id, { attributes: ['id','buyerId','sellerId','status','trackingNumber','shippedAt','deliveredAt','metadata'] });
             if (!order) return next(new AppError('Order not found', 404));
+
+            const userId = req.user?.id;
+            if (order.buyerId !== userId && order.sellerId !== userId && req.user?.role !== 'admin') {
+                return next(new AppError('Not authorized', 403));
+            }
 
             return ok(res, {
                 tracking: {
@@ -1311,30 +1321,38 @@ class MarketplaceController {
             const product = await T?.findByPk(productId);
             if (!product) return next(new AppError('Product not found', 404));
 
-            // P1 FIX: Verified purchase check — confirm buyer has a paid/delivered order for this product
-            let isVerified = false;
+            // FIX (Audit #11 - reviews need anti-abuse enforcement): "verified" was
+            // computed correctly, but nothing actually gated on it — a review with no
+            // matching order at all (isVerified stays false) still went through the same
+            // R.create() below and still called product.addRating(), so it counted fully
+            // toward the product's public star rating. Anyone could create an account and
+            // post 5-star (or 1-star, on a competitor) reviews with zero purchase, at any
+            // volume. Per the audit's own checklist — purchased? delivered? not already
+            // reviewed? — a review now requires a DELIVERED order for this product
+            // (paid/shipped is not enough on its own; that only proves payment intent, not
+            // that the buyer actually received and could evaluate the item).
             let verifiedOrderId = order_id || null;
+            let purchaseOrder = null;
             if (O) {
                 const candidateOrders = await O.findAll({
                     where: {
                         buyerId: userId,
-                        status: { [Op.in]: ['paid', 'delivered', 'shipped'] },
+                        status: 'delivered',
                         ...(order_id ? { id: order_id } : {}),
                     },
                     order: [['createdAt', 'DESC']],
                     limit: order_id ? 1 : 50,
                 }).catch(() => []);
 
-                const purchaseOrder = candidateOrders.find(o =>
+                purchaseOrder = candidateOrders.find(o =>
                     o.productId === productId ||
                     (Array.isArray(o.metadata?.items) && o.metadata.items.some(i => i.product_id === productId))
                 ) || null;
-
-                if (purchaseOrder) {
-                    isVerified = true;
-                    verifiedOrderId = verifiedOrderId || purchaseOrder.id;
-                }
             }
+            if (!purchaseOrder) {
+                return next(new AppError('You can only review products from a delivered order', 403));
+            }
+            verifiedOrderId = verifiedOrderId || purchaseOrder.id;
 
             // Check if already reviewed
             const existing = await R.findOne({ where: { productId, userId } });
@@ -1348,19 +1366,19 @@ class MarketplaceController {
                 rating:             ratingNum,
                 comment:            ((comment || text || '').trim()).substring(0, 2000),
                 images:             Array.isArray(images) ? images.slice(0,5) : [],
-                isVerifiedPurchase: isVerified,
+                isVerifiedPurchase: true,
             });
 
-            if (T) await product.addRating(ratingNum);
+            await product.addRating(ratingNum);
 
             _socketBroadcast(req, 'review:new', {
                 product_id: productId,
                 seller_id:  product.sellerId,
                 rating:     ratingNum,
-                verified:   isVerified,
+                verified:   true,
             });
 
-            return ok(res, { review: _formatReview(review), verified: isVerified }, 'Review submitted', 201);
+            return ok(res, { review: _formatReview(review), verified: true }, 'Review submitted', 201);
         } catch(e) { err(next, e, 'createReview'); }
     }
 
