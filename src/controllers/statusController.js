@@ -108,14 +108,27 @@ class StatusController {
            :  'friends');  // safe default
 
       // Resolve expiry: explicit date > duration in seconds > 24 h default
+      // BUGFIX: this controller resolves expiresAt itself and always passes the
+      // result into statusData.expiresAt below — so statusService.createStatus's
+      // OWN duration-resolution branch never runs (expiresAt already truthy by
+      // then); whatever this block computes is what actually gets saved. This
+      // had the identical duration:0-is-falsy bug as the service: `else if
+      // (duration)` treated 0 (the sentinel status-ui.js uses for "Permanent")
+      // as absent, and ALLOWED_DURATIONS didn't include 0 either, so selecting
+      // Permanent always silently saved a 24h expiry instead. expiresAt is
+      // nullable on the Status model specifically to represent "never expires".
       let resolvedExpiresAt;
       if (expiresAt) {
           resolvedExpiresAt = new Date(expiresAt);
-      } else if (duration) {
+      } else if (duration !== undefined && duration !== null && duration !== '') {
           const secs = parseInt(duration, 10);
-          const ALLOWED_DURATIONS = [3600, 21600, 43200, 86400, 604800];
-          const safeSecs = ALLOWED_DURATIONS.includes(secs) ? secs : 86400;
-          resolvedExpiresAt = new Date(Date.now() + safeSecs * 1000);
+          if (secs === 0) {
+              resolvedExpiresAt = null; // Permanent — never expires
+          } else {
+              const ALLOWED_DURATIONS = [3600, 21600, 43200, 86400, 604800];
+              const safeSecs = ALLOWED_DURATIONS.includes(secs) ? secs : 86400;
+              resolvedExpiresAt = new Date(Date.now() + safeSecs * 1000);
+          }
       } else {
           resolvedExpiresAt = new Date(Date.now() + 86400 * 1000); // 24 h
       }
@@ -128,7 +141,9 @@ class StatusController {
         background: background || null,
         expiresAt:  resolvedExpiresAt,
         privacy:    resolvedPrivacy,
-        duration:   duration   || null,
+        // BUGFIX: `duration || null` turned a real duration:0 (Permanent) into
+        // null, same class of bug as above — preserve 0 explicitly.
+        duration:   (duration !== undefined && duration !== null && duration !== '') ? duration : null,
         type:       type       || 'text',
         moodType:   moodType   || null
       };

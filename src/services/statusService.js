@@ -173,14 +173,34 @@ async function createStatus(statusData) {
     const isPublicValue = (safePrivacy === 'public' || safePrivacy === 'everyone');
 
     // Resolve expiresAt: prefer explicit date, then duration-in-seconds, then 24h default
+    // BUGFIX: `duration` of 0 means "Permanent" (see status-ui.js's duration map,
+    // '0' -> 'Permanent'), but `else if (duration)` treated 0 as falsy and fell
+    // through to the 24h default — so Permanent could never actually be created.
+    // Also, even a correctly-detected duration:0 would previously have been
+    // rejected by the ALLOWED whitelist (0 wasn't in it) and silently downgraded
+    // to 86400s anyway. expiresAt is nullable on the Status model specifically to
+    // support "never expires" (see getActiveStatuses' `expiresAt: null` OR-clause
+    // and Status.prototype.isExpired's `if (!this.expiresAt) return false`), so a
+    // real Permanent status is represented as a null expiresAt.
     let resolvedExpiresAt;
-    if (expiresAt) {
+    if (expiresAt !== undefined && expiresAt !== null) {
         resolvedExpiresAt = new Date(expiresAt);
-    } else if (duration) {
+    } else if (expiresAt === null) {
+        // BUGFIX (handoff from statusController.js): an explicit null here means
+        // the caller already resolved this to "Permanent" — a plain truthy check
+        // (`if (expiresAt)`) would treat null the same as "not provided" and fall
+        // through to the duration/24h branches below, silently discarding the
+        // caller's Permanent resolution. Preserve it.
+        resolvedExpiresAt = null;
+    } else if (duration !== undefined && duration !== null && duration !== '') {
         const secs = parseInt(duration, 10);
-        const ALLOWED = [3600, 21600, 43200, 86400, 604800]; // 1h 6h 12h 24h 1week
-        const safeSecs = ALLOWED.includes(secs) ? secs : 86400;
-        resolvedExpiresAt = new Date(Date.now() + safeSecs * 1000);
+        if (secs === 0) {
+            resolvedExpiresAt = null; // Permanent — never expires
+        } else {
+            const ALLOWED = [3600, 21600, 43200, 86400, 604800]; // 1h 6h 12h 24h 1week
+            const safeSecs = ALLOWED.includes(secs) ? secs : 86400;
+            resolvedExpiresAt = new Date(Date.now() + safeSecs * 1000);
+        }
     } else {
         resolvedExpiresAt = new Date(Date.now() + 86400 * 1000); // 24h default
     }
