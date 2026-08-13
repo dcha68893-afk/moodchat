@@ -170,7 +170,16 @@ const DEFAULT_SETTINGS = {
         lowBandwidth: false
     },
     calls: {
-        whoCanCallMe: 'friends',
+        // FIX (friend-or-non-friend calling): this template default was
+        // 'friends', out of sync with both the DB column's own default
+        // ('everyone' — see src/models/Settings.js) and the actual
+        // enforcement logic (CallSignalingService.js, which also defaults
+        // unset to 'everyone'). A brand-new user whose settings got
+        // populated from this template — rather than the DB default —
+        // would silently start out restricted to friends-only calls,
+        // contradicting the product decision that calls (and messages) are
+        // allowed between any two users by default.
+        whoCanCallMe: 'everyone',
         ringtone: 'default',
         callVibration: true,
         autoAnswer: false,
@@ -368,7 +377,11 @@ function _buildSettingsResponse(user, settingsRow) {
             lowBandwidth: snapshot.advanced.lowBandwidth === true
         },
         calls: {
-            whoCanCallMe: snapshot.calls.whoCanCallMe || 'friends',
+            // FIX (friend-or-non-friend calling): same inconsistency as the
+            // template default above — this fallback (used when an existing
+            // row/snapshot has no explicit value) must also be 'everyone' to
+            // match the DB default and actual enforcement, not 'friends'.
+            whoCanCallMe: snapshot.calls.whoCanCallMe || 'everyone',
             ringtone: chatPrefs.ringtone || snapshot.calls.ringtone || 'default',
             callVibration: chatPrefs.callVibration !== false && snapshot.calls.callVibration !== false,
             autoAnswer: snapshot.calls.autoAnswer === true,

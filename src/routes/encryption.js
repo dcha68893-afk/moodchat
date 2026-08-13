@@ -217,35 +217,29 @@ router.get('/keys', asyncHandler(async (req, res) => {
 // moment the first message is sent — so for a conversation started from
 // Friends/Calls/Status (i.e. every brand-new chat), the very first attempt
 // to fetch the recipient's key for that all-important first message had
-// nothing to authorize against and got a 403. The frontend used to treat a
-// 403 as "transient, retry a few times then give up and send in plaintext"
-// — silently downgrading security for exactly the case (a first message to
-// someone) where getting it right matters most. Now that the frontend
-// waits indefinitely instead of giving up, a permanent 403 here would mean
-// a new conversation's first message could never send at all. Fix the
-// actual authorization gap instead of relying on the client to paper over
-// it: an accepted friendship is real proof these two people are allowed to
-// message each other, and — per this app's own flow — is a precondition
-// for a Friends-list chat to exist in the first place. Allow either an
-// existing shared chat OR an accepted friendship.
+// nothing to authorize against and got a 403. A later fix (still visible in
+// git history) narrowed this to "existing shared chat OR accepted
+// friendship" — but that still 403's the very common case of messaging or
+// calling someone you've discovered but aren't yet friends with, which is
+// an explicitly supported flow in this app (Discovery lets you open a chat/
+// call with any user, friend or not). Per product decision: messaging and
+// calling are allowed between ANY two users regardless of friend status —
+// the only thing that should still deny key access is an actual block
+// (friends.status = 'blocked' in either direction), since a block is a
+// deliberate "do not contact me" signal and should keep working even
+// though the general friend requirement is gone.
 async function _canSeeEncryptionKey(requesterId, targetId, sequelize) {
-  const [rel] = await sequelize.query(
-    `SELECT 1 FROM chat_participants cp1
-     JOIN chat_participants cp2 ON cp2."chatId"=cp1."chatId" AND cp2."userId"=:targetId
-     WHERE cp1."userId"=:requesterId LIMIT 1`,
-    { replacements: { requesterId, targetId } }
-  );
-  if (rel && rel.length > 0) return true;
+  if (requesterId === targetId) return true;
 
-  const [friend] = await sequelize.query(
+  const [blocked] = await sequelize.query(
     `SELECT 1 FROM friends
-     WHERE status = 'accepted'
+     WHERE status = 'blocked'
        AND ((requester_id = :requesterId AND receiver_id = :targetId)
          OR (requester_id = :targetId AND receiver_id = :requesterId))
      LIMIT 1`,
     { replacements: { requesterId, targetId } }
   );
-  return !!(friend && friend.length > 0);
+  return !(blocked && blocked.length > 0);
 }
 
 router.get('/keys/:userId', asyncHandler(async (req, res) => {
@@ -256,7 +250,7 @@ router.get('/keys/:userId', asyncHandler(async (req, res) => {
 
   const authorized = await _canSeeEncryptionKey(req.user.id, targetId, sequelize);
   if (!authorized) {
-    return res.status(403).json({ status: 'error', message: 'No shared conversation or friendship' });
+    return res.status(403).json({ status: 'error', message: 'You cannot message this user' });
   }
 
   const rows = await sequelize.query(

@@ -616,8 +616,10 @@ router.post(
 // round trip, in a fixed order, so no caller can end up with a half-built
 // conversation. It reuses the exact same conversation-resolution function
 // /start uses (resolveOrCreateDirectChat) — never a second implementation —
-// plus the same key-authorization rule already fixed in encryption.js
-// (shared chat OR accepted friendship).
+// and fetches the recipient's key directly once the chat exists, with no
+// friend-status gate (messaging/calling is allowed friend or non-friend —
+// see _canSeeEncryptionKey in encryption.js for the one remaining
+// restriction, an explicit block).
 router.post(
     '/bootstrap',
     apiRateLimiter,
