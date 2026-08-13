@@ -565,7 +565,7 @@ class MarketplaceController {
             const buyerId = req.user?.id;
             if (!buyerId) return next(new AppError('Authentication required', 401));
 
-            const { items, delivery_address, payment_method, phone, notes, total, subtotal, delivery, currency='KES', idempotency_key } = req.body;
+            const { items, delivery_address, payment_method, phone, notes, total, subtotal, delivery, currency='KES', idempotency_key, coupon_code } = req.body;
             if (!items?.length) return next(new AppError('Cart is empty', 400));
             if (!delivery_address) return next(new AppError('Delivery address required', 400));
 
@@ -610,8 +610,21 @@ class MarketplaceController {
             if (sequelize) {
                 const t = await sequelize.transaction();
                 try {
+                    // ── PHASE A: lock every product, compute authoritative items/subtotals
+                    // per seller group, deduct stock. (Same locking/price logic as before.)
+                    const groupResults = []; // { sellerId, authoritativeItems, itemsSubtotal, deliveryTotal, categories }
                     for (const [sellerId, sellerItems] of Object.entries(sellerGroups)) {
-                        // Lock each product row before stock check
+                        // FIX (Audit #6 - price must be server-authoritative): sellerItems
+                        // used to carry item.price and item.delivery_fee straight from the
+                        // request body into the order total with no server check. A client
+                        // could set price:0.01 in the checkout payload and pay almost
+                        // nothing for a real order. Now the locked DB row is the only source
+                        // of truth for price/delivery_fee; the client's price/delivery_fee
+                        // fields are ignored entirely. Client-declared quantity is still
+                        // trusted (it's the buyer's stated intent, not a value fraud-relevant
+                        // on its own), and is what stock availability is checked against.
+                        const authoritativeItems = [];
+                        const categories = new Set();
                         for (const item of sellerItems) {
                             const product = await T.findByPk(item.product_id, {
                                 lock: t.LOCK ? t.LOCK.UPDATE : true,
@@ -619,51 +632,174 @@ class MarketplaceController {
                             });
                             if (!product) { await t.rollback(); return next(new AppError(`Product not found`, 404)); }
                             if (product.status !== 'active') { await t.rollback(); return next(new AppError(`"${product.title}" is not available`, 400)); }
-                            if (product.stock != null && product.stock < item.quantity) {
+                            const qty = parseInt(item.quantity) || 0;
+                            if (qty <= 0) { await t.rollback(); return next(new AppError(`Invalid quantity for "${product.title}"`, 400)); }
+                            if (product.stock != null && product.stock < qty) {
                                 await t.rollback();
                                 return next(new AppError(`Insufficient stock for "${product.title}". Available: ${product.stock}`, 400));
                             }
+
+                            const flashActive = product.isFlashSale && product.flashSalePrice != null &&
+                                (!product.flashSaleEnd || new Date(product.flashSaleEnd) > new Date());
+                            const unitPrice = parseFloat(flashActive ? product.flashSalePrice : product.price) || 0;
+                            const unitDeliveryFee = parseFloat(product.metadata?.delivery_fee) || 0;
+                            if (product.category) categories.add(product.category);
+
+                            authoritativeItems.push({
+                                product_id: product.id, title: product.title,
+                                quantity: qty, price: unitPrice, delivery_fee: unitDeliveryFee,
+                                variant: item.variant || null,
+                            });
+
+                            // Deduct stock now, while we still hold the row lock — avoids a
+                            // second unlocked findByPk (which previously re-read the row
+                            // outside the lock before writing to it).
+                            if (product.stock != null) {
+                                await product.update({ stock: product.stock - qty, available: (product.stock - qty) > 0 }, { transaction: t });
+                            }
                         }
-                        const groupTotal = sellerItems.reduce((s,i) => s + (i.price * i.quantity) + (i.delivery_fee||0), 0);
+                        const itemsSubtotal = authoritativeItems.reduce((s,i) => s + (i.price * i.quantity), 0);
+                        const deliveryTotal = authoritativeItems.reduce((s,i) => s + i.delivery_fee, 0);
+                        groupResults.push({ sellerId, authoritativeItems, itemsSubtotal, deliveryTotal, categories });
+                    }
+
+                    // ── PHASE B: FIX (Audit #7 - coupons need server validation): checkout
+                    // used to accept coupon_code in the request but createOrder never looked
+                    // it up at all — the discount the buyer saw on the confirmation screen
+                    // (from a separate, non-binding /coupon/validate preview call) was
+                    // client-side decoration only, never actually deducted from the charge,
+                    // and usageLimit/perUserLimit were never enforced or incremented. The
+                    // coupon is now looked up and row-locked here, validated server-side
+                    // against the real (server-computed) subtotal, restricted to matching
+                    // seller/category groups if the coupon specifies one, capped by
+                    // perUserLimit using this buyer's past orders, and its usageCount is
+                    // incremented atomically in the same transaction as order creation so a
+                    // race between two concurrent checkouts can't both slip in under a
+                    // usageLimit of 1.
+                    let couponApplied = null;
+                    if (coupon_code) {
+                        const CouponModel = getDb().Coupon;
+                        if (CouponModel) {
+                            const coupon = await CouponModel.findOne({
+                                where: { code: String(coupon_code).toUpperCase().trim() },
+                                lock: t.LOCK ? t.LOCK.UPDATE : true,
+                                transaction: t,
+                            });
+                            if (!coupon) {
+                                await t.rollback();
+                                return next(new AppError('Invalid coupon code', 400));
+                            }
+                            // Which seller groups this coupon is even allowed to discount
+                            const eligibleGroups = groupResults.filter(g => {
+                                if (coupon.sellerId && String(coupon.sellerId) !== String(g.sellerId)) return false;
+                                if (coupon.categorySlug && !g.categories.has(coupon.categorySlug)) return false;
+                                return true;
+                            });
+                            if (!eligibleGroups.length) {
+                                await t.rollback();
+                                return next(new AppError('This coupon does not apply to the items in your cart', 400));
+                            }
+                            const eligibleSubtotal = eligibleGroups.reduce((s,g) => s + g.itemsSubtotal, 0);
+                            const genericCheck = coupon.validate(eligibleSubtotal, buyerId);
+                            if (!genericCheck.valid) {
+                                await t.rollback();
+                                return next(new AppError(genericCheck.reason, 400));
+                            }
+                            // Per-user redemption count — Coupon model only tracks a global
+                            // usageCount, so count this buyer's own past orders that recorded
+                            // this coupon code to enforce perUserLimit.
+                            if (coupon.perUserLimit != null) {
+                                const priorUses = await O.count({
+                                    where: {
+                                        buyerId,
+                                        [Op.and]: [ sequelize.where(sequelize.json('metadata.coupon_code'), coupon.code) ],
+                                    },
+                                    transaction: t,
+                                });
+                                if (priorUses >= coupon.perUserLimit) {
+                                    await t.rollback();
+                                    return next(new AppError('You have already used this coupon the maximum number of times', 400));
+                                }
+                            }
+
+                            couponApplied = coupon;
+                            if (coupon.type === 'free_shipping') {
+                                eligibleGroups.forEach(g => { g.discountShare = g.deliveryTotal; g.deliveryTotal = 0; });
+                            } else {
+                                const couponDiscount = coupon.computeDiscount(eligibleSubtotal);
+                                // Distribute the discount across eligible groups proportional to
+                                // each group's share of the eligible subtotal, so a multi-seller
+                                // cart splits the discount fairly across each seller's order.
+                                let remaining = couponDiscount;
+                                eligibleGroups.forEach((g, idx) => {
+                                    const isLast = idx === eligibleGroups.length - 1;
+                                    const share = isLast ? remaining
+                                        : Math.round((couponDiscount * (g.itemsSubtotal / eligibleSubtotal)) * 100) / 100;
+                                    g.discountShare = Math.min(share, g.itemsSubtotal + g.deliveryTotal);
+                                    remaining = Math.round((remaining - g.discountShare) * 100) / 100;
+                                });
+                            }
+                            await coupon.increment('usageCount', { by: 1, transaction: t });
+                        }
+                    }
+
+                    // ── PHASE C: create the order rows using server-computed totals.
+                    for (const g of groupResults) {
+                        const discountShare = g.discountShare || 0;
+                        const groupTotal = Math.max(0, g.itemsSubtotal + g.deliveryTotal - discountShare);
                         const order = await O.create({
-                            buyerId, sellerId, productId: sellerItems[0].product_id,
+                            buyerId, sellerId: g.sellerId, productId: g.authoritativeItems[0].product_id,
                             status: 'pending',
-                            quantity: sellerItems.reduce((s,i) => s + i.quantity, 0),
+                            quantity: g.authoritativeItems.reduce((s,i) => s + i.quantity, 0),
                             totalPrice: parseFloat(groupTotal.toFixed(2)),
                             currency, paymentMethod: payment_method,
                             deliveryAddress: { ...delivery_address, phone },
                             notes: notes || '',
-                            metadata: { items: sellerItems, idempotency_key: idempotency_key || null },
+                            metadata: {
+                                items: g.authoritativeItems,
+                                idempotency_key: idempotency_key || null,
+                                coupon_code: couponApplied ? couponApplied.code : null,
+                                discount_amount: discountShare || 0,
+                            },
                         }, { transaction: t });
                         orders.push(order);
-                        // Deduct stock inside transaction
-                        for (const item of sellerItems) {
-                            const product = await T.findByPk(item.product_id, { transaction: t });
-                            if (product && product.stock != null) {
-                                await product.update({ stock: product.stock - item.quantity, available: (product.stock - item.quantity) > 0 }, { transaction: t });
-                            }
-                        }
                     }
                     await t.commit();
                 } catch(txErr) { await t.rollback(); throw txErr; }
             } else {
-                // Fallback without transaction support
+                // Fallback without transaction support (no row locking available here — same
+                // price-authority fix applied: price/delivery_fee always read fresh from DB,
+                // never trusted from the request body). Coupons are intentionally NOT applied
+                // in this branch: without a DB transaction there's no way to atomically lock
+                // the coupon row and increment usageCount, so two concurrent checkouts here
+                // could both slip in under a usageLimit of 1. This path only runs if
+                // getSequelize() returns nothing (no transaction manager configured), which
+                // shouldn't happen in a normal deployment — if you rely on this path in
+                // production, that's worth fixing at the transaction-manager level, not here.
                 for (const [sellerId, sellerItems] of Object.entries(sellerGroups)) {
-                    const groupTotal = sellerItems.reduce((s,i) => s + (i.price * i.quantity) + (i.delivery_fee||0), 0);
-                    const order = await O.create({
-                        buyerId, sellerId, productId: sellerItems[0].product_id, status: 'pending',
-                        quantity: sellerItems.reduce((s,i) => s+i.quantity, 0),
-                        totalPrice: parseFloat(groupTotal.toFixed(2)), currency, paymentMethod: payment_method,
-                        deliveryAddress: { ...delivery_address, phone }, notes: notes||'',
-                        metadata: { items: sellerItems },
-                    });
-                    orders.push(order);
+                    const authoritativeItems = [];
                     for (const item of sellerItems) {
+                        const product = await T.findByPk(item.product_id);
+                        if (!product) return next(new AppError('Product not found', 404));
+                        const qty = parseInt(item.quantity) || 0;
+                        const flashActive = product.isFlashSale && product.flashSalePrice != null &&
+                            (!product.flashSaleEnd || new Date(product.flashSaleEnd) > new Date());
+                        const unitPrice = parseFloat(flashActive ? product.flashSalePrice : product.price) || 0;
+                        const unitDeliveryFee = parseFloat(product.metadata?.delivery_fee) || 0;
+                        authoritativeItems.push({ product_id: product.id, title: product.title, quantity: qty, price: unitPrice, delivery_fee: unitDeliveryFee });
                         try {
-                            const p = await T.findByPk(item.product_id);
-                            if (p && p.stock != null) await p.update({ stock: Math.max(0, p.stock - item.quantity), available: Math.max(0, p.stock - item.quantity) > 0 });
+                            if (product.stock != null) await product.update({ stock: Math.max(0, product.stock - qty), available: Math.max(0, product.stock - qty) > 0 });
                         } catch(_) {}
                     }
+                    const groupTotal = authoritativeItems.reduce((s,i) => s + (i.price * i.quantity) + i.delivery_fee, 0);
+                    const order = await O.create({
+                        buyerId, sellerId, productId: sellerItems[0].product_id, status: 'pending',
+                        quantity: authoritativeItems.reduce((s,i) => s+i.quantity, 0),
+                        totalPrice: parseFloat(groupTotal.toFixed(2)), currency, paymentMethod: payment_method,
+                        deliveryAddress: { ...delivery_address, phone }, notes: notes||'',
+                        metadata: { items: authoritativeItems },
+                    });
+                    orders.push(order);
                 }
             }
 
@@ -672,12 +808,22 @@ class MarketplaceController {
                 _socketBroadcast(req, 'order:created', { order_id: order.id, buyer_id: buyerId, seller_id: order.sellerId });
             }
 
+            // FIX (Audit #6, cont'd): the response used to echo back `total` and `items`
+            // straight from the request body, i.e. the same client-supplied numbers that
+            // were never trusted for the actual charge. Echo the server-computed totals
+            // and items instead, so the buyer's confirmation screen shows what they were
+            // actually charged, not what they originally submitted.
             const primaryOrder = orders[0];
+            const serverTotal = orders.reduce((s, o) => s + parseFloat(o.totalPrice || 0), 0);
+            const serverItems = orders.flatMap(o => o.metadata?.items || []);
+            const totalDiscount = orders.reduce((s, o) => s + parseFloat(o.metadata?.discount_amount || 0), 0);
+            const appliedCouponCode = orders.find(o => o.metadata?.coupon_code)?.metadata?.coupon_code || null;
             return ok(res, {
                 order: {
                     id: primaryOrder.id, buyer_id: buyerId, status: 'pending',
-                    total: parseFloat(total||0), currency, payment_method,
-                    delivery_address, items, orders: orders.map(o => o.id), created_at: primaryOrder.createdAt,
+                    total: parseFloat(serverTotal.toFixed(2)), currency, payment_method,
+                    coupon_code: appliedCouponCode, discount_amount: parseFloat(totalDiscount.toFixed(2)),
+                    delivery_address, items: serverItems, orders: orders.map(o => o.id), created_at: primaryOrder.createdAt,
                 }
             }, 'Order placed successfully', 201);
         } catch(e) { err(next, e, 'createOrder'); }

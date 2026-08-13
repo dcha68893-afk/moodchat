@@ -17,7 +17,18 @@ try {
     console.warn('[payments.routes] marketplace controller load failed:', e.message);
 }
 
-// All payment routes require auth
+// BUG FIX: router.use(authenticateToken) used to be registered before ANY
+// route on this router, including /mpesa/callback below. Express applies
+// router-level middleware in registration order, so that put the Safaricom
+// server-to-server callback — which carries no user JWT — behind auth and
+// would make it 401 every time. Register the unauthenticated callback route
+// FIRST, then apply authenticateToken only to the routes that need it.
+if (ctrl) {
+    // M-Pesa callback from Safaricom — no auth needed, must stay unauthenticated
+    router.post('/mpesa/callback', ctrl.mpesaCallback.bind(ctrl));
+}
+
+// All remaining payment routes require auth
 router.use(authenticateToken);
 
 if (ctrl) {
@@ -25,8 +36,6 @@ if (ctrl) {
     router.post('/mpesa/stk-push',    ctrl.initiateMpesa.bind(ctrl));
     // M-Pesa verify — frontend calls /api/payments/mpesa/verify
     router.get('/mpesa/verify',       ctrl.verifyMpesa.bind(ctrl));
-    // M-Pesa callback from Safaricom — no auth needed
-    router.post('/mpesa/callback',    ctrl.mpesaCallback.bind(ctrl));
 
     // AUDIT FIX: These used to be fake stubs that always returned
     // success:true without charging anything. marketplace.controller.js
