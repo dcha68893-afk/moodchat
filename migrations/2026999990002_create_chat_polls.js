@@ -33,7 +33,7 @@ module.exports = {
         },
         createdBy: {
           type: Sequelize.INTEGER, allowNull: false,
-          references: { model: 'users', key: 'id' }, onUpdate: 'CASCADE', onDelete: 'CASCADE',
+          references: { model: 'Users', key: 'id' }, onUpdate: 'CASCADE', onDelete: 'CASCADE',
         },
         question: { type: Sequelize.STRING(500), allowNull: false },
         allowMultipleAnswers: { type: Sequelize.BOOLEAN, allowNull: false, defaultValue: false },
@@ -78,7 +78,7 @@ module.exports = {
         },
         userId: {
           type: Sequelize.INTEGER, allowNull: false,
-          references: { model: 'users', key: 'id' }, onUpdate: 'CASCADE', onDelete: 'CASCADE',
+          references: { model: 'Users', key: 'id' }, onUpdate: 'CASCADE', onDelete: 'CASCADE',
         },
         createdAt: { type: Sequelize.DATE, allowNull: false, defaultValue: Sequelize.NOW },
       });

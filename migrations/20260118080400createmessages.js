@@ -14,7 +14,7 @@ module.exports = {
         type: Sequelize.INTEGER,
         allowNull: false,
         references: {
-          model: 'users',
+          model: 'Users',
           key: 'id'
         },
         onUpdate: 'CASCADE',
@@ -24,21 +24,27 @@ module.exports = {
         type: Sequelize.INTEGER,
         allowNull: true,
         references: {
-          model: 'users',
+          model: 'Users',
           key: 'id'
         },
         onUpdate: 'CASCADE',
         onDelete: 'CASCADE'
       },
+      // FIX (MIGRATION-ORDER-GROUPS): groupId used to declare an inline FK
+      // `references: { model: 'Groups' }` right here, but this migration
+      // (20260118080400) runs before 20260118080600creategroup.js creates
+      // the Groups table — Postgres has no forward references, so a genuinely
+      // fresh `db:migrate` run aborted immediately with
+      // `relation "Groups" does not exist`, and because `npm start` runs
+      // migrations as `(npm run db:migrate || true)`, that fatal failure was
+      // silently swallowed and every migration after this one in the batch
+      // never ran. Reproduced locally against a clean Postgres 16 database.
+      // The column is created here as a plain nullable INTEGER; the actual
+      // FK constraint is added by 20260118080600creategroup.js once Groups
+      // exists, so referential integrity is still enforced end-to-end.
       groupId: {
         type: Sequelize.INTEGER,
-        allowNull: true,
-        references: {
-          model: 'Groups',
-          key: 'id'
-        },
-        onUpdate: 'CASCADE',
-        onDelete: 'CASCADE'
+        allowNull: true
       },
       content: {
         type: Sequelize.TEXT,

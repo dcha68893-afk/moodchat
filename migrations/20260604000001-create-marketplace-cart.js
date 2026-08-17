@@ -11,8 +11,21 @@ module.exports = {
         primaryKey: true,
         allowNull: false,
       },
+      // FIX (MARKETPLACE-CART-TYPE-MISMATCH / MIGRATION-BATCH-BLOCKER):
+      // this was declared Sequelize.UUID, but Users.id is a plain
+      // auto-increment INTEGER (see 20260118080000createusers.js), so
+      // Postgres refused to create the FK constraint:
+      //   foreign key constraint "marketplace_carts_user_id_fkey" cannot be
+      //   implemented — Key columns "user_id" and "id" are of incompatible
+      //   types: uuid and integer.
+      // That's a hard failure on a genuinely fresh database, and because
+      // the production entrypoint (`npm run start:render` ->
+      // `db:migrate:render && npm run prod`) does NOT swallow a failed
+      // migration the way plain `npm start` does, every migration below
+      // this one in the run order — including group/message schema
+      // catch-ups and the chats/chat_participants migration — never ran.
       user_id: {
-        type: Sequelize.UUID,
+        type: Sequelize.INTEGER,
         allowNull: false,
         unique: true,  // One cart per user
         references: {

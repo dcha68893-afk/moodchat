@@ -38,7 +38,7 @@ module.exports = {
         },
         userId: {
           type: Sequelize.INTEGER, allowNull: false,
-          references: { model: 'users', key: 'id' }, onUpdate: 'CASCADE', onDelete: 'CASCADE',
+          references: { model: 'Users', key: 'id' }, onUpdate: 'CASCADE', onDelete: 'CASCADE',
         },
         latitude: { type: Sequelize.DECIMAL(10, 7), allowNull: false },
         longitude: { type: Sequelize.DECIMAL(10, 7), allowNull: false },

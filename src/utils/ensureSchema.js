@@ -82,6 +82,27 @@ const REQUIRED_COLUMNS = [
     table: 'Users', column: 'loyaltyPoints',
     sql: `ALTER TABLE "Users" ADD COLUMN IF NOT EXISTS "loyaltyPoints" INTEGER NOT NULL DEFAULT 0`,
   },
+  {
+    // FIX (SCHEMA-DRIFT-USERS / REGISTER-500): src/models/Users.js defines
+    // `role` and `settings`, and migration 2026999990015_add_users_role_and_settings.js
+    // adds them — but that migration only runs if every earlier migration in
+    // the batch also succeeds (npm start swallows a failed `db:migrate` with
+    // `|| true`), and this self-heal list — the actual belt-and-suspenders
+    // guarantee every other Users column above relies on — never had matching
+    // entries added. Any environment that didn't get a 100%-clean migration
+    // run is left permanently missing `role`, and every POST /auth/register
+    // call 500s with: column "role" does not exist. Reproduced locally
+    // against a genuinely fresh Postgres 16 database.
+    table: 'Users', column: 'role',
+    sql: `ALTER TABLE "Users" ADD COLUMN IF NOT EXISTS "role" VARCHAR(255) NOT NULL DEFAULT 'user'`,
+  },
+  {
+    // FIX (SCHEMA-DRIFT-USERS / REGISTER-500): same root cause as `role`
+    // immediately above — see that comment. Without this column, registration
+    // 500s with: column "settings" does not exist.
+    table: 'Users', column: 'settings',
+    sql: `ALTER TABLE "Users" ADD COLUMN IF NOT EXISTS "settings" JSONB NOT NULL DEFAULT '{"notifications":{"messages":true,"friendRequests":true,"mentions":true,"calls":true},"privacy":{"showOnline":true,"showLastSeen":true,"allowFriendRequests":true,"allowMessages":"friends"}}'::jsonb`,
+  },
 
   // ── Marketplace Orders ───────────────────────────────────────────────────
   // FIX-MARKETPLACE-ANALYTICS-500: Order.js (underscored:true, timestamps:true)

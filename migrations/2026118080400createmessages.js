@@ -31,7 +31,7 @@ module.exports = {
         type: Sequelize.INTEGER,
         allowNull: false,
         references: {
-          model: 'users',
+          model: 'Users',
           key: 'id'
         },
         onUpdate: 'CASCADE',
@@ -41,21 +41,19 @@ module.exports = {
         type: Sequelize.INTEGER,
         allowNull: true,
         references: {
-          model: 'users',
+          model: 'Users',
           key: 'id'
         },
         onUpdate: 'CASCADE',
         onDelete: 'CASCADE'
       },
+      // FIX (MIGRATION-ORDER-GROUPS): see the matching fix in
+      // 20260118080400createmessages.js — Groups doesn't exist yet when this
+      // runs, so the FK constraint is added later by
+      // 20260118080600creategroup.js once it does.
       groupId: {
         type: Sequelize.INTEGER,
-        allowNull: true,
-        references: {
-          model: 'Groups',
-          key: 'id'
-        },
-        onUpdate: 'CASCADE',
-        onDelete: 'CASCADE'
+        allowNull: true
       },
       content: {
         type: Sequelize.TEXT,

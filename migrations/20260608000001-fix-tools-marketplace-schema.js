@@ -41,8 +41,20 @@ module.exports = {
           primaryKey: true,
           allowNull: false,
         },
+        // FIX (TOOLS-SELLER-ID-TYPE-MISMATCH / MIGRATION-BATCH-BLOCKER):
+        // was Sequelize.UUID, but Users.id is a plain auto-increment
+        // INTEGER (see 20260118080000createusers.js) — Postgres refused to
+        // create the FK constraint ("Tools_seller_id_fkey ... Key columns
+        // seller_id and id are of incompatible types: uuid and integer"),
+        // which is a hard failure on a fresh database and, because this
+        // migration sits before others in the run order (group schema
+        // catch-ups, the chats/chat_participants migration, etc.) and the
+        // production entrypoint (`db:migrate:render`) does not swallow a
+        // failed migration, blocked every migration after it too. Tools.id
+        // itself is legitimately its own UUID (unrelated to Users), only
+        // this FK column was wrong.
         seller_id: {
-          type: Sequelize.UUID,
+          type: Sequelize.INTEGER,
           allowNull: false,
           references: { model: 'Users', key: 'id' },
           onUpdate: 'CASCADE',
@@ -107,12 +119,17 @@ module.exports = {
           type: Sequelize.INTEGER,
           defaultValue: 0,
         },
+        // FIX (TOOLS-SAVED-BY-TYPE-MISMATCH): same root cause as seller_id
+        // above — these store arrays of Users.id values (INTEGER), not
+        // UUIDs. Not a foreign key so it didn't block migration, but would
+        // have failed at runtime the first time an integer user id was
+        // pushed into a UUID[] column.
         saved_by: {
-          type: Sequelize.ARRAY(Sequelize.UUID),
+          type: Sequelize.ARRAY(Sequelize.INTEGER),
           defaultValue: [],
         },
         purchased_by: {
-          type: Sequelize.ARRAY(Sequelize.UUID),
+          type: Sequelize.ARRAY(Sequelize.INTEGER),
           defaultValue: [],
         },
         rating: {

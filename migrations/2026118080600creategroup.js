@@ -35,7 +35,7 @@ module.exports = {
         type: Sequelize.INTEGER,
         allowNull: true,
         references: {
-          model: 'users',
+          model: 'Users',
           key: 'id'
         },
         onUpdate: 'CASCADE',
@@ -52,9 +52,32 @@ module.exports = {
         defaultValue: Sequelize.NOW
       }
     });
+
+    // FIX (MIGRATION-ORDER-GROUPS): matches the constraint added in
+    // 20260118080600creategroup.js — see that file for the full explanation.
+    // Only reached if this duplicate is the one that actually creates
+    // Groups (the __exists guard above skips it otherwise), so guard against
+    // the constraint already existing too.
+    const __constraints = await queryInterface.showConstraint
+      ? await queryInterface.showConstraint('Messages', 'Messages_groupId_fkey').catch(() => null)
+      : null;
+    if (!__constraints) {
+      await queryInterface.addConstraint('Messages', {
+        fields: ['groupId'],
+        type: 'foreign key',
+        name: 'Messages_groupId_fkey',
+        references: {
+          table: 'Groups',
+          field: 'id'
+        },
+        onUpdate: 'CASCADE',
+        onDelete: 'CASCADE'
+      }).catch(() => {});
+    }
   },
 
   async down(queryInterface, Sequelize) {
+    await queryInterface.removeConstraint('Messages', 'Messages_groupId_fkey').catch(() => {});
     await queryInterface.dropTable('Groups');
   }
 };

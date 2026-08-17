@@ -31,7 +31,7 @@ module.exports = {
         type: Sequelize.INTEGER,
         allowNull: true,
         references: {
-          model: 'users',
+          model: 'Users',
           key: 'id'
         },
         onUpdate: 'CASCADE',
@@ -41,7 +41,7 @@ module.exports = {
         type: Sequelize.INTEGER,
         allowNull: true,
         references: {
-          model: 'users',
+          model: 'Users',
           key: 'id'
         },
         onUpdate: 'CASCADE',
@@ -51,7 +51,7 @@ module.exports = {
         type: Sequelize.INTEGER,
         allowNull: true,
         references: {
-          model: 'group',
+          model: 'Groups', // FIX: was 'group' (wrong, singular+lowercase), actual table is 'Groups'
           key: 'id'
         },
         onUpdate: 'CASCADE',
