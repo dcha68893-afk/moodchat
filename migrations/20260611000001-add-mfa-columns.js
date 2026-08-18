@@ -8,20 +8,29 @@
 // mfaEnabled - whether the user has completed 2FA setup and enabled it
 module.exports = {
   async up(queryInterface, Sequelize) {
-    await queryInterface.addColumn('Users', 'mfaSecret', {
-      type: Sequelize.STRING,
-      allowNull: true
-    });
-
-    await queryInterface.addColumn('Users', 'mfaEnabled', {
-      type: Sequelize.BOOLEAN,
-      allowNull: false,
-      defaultValue: false
-    });
+    // FIX (PROD-SCHEMA-DRIFT): same class of bug as
+    // 20260324075223-add-reset-token.js — this project's own in-app runtime
+    // migration system may already have added these columns before
+    // `db:migrate` runs, which made a bare addColumn fail with "column
+    // already exists" and silently block every migration after it. Guard.
+    const cols = await queryInterface.describeTable('Users');
+    if (!cols.mfaSecret) {
+      await queryInterface.addColumn('Users', 'mfaSecret', {
+        type: Sequelize.STRING,
+        allowNull: true
+      });
+    }
+    if (!cols.mfaEnabled) {
+      await queryInterface.addColumn('Users', 'mfaEnabled', {
+        type: Sequelize.BOOLEAN,
+        allowNull: false,
+        defaultValue: false
+      });
+    }
   },
 
   async down(queryInterface) {
-    await queryInterface.removeColumn('Users', 'mfaSecret');
-    await queryInterface.removeColumn('Users', 'mfaEnabled');
+    await queryInterface.removeColumn('Users', 'mfaSecret').catch(() => {});
+    await queryInterface.removeColumn('Users', 'mfaEnabled').catch(() => {});
   }
 };

@@ -33,6 +33,16 @@
 // content itself.
 module.exports = {
   async up(queryInterface, Sequelize) {
+    // FIX (PROD-SCHEMA-DRIFT): guard against a partial prior run (this
+    // migration creates a table + constraint + 2 indexes in one go — if a
+    // prior deploy died partway through for an unrelated reason, retrying
+    // would otherwise fail on "relation already exists").
+    const tables = await queryInterface.showAllTables();
+    if (tables.some(t => String(t).toLowerCase() === 'group_sender_key_distributions')) {
+      console.log('[create-group-sender-key-distributions] table already exists — skipping.');
+      return;
+    }
+
     await queryInterface.createTable('group_sender_key_distributions', {
       id: {
         type: Sequelize.INTEGER,
