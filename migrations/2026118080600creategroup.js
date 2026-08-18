@@ -17,9 +17,8 @@ module.exports = {
     const __tables = await queryInterface.showAllTables();
     const __exists = __tables.some(t => String(t).toLowerCase() === 'groups');
     if (__exists) {
-      console.log('[Migration] Skipping duplicate migration — Groups table already exists (created by the correctly-named 20260118... migration).');
-      return;
-    }
+      console.log('[Migration] Groups table already exists (created by the correctly-named 20260118... migration) — skipping createTable, still checking Messages.groupId below.');
+    } else {
     await queryInterface.createTable('Groups', {
       id: {
         type: Sequelize.INTEGER,
@@ -52,16 +51,24 @@ module.exports = {
         defaultValue: Sequelize.NOW
       }
     });
+    }
 
-    // FIX (MIGRATION-ORDER-GROUPS): matches the constraint added in
-    // 20260118080600creategroup.js — see that file for the full explanation.
-    // Only reached if this duplicate is the one that actually creates
-    // Groups (the __exists guard above skips it otherwise), so guard against
-    // the constraint already existing too.
-    const __constraints = await queryInterface.showConstraint
-      ? await queryInterface.showConstraint('Messages', 'Messages_groupId_fkey').catch(() => null)
-      : null;
-    if (!__constraints) {
+    // FIX (MIGRATION-ORDER-GROUPS / PROD-SCHEMA-DRIFT): matches the fix in
+    // 20260118080600creategroup.js — see that file for the full
+    // explanation. Messages.groupId may not exist at all on a database with
+    // real deploy history, so add it defensively before trying to
+    // constrain it.
+    const __messagesCols = await queryInterface.describeTable('Messages').catch(() => null);
+    if (__messagesCols && !__messagesCols.groupId) {
+      await queryInterface.addColumn('Messages', 'groupId', {
+        type: Sequelize.INTEGER,
+        allowNull: true,
+      }).catch(() => {});
+    }
+    const __constraints = await queryInterface.sequelize.query(
+      `SELECT 1 FROM information_schema.table_constraints WHERE constraint_name = 'Messages_groupId_fkey'`
+    ).then(([rows]) => rows).catch(() => []);
+    if (__messagesCols && !__constraints.length) {
       await queryInterface.addConstraint('Messages', {
         fields: ['groupId'],
         type: 'foreign key',

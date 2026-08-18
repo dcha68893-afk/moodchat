@@ -432,6 +432,20 @@ module.exports = (sequelize, DataTypes) => {
         // Each entry: { name: DB column name, sql: column definition, aliases: [] }
         const colsToAdd = [
           // ── Array tracking fields (camelCase model → snake_case DB column) ──
+          // FIX (CALLS-PARTICIPANTS-MISSING): `participants` (the base array of
+          // all call participant user IDs — used by getUserCalls' history
+          // query and by the calls_participants_gin index) was never in this
+          // self-heal list, even though the derived participantsJoined/
+          // participantsLeft arrays right below it were. On any database
+          // where the original createcalls migration didn't already have this
+          // column, 20260701000001-add-call-composite-indexes.js's
+          // `CREATE INDEX ... ON "Calls" USING gin (participants)` failed
+          // with "column participants does not exist" — a hard failure in
+          // the strict production migrate path that blocked every migration
+          // after it (including 2026999990017_create_offline_message_queue.js,
+          // which is why offline-message redelivery was failing in
+          // production). Reproduced against a real deploy.
+          { name: 'participants',       sql: "INTEGER[] NOT NULL DEFAULT '{}'" },
           { name: 'answered_by',        sql: "INTEGER[] NOT NULL DEFAULT '{}'" },
           { name: 'declined_by',        sql: "INTEGER[] NOT NULL DEFAULT '{}'" },
           { name: 'read_by',            sql: "INTEGER[] NOT NULL DEFAULT '{}'" },

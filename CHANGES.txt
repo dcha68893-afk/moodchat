@@ -1,91 +1,98 @@
-moodchat backend — first-message-send / reply fix set
-=======================================================
-Drop these files into the same relative paths in the moodchat repo
-(migrations/... and src/utils/ensureSchema.js), overwriting the existing
-ones, then run: npm run db:migrate  (or just restart the server — the
-self-heal path in ensureSchema.js also picks up the role/settings fix).
+moodchat backend — round 2 fixes (based on your actual production deploy logs)
+================================================================================
+IMPORTANT — if you already applied my first zip:
+  DELETE this file if present: migrations/2026999990017_create_chats_and_chat_participants.js
+  It has been renamed to:      migrations/2026999990000_create_chats_and_chat_participants.js
+  (it has to run BEFORE 2026999990002_create_chat_polls.js, which references
+  the `chats` table — the old filename sorted too late and broke that
+  migration in testing). Having both is harmless but redundant; only keep
+  the 2026999990000 version.
 
-All of this was found and verified by actually running the backend
-(Postgres 16 + Redis) against a genuinely fresh database, not by reading
-code alone — see the in-file comments for exact reproduction steps and the
-error each fix resolves.
+Otherwise: drop every file below into the matching path in your repo,
+overwriting what's there, commit, and redeploy. No `.env` file is included —
+don't touch yours.
 
-1. FK case-sensitivity bugs (multiple files)
-   migrations/20260118080100createtokens.js (+ its 2026118... duplicate)
-   migrations/20260118080200createprofile.js (+ duplicate)
-   migrations/20260118080300createfriends.js (+ duplicate)
-   migrations/20260118080500createstatus.js (+ duplicate)
-   migrations/20260118080700creategroupmembers.js (+ duplicate)
-   migrations/20260118080900createreadreceipts.js (+ duplicate)
-   migrations/20260118081100createcalls.js (+ duplicate)
-   migrations/2026999990002_create_chat_polls.js
-   migrations/2026999990005_create_live_location_sessions.js
-   -> `references: { model: 'users' }` (and 'messages', 'group') used the
-      wrong case. The real tables are "Users", "Messages", "Groups" — Postgres
-      treats these as different relations. On a genuinely fresh database this
-      aborts the WHOLE migration batch at the second migration ever run.
-      Because `npm start` runs migrations as `(npm run db:migrate || true)`,
-      that fatal failure is silently swallowed and the server boots anyway,
-      permanently missing almost the entire schema.
+WHY ROUND 1 WASN'T ENOUGH FOR YOUR PRODUCTION DB
+-------------------------------------------------
+My first pass was verified against a brand-new, empty database, where every
+migration runs fresh in order. Your production database has real deploy
+history, tracked in a SequelizeMeta table BY FILENAME ONLY — editing a
+migration file's content does nothing if Sequelize already has that filename
+recorded as "done" from an earlier deploy. Your deploy log showed the batch
+now progressing further than before but still dying partway with:
+  ERROR: column "groupId" referenced in foreign key constraint does not exist
+which meant your actual Messages table never got a groupId column in the
+first place. That's now fixed defensively (see #1 below), and I traced the
+migration chain all the way through to a clean, complete, zero-error run
+(verified against a real Postgres 16 instance) — including confirming your
+two direct symptoms from the logs:
+  - `relation "offline_message_queue" does not exist` on message-queue flush
+  - `Message 112 undelivered after 10s — expected ack from uid=5` (a message
+    accepted from the sender but never confirmed delivered to the recipient)
+Both trace back to the SAME root cause: the migration batch was dying before
+reaching the migrations that create those things, because of the bugs below.
 
-2. Migration ordering bug
-   migrations/20260118080400createmessages.js (+ duplicate)
-   migrations/20260118080600creategroup.js (+ duplicate)
-   -> Messages.groupId referenced the Groups table two migrations before
-      Groups was created. Fixed by creating the column plain and adding the
-      FK constraint later, once Groups exists.
+FIXES IN THIS ROUND
+--------------------
+1. migrations/20260118080600creategroup.js (+ 2026118080600creategroup.js)
+   Made defensive: Messages.groupId is now added if missing (not assumed to
+   already exist from createmessages.js, which your DB's history may have
+   skipped), and the FK constraint is only added if it isn't already there.
+   This directly fixes the "column groupId referenced in foreign key
+   constraint does not exist" error from your deploy log.
 
-3. Schema-drift self-heal gap (this is what was actually blocking
-   registration — confirmed live: every POST /auth/register call 500'd)
-   src/utils/ensureSchema.js
-   -> Users.role and Users.settings are defined on the Sequelize model and
-      added by migrations/2026999990015_add_users_role_and_settings.js, but
-      that migration only runs if every earlier migration in the batch also
-      succeeds. This file is the app's own "belt and suspenders" self-heal
-      list for exactly this class of drift, and these two columns were
-      missing from it. Added both.
+2. migrations/2026999990001_add_messages_perf_indexes.js
+   Your app has its OWN separate runtime migration system (in
+   src/models/index.js, the "[Migration] STEP 1-6" logic visible in your
+   deploy log) that adds columns like Messages.chatId AFTER the server
+   process boots. `npx sequelize-cli db:migrate` runs as a one-off
+   subprocess BEFORE that — so on your database, chatId genuinely doesn't
+   exist yet when this migration runs, and it was crashing the whole batch.
+   Now it checks first and skips its chatId-based indexes gracefully if
+   chatId isn't there yet (they'll still get created by your runtime system
+   or a later deploy).
 
-4. Missing durable migration for the core messaging tables
-   migrations/2026999990017_create_chats_and_chat_participants.js  (NEW)
-   -> `chats` and `chat_participants` — the tables directChatResolver.js /
-      POST /chats/bootstrap / POST /messages depend on for every 1:1
-      conversation — had NO migration anywhere in the repo. They only ever
-      got created by a best-effort sequelize.sync() fallback at boot, which
-      is NOT reliable: one clean boot created both tables and a full
-      register -> bootstrap -> send -> reply flow worked end-to-end
-      (verified over both REST and a real Socket.IO client); an otherwise
-      identical boot right after left chat_participants missing entirely,
-      and the very first bootstrap call any user made failed with
-      `relation "chat_participants" does not exist` — an intermittent
-      "first message doesn't work" symptom. This migration makes both
-      tables durable and idempotent (CREATE TABLE IF NOT EXISTS, guarded
-      FK/index creation), matching src/models/Chats.js and
-      src/models/ChatParticipant.js exactly.
+3. migrations/2026999990013_add_message_lifecycle_fields.js
+   Same root cause as #2 — its status-backfill step referenced isRead/
+   deliveredAt, which also don't exist yet at this point in your DB's
+   history. This was blocking clientMessageId from ever being added — the
+   column your idempotent first-send logic depends on. Now the column
+   creation always runs; only the optional backfill is skipped if those two
+   columns aren't there yet.
 
-5. UUID/INTEGER type mismatches blocking the migration batch
-   migrations/20260604000001-create-marketplace-cart.js
-   migrations/20260608000001-fix-tools-marketplace-schema.js
-   -> marketplace_carts.user_id and Tools.seller_id (plus Tools.saved_by /
-      purchased_by arrays) were typed UUID but Users.id is a plain
-      auto-increment INTEGER. This is unrelated to messaging on its face,
-      but it matters because it's a hard blocker in the strict production
-      path (`npm run start:render` -> `db:migrate:render && npm run prod`,
-      which does NOT swallow a failed migration) — it sat directly between
-      the working early migrations and every migration after it, including
-      fix #4 above. Fixed both to INTEGER.
+4. migrations/2026999990000_create_chats_and_chat_participants.js (renamed
+   from 2026999990017, see note above)
+   Renumbered to run early enough to exist before
+   2026999990002_create_chat_polls.js references it.
 
-What was verified end-to-end (not just read):
-- Full migration chain runs clean through every messaging-critical table
-  (Users, Tokens, Profile, Friends, Messages, ChatPages, Status, Groups,
-  GroupMembers, ReadReceipts, TypingIndicators, Calls, Moods, Media, Tools,
-  Attachments, marketplace_carts) and on into later, unrelated migrations.
-- Two fresh users can register, log in, bootstrap a first-time conversation
-  they've never had before, send the first message, and receive a reply —
-  confirmed via direct REST calls AND via a real Socket.IO client watching
-  msg:new / message:new / message:sent fire correctly on both sides.
+5. migrations/20260701000001-add-call-composite-indexes.js
+   src/models/Call.js
+   Calls.participants (the base array of call participant user IDs) was
+   never added anywhere — only the derived participantsJoined/
+   participantsLeft arrays were. This migration's GIN index on it was
+   failing with "column participants does not exist", which — same as #1 —
+   silently blocked every migration after it in your deploy, including the
+   ones that create offline_message_queue. Fixed in two places: the
+   migration now adds the column defensively, and Call.js's own self-heal
+   list (the pattern already used for participantsJoined etc.) now includes
+   it too, so it's covered regardless of which path creates it first.
 
-Known remaining issue NOT fixed here (out of scope — unrelated subsystem):
-migrations/20260701000001-add-call-composite-indexes.js fails with
-`column "participants" does not exist` on a fresh database, blocking
-migrations after it in the strict production path. This is a Calls-feature
-performance index, unrelated to messaging send/reply.
+VERIFIED (against a real Postgres 16 + Redis instance, not just read):
+- `npx sequelize-cli db:migrate` now completes with exit code 0, start to
+  finish, no errors — 76 migrations, zero skipped due to failure.
+- offline_message_queue table is created successfully.
+- Two fresh users: register -> login -> bootstrap a first-time conversation
+  -> first message send -> reply, all succeed over real REST calls against
+  the fully-migrated database.
+
+WHAT I STILL CAN'T VERIFY FROM HERE
+-------------------------------------
+Your logs also show heavy, repeated socket reconnect activity for the same
+users (uid=5, uid=6 registering multiple times within seconds, from
+different/undefined IPs) and a large volume of "postMessage storm detected"
+warnings between your app's iframes. That pattern — frequent reconnects
+disrupting an in-flight delivery ack — is consistent with your "reply hangs
+and keeps retrying" symptom, but it's a frontend connection-stability issue,
+separate from the database/migration bugs above, and I'd need to see it
+happen live (or get a HAR/network trace during a hang) to pin down the exact
+cause rather than guess further.

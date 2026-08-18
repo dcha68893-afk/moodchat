@@ -61,14 +61,30 @@ module.exports = {
 
     // Backfill status for existing rows from the old deliveredAt/isRead fields
     // so nothing that already shipped shows as un-sent.
-    await queryInterface.sequelize.query(`
-      UPDATE "Messages" SET status = CASE
-        WHEN "isRead" = true THEN 'read'
-        WHEN "deliveredAt" IS NOT NULL THEN 'delivered'
-        ELSE 'sent'
-      END
-      WHERE status = 'sent'
-    `);
+    // FIX (LIFECYCLE-BACKFILL-COLUMN-TIMING): isRead/deliveredAt, like
+    // chatId, are added to Messages by this project's own in-app runtime
+    // migration system (models/index.js), which only runs once the actual
+    // Node server boots — not during a standalone `npx sequelize-cli
+    // db:migrate` deploy step. This backfill used to assume both already
+    // existed and crashed the whole migration (and everything after it,
+    // including clientMessageId's own creation above) with "column isRead
+    // does not exist" on a database where the runtime step hadn't run yet.
+    // Guard it so clientMessageId/status/deliveryAttempts still get created
+    // even when the backfill itself has to be skipped for now (the runtime
+    // system's own logic reconciles status shortly after boot regardless).
+    const tableNow = await queryInterface.describeTable('Messages');
+    if (tableNow.isRead && tableNow.deliveredAt) {
+      await queryInterface.sequelize.query(`
+        UPDATE "Messages" SET status = CASE
+          WHEN "isRead" = true THEN 'read'
+          WHEN "deliveredAt" IS NOT NULL THEN 'delivered'
+          ELSE 'sent'
+        END
+        WHERE status = 'sent'
+      `);
+    } else {
+      console.log('[add_message_lifecycle_fields] isRead/deliveredAt not present yet — skipping status backfill for now.');
+    }
   },
 
   async down(queryInterface) {

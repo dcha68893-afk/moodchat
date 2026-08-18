@@ -16,6 +16,19 @@
 
 module.exports = {
   async up(queryInterface, Sequelize) {
+    // FIX (CALLS-PARTICIPANTS-MISSING): don't assume `participants` already
+    // exists — see the matching fix in src/models/Call.js for why it
+    // sometimes doesn't on a database with real deploy history. Add it here
+    // too so this migration succeeds regardless of self-heal timing.
+    const callsCols = await queryInterface.describeTable('Calls').catch(() => null);
+    if (callsCols && !callsCols.participants) {
+      await queryInterface.addColumn('Calls', 'participants', {
+        type: Sequelize.ARRAY(Sequelize.INTEGER),
+        allowNull: false,
+        defaultValue: [],
+      }).catch(() => {});
+    }
+
     // Composite: status + createdAt for cleanup sweep
     await queryInterface.addIndex('Calls', ['status', 'createdAt'], {
       name:        'calls_status_created_idx',
