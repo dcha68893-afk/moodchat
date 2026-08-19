@@ -72,6 +72,50 @@ try {
 
 const STALE_REAPER_INTERVAL = 60_000;
 
+// ── FIX-ROOT-CAUSE-OFFLINE-QUEUE-TABLE-NEVER-CREATED (defense in depth) ──
+// offline_message_queue is created by migration 2026999990017, but
+// sequelize-cli's `db:migrate` runs migrations in filename-lexicographic
+// order and stops at the first failure. Migration
+// 20260604000001-create-marketplace-cart.js (which sorts BEFORE the
+// 2026999990xxx family — '0' < '9' at the same character position) used
+// to fail with "relation idx_cart_user_unique already exists" on any
+// deploy where that table/index already existed out-of-band (see the FIX
+// comment in that migration file) — silently blocking every migration
+// after it in the run, including this table's own creation, on every such
+// deploy. That migration is now idempotent, but a single broken migration
+// anywhere upstream in the run order would reintroduce this exact failure
+// mode again. Mirror the same self-healing "CREATE TABLE IF NOT EXISTS"
+// pattern already used for user_encryption_keys (routes/encryption.js) and
+// linked_devices (routes/devices.js) so this table exists regardless of
+// migration-CLI health, the same way those two already do.
+let _offlineQueueTableReady = false;
+async function _ensureOfflineQueueTable() {
+    if (_offlineQueueTableReady) return;
+    try {
+        const sequelize = require('../models').sequelize;
+        await sequelize.query(`
+            CREATE TABLE IF NOT EXISTS offline_message_queue (
+                id            SERIAL PRIMARY KEY,
+                "userId"      INTEGER NOT NULL,
+                event         VARCHAR(100) NOT NULL,
+                payload       JSONB NOT NULL,
+                "queuedAt"    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                "deliveredAt" TIMESTAMPTZ,
+                attempts      INTEGER NOT NULL DEFAULT 0,
+                "createdAt"   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                "updatedAt"   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+        `);
+        await sequelize.query(`
+            CREATE INDEX IF NOT EXISTS idx_offline_queue_user_undelivered
+            ON offline_message_queue ("userId", "deliveredAt");
+        `);
+        _offlineQueueTableReady = true;
+    } catch (err) {
+        console.warn('[WSService] Could not verify/create offline_message_queue table:', err.message);
+    }
+}
+
 class WebSocketService {
     constructor() {
         this.io          = null;
@@ -1525,6 +1569,7 @@ class WebSocketService {
     async enqueueOfflineMessage(targetUserId, event, payload) {
         const uid = parseInt(targetUserId, 10);
         if (!uid || !event) return;
+        await _ensureOfflineQueueTable();
         try {
             const sequelize = require('../models').sequelize;
             // Cap per-user backlog at 200 undelivered rows (same limit the
@@ -1563,6 +1608,7 @@ class WebSocketService {
     async flushOfflineMessages(userId) {
         const uid = parseInt(userId, 10);
         if (!uid) return;
+        await _ensureOfflineQueueTable();
 
         try {
             const sequelize = require('../models').sequelize;

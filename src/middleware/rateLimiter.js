@@ -1,5 +1,15 @@
 const rateLimit = require('express-rate-limit');
-const RedisStore = require('rate-limit-redis');
+// FIX-ROOT-CAUSE-REDISSTORE-NOT-CONSTRUCTOR: rate-limit-redis v4+ (this repo
+// pins ^4.3.1 — see package.json) exports `{ RedisStore }` as a NAMED
+// export, not a default export. `require('rate-limit-redis')` therefore
+// returned the whole module namespace object, not the class itself, so
+// `new RedisStore(...)` below always threw "RedisStore is not a
+// constructor" — every deploy, unconditionally, the instant REDIS_URL was
+// set. That silently left `redisStore` undefined and every rate limiter
+// below fell back to express-rate-limit's default in-memory store, which
+// resets on every restart/deploy and doesn't share state across multiple
+// server instances — rate limiting was never actually backed by Redis.
+const { RedisStore } = require('rate-limit-redis');
 const redis = require('redis');
 
 // Create Redis client if REDIS_URL is set

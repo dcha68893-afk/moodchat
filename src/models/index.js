@@ -784,6 +784,21 @@ async function addMissingColumns() {
       // (chatId, isDeleted) covers the GET /messages query which runs on every chat open
       // chat_participants(userId) covers getUserChats which runs on every page load
       // GroupMembers(groupId) covers member count queries
+      //
+      // FIX-ROOT-CAUSE-INDEX-BATCH-ABORT: three of these table names were
+      // wrong — "Statuses"/"StatusViews"/"Notifications" don't exist; the
+      // actual tables (per this file's own STARTUP REPORT / model
+      // tableName mappings) are lowercase "statuses", "status_views", and
+      // "notifications". Postgres runs a multi-statement query sent as one
+      // string in a single implicit transaction, so ONE bad relation name
+      // aborted the whole CREATE INDEX batch — including the messages/
+      // chat_participants/GroupMembers indexes further up that were
+      // perfectly correct and would otherwise have succeeded. Net effect:
+      // none of these 9 indexes were ever actually created, on every single
+      // deploy, silently (only surfaced as a swallowed warning in the
+      // logs) — the exact indexes covering the hottest queries in the app
+      // (opening a chat, loading the chat list, counting group members)
+      // were missing the entire time.
       try {
         await sequelize.query(`
           CREATE INDEX IF NOT EXISTS idx_messages_chat_deleted  ON "Messages"("chatId", "isDeleted");
@@ -792,9 +807,9 @@ async function addMissingColumns() {
           CREATE INDEX IF NOT EXISTS idx_chat_participants_chat  ON chat_participants("chatId");
           CREATE INDEX IF NOT EXISTS idx_group_members_group     ON "GroupMembers"("groupId");
           CREATE INDEX IF NOT EXISTS idx_group_members_user      ON "GroupMembers"("userId");
-          CREATE INDEX IF NOT EXISTS idx_status_creator          ON "Statuses"("userId", "expiresAt");
-          CREATE INDEX IF NOT EXISTS idx_status_views_status     ON "StatusViews"("statusId");
-          CREATE INDEX IF NOT EXISTS idx_notifications_user      ON "Notifications"("userId", "isRead");
+          CREATE INDEX IF NOT EXISTS idx_status_creator          ON statuses("userId", "expiresAt");
+          CREATE INDEX IF NOT EXISTS idx_status_views_status     ON status_views("statusId");
+          CREATE INDEX IF NOT EXISTS idx_notifications_user      ON notifications("userId", "isRead");
         `);
         _slog(`[Migration] ✅ Added critical performance indexes`);
       } catch (indexError) {
