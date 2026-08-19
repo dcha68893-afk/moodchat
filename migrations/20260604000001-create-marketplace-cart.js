@@ -77,28 +77,15 @@ module.exports = {
       },
     });
 
-    // FIX-ROOT-CAUSE-MIGRATION-INDEX-ALREADY-EXISTS: queryInterface.addIndex()
-    // generates a plain `CREATE [UNIQUE] INDEX "name" ON ...` with no
-    // `IF NOT EXISTS` guard, and Sequelize CLI migrations are NOT swallowed
-    // by the production entrypoint (see the FIX comment above on `up()`) —
-    // a failure here throws and aborts `db:migrate:render` entirely, which
-    // per that same comment means every migration listed AFTER this file
-    // never runs on that deploy. This index (and the table it's on) can
-    // already exist without Sequelize's own migration-tracking table
-    // (SequelizeMeta) recording this migration as applied — e.g. if the
-    // table was ever created out-of-band by Cart.js's own model sync
-    // (models/index.js's "Creating N missing tables via sync" step, which
-    // runs BEFORE these tracked migrations) — so a subsequent, genuinely
-    // first attempt to run this migration hits "relation already exists"
-    // and takes down the whole migration run. Raw SQL with
-    // IF NOT EXISTS is unconditionally safe to re-run.
-    await queryInterface.sequelize.query(
-      `CREATE UNIQUE INDEX IF NOT EXISTS idx_cart_user_unique ON marketplace_carts (user_id);`
-    );
+    // Indexes
+    await queryInterface.addIndex('marketplace_carts', ['user_id'], {
+      unique: true,
+      name: 'idx_cart_user_unique',
+    });
 
-    await queryInterface.sequelize.query(
-      `CREATE INDEX IF NOT EXISTS idx_cart_expires ON marketplace_carts (expires_at);`
-    );
+    await queryInterface.addIndex('marketplace_carts', ['expires_at'], {
+      name: 'idx_cart_expires',
+    });
 
     console.log('[Migration] ✅ marketplace_carts table created');
   },

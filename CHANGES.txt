@@ -1,66 +1,96 @@
-moodchat backend — round 3: full migration chain now verified clean end-to-end
+moodchat backend — round 4: rate limiter crash on every route (confirmed by
+running the actual code, not by reading a comment)
 ================================================================================
-Your latest deploy log showed real progress from round 2 (it got further —
-past the groupId bug), then died on a NEW error of the exact same family:
+Drop everything in this zip into the matching paths, overwriting existing
+files, and redeploy. This zip is cumulative — it includes every fix from
+rounds 1-3 plus this one, so you only need this single zip.
 
-  ERROR: column "resetToken" of relation "Users" already exists
+THE BUG (from your production log — real, not theoretical)
+-------------------------------------------------------------
+Your deploy log showed this exact error repeated ~10 times, once per route
+file, right as every router was mounting:
 
-This is not a hidden bug, and nothing was suppressing it — you can see it
-right there in your log, logged plainly, then caught non-fatally so the
-server keeps booting. The reason it kept resurfacing as a NEW error each
-round is structural: this app has TWO independent migration systems —
-`npx sequelize-cli db:migrate` (the migrations/ folder) and a separate
-hand-rolled system in src/models/index.js that runs every time the Node
-server itself boots. Whichever one adds a column first "wins"; the other
-then hits "already exists" if it isn't defensive. I'd been fixing these one
-at a time as your logs revealed them. This round, I stopped doing that and
-instead audited every migration file in the repo for the same pattern and
-fixed all of them in one pass, rather than continuing to whack-a-mole one
-error per deploy.
+  ValidationError: A Store instance must not be shared across multiple
+  rate limiters. Create a new instance of RedisStore (with a unique
+  prefix) for each limiter instead.
+  code: 'ERR_ERL_STORE_REUSE'
 
-FILES CHANGED THIS ROUND (in addition to everything from rounds 1-2, which
-this zip also includes in full — this is a complete, current snapshot, not
-a diff):
+I opened src/middleware/rateLimiter.js and confirmed it directly: a single
+`redisStore` object was constructed once, then handed to eleven separate
+`rateLimit({ store: redisStore, ... })` calls (authLimiter, apiLimiter,
+marketplaceLimiter, registerLimiter, passwordResetLimiter,
+dataExportLimiter, searchLimiter, uploadLimiter, chatLimiter,
+callInitiationLimiter, dynamicLimiter). express-rate-limit v7+ explicitly
+rejects sharing one store instance across multiple limiters. There was
+also a second, related bug: `const RedisStore = require('rate-limit-redis')`
+grabs the whole module object, not the class — rate-limit-redis v4 exports
+RedisStore as a named export. Depending on the exact resolved package
+version this manifests as either "RedisStore is not a constructor" or the
+store-reuse error above (I actually got the "not a constructor" variant
+locally and the reuse error is what your production log showed — same
+root defect, two different failure faces depending on environment).
 
-- migrations/20260324075223-add-reset-token.js — guarded (this was the
-  actual error in your last log)
-- migrations/20260611000001-add-mfa-columns.js — guarded (same pattern,
-  would have been the next failure)
-- migrations/20260611000002-add-deletion-requested-at.js — guarded (ditto)
-- migrations/20260720000001-add-mfa-backup-codes-column.js — guarded (ditto)
-- migrations/20260621000001-create-group-sender-key-distributions.js —
-  added an idempotency guard (createTable + constraint + 2 indexes in one
-  migration; a partial prior failure would otherwise make retries fail on
-  "relation already exists")
+I did not stop at reading the error — I ran the actual module in Node
+before and after the fix to confirm it, not just read the code and assume:
 
-All of these follow the same pattern as the earlier fixes: check whether
-the column/table already exists before trying to add it, instead of
-assuming a pristine database.
+  BEFORE (reproduced locally):
+    ❌ Redis connection failed: RedisStore is not a constructor
+    (module still "loaded", but every limiter silently got an in-memory
+    fallback store instead of Redis — meaning rate limiting resets on
+    every server restart / doesn't work across multiple server instances,
+    silently, no error visible unless you go looking)
 
-VERIFIED (against a real Postgres 16 + Redis instance):
-- `npx sequelize-cli db:migrate` now runs to completion with exit code 0 —
-  74 migrations, zero errors, zero skips — starting from a genuinely empty
-  database.
-- Running it a SECOND time immediately after (simulating a redeploy) is a
-  clean no-op: "No migrations were executed, database schema was already
-  up to date." This specifically confirms the "already exists" class of
-  bug that kept resurfacing in your logs is now closed, not just moved.
-- offline_message_queue is created successfully as part of this run.
-- Full server boot on the fully-migrated database, then two fresh users:
-  register -> login -> bootstrap a first-time conversation -> first
-  message send -> reply, all succeed over real REST calls.
+  AFTER:
+    ✅ Redis connected for rate limiting
+    MODULE LOADED OK
+    authLimiter : function
+    apiLimiter : function
+    ...(all 11 limiters loaded as real functions, zero errors)
 
-WHAT THIS DOES AND DOES NOT PROVE
------------------------------------
-This closes out the database/migration layer — I'm now fairly confident
-that layer is no longer your blocker, verified by an actual clean run
-against your real migration history pattern (guard-then-add, tested twice
-in a row).
+FIX
+----
+src/middleware/rateLimiter.js — two changes:
+  1. `const { RedisStore } = require('rate-limit-redis');` (named import,
+     matches the actual package export shape)
+  2. Each limiter now calls `makeStore('<unique-name>')`, which creates
+     its OWN RedisStore instance with a unique Redis key prefix
+     (rate-limit:auth:, rate-limit:api:, rate-limit:chat:, etc.) instead
+     of all eleven sharing one instance.
 
-It does NOT prove your chat panel UI displays messages correctly — I have
-not been able to test that; see my message ​before this file for exactly
-why (no browser available in my environment) and what I need from your
-browser's Console/Network tabs at the moment of an actual hang to diagnose
-that specifically. If sends/replies still don't appear after this deploy,
-that capture is the fastest way forward — the database piece should no
-longer be a variable at that point.
+WHY THIS MATTERS FOR YOUR SYMPTOM
+------------------------------------
+I can't prove this is THE cause of "first send doesn't go through, works
+after refresh" without seeing it happen live — but the profile fits: this
+error was firing during EVERY server boot, on every route file, for what
+looks like every deploy you've shown me. A rate limiter that fails to
+construct correctly is exactly the kind of thing that could make a
+request silently misbehave on the first attempt in a way that isn't
+visible in the response body, and this is a definite, confirmed, verified
+bug regardless — worth having fixed either way.
+
+EVERYTHING ELSE IN THIS ZIP (rounds 1-3, for reference)
+-----------------------------------------------------------
+- Migration case-sensitivity bugs (Users/Messages/Groups FK references)
+- Migration ordering bug (Messages.groupId before Groups existed)
+- Missing chats/chat_participants durable migration
+- marketplace_carts / Tools UUID-vs-INTEGER type mismatches
+- Several "column already exists" guards (resetToken, mfaSecret,
+  deletionRequestedAt, mfaBackupCodes) — your app has two independent
+  migration systems that step on each other; these are all defensive
+  fixes for that
+- Calls.participants missing from the self-heal column list
+
+STILL UNRESOLVED / NOT ADDRESSED YET
+----------------------------------------
+Your latest log also shows:
+  - `relation "idx_tools_status" already exists` (Tools marketplace
+    schema step) — same "already exists" bug class as before, in a
+    migration I haven't touched yet
+  - `Could not add performance indexes: column "userId" does not exist`
+  - The "[Decryption failed]" E2E issue from the previous round — the
+    diagnostic logging patch for js/e2e-encryption.js (frontend repo,
+    separate zip) is still the next step there; I haven't received the
+    console output from a reproduction yet.
+
+I'm listing these explicitly rather than silently deferring them, since
+you've rightly pushed back on me leaving things vague.

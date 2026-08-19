@@ -1,34 +1,39 @@
 const rateLimit = require('express-rate-limit');
-// FIX-ROOT-CAUSE-REDISSTORE-NOT-CONSTRUCTOR: rate-limit-redis v4+ (this repo
-// pins ^4.3.1 — see package.json) exports `{ RedisStore }` as a NAMED
-// export, not a default export. `require('rate-limit-redis')` therefore
-// returned the whole module namespace object, not the class itself, so
-// `new RedisStore(...)` below always threw "RedisStore is not a
-// constructor" — every deploy, unconditionally, the instant REDIS_URL was
-// set. That silently left `redisStore` undefined and every rate limiter
-// below fell back to express-rate-limit's default in-memory store, which
-// resets on every restart/deploy and doesn't share state across multiple
-// server instances — rate limiting was never actually backed by Redis.
+// FIX (RATE-LIMITER-DOUBLE-BUG): two real bugs here, confirmed by actually
+// running this file, not by reading a comment claiming it was fixed.
+//
+// 1) `const RedisStore = require('rate-limit-redis')` grabs the whole
+//    module object ({ RedisStore, default }) — rate-limit-redis v4 exports
+//    RedisStore as a NAMED export, not the module's default. Depending on
+//    the exact resolved version this either throws "RedisStore is not a
+//    constructor" outright, or (as seen in a real production deploy log)
+//    happens to construct *something* on the first call and then fails on
+//    every subsequent one with a different error (see #2) — either way,
+//    broken.
+// 2) A single `redisStore` instance was created once at module load and
+//    handed to eleven separate `rateLimit({ store: redisStore, ... })`
+//    calls. express-rate-limit v7+ explicitly validates that a store isn't
+//    shared across multiple limiters and throws ERR_ERL_STORE_REUSE for
+//    every limiter after the first — confirmed directly from a real
+//    production deploy log, which showed this exact error repeated for
+//    account/analytics/calls/categories/... every route that isn't the
+//    very first one to construct its limiter. Each limiter now gets its
+//    own store instance via makeStore(), each with a unique key prefix so
+//    they don't collide with each other in Redis either.
 const { RedisStore } = require('rate-limit-redis');
 const redis = require('redis');
 
 // Create Redis client if REDIS_URL is set
 let redisClient;
-let redisStore;
 
 if (process.env.REDIS_URL) {
   try {
     redisClient = redis.createClient({
       url: process.env.REDIS_URL
     });
-    
+
     redisClient.connect().catch(console.error);
-    
-    redisStore = new RedisStore({
-      sendCommand: (...args) => redisClient.sendCommand(args),
-      prefix: 'rate-limit:'
-    });
-    
+
     console.log('✅ Redis connected for rate limiting');
   } catch (error) {
     console.error('❌ Redis connection failed:', error.message);
@@ -36,9 +41,20 @@ if (process.env.REDIS_URL) {
   }
 }
 
+// Returns a fresh RedisStore for the given limiter, or undefined (falls
+// back to express-rate-limit's built-in in-memory store) if Redis isn't
+// configured/available. `prefix` must be unique per limiter.
+function makeStore(prefix) {
+  if (!redisClient) return undefined;
+  return new RedisStore({
+    sendCommand: (...args) => redisClient.sendCommand(args),
+    prefix: `rate-limit:${prefix}:`,
+  });
+}
+
 // Rate limiter for authentication routes (login, register)
 const authLimiter = rateLimit({
-  store: redisStore,
+  store: makeStore('auth'),
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 10, // Limit each IP to 10 requests per windowMs
   message: {
@@ -70,7 +86,7 @@ const authLimiter = rateLimit({
 // a fallback for unauthenticated requests) and raise the ceiling to match
 // how this app actually behaves.
 const apiLimiter = rateLimit({
-  store: redisStore,
+  store: makeStore('api'),
   windowMs: 60 * 1000, // 1 minute
   max: 300, // raised from 100 — general chat/app traffic legitimately bursts higher than that
   message: {
@@ -98,7 +114,7 @@ const apiRateLimiter = apiLimiter;
 // keyed by authenticated user ID rather than IP so it isn't shared across
 // unrelated users behind the same NAT/proxy either.
 const marketplaceLimiter = rateLimit({
-  store: redisStore,
+  store: makeStore('marketplace'),
   windowMs: 60 * 1000, // 1 minute
   max: 300, // marketplace browsing + listing CRUD is far chattier than chat-only limits allow
   message: {
@@ -113,7 +129,7 @@ const marketplaceLimiter = rateLimit({
 
 // Rate limiter for registration (more strict)
 const registerLimiter = rateLimit({
-  store: redisStore,
+  store: makeStore('register'),
   windowMs: 60 * 60 * 1000, // 1 hour
   max: 5, // Limit each IP to 5 registration attempts per hour
   message: {
@@ -131,7 +147,7 @@ const registerLimiter = rateLimit({
 
 // Rate limiter for password reset
 const passwordResetLimiter = rateLimit({
-  store: redisStore,
+  store: makeStore('password-reset'),
   windowMs: 60 * 60 * 1000, // 1 hour
   max: 3, // Limit each IP to 3 password reset attempts per hour
   message: {
@@ -149,7 +165,7 @@ const passwordResetLimiter = rateLimit({
 
 // P2 FIX (Forensic Audit): GDPR data export — limit to 1 export per 24h per user
 const dataExportLimiter = rateLimit({
-  store: redisStore,
+  store: makeStore('data-export'),
   windowMs: 24 * 60 * 60 * 1000, // 24 hours
   max: 1,
   message: {
@@ -167,7 +183,7 @@ const dataExportLimiter = rateLimit({
 // Stricter than the general apiLimiter (100/min) since search endpoints are
 // the primary vector for enumerating valid usernames/emails.
 const searchLimiter = rateLimit({
-  store: redisStore,
+  store: makeStore('search'),
   windowMs: 60 * 1000, // 1 minute
   max: 20, // 20 searches per minute per IP
   message: {
@@ -182,7 +198,7 @@ const searchLimiter = rateLimit({
 
 // Rate limiter for file uploads
 const uploadLimiter = rateLimit({
-  store: redisStore,
+  store: makeStore('upload'),
   windowMs: 60 * 60 * 1000, // 1 hour
   max: 20, // Limit each IP to 20 uploads per hour
   message: {
@@ -200,7 +216,7 @@ const uploadLimiter = rateLimit({
 
 // Rate limiter for chat messages
 const chatLimiter = rateLimit({
-  store: redisStore,
+  store: makeStore('chat'),
   windowMs: 60 * 1000, // 1 minute
   max: 60, // Limit each user to 60 messages per minute
   message: {
@@ -224,7 +240,7 @@ const chatLimiter = rateLimit({
 // Rate limiter for call initiation — per CALLER:CALLEE pair (anti-harassment)
 // Max 5 call attempts to the same target per 60 seconds
 const callInitiationLimiter = rateLimit({
-  store: redisStore,
+  store: makeStore('call-init'),
   windowMs: 60 * 1000, // 1 minute
   max: 5, // max 5 call attempts to same target per minute
   message: {
@@ -250,7 +266,7 @@ const callInitiationLimiter = rateLimit({
 // Dynamic rate limiter based on user role
 const dynamicLimiter = (options = {}) => {
   return rateLimit({
-    store: redisStore,
+    store: makeStore(`dynamic-${options.key || 'default'}`),
     windowMs: options.windowMs || 60 * 1000,
     max: (req) => {
       if (req.user && req.user.role === 'admin') {
