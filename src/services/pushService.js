@@ -219,6 +219,12 @@ async function pushGroupMessage(groupId, message, groupName = 'Group') {
       messageId: String(message.id || ''),
       senderId:  String(message.senderId || ''),
       channelId: 'group_messages',
+      // FIX (VERIFIED-MISSING-DEEP-LINK): without this, service-worker.js's
+      // notificationclick handler (`data.url || '/chat.html'`) had nothing
+      // to fall back to but the bare shell — a group message notification
+      // click never opened the specific group. Mirrors
+      // pushNotificationService.js's 1:1 `data.url` field exactly.
+      url: `/chat.html?groupId=${groupId}`,
     };
 
     const tokenList = tokens.map(t => t.token);
