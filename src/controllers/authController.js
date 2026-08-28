@@ -495,6 +495,20 @@ class AuthController {
       // Verify stored refresh token
       const storedCheck = await tokenService.validateStoredRefreshToken(refreshToken);
       if (!storedCheck.valid) {
+        // FIX-REFRESH-FALSE-REAUTH: a transient DB failure (see
+        // tokenService.validateStoredRefreshToken) is not proof the refresh
+        // token is actually invalid — respond 503 so the frontend's
+        // refreshTokenIfNeeded() does NOT set requiresReauth (that check is
+        // status === 401 || 403) and instead treats this as retryable,
+        // exactly like any other transient network failure. Only a real
+        // TOKEN_NOT_FOUND/TOKEN_EXPIRED verdict is a genuine 401.
+        if (storedCheck.transient) {
+          return res.status(503).json({
+            success: false,
+            message: 'Token validation temporarily unavailable, please retry',
+            errorCode: 'REFRESH_TEMPORARILY_UNAVAILABLE'
+          });
+        }
         return res.status(401).json({
           success: false,
           message: 'Invalid refresh token',

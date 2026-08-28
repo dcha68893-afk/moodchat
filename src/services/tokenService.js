@@ -225,9 +225,34 @@ class TokenService {
   // If the model is null (race condition on refresh call), fall through to
   // memory store rather than crashing, so /auth/refresh still works in dev
   // and gives a clear error in production.
+  //
+  // FIX-REFRESH-FALSE-REAUTH (confirmed live Aug 28 2026 — frontend console
+  // showed a wave of "Token expired and requires reauthentication" across
+  // message.html/friend.html/Tools.html all firing at once, at the exact
+  // same moment app.realtime.socket.js was logging repeated "xhr poll
+  // error" — i.e. a transient backend/DB connectivity blip (Render cold
+  // start / dyno wake / DB pool reconnect), not an actually-dead refresh
+  // token): a thrown DB error here used to be silently swallowed (just a
+  // console.warn) and fall through to the in-memory refreshTokenStore —
+  // which, in production, never has this token in it (real tokens are
+  // stored via the DB, not the memory map), so it always came back
+  // TOKEN_NOT_FOUND. The caller (authController.refreshToken) treats
+  // TOKEN_NOT_FOUND as a hard 401 "Invalid refresh token", which the
+  // frontend's refreshTokenIfNeeded() maps straight to requiresReauth:true
+  // — permanently giving up on a session that was actually still valid,
+  // for every subsystem that shares this one refresh call, simultaneously.
+  // Fixed by tracking whether the DB lookup itself failed (vs. genuinely
+  // found nothing) and, only in that case, returning a distinct
+  // transient:true error instead of TOKEN_NOT_FOUND — so the controller
+  // can respond 503 (retryable) instead of 401 (terminal). A DB error that
+  // still resolves via the memory fallback is unaffected — this only
+  // changes the case where BOTH lookups come up empty after a real DB
+  // error, which previously had no way to distinguish itself from an
+  // actually-invalid token.
   // ─────────────────────────────────────────────────────────────────────────
   async validateStoredRefreshToken(token) {
     const TokenModel = this.getTokenModel();
+    let dbErrored = false;
     if (TokenModel) {
       try {
         const tokenRow = await TokenModel.findOne({
@@ -244,12 +269,17 @@ class TokenService {
         return { valid: true, userId: tokenRow.userId, source: 'db' };
       } catch (error) {
         console.warn('[TokenService] DB validation failed:', error.message);
+        dbErrored = true;
       }
     }
 
     // Memory fallback (dev only — in production this only fires if DB is down)
     const stored = TokenService.refreshTokenStore.get(token);
-    if (!stored)               return { valid: false, error: 'TOKEN_NOT_FOUND' };
+    if (!stored) {
+      return dbErrored
+        ? { valid: false, error: 'VALIDATION_UNAVAILABLE', transient: true }
+        : { valid: false, error: 'TOKEN_NOT_FOUND' };
+    }
     if (stored.expiresAt < Date.now()) {
       TokenService.refreshTokenStore.delete(token);
       return { valid: false, error: 'TOKEN_EXPIRED' };
