@@ -1,71 +1,51 @@
 // =============================================================================
-// messageLifecycleSocket.js
-// -----------------------------------------------------------------------------
-// MESSAGE LIFECYCLE REBUILD (messages-only scope, added 2026-07-26).
+// Canonical 1:1 message lifecycle socket.
+// One send -> one canonical msg:new -> receiver persists -> msg:delivered_ack.
+// Read receipts remain separate from delivery receipts.
 //
-// Registers a brand-new, deliberately separate event namespace (`msg:*`)
-// for the 1:1 message send/ack/read/sync flow described in the Signal-style
-// lifecycle diagram this rebuild follows:
-//
-//   msg:send            (client -> server)  create message, idempotent
-//   msg:send:ack        (server -> sender)  server id assigned, status=sent
-//   msg:send:error      (server -> sender)  validation/auth failure
-//   msg:new             (server -> recipient) push to whoever is online
-//   msg:delivered_ack   (client -> server)  recipient confirms local storage
-//   msg:delivered       (server -> sender)  -> ✓✓ delivered
-//   msg:read            (client -> server, then server -> sender) -> ✓✓ read
-//   msg:sync            (client -> server)  reconnect catch-up request
-//   msg:sync:result     (server -> client)  per-chat missed messages
-//
-// WHY A SEPARATE NAMESPACE INSTEAD OF REUSING message:*
-// ------------------------------------------------------
-// The existing `message:*` events are consumed by several overlapping
-// frontend relay layers (iframe postMessage bridge, mesh relay, multiple
-// "phaseN" patches) that coordinate via a shared "claim once" dedup flag.
-// That coordination is what's actually causing messages to intermittently
-// vanish: whichever relay path claims the event first is the only one that
-// will render it, and if that path fails partway (iframe not ready, socket
-// listener not yet rebound after reconnect), nothing else picks up the
-// slack. Per the agreed scope, this rebuild does NOT touch that shared
-// relay system (it's also used by calls/groups/games). Instead it gives
-// messages their own event names that no existing relay/dedup code even
-// looks at, so there is nothing for them to race against. The frontend's
-// new MessageLifecycleClient.js listens directly on the socket for these,
-// bypassing the claim system entirely, and re-dispatches through the
-// existing (working) render pipeline once a message is confirmed unique.
+// WIRING STATUS (verified against the live call graph, not assumed):
+//   - pushToRecipients() below IS live — the legacy socket 'message:send'
+//     handler in webSocketService.js requires and calls it directly for its
+//     participant lookup + the single 'msg:new' emit, independent of
+//     register(). So msg:new does reach clients today.
+//   - register() itself is NOT currently called anywhere — grep the repo
+//     for `messageLifecycleSocket.register(` and there's no live call site
+//     (webSocketService.js's connection handler has a "REMOVED
+//     (consolidation pass)" comment where it used to call this, taken out
+//     after a double-ack bug traced to both this pipeline and the legacy
+//     message:* pipeline independently acking the same message). That
+//     means socket.on('msg:send'/'msg:delivered_ack'/'msg:read'/'msg:sync')
+//     in this file never fire — in particular, the frontend's
+//     MessageLifecycleClient.js unconditionally emits 'msg:delivered_ack'
+//     on every message it receives, and nothing on this server is
+//     listening for it: that ack currently goes nowhere, so senders never
+//     get an 'msg:delivered' receipt through this path even though the
+//     message itself was delivered and displayed. Re-enabling register()
+//     fixes that, but needs to first confirm the legacy message:* ack path
+//     stands down for anything this module already handled — that's a
+//     webSocketService.js change, outside this file.
 // =============================================================================
-
 const messageDeliveryService = require('../services/messageDeliveryService');
 
+function trace(serverId, stage, extra) {
+  try { console.log(`[MsgLifecycle][${serverId != null ? serverId : '?'}][server] ${stage}`, extra || ''); } catch (_) {}
+}
+
 function register(wsService, socket, userId) {
-  if (socket.__msgLifecycleBound) return; // idempotent registration guard
+  if (socket.__msgLifecycleBound) return;
   socket.__msgLifecycleBound = true;
 
-  // ---- client -> server: send a message -----------------------------------
   socket.on('msg:send', async (payload = {}, cb) => {
-    // FIX-RECEIVERID-GAP: accept receiverId alongside chatId. Every "message
-    // this person" entry point from Friends/Calls/Status starts with only a
-    // receiverId (no chatId exists yet) — messageDeliveryService.sendMessage()
-    // now resolves/creates the real direct chat from it, same as the
-    // REST POST /messages path already does.
     const { chatId, receiverId, content, type, clientMessageId, replyToId } = payload;
     try {
-      if (!clientMessageId) {
-        socket.emit('msg:send:error', { clientMessageId, error: 'clientMessageId is required' });
-        if (typeof cb === 'function') cb({ ok: false, error: 'clientMessageId is required' });
-        return;
-      }
-      if (!chatId && !receiverId) {
-        socket.emit('msg:send:error', { clientMessageId, error: 'chatId or receiverId is required' });
-        if (typeof cb === 'function') cb({ ok: false, error: 'chatId or receiverId is required' });
-        return;
-      }
+      if (!clientMessageId) return fail(socket, cb, clientMessageId, 'clientMessageId is required');
+      if (!chatId && !receiverId) return fail(socket, cb, clientMessageId, 'chatId or receiverId is required');
 
       const { message, alreadyExisted } = await messageDeliveryService.sendMessage({
         chatId, receiverId, senderId: userId, content, type, clientMessageId, replyToId,
       });
 
-      const ackPayload = {
+      const ack = {
         clientMessageId,
         serverId: message.id,
         chatId: message.chatId,
@@ -73,46 +53,22 @@ function register(wsService, socket, userId) {
         sentAt: message.sentAt || message.createdAt,
         alreadyExisted: !!alreadyExisted,
       };
-      socket.emit('msg:send:ack', ackPayload);
-      if (typeof cb === 'function') cb({ ok: true, ...ackPayload });
+      socket.emit('msg:send:ack', ack);
+      if (typeof cb === 'function') cb({ ok: true, ...ack });
 
-      // Don't re-push to recipients if this was just a retried/duplicate
-      // send that already delivered the first time.
+      // Idempotent retry: the original recipient push already happened.
       if (alreadyExisted) return;
-
-      // ADAPTER-WRAP (point 1): msg:send is the canonical send path, but the
-      // frontend still has several listeners bound to the legacy 'message:new'
-      // event (app.realtime.socket.js, mesh-messages-bridge.js, etc. — see
-      // MESSAGE_LIFECYCLE_REBUILD.md's own note that this rewiring was left
-      // as a follow-up and never done, meaning messages sent through this
-      // exact handler previously never reached those listeners at all).
-      // Re-emit the identical payload pushToRecipients() already built and
-      // sent as 'msg:new' — no second query, no second payload shape.
-      const result = await pushToRecipients(wsService, message, userId);
-      if (result && result.recipients) {
-        for (const recipientId of result.recipients) {
-          wsService.sendToUser(recipientId, 'message:new', {
-            ...result.payload, id: message.id,
-          }).catch(() => {});
-        }
-      }
+      await pushToRecipients(wsService, message, userId);
     } catch (err) {
-      socket.emit('msg:send:error', { clientMessageId, error: err.message });
-      if (typeof cb === 'function') cb({ ok: false, error: err.message });
+      fail(socket, cb, clientMessageId, err.message);
     }
   });
 
-  // ---- client -> server: recipient confirms local storage -----------------
   socket.on('msg:delivered_ack', async ({ serverId, chatId } = {}) => {
     if (!serverId) return;
+    trace(serverId, 'DELIVERED_ACK_RECEIVED', { chatId, ackedBy: userId });
     try {
       await messageDeliveryService.markDelivered(serverId, userId);
-      // FIX-ACK-EVENT-MISMATCH: this is the ack event the client actually
-      // sends on real receipt (confirmed live in traffic — 'msg:delivered_ack',
-      // not 'message:delivery_ack'). The 10s ack-timeout armed in messages.js
-      // was only ever wired to clear on 'message:delivery_ack', which nothing
-      // emits, so it fired 'delivery_timeout' on every single message exactly
-      // 10s after this real ack already confirmed delivery. Clear it here too.
       if (typeof wsService.clearMessageDeliveryTimeout === 'function') {
         wsService.clearMessageDeliveryTimeout(serverId);
       }
@@ -121,15 +77,18 @@ function register(wsService, socket, userId) {
         await wsService.sendToUser(senderId, 'msg:delivered', {
           serverId, chatId, deliveredBy: userId, deliveredAt: new Date().toISOString(),
         }).catch(() => {});
+        trace(serverId, 'DELIVERED_NOTIFIED_SENDER', { senderId });
+      } else {
+        trace(serverId, 'DELIVERED_SENDER_LOOKUP_FAILED');
       }
     } catch (err) {
+      trace(serverId, 'DELIVERED_ACK_ERROR', { error: err.message });
       console.warn('[messageLifecycleSocket] msg:delivered_ack error:', err.message);
     }
   });
 
-  // ---- client -> server: reader opened the chat ----------------------------
   socket.on('msg:read', async ({ chatId, messageIds } = {}) => {
-    if (!Array.isArray(messageIds) || messageIds.length === 0) return;
+    if (!Array.isArray(messageIds) || !messageIds.length) return;
     try {
       await messageDeliveryService.markRead(messageIds, userId);
       socket.to(`chat:${chatId}`).emit('msg:read', {
@@ -140,21 +99,15 @@ function register(wsService, socket, userId) {
     }
   });
 
-  // ---- client -> server: reconnect catch-up --------------------------------
-  // This is the direct fix for the dead-letter bug: the pre-existing
-  // sync:missed_messages flow sent replies that nothing on the client read.
-  // msg:sync/msg:sync:result is the same idea, paired with a client that
-  // actually consumes the result (see MessageLifecycleClient.js).
   socket.on('msg:sync', async ({ chats } = {}) => {
     if (!Array.isArray(chats)) return;
     for (const c of chats.slice(0, 30)) {
       try {
-        const messages = await messageDeliveryService.getMissedMessages(
-          userId, c.chatId, { sinceId: c.sinceId || null, sinceTimestamp: c.sinceTimestamp || null }
-        );
-        if (messages.length > 0) {
-          socket.emit('msg:sync:result', { chatId: c.chatId, messages });
-        }
+        const messages = await messageDeliveryService.getMissedMessages(userId, c.chatId, {
+          sinceId: c.sinceId || null,
+          sinceTimestamp: c.sinceTimestamp || null,
+        });
+        if (messages.length) socket.emit('msg:sync:result', { chatId: c.chatId, messages });
       } catch (err) {
         console.warn('[messageLifecycleSocket] msg:sync error for chat', c.chatId, err.message);
       }
@@ -163,22 +116,16 @@ function register(wsService, socket, userId) {
   });
 }
 
-// CONSOLIDATE-MESSAGE-PROTOCOL: exported so any other entry point that
-// creates a message through messageDeliveryService (currently: this
-// module's msg:send handler, and the legacy message:send handler in
-// webSocketService.js) pushes it to recipients through this exact same
-// function, instead of each keeping its own hand-rolled copy of "look up
-// participants, build the payload, call sendToUser per recipient". That
-// duplication is what let the msg:* and message:* protocols drift apart
-// in the first place.
+function fail(socket, cb, clientMessageId, error) {
+  socket.emit('msg:send:error', { clientMessageId, error });
+  if (typeof cb === 'function') cb({ ok: false, error });
+}
+
 async function pushToRecipients(wsService, message, senderId) {
   const sequelize = require('../models').sequelize;
-  const chatIdInt = parseInt(message.chatId, 10);
-  const senderIdInt = parseInt(senderId, 10);
-
   const participants = await sequelize.query(
     `SELECT DISTINCT "userId" FROM chat_participants WHERE "chatId" = :chatId AND "userId" != :senderId`,
-    { replacements: { chatId: chatIdInt, senderId: senderIdInt }, type: sequelize.QueryTypes.SELECT }
+    { replacements: { chatId: parseInt(message.chatId, 10), senderId: parseInt(senderId, 10) }, type: sequelize.QueryTypes.SELECT }
   ).catch(() => []);
 
   const payload = {
@@ -195,19 +142,14 @@ async function pushToRecipients(wsService, message, senderId) {
     status: 'sent',
   };
 
-  if (!participants || participants.length === 0) return { recipients: [], payload };
-
-  const recipients = participants.map(p => p.userId);
-  for (const recipientId of recipients) {
+  for (const { userId: recipientId } of participants) {
+    // Exactly one canonical realtime event. Do not also emit message:new here;
+    // that legacy event is handled by a different relay stack and was the
+    // source of duplicate packets observed in the browser network trace.
     await wsService.sendToUser(recipientId, 'msg:new', payload).catch(() => {});
+    trace(message.id, 'PUSHED_MSG_NEW', { recipientId });
   }
-
-  // CONSOLIDATE-MESSAGE-PROTOCOL: return the exact recipient list + payload
-  // used for the canonical 'msg:new' emit so any legacy-event adapter (see
-  // webSocketService.js's 'message:send' handler) re-emits the SAME data
-  // under 'message:new' instead of re-querying participants and re-building
-  // its own payload — one lookup, one payload, two event names.
-  return { recipients, payload };
+  return { recipients: participants.map(p => p.userId), payload };
 }
 
 async function getSenderIdForMessage(messageId) {
