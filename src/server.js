@@ -2110,6 +2110,28 @@ class DatabaseService {
         this._retryAttempts = 0;
         this._retrying = false;
 
+        // FIX-MIGRATE-BLOCKING (root cause of the simultaneous "everything
+        // times out at once" storm across totally unrelated endpoints —
+        // friends, groups, tools marketplace, status, calls all timing out
+        // in the same ~30s window): initialize() ran `npx sequelize-cli
+        // db:migrate` via execSync on EVERY call, not just the first boot.
+        // execSync blocks Node's single event loop for the full duration of
+        // the child process (observed up to the 60s timeout) — while it
+        // runs, the already-listening HTTP server cannot service ANY
+        // request, so every in-flight and incoming request queues until it
+        // returns, then all time out/hang together. This is bad enough on
+        // first boot, but initialize() is also re-invoked by
+        // scheduleReconnect() on every DB reconnect attempt (a transient
+        // network blip, not just cold start), so a perfectly healthy,
+        // already-running server would re-freeze itself for up to a minute
+        // on each retry. Migrations already run once via `npm run start`
+        // ("(npm run db:migrate || true) && node src/server.js") before
+        // this process ever starts, so re-running them here was redundant
+        // even on first boot. This flag makes sure it runs at most once per
+        // process lifetime, and runMigrationsAsync() below no longer blocks
+        // the event loop while it runs.
+        this._migrationsAttempted = false;
+
         systemState.registerService('database', this);
     }
 
@@ -2186,16 +2208,26 @@ class DatabaseService {
             // guards against the start command not being start:render at
             // all — migrations now run here regardless of how the process
             // was launched, before the server starts accepting traffic.
-            try {
-                const { execSync } = require('child_process');
+            // FIX-MIGRATE-BLOCKING: only ever attempt this once per process
+            // (not on every reconnect retry), and don't block the event
+            // loop while it runs — see constructor comment for why.
+            if (!this._migrationsAttempted) {
+                this._migrationsAttempted = true;
+                const { exec } = require('child_process');
                 const migrateEnv = config.get('NODE_ENV') === 'production' ? 'production' : (config.get('NODE_ENV') || 'development');
-                const output = execSync(
+                exec(
                     `npx sequelize-cli db:migrate --env ${migrateEnv}`,
-                    { cwd: BACKEND_ROOT_DIR, timeout: 60000, encoding: 'utf8' }
+                    { cwd: BACKEND_ROOT_DIR, timeout: 60000, encoding: 'utf8' },
+                    (migrateErr, stdout) => {
+                        if (migrateErr) {
+                            console.error('[DB MIGRATE] Auto-migration failed (server continues running):', migrateErr.message);
+                        } else {
+                            _slog('[DB MIGRATE] ' + stdout);
+                        }
+                    }
                 );
-                _slog('[DB MIGRATE] ' + output);
-            } catch (migrateErr) {
-                console.error('[DB MIGRATE] Auto-migration failed (server will continue starting):', migrateErr.message);
+            } else {
+                _slog('[DB MIGRATE] Skipped — already attempted once this process lifetime (reconnect retry)');
             }
 
             // Update state to CONNECTED
