@@ -273,12 +273,26 @@ router.get('/users/all', apiRateLimiter, asyncHandler(async (req, res) => {
             ];
         }
 
+        // ROOT-CAUSE FIX (new-friend-missing-from-browse-all): this endpoint
+        // paginates (offset/limit) but the frontend's "Browse All" tab only
+        // ever fetches a single page (?limit=200, no page param) and renders
+        // it flat — it never pages through the rest. With the old sort
+        // (online-status, then username ASC and nothing else), a brand-new
+        // user whose username happened to sort alphabetically past whatever
+        // fits in that first 200-user page was invisible in Browse All
+        // forever, even though a direct /search for their exact username
+        // still found them (that endpoint's bug is the same, fixed below).
+        // Sorting newest-registered-first within each status bucket means a
+        // just-created account is always near the top of the one page the
+        // frontend actually loads, instead of being buried/truncated
+        // alphabetically.
         const { count, rows: users } = await withTimeout(User.findAndCountAll({
             where: whereCondition,
-            attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'settings', 'email'],
+            attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'settings', 'email', 'createdAt'],
             limit: limitNum, offset,
             order: [
                 [Sequelize.literal("CASE WHEN status IN ('online','away') THEN 0 ELSE 1 END"), 'ASC'],
+                ['createdAt', 'DESC'],
                 ['username', 'ASC']
             ]
         }), 10000);
@@ -555,14 +569,20 @@ router.get('/search', searchLimiter, asyncHandler(async (req, res) => {
             orConditions.push(Sequelize.where(Sequelize.fn('LOWER', Sequelize.col('email')), { [Op.like]: s }));
         }
 
+        // ROOT-CAUSE FIX (new-friend-missing-from-search): same class of bug
+        // as /users/all above — a pure username ASC order meant that once a
+        // query matched more users than the limit, a newly-registered match
+        // could be truncated off purely by alphabetical bad luck. Newest
+        // first ensures a friend who JUST registered is never the one that
+        // gets cut.
         const users = await withTimeout(User.findAll({
             where: {
                 id: { [Op.ne]: userId },
                 [Op.or]: orConditions
             },
-            attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'bio', 'settings', 'phone', 'email'],
+            attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'bio', 'settings', 'phone', 'email', 'createdAt'],
             limit: Math.min(100, parseInt(req.query.limit) || 50),
-            order: [['username', 'ASC']]
+            order: [['createdAt', 'DESC'], ['username', 'ASC']]
         }));
 
         await applyLastSeenPrivacy(users, userId);
@@ -667,10 +687,12 @@ router.get('/search/new', searchLimiter, asyncHandler(async (req, res) => {
             } catch (e) { /* non-fatal */ }
         }
 
+        // ROOT-CAUSE FIX (new-friend-missing-from-search): see the matching
+        // fix in /search above — same truncation bug, same fix.
         const { count, rows: users } = await withTimeout(User.findAndCountAll({
             where,
-            attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'bio', 'settings'],
-            order: [['username', 'ASC']], offset, limit: limitNum
+            attributes: ['id', 'username', 'avatar', 'firstName', 'lastName', 'status', 'lastSeen', 'bio', 'settings', 'createdAt'],
+            order: [['createdAt', 'DESC'], ['username', 'ASC']], offset, limit: limitNum
         }));
 
         await applyLastSeenPrivacy(users, userId);

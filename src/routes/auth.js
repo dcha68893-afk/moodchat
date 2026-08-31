@@ -208,6 +208,24 @@ router.post('/register', asyncHandler(async (req, res) => {
                 avatar:   newUser.avatar || null,
                 role:     newUser.role   || 'user',
                 isVerified: newUser.isVerified || false,
+                // ROOT-CAUSE FIX (incomplete-profile-after-auth): this response
+                // — and /login and /google below — used to return only
+                // id/username/email/avatar/role, never firstName/lastName/bio/
+                // status/displayName. GET /auth/me returns the full shape, but
+                // the frontend stores THIS response's `user` object to
+                // localStorage/currentUser immediately on login/register, and
+                // several UI spots (js/app.core.js, js/app.core.session.js)
+                // render `user.displayName || 'User'` with no username
+                // fallback — so any account whose cached object lacked
+                // displayName rendered the literal string "User" until (or
+                // unless) a later /auth/me call happened to overwrite it.
+                // Returning the same fields /me returns here closes that gap
+                // at the source for every auth path, not just Google's.
+                firstName:   newUser.firstName || null,
+                lastName:    newUser.lastName  || null,
+                bio:         newUser.bio       || '',
+                status:      newUser.status    || 'offline',
+                displayName: [newUser.firstName, newUser.lastName].filter(Boolean).join(' ').trim() || newUser.username,
                 // E2E-WRAP-SECRET FIX: see note near the top of this file.
                 e2eWrapSecret: await ensureE2EWrapSecret(newUser)
             }
@@ -381,6 +399,15 @@ router.post('/login', asyncHandler(async (req, res) => {
                 email:    user.email,
                 avatar:   user.avatar || null,
                 role:     user.role   || 'user',
+                // ROOT-CAUSE FIX (incomplete-profile-after-auth): see the
+                // matching comment on /register above — same missing-fields
+                // gap, same fix, so a manual login's cached user object is
+                // complete without waiting on a separate /auth/me call.
+                firstName:   user.firstName || null,
+                lastName:    user.lastName  || null,
+                bio:         user.bio       || '',
+                status:      user.status    || 'offline',
+                displayName: [user.firstName, user.lastName].filter(Boolean).join(' ').trim() || user.username,
                 // E2E-WRAP-SECRET FIX: see note near the top of this file —
                 // this is the field manual login was already correctly able
                 // to derive a substitute for client-side (the typed
@@ -432,6 +459,27 @@ router.post('/google', asyncHandler(async (req, res) => {
             email:    result.user.email,
             avatar:   result.user.avatar || null,
             role:     result.user.role || 'user',
+            // ROOT-CAUSE FIX (google-login-shows-"User"-everywhere): this is
+            // the actual bug reported as "Google login shows 'user' and
+            // incomplete details". authService.loginWithGoogle() already
+            // resolves real firstName/lastName from the Google profile (see
+            // the ROOT-CAUSE FIX comment in authService.js) and returns them
+            // on result.user — but this route's response mapping was as
+            // narrow as e2eWrapSecret used to be before the fix just below,
+            // dropping firstName/lastName/bio/status/displayName the exact
+            // same way. The frontend (js/google-auth.js) stores this `user`
+            // object directly to localStorage/currentUser, and UI code like
+            // js/app.core.session.js renders `user.displayName || 'User'`
+            // with no username fallback — so a Google account always showed
+            // the literal string "User" until a separate /auth/me call
+            // happened to overwrite it (which several code paths never
+            // trigger). Returning the same fields /auth/me returns closes
+            // this at the source instead of relying on a later hydration.
+            firstName:   result.user.firstName || null,
+            lastName:    result.user.lastName  || null,
+            bio:         result.user.bio       || '',
+            status:      result.user.status    || 'offline',
+            displayName: [result.user.firstName, result.user.lastName].filter(Boolean).join(' ').trim() || result.user.username,
             // E2E-WRAP-SECRET FIX: THIS is the actual root-cause fix for
             // "Manual login fails encryption, Google login works" — see the
             // note near the top of this file. authService.loginWithGoogle()
@@ -573,6 +621,31 @@ router.post('/refresh', asyncHandler(async (req, res) => {
     
     const stored = await tokenService.validateStoredRefreshToken(refreshToken);
     if (!stored.valid) {
+        // ROOT-CAUSE FIX (refresh-kills-session-on-transient-blip): this used
+        // to return 401 unconditionally, collapsing two very different
+        // situations into one terminal response. tokenService.js's
+        // validateStoredRefreshToken() (see its own FIX-REFRESH-FALSE-REAUTH
+        // comment, confirmed live Aug 28 2026) already tells us which one we
+        // have: `stored.transient === true` means the DB lookup itself
+        // failed (cold start / pool reconnect) and we genuinely don't know
+        // if the refresh token is valid, vs. a real TOKEN_NOT_FOUND/
+        // TOKEN_EXPIRED meaning it definitely isn't. The frontend's
+        // refreshTokenIfNeeded() (js/api.core.js) already treats a non-401/
+        // 403 status as retryable and only sets requiresReauth on 401/403 —
+        // but this route never read `stored.transient`, so it always sent
+        // 401 either way, and a single transient DB blip was enough to make
+        // the frontend dispatch 'auth:session:ended', permanently disconnect
+        // the realtime socket, and wipe the token for every module sharing
+        // it — even though the user's actual refresh token was still good.
+        // 503 here lets the frontend retry shortly instead of ending the
+        // session outright.
+        if (stored.transient) {
+            return res.status(503).json({
+                success: false,
+                message: 'Could not verify refresh token right now — please retry',
+                errorCode: 'REFRESH_VALIDATION_UNAVAILABLE'
+            });
+        }
         return res.status(401).json({
             success: false,
             message: 'Refresh token not found or expired'
