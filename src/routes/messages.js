@@ -1097,18 +1097,21 @@ router.post('/', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
         const _htrAvail = !!global.__HybridTransportRuntime;
         _flog(`[FORENSIC][${_traceId}] TRANSPORT_SELECTED | messageId=${messageId} | transport=${_htrAvail?'HTR+SocketIO':'SocketIO'} | recipients=${recipientIds.join(',')} | ts=${Date.now()}`);
 
-        // CONSOLIDATE-MESSAGE-PROTOCOL (point 1): 'message:new' and 'msg:new'
-        // used to be built from two SEPARATELY CONSTRUCTED payload objects
-        // (populatedMessage vs. a hand-picked field subset) — the exact kind
-        // of drift that lets the two protocols silently diverge (a field
-        // present on one, missing/renamed on the other) and was flagged here
-        // as a live, unresolved risk ("DUAL_EMIT_WARNING"). There is now ONE
-        // canonical payload, built once, reused for both emits. 'msg:new' is
-        // canonical (this is what MessageLifecycleClient.js's race-free
-        // listener consumes); 'message:new' is kept ONLY as a thin adapter
-        // for the frontend's still-active legacy listeners (app.realtime.
-        // socket.js, mesh-messages-bridge.js, etc. — see MESSAGE_LIFECYCLE_
-        // REBUILD.md) and carries the identical data, not a re-derived copy.
+        // FIX-ROOT-CAUSE-DEAD-DUAL-EMIT (msg:new / message:new consolidation):
+        // the comment this replaces claimed 'msg:new' was "canonical" because
+        // "MessageLifecycleClient.js's race-free listener consumes" it. Traced
+        // from the actual executable code, not the comment: MessageLifecycleClient.js
+        // is never loaded by any <script> tag in any HTML file in this app (see its
+        // own file header, "DEPRECATED / NOT WIRED IN — DO NOT LOAD THIS FILE", and
+        // message.html's FIX-VERIFIED-DEAD-CODE-WAS-NOT-DEAD comment where its tag
+        // is commented out). Nothing in the live frontend ever listens for 'msg:new'.
+        // The only frontend modules that register a receiver-side listener for an
+        // incoming message event — js/phase15.delivery.patch.js, js/messageSync.engine.js,
+        // and app.realtime.socket.js's own message router — all listen for
+        // 'message:new'. So 'message:new' is the actual canonical event consumed by
+        // production, and 'msg:new' was the dead, wasted duplicate emission — the
+        // opposite of what the old comment claimed. Removed the 'msg:new' emit;
+        // 'message:new' (below) is now the single realtime emission for this path.
         const canonicalPayload = {
           serverId:   populatedMessage.id,
           id:         populatedMessage.id,
@@ -1128,16 +1131,15 @@ router.post('/', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
           deliveredAt: null,
         };
 
-        // sendToUser() already emits to all room-name variants for the uid.
+        // sendToUser() already emits to all room-name variants for the uid,
+        // exactly once per socket (see FIX-ROOT-CAUSE-DUPLICATE-ROOM-EMIT in
+        // webSocketService.js). ONE canonical realtime event per message.
         const deliveryResults = await Promise.allSettled(
-          recipientIds.map(uid => wsService.sendToUser(uid, 'msg:new', canonicalPayload))
+          recipientIds.map(uid => wsService.sendToUser(uid, 'message:new', canonicalPayload))
         );
-        recipientIds.forEach(uid => {
-          wsService.sendToUser(uid, 'message:new', canonicalPayload).catch(() => {});
-        });
 
         if (recipientIds.length > 0) {
-          _flog(`[FORENSIC][${_traceId}] BROADCAST_PAYLOAD_UNIFIED | messageId=${messageId} | events=msg:new(canonical),message:new(adapter) | recipients=${recipientIds.join(',')} | ts=${Date.now()}`);
+          _flog(`[FORENSIC][${_traceId}] BROADCAST_PAYLOAD_UNIFIED | messageId=${messageId} | events=message:new(canonical) | recipients=${recipientIds.join(',')} | ts=${Date.now()}`);
         }
 
         // ── FORENSIC LOG: BROADCASTED ─────────────────────────────────────────
@@ -1733,31 +1735,24 @@ router.post('/bulk', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) 
           const allParticipantIds = (participants || []).map(r => parseInt(r.userId, 10)).filter(Boolean);
           const recipientIds = allParticipantIds.filter(id => id !== senderId);
 
-          // FIX-010: Single canonical 'message:new' event — sendToUser() covers all room variants
-          // FIX: Only deliver to recipients, not sender (sender has optimistic message already)
+          // FIX-ROOT-CAUSE-DUPLICATE (applying the fix already proven correct on the
+          // single-message send path above, at "FIX-ROOT-CAUSE-DUPLICATE: Removed
+          // broadcastToChat(chatId, 'message:new')" — that fix was never applied
+          // here): calling both sendToUser() AND broadcastToChat() double-delivers
+          // 'message:new' to any socket that is both a target of sendToUser() and a
+          // member of the chat:<chatId>/chat_<chatId> room (every participant's
+          // socket joins its chat rooms on authentication — see
+          // webSocketService.js's _joinUserChatRooms). sendToUser() already reaches
+          // every participant socket via the user:<id>/user_<id> rooms, so
+          // broadcastToChat() here was pure duplicate delivery, not added coverage.
+          // Also removed the 'msg:new' emit alongside it: traced from executable
+          // code, nothing in the live frontend listens for 'msg:new' (see the
+          // matching FIX-ROOT-CAUSE-DEAD-DUAL-EMIT comment on the single-message
+          // send path above) — MessageLifecycleClient.js is never loaded by any page.
+          // 'message:new' is the one canonical event, same as the single-send path.
           await Promise.allSettled(
             recipientIds.map(uid => wsService.sendToUser(uid, 'message:new', populatedMessage))
           );
-          if (typeof wsService.broadcastToChat === 'function') {
-            wsService.broadcastToChat(chatId, 'message:new', populatedMessage, []);
-          }
-          // FIX-LIFECYCLE-DEADCODE: see matching comment on the single-message send
-          // path above — same reasoning, same shim, so bulk/share sends also engage
-          // MessageLifecycleClient's race-free listener instead of relying solely on
-          // the old relay/claim system.
-          recipientIds.forEach(uid => {
-            wsService.sendToUser(uid, 'msg:new', {
-              serverId: populatedMessage.id,
-              chatId: populatedMessage.chatId,
-              senderId: populatedMessage.senderId,
-              content: populatedMessage.content,
-              type: populatedMessage.type,
-              sender: populatedMessage.sender,
-              replyToId: null,
-              createdAt: populatedMessage.createdAt,
-              sentAt: populatedMessage.sentAt,
-            }).catch(() => {});
-          });
         } catch (notifyErr) {
           console.warn('[bulk] Realtime delivery failed for chatId=' + chatId + ':', notifyErr.message);
         }

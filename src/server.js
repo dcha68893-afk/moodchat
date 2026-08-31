@@ -2213,6 +2213,66 @@ class DatabaseService {
             // loop while it runs — see constructor comment for why.
             if (!this._migrationsAttempted) {
                 this._migrationsAttempted = true;
+
+                // FIX-ROOT-CAUSE-MIGRATION-NEVER-APPLIED: "column GroupMembers.leftAt
+                // does not exist" (and the same for notificationsMuted/customSettings)
+                // kept firing on EVERY getUserGroups() call in production, for every
+                // user, indefinitely — not just in a brief startup race window. That
+                // ruled out "migration just hasn't finished yet": the migration for
+                // these exact columns (20260716000001-add-missing-groupmembers-
+                // columns.js) already exists in this repo, dated over a month before
+                // the failing logs. It was simply never successfully applied to the
+                // production database.
+                //
+                // The `exec('npx sequelize-cli db:migrate ...')` call below is
+                // fire-and-forget (not awaited — see FIX-MIGRATE-BLOCKING above) and
+                // spawns a CHILD PROCESS that re-resolves `sequelize-cli` and every
+                // migration file from disk independently of this already-running
+                // process. On a platform like Render, `npx` may need to hit the npm
+                // registry to resolve the binary (slow/blocked egress = silent
+                // timeout/failure), and any failure here only logs a console.error —
+                // there is no retry, no alert, and no visibility if that log line
+                // itself gets lost/rotated. The exact "column does not exist" error
+                // in the report's log is direct evidence this path was silently
+                // failing: no matching "[DB MIGRATE]" success line appears anywhere
+                // in the ~6 minutes of log surrounding the errors.
+                //
+                // Fix: apply this specific, known-safe set of columns directly via
+                // Sequelize's own query interface, in-process, AWAITED before the
+                // server proceeds — no child process, no CLI binary resolution, no
+                // dependency on `npx`/network/registry access at runtime. This
+                // guarantees the column exists before any request can hit the
+                // "column does not exist" error, regardless of whether the
+                // sequelize-cli subprocess path below succeeds. The full CLI
+                // migration run is still kicked off afterward (unawaited, as before)
+                // to pick up any OTHER pending migrations project-wide.
+                try {
+                    const { DataTypes } = require('sequelize');
+                    const qi = this.sequelize.getQueryInterface();
+                    const gmCols = await qi.describeTable('GroupMembers').catch(() => null);
+                    if (gmCols) {
+                        if (!gmCols.leftAt) {
+                            await qi.addColumn('GroupMembers', 'leftAt', { type: DataTypes.DATE, allowNull: true });
+                            _slog('[DB MIGRATE] ✅ Added GroupMembers.leftAt directly (in-process fallback)');
+                        }
+                        if (!gmCols.notificationsMuted) {
+                            await qi.addColumn('GroupMembers', 'notificationsMuted', { type: DataTypes.BOOLEAN, defaultValue: false, allowNull: false });
+                            _slog('[DB MIGRATE] ✅ Added GroupMembers.notificationsMuted directly (in-process fallback)');
+                        }
+                        if (!gmCols.customSettings) {
+                            await qi.addColumn('GroupMembers', 'customSettings', { type: DataTypes.JSONB, defaultValue: { bannedAt: null, banReason: null, banExpiry: null }, allowNull: false });
+                            _slog('[DB MIGRATE] ✅ Added GroupMembers.customSettings directly (in-process fallback)');
+                        }
+                        await qi.sequelize.query(
+                            'CREATE INDEX IF NOT EXISTS idx_groupmembers_userid_leftat ON "GroupMembers" ("userId", "leftAt");'
+                        ).catch(() => {});
+                    } else {
+                        _slog('[DB MIGRATE] GroupMembers table not found yet — skipping in-process column fallback');
+                    }
+                } catch (directMigrateErr) {
+                    console.error('[DB MIGRATE] In-process GroupMembers column fallback failed:', directMigrateErr.message);
+                }
+
                 const { exec } = require('child_process');
                 const migrateEnv = config.get('NODE_ENV') === 'production' ? 'production' : (config.get('NODE_ENV') || 'development');
                 exec(

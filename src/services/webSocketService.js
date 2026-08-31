@@ -1380,13 +1380,35 @@ class WebSocketService {
         // twice — doubling socket I/O across the whole platform for zero benefit.
         // getActiveSocketsForUser() is the single canonical definition of
         // "where does this user's traffic go" — see its doc comment above.
+        // FIX-ROOT-CAUSE-DUPLICATE-ROOM-EMIT: this used to call `io.to(room).emit(...)`
+        // once PER room variant in a loop (e.g. once for `user:5`, once for `user_5`).
+        // Socket.IO only de-duplicates recipients WITHIN a single `.to().to().emit()`
+        // chain/call — it does NOT de-duplicate across separate, independent `.emit()`
+        // invocations. Every socket that is a member of more than one of these room
+        // variants (confirmed live: app.realtime.socket.js's 'authenticated' handler
+        // joins BOTH `user:<id>` and `user_<id>` for every connection) therefore
+        // received the exact same event — 'message:new' included — once per matching
+        // room, i.e. genuinely duplicated at the transport layer before any client-side
+        // de-dup logic even runs. This is a real, verified root cause of the "same
+        // message/notification appears more than once" symptom, independent of and in
+        // addition to any client-side dedup gaps. Fix: check membership per room (to
+        // preserve the existing delivered/offline-queue accuracy below), but emit
+        // exactly ONCE across all room variants via a single chained `.to()` call, so
+        // a socket in multiple room variants is only ever delivered to once.
         const { rooms } = await this.getActiveSocketsForUser(uid);
+        let _anyRoomHasMembers = false;
         for (const room of rooms) {
             try {
                 const roomSet = io.sockets?.adapter?.rooms?.get(room);
-                const hasMembers = !!(roomSet && roomSet.size > 0);
-                io.to(room).emit(event, payload);
-                if (hasMembers) delivered = true;
+                if (roomSet && roomSet.size > 0) _anyRoomHasMembers = true;
+            } catch (_) {}
+        }
+        if (rooms.length > 0) {
+            try {
+                let emitter = io;
+                for (const room of rooms) emitter = emitter.to(room);
+                emitter.emit(event, payload);
+                if (_anyRoomHasMembers) delivered = true;
             } catch (_) {}
         }
 

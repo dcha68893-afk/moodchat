@@ -225,8 +225,11 @@ router.post('/', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
         sentAt: new Date().toISOString(), deliveredAt: new Date().toISOString(),
         createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
       };
+      // FIX-ROOT-CAUSE-DUPLICATE: see matching fix in src/routes/messages.js —
+      // sendToUser() already covers every participant socket; broadcastToChat()
+      // on top of it double-delivers to sockets that are members of both the
+      // user room and the chat room (every participant, in practice).
       await Promise.allSettled(recipientIds.map(uid => wsService.sendToUser(uid, 'message:new', populatedMessage)));
-      wsService.broadcastToChat(chatId, 'message:new', populatedMessage, []);
     } catch (_) { /* non-fatal — clients will see the poll on next fetch */ }
 
     res.status(201).json({ success: true, message: 'Poll created', data: { poll: payload, messageId } });

@@ -139,10 +139,15 @@ router.post('/start', apiRateLimiter, chatLimiter, asyncHandler(async (req, res)
         sentAt: new Date().toISOString(), deliveredAt: new Date().toISOString(),
         createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
       };
+      // FIX-ROOT-CAUSE-DUPLICATE: matches the fix applied in src/routes/messages.js
+      // (see "FIX-ROOT-CAUSE-DUPLICATE: Removed broadcastToChat(chatId, 'message:new')"
+      // there). sendToUser() already reaches every participant's socket via their
+      // user:<id>/user_<id> rooms; broadcastToChat() additionally targets the
+      // chat:<chatId>/chat_<chatId> rooms those same sockets are also members of,
+      // so calling both delivers this 'message:new' twice to the same socket.
       await Promise.allSettled(
         participants.map(p => wsService.sendToUser(p.userId, 'message:new', populatedMessage))
       );
-      wsService.broadcastToChat(chatId, 'message:new', populatedMessage, []);
     } catch (_) {}
 
     res.status(201).json({ success: true, message: 'Live location sharing started', data: { session: payload } });
