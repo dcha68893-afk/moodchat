@@ -209,7 +209,16 @@ router.post('/lifecycle/send', apiRateLimiter, chatLimiter, asyncHandler(async (
 
   // Best-effort real-time push to recipients — if this REST call is itself
   // the retry after a socket failure, the recipients may already have it,
-  // but msg:new pushes are idempotent client-side (dedup by serverId).
+  // but message:new pushes are idempotent client-side (dedup by serverId).
+  // FIX-ROOT-CAUSE-DEAD-DUAL-EMIT (msg:new / message:new consolidation,
+  // /lifecycle/send REST fallback): this emitted the legacy 'msg:new' event,
+  // which is the same dead event name eliminated from the two live send
+  // paths below (single-send and group broadcast) — MessageLifecycleClient.js,
+  // its only ever frontend consumer, is not loaded (its <script> tag is
+  // commented out in message.html). 'message:new' is the one canonical event
+  // consumed by the live chat renderer everywhere else in this file; this
+  // fallback route must not be the one remaining path still emitting the
+  // dead duplicate.
   if (!alreadyExisted) {
     try {
       const wsService = require('../services/webSocketService');
@@ -223,7 +232,7 @@ router.post('/lifecycle/send', apiRateLimiter, chatLimiter, asyncHandler(async (
         { replacements: { chatId: parseInt(message.chatId, 10), senderId: parseInt(senderId, 10) }, type: sequelize.QueryTypes.SELECT }
       ).catch(() => []);
       for (const { userId: recipientId } of participants) {
-        wsService.sendToUser(recipientId, 'msg:new', {
+        wsService.sendToUser(recipientId, 'message:new', {
           serverId: message.id, chatId: message.chatId, senderId: message.senderId,
           content: message.content, type: message.type, sender: message.sender || null,
           replyToId: message.replyToId || null, createdAt: message.createdAt,

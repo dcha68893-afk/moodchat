@@ -849,27 +849,39 @@ class WebSocketService {
 
                     socket.emit('message:send:ack', { localId: msLocalId, messageId: message.id, chatId: message.chatId, sentAt: message.sentAt || message.createdAt });
 
-                    // ADAPTER-WRAP (point 1): this handler used to run its own
-                    // second participant lookup + broadcast loop for legacy
-                    // 'message:new', built from a separately hand-picked field
-                    // subset — the same payload-drift risk fixed in POST
-                    // /messages (see BROADCAST_PAYLOAD_UNIFIED there). It's now
-                    // a thin adapter: pushToRecipients() (the msg:* pipeline's
-                    // single canonical delivery function, shared with
-                    // messageLifecycleSocket.js's own msg:send handler) does
-                    // the one participant lookup and the one 'msg:new' emit;
-                    // this just re-emits the exact same payload it returns
-                    // under the legacy event name, for clients not yet on
-                    // msg:*. No second query, no second payload shape.
-                    const { pushToRecipients } = require('../sockets/messageLifecycleSocket');
-                    const canonicalPayload = await pushToRecipients(this, message, userId).catch(() => null);
-                    if (canonicalPayload && canonicalPayload.recipients) {
-                        for (const recipientId of canonicalPayload.recipients) {
-                            this.sendToUser(recipientId, 'message:new', {
-                                ...canonicalPayload.payload,
-                                id: message.id, conversationId: message.chatId,
-                            }).catch(() => {});
-                        }
+                    // FIX-ROOT-CAUSE-DUAL-EMIT (msg:new / message:new, message:send
+                    // socket path): this used to call messageLifecycleSocket's
+                    // pushToRecipients() — which runs its own participant lookup and
+                    // emits the *dead* legacy 'msg:new' event (verified: its only
+                    // frontend listener lives in MessageLifecycleClient.js, whose
+                    // <script> tag is commented out in message.html, so nothing ever
+                    // receives it) — and THEN ran a second, independent participant
+                    // lookup + broadcast loop here for 'message:new', the event the
+                    // live chat renderer actually consumes. That's two DB queries and
+                    // two realtime emits per recipient for one logical message, on
+                    // this one already-consolidated send path — exactly the kind of
+                    // dual emission the msg:new/message:new consolidation in
+                    // routes/messages.js already eliminated for the REST send path
+                    // (see BROADCAST_PAYLOAD_UNIFIED there). Fixed by doing the one
+                    // participant lookup and the one canonical 'message:new' emit
+                    // directly here, matching that REST path's payload shape, and no
+                    // longer calling pushToRecipients()/emitting 'msg:new' at all.
+                    // pushToRecipients() itself is untouched — it remains correct for
+                    // messageLifecycleSocket.js's own register()-based msg:* pipeline
+                    // if that is ever re-enabled.
+                    const sequelizeMS = require('../models').sequelize;
+                    const msRecipients = await sequelizeMS.query(
+                        `SELECT DISTINCT "userId" FROM chat_participants WHERE "chatId" = :chatId AND "userId" != :senderId`,
+                        { replacements: { chatId: parseInt(message.chatId, 10), senderId: parseInt(userId, 10) }, type: sequelizeMS.QueryTypes.SELECT }
+                    ).catch(() => []);
+                    const msCanonicalPayload = {
+                        id: message.id, serverId: message.id, chatId: message.chatId, conversationId: message.chatId,
+                        senderId: message.senderId, content: message.content, type: message.type,
+                        sender: message.sender || null, replyToId: message.replyToId || null,
+                        createdAt: message.createdAt, sentAt: message.sentAt, status: 'sent',
+                    };
+                    for (const { userId: msRecipientId } of msRecipients) {
+                        this.sendToUser(msRecipientId, 'message:new', msCanonicalPayload).catch(() => {});
                     }
                 } catch (err) {
                     console.warn('[WSService] message:send socket error:', err.message);
