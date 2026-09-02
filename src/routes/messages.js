@@ -1217,7 +1217,24 @@ router.post('/', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
         // including its own zombie-socket timeout retry this function
         // knows nothing about — this call is additive, not a replacement.
         if (recipientIds.length > 0) {
-          messageDeliveryService.notifyMessageRecipients(message, recipientIds, { push: false }).catch(() => {});
+          // FIX-REFERENCEERROR-MESSAGE-UNDEFINED: this referenced a variable
+          // named `message`, which does not exist in this scope — the actual
+          // message object here is `populatedMessage` (see canonicalPayload
+          // just above, which reads populatedMessage.id/.chatId/etc.).
+          // Referencing the undefined `message` threw a synchronous
+          // ReferenceError, which aborted the REST of this try block —
+          // including the _pushFallback() scheduling, the delivery-log
+          // INSERT, and mentions handling further down — even though the
+          // exception itself was swallowed by the outer catch (logged as
+          // "[messages.js] Realtime delivery threw an error (message is
+          // saved)"). Net effect: the sender got a normal 201 success (the
+          // DB write is unaffected), the recipient got the live socket
+          // emit if they were already online (that happens earlier, above
+          // this line), but an OFFLINE recipient got neither the socket
+          // delivery nor the push-notification fallback that exists
+          // specifically to cover that case — the message silently never
+          // reached them until they manually reopened the chat.
+          messageDeliveryService.notifyMessageRecipients(populatedMessage, recipientIds, { push: false }).catch(() => {});
         }
 
         // FIX-ZOMBIE-SOCKET-PUSH-FALLBACK: extracted so the SAME push logic can

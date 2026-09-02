@@ -366,9 +366,51 @@ class MessageDeliveryService {
       ? new Set(offlineRecipientIds.map(id => parseInt(id, 10)))
       : null;
 
+    // FIX-CHAT-MUTE-NOT-CONSULTED: chat_participants.isMuted/mutedUntil is a
+    // real, user-facing per-conversation mute (set via PATCH in
+    // messagingFeatures.js, columns added in the chats/chat_participants
+    // migration) but nothing in the message-notification path ever read it.
+    // _getRecipientNotificationPrefs() in pushNotificationService only checks
+    // the user's GLOBAL messageNotifications toggle, and
+    // notificationService.createFromTemplate() checks the same global
+    // setting. Muting one noisy group chat therefore did nothing — every
+    // other conversation's messages kept generating pushes and in-app
+    // Notification rows exactly as before. Per spec (§48: mute controls
+    // notification behavior, not delivery), the fix is scoped to this
+    // function only — the message itself, its websocket delivery, and
+    // unread-count updates (handled elsewhere) are untouched; only the
+    // "do I create a Notification / send a push" decision below now checks
+    // the specific chatId, per recipient.
+    let mutedRecipientIds = new Set();
+    try {
+      const chatIdInt = parseInt(message.chatId, 10);
+      if (chatIdInt) {
+        const mutedRows = await sequelize.query(
+          `SELECT "userId" FROM chat_participants
+           WHERE "chatId" = :chatId AND "userId" = ANY(:recipientIds)
+             AND "isMuted" = true
+             AND ("mutedUntil" IS NULL OR "mutedUntil" > NOW())`,
+          {
+            replacements: {
+              chatId: chatIdInt,
+              recipientIds: recipientIds.map(id => parseInt(id, 10)).filter(Boolean),
+            },
+            type: sequelize.QueryTypes.SELECT,
+          }
+        );
+        mutedRecipientIds = new Set((mutedRows || []).map(r => r.userId));
+      }
+    } catch (_) {
+      // Fail open on the mute lookup itself — same posture as
+      // _getRecipientNotificationPrefs: a lookup error shouldn't silently
+      // eat a notification for every unmuted recipient too.
+      mutedRecipientIds = new Set();
+    }
+
     await Promise.allSettled(recipientIds.map(async (rawRecipientId) => {
       const recipientId = parseInt(rawRecipientId, 10);
       if (!recipientId) return;
+      if (mutedRecipientIds.has(recipientId)) return;
 
       // In-app Notification row + realtime 'notification' push. Every
       // recipient, regardless of online/offline — a recipient can be
