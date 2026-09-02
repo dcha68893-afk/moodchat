@@ -195,6 +195,7 @@ _flog('✅ Messages routes initialized');
 // can never create a duplicate message.
 // =============================================================================
 const messageDeliveryService = require('../services/messageDeliveryService');
+const directChatResolver = require('../services/directChatResolver');
 
 router.post('/lifecycle/send', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
   const senderId = req.user.id;
@@ -611,6 +612,25 @@ router.get('/', apiRateLimiter, asyncHandler(async (req, res) => {
               m.type as "messageType", m.reactions, m."isEdited",
               m."editedAt", m."isDeleted", m."createdAt", m."updatedAt",
               m."replyToId", m.metadata, m."viewOnceViewedAt", m."viewOnceViewedBy",
+              m."deliveredAt",
+              -- FIX (MESSAGE-HISTORY-MISSING-STATUS, applied to the route
+              -- actually live traffic hits): this is the query
+              -- fetchMessages() and KynectaSyncEngine._fetchServerMessages
+              -- (the reconnect/catch-up sync path) really call — confirmed
+              -- by tracing their exact request URLs, which use
+              -- '/messages?chatId=...', not '/messages/<chatId>'. The
+              -- other route in this file, GET '/:chatId', got this same
+              -- fix in an earlier pass of this audit before this one had
+              -- been traced — no live frontend caller actually reaches it,
+              -- so that earlier fix, while not wrong, wasn't the one
+              -- production traffic needed. See this same CASE expression's
+              -- doc comment on GET '/:chatId' below for the full trace of
+              -- why m.status alone can't be trusted for 'read'.
+              CASE
+                WHEN rr."messageId" IS NOT NULL THEN 'read'
+                WHEN m."deliveredAt" IS NOT NULL THEN 'delivered'
+                ELSE COALESCE(m.status, 'sent')
+              END AS status,
               jsonb_build_object('id', u.id, 'username', u.username, 'avatar', u.avatar) as sender,
               CASE WHEN m."replyToId" IS NOT NULL THEN
                 jsonb_build_object(
@@ -626,6 +646,11 @@ router.get('/', apiRateLimiter, asyncHandler(async (req, res) => {
        LEFT JOIN "Users" u  ON u.id  = m."senderId"
        LEFT JOIN "Messages" rm ON rm.id = m."replyToId" AND rm."isDeleted" = false
        LEFT JOIN "Users" ru ON ru.id = rm."senderId"
+       LEFT JOIN LATERAL (
+         SELECT 1 AS "messageId" FROM "ReadReceipts" r
+         WHERE r."messageId" = m.id AND r."userId" != m."senderId"
+         LIMIT 1
+       ) rr ON true
        WHERE m."chatId" = :chatId AND m."isDeleted" = false ${beforeClause} ${afterClause}
          AND NOT COALESCE((m.metadata->'deletedFor') @> to_jsonb(:userId::int), false)
        ORDER BY m."createdAt" DESC LIMIT :_limit OFFSET :_offset`,
@@ -792,6 +817,25 @@ router.post('/', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
 
     if (!isParticipant || isParticipant.length === 0) {
       return res.status(403).json({ success: false, message: 'Access denied to this chat' });
+    }
+
+    // FIX (ENFORCE-BLOCK-ON-CONVERSATION-CREATION, part 2): this route runs
+    // its own independent message INSERT below rather than calling
+    // messageDeliveryService.sendMessage() — see
+    // directChatResolver.assertDirectChatNotBlocked's doc comment for the
+    // full trace of why blocking enforcement was missing here specifically.
+    // The receiverId branches above already route brand-new conversations
+    // through resolveOrCreateDirectChat() (which now blocks), but a reply
+    // into an already-existing chat (the common case — chatId already
+    // known, no receiverId in the request body) reaches this point without
+    // ever going through that check.
+    try {
+      await directChatResolver.assertDirectChatNotBlocked(senderId, chatId);
+    } catch (blockErr) {
+      if (blockErr.code === 'USER_BLOCKED') {
+        return res.status(403).json({ success: false, message: blockErr.message });
+      }
+      throw blockErr;
     }
 
     // ── FORENSIC LOG: BACKEND_RECEIVED ───────────────────────────────────────
@@ -1161,6 +1205,21 @@ router.post('/', apiRateLimiter, chatLimiter, asyncHandler(async (req, res) => {
           .map((r, i) => ({ uid: recipientIds[i], delivered: r.status === 'fulfilled' && r.value === true }))
           .filter(r => !r.delivered).map(r => r.uid);
 
+        // FIX (STRUCTURE-MISSING-MESSAGE-NOTIFICATIONS): this route already
+        // has a push-notification fallback (_pushFallback below), but never
+        // persisted anything to the in-app "Notifications" table —
+        // notificationService.createFromTemplate('new_message', ...) exists,
+        // fully built, and had zero callers anywhere in the codebase. Added
+        // here as one call to the shared implementation (also used by the
+        // 'message:send' socket path — see its matching comment) rather
+        // than hand-writing this a second time. push:false because
+        // _pushFallback below already owns OS-level push for this route,
+        // including its own zombie-socket timeout retry this function
+        // knows nothing about — this call is additive, not a replacement.
+        if (recipientIds.length > 0) {
+          messageDeliveryService.notifyMessageRecipients(message, recipientIds, { push: false }).catch(() => {});
+        }
+
         // FIX-ZOMBIE-SOCKET-PUSH-FALLBACK: extracted so the SAME push logic can
         // also run later, off the real message:delivery_ack timeout below, for
         // recipients the room-membership check wrongly called "delivered" (see
@@ -1426,6 +1485,28 @@ router.get('/:chatId', apiRateLimiter, asyncHandler(async (req, res) => {
               m.type as "messageType", m.reactions, m."isEdited",
               m."editedAt", m."isDeleted", m."createdAt", m."updatedAt",
               m."replyToId", m.metadata, m."viewOnceViewedAt", m."viewOnceViewedBy",
+              m."deliveredAt",
+              -- FIX (MESSAGE-HISTORY-MISSING-STATUS): this query previously
+              -- selected no status/delivery/read fields at all. Traced the
+              -- frontend consumer (fetchMessages() in
+              -- messages-core.operations.js): it does 'status: msg.status ||
+              -- 'delivered'' — since msg.status was always undefined here,
+              -- EVERY historical message silently got hardcoded to
+              -- 'delivered' on every reload/refetch, regardless of whether
+              -- it had actually been read. m.status itself can't be trusted
+              -- for 'read' either — messageDeliveryService.markRead(), the
+              -- only code that ever wrote status='read' to this column, is
+              -- unreachable dead code (see UNREAD-COUNT-DUAL-SYSTEM fix).
+              -- The real read signal lives in "ReadReceipts", which the
+              -- live mark-as-read flow (POST /messages/mark-read/batch)
+              -- actually writes to. So: read wins if any OTHER participant
+              -- has a receipt for this message; otherwise fall back to
+              -- deliveredAt/m.status for the sent/delivered distinction.
+              CASE
+                WHEN rr."messageId" IS NOT NULL THEN 'read'
+                WHEN m."deliveredAt" IS NOT NULL THEN 'delivered'
+                ELSE COALESCE(m.status, 'sent')
+              END AS status,
               jsonb_build_object('id', u.id, 'username', u.username, 'avatar', u.avatar) as sender,
               CASE WHEN m."replyToId" IS NOT NULL THEN
                 jsonb_build_object(
@@ -1441,6 +1522,11 @@ router.get('/:chatId', apiRateLimiter, asyncHandler(async (req, res) => {
        LEFT JOIN "Users" u  ON u.id  = m."senderId"
        LEFT JOIN "Messages" rm ON rm.id = m."replyToId" AND rm."isDeleted" = false
        LEFT JOIN "Users" ru ON ru.id = rm."senderId"
+       LEFT JOIN LATERAL (
+         SELECT 1 AS "messageId" FROM "ReadReceipts" r
+         WHERE r."messageId" = m.id AND r."userId" != m."senderId"
+         LIMIT 1
+       ) rr ON true
        WHERE m."chatId" = :chatId AND m."isDeleted" = false ${beforeClause} ${afterClause}
        ORDER BY m."createdAt" DESC LIMIT :_limit OFFSET :_offset`,
       { replacements: { ...replacements, _limit: limit, _offset: offset }, type: sequelize.QueryTypes.SELECT }

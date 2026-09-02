@@ -39,6 +39,27 @@ async function resolveOrCreateDirectChat({ userId, otherUserId, otherUser = null
   if (!_otherNum) throw new Error('Invalid otherUserId');
   if (_uidNum === _otherNum) throw new Error('Cannot message yourself');
 
+  // FIX (ENFORCE-BLOCK-ON-CONVERSATION-CREATION): traced the actual blocking
+  // enforcement in this codebase (per the no-guessing rule — don't trust the
+  // "no friend-status gate... see _canSeeEncryptionKey for the one remaining
+  // restriction" comment in routes/chats.js at face value). It only denies
+  // E2E public-key visibility between blocked users; it does NOT stop this
+  // resolver from creating/reactivating a direct chat, nor does it stop
+  // messageDeliveryService.sendMessage() from inserting a plaintext message
+  // into that chat. Net effect, verified end to end: a blocked user could
+  // still open a conversation with the user who blocked them and send them
+  // messages. This is the single chokepoint both live "open/create a direct
+  // chat" callers (messageDeliveryService.resolveOrCreateDirectChat and, via
+  // the routes/chats.js consolidation below, POST /start and POST
+  // /bootstrap) go through, so the check belongs here rather than
+  // duplicated per caller.
+  const { isBlocked } = require('./friendService');
+  if (await isBlocked(_uidNum, _otherNum)) {
+    const blockedErr = new Error('Messaging is not available between these users');
+    blockedErr.code = 'USER_BLOCKED';
+    throw blockedErr;
+  }
+
   // Some callers (messageDeliveryService.js) only ever had a bare
   // receiverId, never the full user record — resolve it here so both
   // callers get a validated "receiver actually exists" check and, when
@@ -113,4 +134,48 @@ async function resolveOrCreateDirectChat({ userId, otherUserId, otherUser = null
   }
 }
 
-module.exports = { resolveOrCreateDirectChat };
+/**
+ * FIX (ENFORCE-BLOCK-ON-CONVERSATION-CREATION, part 2): the block check
+ * inside resolveOrCreateDirectChat() only runs on the "resolve/create a
+ * chat for this pair" path. It is NOT called by every place a message
+ * actually gets inserted — verified by tracing all three live message-write
+ * paths in this codebase: messageDeliveryService.sendMessage() (used by the
+ * msg:send / legacy message:send socket handlers), and routes/messages.js's
+ * POST '/' handler, which runs its own independent raw-SQL INSERT once a
+ * chatId is already known (the common "reply in an existing conversation"
+ * case) and never calls resolveOrCreateDirectChat() at all in that branch.
+ * Rather than re-implement "look up the other participant of this direct
+ * chat, then check isBlocked" a third time in routes/messages.js, that
+ * check is extracted here once and both real write paths call it.
+ * No-op (returns without throwing) for group chats — blocking there is a
+ * membership/moderation concern (see GroupMembers.isBlocked), not this
+ * direct-message block relationship.
+ */
+async function assertDirectChatNotBlocked(senderId, chatId) {
+  const db = require('../models');
+  const sequelize = db.sequelize;
+  const { isBlocked } = require('./friendService');
+
+  const senderIdInt = parseInt(senderId, 10);
+  const chatIdInt = parseInt(chatId, 10);
+
+  const [chatRow] = await sequelize.query(
+    `SELECT type FROM chats WHERE id = :chatId LIMIT 1`,
+    { replacements: { chatId: chatIdInt }, type: sequelize.QueryTypes.SELECT }
+  ).catch(() => [null]);
+  if (!chatRow || chatRow.type !== 'direct') return;
+
+  const [otherParticipant] = await sequelize.query(
+    `SELECT "userId" FROM chat_participants WHERE "chatId" = :chatId AND "userId" != :senderId LIMIT 1`,
+    { replacements: { chatId: chatIdInt, senderId: senderIdInt }, type: sequelize.QueryTypes.SELECT }
+  ).catch(() => [null]);
+  if (!otherParticipant) return;
+
+  if (await isBlocked(senderIdInt, otherParticipant.userId)) {
+    const blockedErr = new Error('Messaging is not available between these users');
+    blockedErr.code = 'USER_BLOCKED';
+    throw blockedErr;
+  }
+}
+
+module.exports = { resolveOrCreateDirectChat, assertDirectChatNotBlocked };

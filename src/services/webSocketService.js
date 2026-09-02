@@ -880,8 +880,31 @@ class WebSocketService {
                         sender: message.sender || null, replyToId: message.replyToId || null,
                         createdAt: message.createdAt, sentAt: message.sentAt, status: 'sent',
                     };
-                    for (const { userId: msRecipientId } of msRecipients) {
-                        this.sendToUser(msRecipientId, 'message:new', msCanonicalPayload).catch(() => {});
+                    // FIX (STRUCTURE-MISSING-MESSAGE-NOTIFICATIONS): this loop
+                    // used to fire-and-forget sendToUser with no tracking of
+                    // which recipients were actually reached — meaning this
+                    // path (kept for older clients still emitting
+                    // 'message:send') had no notification mechanism of any
+                    // kind for a recipient who wasn't online. Awaiting each
+                    // call's delivered/undelivered result costs nothing extra
+                    // (sendToUser was always awaited-per-call-worthy, just
+                    // previously not awaited) and lets the shared
+                    // notifyMessageRecipients() know who genuinely needs an
+                    // OS-level push versus who was already reached live.
+                    const msDeliveryResults = await Promise.allSettled(
+                        msRecipients.map(({ userId: msRecipientId }) => this.sendToUser(msRecipientId, 'message:new', msCanonicalPayload))
+                    );
+                    const msOfflineRecipients = msRecipients
+                        .map((r, i) => ({ uid: r.userId, delivered: msDeliveryResults[i].status === 'fulfilled' && msDeliveryResults[i].value === true }))
+                        .filter(r => !r.delivered)
+                        .map(r => r.uid);
+                    if (msRecipients.length > 0) {
+                        const messageDeliveryServiceNotify = require('./messageDeliveryService');
+                        messageDeliveryServiceNotify.notifyMessageRecipients(
+                            message,
+                            msRecipients.map(r => r.userId),
+                            { push: true, offlineRecipientIds: msOfflineRecipients }
+                        ).catch(() => {});
                     }
                 } catch (err) {
                     console.warn('[WSService] message:send socket error:', err.message);

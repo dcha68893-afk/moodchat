@@ -16,6 +16,7 @@ const applyLastSeenPrivacy = require('./users').applyLastSeenPrivacy;
 const Chat = db.Chat;
 const Message = db.Message;
 const ChatParticipant = db.ChatParticipant;
+const messageDeliveryService = require('../services/messageDeliveryService');
 
 // Add validation
 if (!Chat || !User || !Message || !ChatParticipant) {
@@ -195,13 +196,10 @@ router.get(
                 });
                 
                 // Calculate unread count for this user
-                const unreadCount = await Message.count({
-                    where: {
-                        chatId: chat.id,
-                        isRead: false,
-                        senderId: { [Op.ne]: userId }
-                    }
-                });
+                // FIX (UNREAD-COUNT-DUAL-SYSTEM): was Message.count({isRead:false}),
+                // a column the live mark-as-read flow never updates — see
+                // messageDeliveryService.getUnreadCountForChat's doc comment.
+                const unreadCount = await messageDeliveryService.getUnreadCountForChat(chat.id, userId);
                 chatObj.unreadCount = unreadCount || 0;
                 
                 // For direct chats, get the other participant
@@ -343,13 +341,9 @@ router.get(
             });
             
             // Calculate unread count
-            const unreadCount = await Message.count({
-                where: {
-                    chatId: chat.id,
-                    isRead: false,
-                    senderId: { [Op.ne]: userId }
-                }
-            });
+            // FIX (UNREAD-COUNT-DUAL-SYSTEM): see doc comment on
+            // messageDeliveryService.getUnreadCountForChat.
+            const unreadCount = await messageDeliveryService.getUnreadCountForChat(chat.id, userId);
             chatObj.unreadCount = unreadCount || 0;
             
             // For direct chats, get the other participant
@@ -396,110 +390,61 @@ router.get(
 // ============================================================================
 // PHASE 23 — SHARED DIRECT-CHAT RESOLUTION (single implementation)
 // ============================================================================
-// FIX (BOOTSTRAP-CONSOLIDATION): this find-or-create-with-advisory-lock block
-// used to live only inline inside POST /start. The new POST /bootstrap route
-// below needs the exact same idempotent resolution (never a duplicate chat,
-// never a different chat depending on call order) so entry points other than
-// "Start a DM" — Friend, Status, Calls, Marketplace, Search, Notifications,
-// Profile, Recent Contacts — get identical guarantees to Chat History. Rather
-// than copy this logic a second time (which is exactly the "parallel
-// implementation" drift this phase is meant to eliminate), it's extracted
-// into one function both routes call. Behavior is unchanged from before the
-// extraction — same lock keys, same lookup order, same reactivation and
-// nondeterministic-pick fixes, same commit points.
+// FIX (CONSOLIDATE-DIRECT-CHAT-RESOLUTION, corrected): the comment above this
+// function claimed it was "extracted into one function both routes call" —
+// but tracing the actual code (not the comment) showed this was still a
+// full, independent reimplementation of the same advisory-lock find-or-
+// create logic already living in src/services/directChatResolver.js, which
+// messageDeliveryService.js genuinely does delegate to. Two hand-maintained
+// copies of identical lock/lookup/create logic is exactly the drift risk
+// directChatResolver.js's own header warns about — and concretely, it meant
+// this copy never got the isBlocked() check added to the shared resolver
+// (see ENFORCE-BLOCK-ON-CONVERSATION-CREATION), so a blocked user could
+// still open a chat via POST /start or /bootstrap (Profile, Marketplace,
+// Search, Friends, Notifications, etc.) even though the REST/socket send
+// paths now correctly reject it. This function now delegates to the one
+// real shared implementation and keeps only the caller-specific side effect
+// (emitting 'chat:created' with this route's request-scoped display data),
+// which is exactly what the shared resolver was designed to leave to its
+// callers. Return shape and behavior for existing callers are unchanged.
 async function resolveOrCreateDirectChat(userId, otherUser, req) {
-    const _uidNum   = parseInt(userId, 10);
-    const _otherNum = parseInt(otherUser.id, 10);
-    const _lockA = Math.min(_uidNum, _otherNum);
-    const _lockB = Math.max(_uidNum, _otherNum);
+    const { resolveOrCreateDirectChat: _sharedResolve } = require('../services/directChatResolver');
+    const { chat: newChatOrExisting, isNew } = await _sharedResolve({
+        userId,
+        otherUserId: otherUser.id,
+        otherUser,
+    });
 
-    const t = await db.sequelize.transaction();
-    try {
-        await db.sequelize.query(
-            'SELECT pg_advisory_xact_lock(:a, :b)',
-            { replacements: { a: _lockA, b: _lockB }, transaction: t }
-        );
-
-        const existingParticipant1 = await ChatParticipant.findAll({
-            where: { userId: userId },
-            attributes: ['chatId'],
-            transaction: t
-        });
-        const existingParticipant2 = await ChatParticipant.findAll({
-            where: { userId: otherUser.id },
-            attributes: ['chatId'],
-            transaction: t
-        });
-
-        const userChatIds = new Set(existingParticipant1.map(p => p.chatId));
-        const otherChatIds = new Set(existingParticipant2.map(p => p.chatId));
-
-        const commonChatIds = [...userChatIds]
-            .filter(id => otherChatIds.has(id))
-            .sort((a, b) => a - b);
-
-        if (commonChatIds.length > 0) {
-            for (const chatId of commonChatIds) {
-                const chat = await Chat.findByPk(chatId, { transaction: t });
-                if (chat && chat.type === 'direct') {
-                    if (chat.isActive === false) {
-                        await chat.update({ isActive: true, deletedAt: null, deletedBy: null }, { transaction: t });
-                    }
-                    await t.commit();
-                    return { chat, isNew: false };
-                }
-            }
-        }
-
-        const newChat = await Chat.create({
+    if (isNew && req.io) {
+        const displayName = [otherUser.firstName, otherUser.lastName].filter(Boolean).join(' ').trim() || otherUser.username;
+        const chatData = {
+            id: newChatOrExisting.id,
             type: 'direct',
-            createdBy: userId,
-            isActive: true,
-            createdAt: new Date(),
-            updatedAt: new Date()
-        }, { transaction: t });
-
-        await ChatParticipant.bulkCreate([
-            { chatId: newChat.id, userId: userId, joinedAt: new Date(), createdAt: new Date(), updatedAt: new Date() },
-            { chatId: newChat.id, userId: otherUser.id, joinedAt: new Date(), createdAt: new Date(), updatedAt: new Date() }
-        ], { transaction: t });
-
-        await t.commit();
-
-        if (req.io) {
-            const displayName = [otherUser.firstName, otherUser.lastName].filter(Boolean).join(' ').trim() || otherUser.username;
-            const chatData = {
-                id: newChat.id,
-                type: 'direct',
-                otherParticipant: {
-                    id: otherUser.id,
-                    username: otherUser.username,
-                    avatar: otherUser.avatar,
-                    displayName: displayName,
-                    status: otherUser.status || 'offline'
-                },
-                chatName: displayName,
-                createdAt: newChat.createdAt,
-                updatedAt: newChat.updatedAt
-            };
-            await emitToUser(req.io, userId, 'chat:created', chatData);
-            const otherUserChatData = {
-                ...chatData,
-                otherParticipant: {
-                    id: userId,
-                    username: req.user?.username || 'User',
-                    avatar: req.user?.avatar || null,
-                    displayName: req.user?.username || 'User'
-                }
-            };
-            await emitToUser(req.io, otherUser.id, 'chat:created', otherUserChatData);
-        }
-
-        return { chat: newChat, isNew: true };
-    } catch (lockedSectionError) {
-        try { await t.rollback(); } catch (_) {}
-        throw lockedSectionError;
+            otherParticipant: {
+                id: otherUser.id,
+                username: otherUser.username,
+                avatar: otherUser.avatar,
+                displayName: displayName,
+                status: otherUser.status || 'offline'
+            },
+            chatName: displayName,
+            createdAt: newChatOrExisting.createdAt,
+            updatedAt: newChatOrExisting.updatedAt
+        };
+        await emitToUser(req.io, userId, 'chat:created', chatData);
+        const otherUserChatData = {
+            ...chatData,
+            otherParticipant: {
+                id: userId,
+                username: req.user?.username || 'User',
+                avatar: req.user?.avatar || null,
+                displayName: req.user?.username || 'User'
+            }
+        };
+        await emitToUser(req.io, otherUser.id, 'chat:created', otherUserChatData);
     }
+
+    return { chat: newChatOrExisting, isNew };
 }
 
 function _formatDirectChatPayload(chat, otherUser) {
@@ -737,9 +682,9 @@ router.post(
                 limit: 30,
                 attributes: ['id', 'chatId', 'senderId', 'content', 'type', 'isEdited', 'editedAt', 'createdAt', 'updatedAt', 'replyToId']
             });
-            const unreadCount = await Message.count({
-                where: { chatId: resultChat.id, isRead: false, senderId: { [Op.ne]: userId } }
-            });
+            // FIX (UNREAD-COUNT-DUAL-SYSTEM): see doc comment on
+            // messageDeliveryService.getUnreadCountForChat.
+            const unreadCount = await messageDeliveryService.getUnreadCountForChat(resultChat.id, userId);
 
             stage.current = 'READY';
             const chatObj = resultChat.toJSON ? resultChat.toJSON() : resultChat;

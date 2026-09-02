@@ -36,7 +36,7 @@
 //     and a REST fallback route can use it.
 // =============================================================================
 
-const { ValidationError, ServerError } = require('../utils/errors');
+const { ValidationError, ForbiddenError, ServerError } = require('../utils/errors');
 
 function getSequelize() {
   const db = require('../models');
@@ -77,6 +77,17 @@ class MessageDeliveryService {
       if (err.message === 'Invalid otherUserId') throw new ValidationError('Invalid receiverId');
       if (err.message === 'Cannot message yourself') throw new ValidationError('Cannot message yourself');
       if (err.message === 'Receiver not found') throw new ValidationError('Receiver not found');
+      // FIX (ENFORCE-BLOCK-ON-CONVERSATION-CREATION): surface the shared
+      // resolver's block check as a 403-shaped error instead of a generic
+      // ValidationError/500, so callers (REST route, msg:send socket
+      // handler) can distinguish "you can't message this person" from a
+      // plain bad-request.
+      if (err.code === 'USER_BLOCKED') {
+        const blockedErr = new ValidationError(err.message);
+        blockedErr.status = 403;
+        blockedErr.code = 'USER_BLOCKED';
+        throw blockedErr;
+      }
       throw err;
     }
   }
@@ -169,6 +180,25 @@ class MessageDeliveryService {
     ).catch(() => [null]);
     if (!participant) throw new ValidationError('Sender is not a participant in this chat');
 
+    // FIX (ENFORCE-BLOCK-ON-CONVERSATION-CREATION, part 2): the check inside
+    // resolveOrCreateDirectChat() only runs when THIS call needed to
+    // resolve/create the chat. A reply into an already-existing direct chat
+    // skips that path entirely — chatId is already known and valid. Without
+    // a check here, a user who gets blocked mid-conversation could still
+    // send further messages into that same chat. See
+    // directChatResolver.assertDirectChatNotBlocked's doc comment for why
+    // this is a shared helper rather than a third copy of this check.
+    try {
+      await require('./directChatResolver').assertDirectChatNotBlocked(senderIdInt, chatIdInt);
+    } catch (blockErr) {
+      if (blockErr.code === 'USER_BLOCKED') {
+        const forbidden = new ForbiddenError(blockErr.message);
+        forbidden.code = 'USER_BLOCKED';
+        throw forbidden;
+      }
+      throw blockErr;
+    }
+
     // FIX-DUAL-IDEMPOTENCY-SYSTEMS: also store the id under metadata.localId
     // (the shape the REST idempotency check and some frontend read paths
     // expect), not just in the clientMessageId column, so a message created
@@ -232,6 +262,135 @@ class MessageDeliveryService {
     message.sender = sender || null;
 
     return { message, alreadyExisted: false };
+  }
+
+  /**
+   * FIX (UNREAD-COUNT-DUAL-SYSTEM): traced the actual "mark as read"
+   * write path used by the live app (messages-core.operations.js's
+   * markAsRead(), called when a conversation is opened) and found it only
+   * ever calls POST /messages/mark-read/batch, which inserts rows into the
+   * "ReadReceipts" table. It never touches Messages.isRead — the only
+   * things that ever wrote isRead=true are routes/chats.js's POST
+   * /:chatId/read route and this class's own markRead() (both dead code:
+   * neither is ever called by the live frontend, and markRead()'s only
+   * caller, messageLifecycleSocket.js, was already removed from
+   * webSocketService.js's socket registration). Meanwhile GET /chats (the
+   * route that actually populates the conversation-list unread badges via
+   * ChatManager.fetchConversations()) computed unreadCount from
+   * Messages.isRead — a column the live read flow never updates. Net
+   * effect, verified end to end: a user reads a conversation, the local
+   * badge clears optimistically, but the very next full conversation-list
+   * refetch (reload, reopen, another device) shows it unread again,
+   * because the server-side count never actually changed.
+   *
+   * This is now the one canonical "how many of this chat's messages has
+   * this user not yet read" query — the same ReadReceipts-based logic
+   * routes/messages.js's GET /unread-counts already used correctly — so
+   * every caller (the per-chat list computation and the aggregate-counts
+   * route) reads from the same source the live mark-as-read path writes
+   * to.
+   */
+  async getUnreadCountForChat(chatId, userId) {
+    const sequelize = getSequelize();
+    const [row] = await sequelize.query(
+      `SELECT COUNT(*)::int AS count
+       FROM "Messages" m
+       LEFT JOIN "ReadReceipts" rr
+         ON rr."messageId" = m.id AND rr."userId" = :userId
+       WHERE m."chatId" = :chatId
+         AND m."senderId" != :userId
+         AND m."isDeleted" = false
+         AND rr.id IS NULL`,
+      { replacements: { chatId: parseInt(chatId, 10), userId: parseInt(userId, 10) }, type: sequelize.QueryTypes.SELECT }
+    ).catch(() => [{ count: 0 }]);
+    return (row && row.count) || 0;
+  }
+
+  /**
+   * FIX (STRUCTURE-MISSING-MESSAGE-NOTIFICATIONS): traced every live path
+   * that creates a message and found the "tell the recipient a message
+   * arrived" step was inconsistent and, in one case, entirely missing —
+   * exactly the kind of unstructured gap worth fixing properly rather than
+   * leaving as a known-missing feature:
+   *   - routes/messages.js's POST '/' route had its own inline, one-off
+   *     block that did ONLY an OS-level push notification
+   *     (pushNotificationService.notifyNewMessage), and only for
+   *     recipients not reached over an active socket. It never persisted
+   *     anything to the "Notifications" table.
+   *   - The 'message:send' socket handler in webSocketService.js (kept for
+   *     older clients) had NO notification logic at all — not push, not
+   *     in-app. A message sent by a legacy client generated zero
+   *     notification for a recipient who wasn't actively online.
+   *   - notificationService.createFromTemplate('new_message', ...) already
+   *     exists, is fully built (respects the recipient's per-category
+   *     notification preference and preview-privacy setting, persists a
+   *     row, and pushes a realtime 'notification' event) — but had zero
+   *     callers anywhere in the codebase.
+   * Rather than hand-write "look up sender info, build a payload, notify"
+   * a third time for the socket path, this is the one shared
+   * implementation both real message-creation paths call. It does not
+   * replace routes/messages.js's existing push-notification retry logic
+   * (which also handles a "zombie socket" timeout retry this method knows
+   * nothing about) — that stays as-is; this only adds the previously
+   * entirely-absent in-app Notification persistence there, and supplies
+   * BOTH the in-app and push pieces for the socket path, which had
+   * neither.
+   *
+   * @param {object} message - the created message row (id, chatId, senderId, content, type)
+   * @param {number[]} recipientIds - every other participant in the chat
+   * @param {object} [opts]
+   * @param {boolean} [opts.push=true] - also send an OS-level push notification
+   * @param {number[]|null} [opts.offlineRecipientIds=null] - if provided (and
+   *   opts.push is true), only these recipients get the OS push, matching
+   *   the existing "don't push-notify someone already looking at their
+   *   phone with a live socket connection" behavior. If null, all
+   *   recipientIds are treated as needing a push.
+   */
+  async notifyMessageRecipients(message, recipientIds, opts = {}) {
+    if (!recipientIds || recipientIds.length === 0) return;
+    const { push = true, offlineRecipientIds = null } = opts;
+    const sequelize = getSequelize();
+    const notificationService = require('./notificationService');
+
+    const [senderRow] = await sequelize.query(
+      `SELECT username, avatar FROM "Users" WHERE id = :id LIMIT 1`,
+      { replacements: { id: parseInt(message.senderId, 10) }, type: sequelize.QueryTypes.SELECT }
+    ).catch(() => [null]);
+    const senderName = senderRow?.username || 'Someone';
+    const senderAvatar = senderRow?.avatar || null;
+    const preview = (message.type === 'text' || !message.type)
+      ? String(message.content || '').slice(0, 100)
+      : `Sent a ${message.type}`;
+
+    const offlineSet = (push && offlineRecipientIds)
+      ? new Set(offlineRecipientIds.map(id => parseInt(id, 10)))
+      : null;
+
+    await Promise.allSettled(recipientIds.map(async (rawRecipientId) => {
+      const recipientId = parseInt(rawRecipientId, 10);
+      if (!recipientId) return;
+
+      // In-app Notification row + realtime 'notification' push. Every
+      // recipient, regardless of online/offline — a recipient can be
+      // online but viewing a different chat entirely (or no chat), and
+      // still needs this. createFromTemplate is itself a no-op if the
+      // recipient has turned message notifications off in settings.
+      await notificationService.createFromTemplate(recipientId, 'new_message', {
+        senderName,
+        senderAvatar,
+        messagePreview: preview,
+        chatId: message.chatId,
+        messageId: message.id,
+      }).catch(() => {});
+
+      if (push && (!offlineSet || offlineSet.has(recipientId))) {
+        const pushNotificationService = require('./pushNotificationService');
+        await pushNotificationService.notifyNewMessage(recipientId, {
+          senderName, senderAvatar, content: preview,
+          chatId: message.chatId, messageId: message.id,
+        }, sequelize).catch(() => {});
+      }
+    }));
   }
 
   /** Recipient's client confirms it actually stored the message locally. */
