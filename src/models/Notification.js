@@ -26,7 +26,25 @@ module.exports = (sequelize, DataTypes) => {
           'mood_shared',
           'system',
           'warning',
-          'info'
+          'info',
+          // FIX: notificationService.js's getNotificationTemplate() has
+          // always emitted these type values, but they were never added
+          // here or to the live Postgres enum — every Notification.create()
+          // for one of these templates threw SequelizeDatabaseError
+          // ("invalid input value for enum ... type") and was silently
+          // swallowed by messageDeliveryService.js's .catch(() => {}),
+          // so recipients never got the in-app Notification row or
+          // realtime push. See migrations/20260902000001-add-missing-notification-types.js
+          // for the matching live-DB enum fix (this array alone does not
+          // alter the existing table).
+          'new_message',
+          'message_reaction',
+          'message_reply',
+          'status_mention',
+          'status_like',
+          'status_comment',
+          'status_question_answer',
+          'on_this_day'
         ),
         allowNull: false,
       },
