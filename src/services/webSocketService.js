@@ -572,7 +572,52 @@ class WebSocketService {
             });
             }
 
-            // ── FIX-OFFLINE-QUEUE: Flush any queued messages on reconnect ─────
+            // ── Message Module: realtime send/delivered/read ──────────────────
+            // Thin handlers only — all persistence/policy/idempotency logic
+            // lives in messageDeliveryService.js, and the post-create
+            // delivery+notify step lives in messageBroadcast.js. This is the
+            // exact same pipeline routes/messages.js's REST endpoints call;
+            // the socket here is purely a second transport onto it, not a
+            // second implementation (spec §10).
+            socket.removeAllListeners('message:send').on('message:send', async (payload = {}) => {
+                const { localId } = payload || {};
+                try {
+                    const { chatId, receiverId, content, type, replyToId, metadata, expiresAt } = payload;
+                    const messageDeliveryService = require('./messageDeliveryService');
+                    const { broadcastNewMessage } = require('./messageBroadcast');
+
+                    const clientMessageId = localId
+                        ? String(localId)
+                        : `nolocalid:${userId}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+
+                    const { message, alreadyExisted } = await messageDeliveryService.sendMessage({
+                        chatId, receiverId, senderId: userId, content, type, clientMessageId, replyToId, metadata, expiresAt,
+                    });
+
+                    socket.emit('message:send:ack', {
+                        localId, messageId: message.id, chatId: message.chatId,
+                        sentAt: message.sentAt || message.createdAt, alreadyExisted: !!alreadyExisted,
+                    });
+
+                    if (!alreadyExisted) {
+                        broadcastNewMessage(message, userId).catch(err =>
+                            console.error('[WSService] broadcastNewMessage failed:', err.message)
+                        );
+                    }
+                } catch (err) {
+                    console.warn('[WSService] message:send socket error:', err.message);
+                    socket.emit('message:send:error', { localId, error: err.message, code: err.code });
+                }
+            });
+            // NOTE: delivered/read state over the socket already has live,
+            // generic handlers elsewhere in this file — 'message:delivered'
+            // (room relay) and 'mark_as_read' (writes ReadReceipts) — both
+            // already used by the Group module too. Do not add competing
+            // handlers on those event names here: removeAllListeners() means
+            // whichever registers last would silently win, and a second
+            // "mark read" implementation next to ReadReceipts is exactly the
+            // dual-system drift this codebase already had to fix once (see
+            // messageDeliveryService.js's UNREAD-COUNT-DUAL-SYSTEM comment).
             this.flushOfflineMessages(userId).catch(() => {});
 
             // ── REMOVED (consolidation pass): messageLifecycleSocket.register() ──
@@ -795,122 +840,14 @@ class WebSocketService {
 
             socket.removeAllListeners('call:webrtc_answer').on('call:webrtc_answer', () => {});
 
-            // ── PHASE14 FIX P0: message:send socket handler ───────────────────
-            // CONSOLIDATE-MESSAGE-PROTOCOL (fix for two-protocols-coexisting):
-            // this handler used to run its own separate creation path —
-            // messageService.createMessage(), which internally does its own
-            // participant-lookup + raw io.to() broadcast (no idempotency key,
-            // no offline-queue fallback, no shared identity-resolution
-            // validation) — completely independent from the msg:* lifecycle
-            // pipeline's messageDeliveryService.sendMessage(). Two live,
-            // independently-maintained "create + deliver a message" code
-            // paths is the exact drift risk called out across this codebase's
-            // other consolidation fixes (directChatResolver.js,
-            // messageDeliveryService's markDelivered, etc.) — a correctness
-            // fix landing in one path and not the other. This legacy event
-            // name is kept (older clients still emit 'message:send' instead
-            // of 'msg:send'), but now delegates to the same canonical,
-            // idempotent creation path and the same canonical delivery
-            // mechanism (sendToUser, with its offline-queue fallback) as
-            // everything else.
-            socket.removeAllListeners('message:send').on('message:send', async (payload = {}) => {
-                const { localId: msLocalId } = payload || {};
-                try {
-                    const { chatId: msChatId, receiverId: msReceiverId, content: msContent, type: msType = 'text', replyToId: msReplyId } = payload;
-                    if ((!msChatId && !msReceiverId) || !msContent) {
-                        socket.emit('message:send:error', { localId: msLocalId, error: 'chatId (or receiverId) and content are required' });
-                        return;
-                    }
-
-                    const messageDeliveryService = require('./messageDeliveryService');
-                    // FIX-DUAL-IDEMPOTENCY-SYSTEMS: use the caller's raw localId
-                    // directly as the clientMessageId (no transport-specific
-                    // prefix) — the unique index is already scoped per-sender
-                    // (senderId, clientMessageId), so there's no collision risk
-                    // between different users, and using the exact same id the
-                    // client generated means a retry of the same logical send
-                    // is recognized as a duplicate no matter which transport
-                    // (this legacy socket event, msg:send, or REST) it goes out
-                    // over. Falls back to a random one-shot id only when the
-                    // caller didn't supply a localId at all.
-                    const clientMessageId = msLocalId
-                        ? String(msLocalId)
-                        : `nolocalid:${userId}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
-
-                    const { message } = await messageDeliveryService.sendMessage({
-                        chatId: msChatId ? parseInt(msChatId, 10) : undefined,
-                        receiverId: msReceiverId ? parseInt(msReceiverId, 10) : undefined,
-                        senderId: userId,
-                        content: String(msContent).trim().substring(0, 5000),
-                        type: msType,
-                        clientMessageId,
-                        replyToId: msReplyId ? parseInt(msReplyId, 10) : null,
-                    });
-
-                    socket.emit('message:send:ack', { localId: msLocalId, messageId: message.id, chatId: message.chatId, sentAt: message.sentAt || message.createdAt });
-
-                    // FIX-ROOT-CAUSE-DUAL-EMIT (msg:new / message:new, message:send
-                    // socket path): this used to call messageLifecycleSocket's
-                    // pushToRecipients() — which runs its own participant lookup and
-                    // emits the *dead* legacy 'msg:new' event (verified: its only
-                    // frontend listener lives in MessageLifecycleClient.js, whose
-                    // <script> tag is commented out in message.html, so nothing ever
-                    // receives it) — and THEN ran a second, independent participant
-                    // lookup + broadcast loop here for 'message:new', the event the
-                    // live chat renderer actually consumes. That's two DB queries and
-                    // two realtime emits per recipient for one logical message, on
-                    // this one already-consolidated send path — exactly the kind of
-                    // dual emission the msg:new/message:new consolidation in
-                    // routes/messages.js already eliminated for the REST send path
-                    // (see BROADCAST_PAYLOAD_UNIFIED there). Fixed by doing the one
-                    // participant lookup and the one canonical 'message:new' emit
-                    // directly here, matching that REST path's payload shape, and no
-                    // longer calling pushToRecipients()/emitting 'msg:new' at all.
-                    // pushToRecipients() itself is untouched — it remains correct for
-                    // messageLifecycleSocket.js's own register()-based msg:* pipeline
-                    // if that is ever re-enabled.
-                    const sequelizeMS = require('../models').sequelize;
-                    const msRecipients = await sequelizeMS.query(
-                        `SELECT DISTINCT "userId" FROM chat_participants WHERE "chatId" = :chatId AND "userId" != :senderId`,
-                        { replacements: { chatId: parseInt(message.chatId, 10), senderId: parseInt(userId, 10) }, type: sequelizeMS.QueryTypes.SELECT }
-                    ).catch(() => []);
-                    const msCanonicalPayload = {
-                        id: message.id, serverId: message.id, chatId: message.chatId, conversationId: message.chatId,
-                        senderId: message.senderId, content: message.content, type: message.type,
-                        sender: message.sender || null, replyToId: message.replyToId || null,
-                        createdAt: message.createdAt, sentAt: message.sentAt, status: 'sent',
-                    };
-                    // FIX (STRUCTURE-MISSING-MESSAGE-NOTIFICATIONS): this loop
-                    // used to fire-and-forget sendToUser with no tracking of
-                    // which recipients were actually reached — meaning this
-                    // path (kept for older clients still emitting
-                    // 'message:send') had no notification mechanism of any
-                    // kind for a recipient who wasn't online. Awaiting each
-                    // call's delivered/undelivered result costs nothing extra
-                    // (sendToUser was always awaited-per-call-worthy, just
-                    // previously not awaited) and lets the shared
-                    // notifyMessageRecipients() know who genuinely needs an
-                    // OS-level push versus who was already reached live.
-                    const msDeliveryResults = await Promise.allSettled(
-                        msRecipients.map(({ userId: msRecipientId }) => this.sendToUser(msRecipientId, 'message:new', msCanonicalPayload))
-                    );
-                    const msOfflineRecipients = msRecipients
-                        .map((r, i) => ({ uid: r.userId, delivered: msDeliveryResults[i].status === 'fulfilled' && msDeliveryResults[i].value === true }))
-                        .filter(r => !r.delivered)
-                        .map(r => r.uid);
-                    if (msRecipients.length > 0) {
-                        const messageDeliveryServiceNotify = require('./messageDeliveryService');
-                        messageDeliveryServiceNotify.notifyMessageRecipients(
-                            message,
-                            msRecipients.map(r => r.userId),
-                            { push: true, offlineRecipientIds: msOfflineRecipients }
-                        ).catch(() => {});
-                    }
-                } catch (err) {
-                    console.warn('[WSService] message:send socket error:', err.message);
-                    socket.emit('message:send:error', { localId: msLocalId, error: err.message });
-                }
-            });
+            // ── REMOVED (messaging module deletion): legacy 'message:send' socket
+            // handler. This event was only ever emitted by the DM messaging
+            // frontend (message.html / messages-core.*.js / messages-ui.js),
+            // all of which have been deleted. Group messages never used this
+            // event — they are created via the REST route in routes/group.js.
+            // typing:start/stop and message:ack above are chat-generic (keyed
+            // by chatId) and are still used by the Group module, so they were
+            // left in place.
 
 
             // ── Multi-device call sync ────────────────────────────────────────────

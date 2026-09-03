@@ -1,146 +1,25 @@
 /**
  * scheduledMessageWorker.js
  *
- * Runs every 60 seconds. Picks up any scheduled_messages with:
- *   status = 'pending' AND sendAt <= NOW()
+ * NOTE (messaging module deletion): this worker used to do two unrelated
+ * jobs — (1) deliver due rows from the scheduled_messages table, which was
+ * a DM-only feature whose only creator was the now-deleted
+ * routes/messagingFeatures.js, and (2) clean up expired ("disappearing")
+ * messages from the shared Messages table. Job (1) has been removed since
+ * nothing can create a scheduled_messages row anymore. Job (2) is kept —
+ * disappearing messages are set via expiresAt on the generic Messages
+ * table and are used by the Group module too (see routes/group.js), not
+ * just direct messages.
  *
- * For each due message:
- *  1. Inserts into Messages table
- *  2. Emits message:new via WebSocket to chat participants
- *  3. Updates chat.lastMessageId / lastMessageAt
- *  4. Marks the scheduled_message row as 'sent'
- *
- * On failure: increments retryCount. After 3 retries → marks as 'failed'.
+ * Runs every 5 minutes, cleaning up any Messages rows with:
+ *   expiresAt IS NOT NULL AND expiresAt <= NOW() AND isDeleted = false
  *
  * Started automatically by server.js on boot.
  */
 
 'use strict';
 
-const MAX_RETRIES = 3;
-const POLL_MS     = 60 * 1000; // 1 minute
-
 let _timer = null;
-
-async function processDueMessages() {
-  let sequelize;
-  try {
-    const db = require('../models/index');
-    sequelize = db.sequelize;
-  } catch (e) {
-    console.error('[ScheduledWorker] Cannot load DB:', e.message);
-    return;
-  }
-
-  let wsService;
-  try {
-    wsService = require('./webSocketService');
-  } catch (_) {}
-
-  // FIX: the ScheduledMessage model exists and is whitelisted for auto-sync,
-  // but production logs show "relation scheduled_messages does not exist" —
-  // ensure it directly rather than trust sync() timing/ordering.
-  try {
-    await sequelize.query(`
-      CREATE TABLE IF NOT EXISTS scheduled_messages (
-        id            SERIAL PRIMARY KEY,
-        "userId"      INTEGER NOT NULL,
-        "chatId"      INTEGER NOT NULL,
-        content       TEXT,
-        type          VARCHAR(20) NOT NULL DEFAULT 'text',
-        "mediaUrl"    VARCHAR(2048),
-        metadata      JSONB NOT NULL DEFAULT '{}',
-        "sendAt"      TIMESTAMPTZ NOT NULL,
-        status        VARCHAR(20) NOT NULL DEFAULT 'pending',
-        "sentAt"      TIMESTAMPTZ,
-        "failureReason" VARCHAR(500),
-        "retryCount"  INTEGER NOT NULL DEFAULT 0,
-        "createdAt"   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        "updatedAt"   TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      );
-    `);
-    await sequelize.query(`CREATE INDEX IF NOT EXISTS scheduled_messages_due_idx ON scheduled_messages (status, "sendAt");`);
-  } catch (tableErr) {
-    console.error('[ScheduledWorker] Could not verify/create scheduled_messages table:', tableErr.message);
-  }
-
-  try {
-    // Fetch due messages
-    const due = await sequelize.query(
-      `SELECT id, "userId", "chatId", content, type, "mediaUrl", metadata, "retryCount"
-       FROM scheduled_messages
-       WHERE status = 'pending' AND "sendAt" <= NOW()
-       ORDER BY "sendAt" ASC LIMIT 20`,
-      { type: sequelize.QueryTypes.SELECT }
-    );
-
-    if (!due || due.length === 0) return;
-    console.log(`[ScheduledWorker] Processing ${due.length} due scheduled messages`);
-
-    for (const sm of due) {
-      try {
-        // Insert the actual message
-        const [result] = await sequelize.query(
-          `INSERT INTO "Messages"
-             ("chatId","senderId","content","type","reactions","metadata","sentAt","deliveredAt","createdAt","updatedAt")
-           VALUES (:chatId,:userId,:content,:type,'{}', :metadata, NOW(), NOW(), NOW(), NOW())
-           RETURNING id, "chatId", "senderId", content, type, "sentAt", "createdAt"`,
-          {
-            replacements: {
-              chatId:   sm.chatId,
-              userId:   sm.userId,
-              content:  sm.content || '',
-              type:     sm.type || 'text',
-              metadata: JSON.stringify({ ...(sm.metadata || {}), scheduled: true, scheduledMessageId: sm.id }),
-            },
-          }
-        );
-
-        const newMsg = result[0];
-
-        // Update chat's last message pointer
-        await sequelize.query(
-          `UPDATE chats SET "updatedAt"=NOW(), "lastMessageId"=:msgId, "lastMessageAt"=NOW() WHERE id=:chatId`,
-          { replacements: { msgId: newMsg.id, chatId: sm.chatId } }
-        );
-
-        // Notify participants via WebSocket
-        if (wsService) {
-          const participants = await sequelize.query(
-            `SELECT "userId" FROM chat_participants WHERE "chatId"=:chatId AND "userId"!=:senderId`,
-            { replacements: { chatId: sm.chatId, senderId: sm.userId }, type: sequelize.QueryTypes.SELECT }
-          );
-          const payload = { ...newMsg, scheduledMessageId: sm.id };
-          await Promise.allSettled([
-            wsService.sendToUser(sm.userId, 'message:new', payload), // echo to sender too
-            ...participants.map(p => wsService.sendToUser(p.userId, 'message:new', payload)),
-          ]);
-        }
-
-        // Mark as sent
-        await sequelize.query(
-          `UPDATE scheduled_messages SET status='sent', "sentAt"=NOW(), "updatedAt"=NOW() WHERE id=:id`,
-          { replacements: { id: sm.id } }
-        );
-
-        console.log(`[ScheduledWorker] ✅ Sent scheduled message id=${sm.id} → Messages.id=${newMsg.id}`);
-      } catch (msgErr) {
-        console.error(`[ScheduledWorker] ❌ Failed to send scheduled message id=${sm.id}:`, msgErr.message);
-
-        const newRetry = (sm.retryCount || 0) + 1;
-        const newStatus = newRetry >= MAX_RETRIES ? 'failed' : 'pending';
-        await sequelize.query(
-          `UPDATE scheduled_messages
-           SET "retryCount"=:retryCount, status=:status, "failureReason"=:reason, "updatedAt"=NOW()
-           WHERE id=:id`,
-          { replacements: { retryCount: newRetry, status: newStatus, reason: msgErr.message.slice(0, 499), id: sm.id } }
-        );
-      }
-    }
-  } catch (err) {
-    console.error('[ScheduledWorker] Unexpected error:', err.message);
-  }
-}
 
 // Expired message cleanup — runs every 5 minutes
 async function cleanExpiredMessages() {
@@ -192,17 +71,13 @@ async function cleanExpiredMessages() {
 function start() {
   if (_timer) return; // already running
 
-  console.log('[ScheduledWorker] Starting — polls every 60s for scheduled messages + expired messages');
+  console.log('[ScheduledWorker] Starting — polls every 5 minutes for expired (disappearing) messages');
 
   // Run immediately on start
-  processDueMessages();
   cleanExpiredMessages();
 
-  // Then every 60 seconds for scheduled messages
-  _timer = setInterval(processDueMessages, POLL_MS);
-
   // Every 5 minutes for expired disappearing messages
-  setInterval(cleanExpiredMessages, 5 * 60 * 1000);
+  _timer = setInterval(cleanExpiredMessages, 5 * 60 * 1000);
 }
 
 function stop() {
@@ -213,4 +88,4 @@ function stop() {
   }
 }
 
-module.exports = { start, stop, processDueMessages, cleanExpiredMessages };
+module.exports = { start, stop, cleanExpiredMessages };
