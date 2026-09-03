@@ -54,6 +54,7 @@ async function broadcastNewMessage(message, senderId) {
     sender: message.sender || null,
     replyToId: message.replyToId || null,
     clientMessageId: message.clientMessageId || null,
+    metadata: message.metadata || null,
     createdAt: message.createdAt,
     sentAt: message.sentAt,
     status: 'sent',

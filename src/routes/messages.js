@@ -227,4 +227,120 @@ router.post('/read', asyncHandler(async (req, res) => {
 }));
 
 
+function stripHtmlTags(str) {
+  if (!str || typeof str !== 'string') return str;
+  return str
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(/<[^>]*>/g, '')
+    .replace(/javascript:/gi, '')
+    .replace(/\bon\w+\s*=/gi, 'data-blocked=');
+}
+
+// ── DELETE /:messageId — delete a message ────────────────────────────────────
+// Body/query: deleteForEveryone (bool). Matches the app's existing convention
+// (see the previous routes/messages.js): "delete for me" stores the caller's
+// id in metadata.deletedFor (message still exists for everyone else);
+// "delete for everyone" sets isDeleted (sender-only — no group-admin concept
+// exists for direct chats). Broadcasts via broadcastToChatFull, the existing
+// generic helper that already covers both the chat room and each
+// participant's user room — not reimplemented here.
+router.delete('/:messageId', asyncHandler(async (req, res) => {
+  const userId = getUserId(req);
+  if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
+
+  const messageId = safeInt(req.params.messageId);
+  if (!messageId) return res.status(400).json({ success: false, message: 'Invalid messageId' });
+
+  const rawForEveryone = req.body?.deleteForEveryone ?? req.query.deleteForEveryone ?? false;
+  const deleteForEveryone = rawForEveryone === true || rawForEveryone === 'true';
+
+  const sequelize = getSequelize();
+  const [msg] = await sequelize.query(
+    `SELECT id, "chatId", "senderId", metadata FROM "Messages" WHERE id = :messageId AND "isDeleted" = false LIMIT 1`,
+    { replacements: { messageId }, type: sequelize.QueryTypes.SELECT }
+  );
+  if (!msg) return res.status(404).json({ success: false, message: 'Message not found' });
+
+  const [participant] = await sequelize.query(
+    `SELECT 1 FROM chat_participants WHERE "chatId" = :chatId AND "userId" = :userId LIMIT 1`,
+    { replacements: { chatId: msg.chatId, userId }, type: sequelize.QueryTypes.SELECT }
+  ).catch(() => [null]);
+  if (!participant) return res.status(403).json({ success: false, message: 'Not a participant of this chat' });
+
+  if (deleteForEveryone) {
+    if (msg.senderId !== userId) {
+      return res.status(403).json({ success: false, message: 'Only the sender can delete a message for everyone' });
+    }
+    await sequelize.query(
+      `UPDATE "Messages" SET "isDeleted" = true, "deletedAt" = NOW(), "deletedBy" = :userId, "updatedAt" = NOW() WHERE id = :messageId`,
+      { replacements: { userId, messageId } }
+    );
+  } else {
+    let metadata = {};
+    try { metadata = (typeof msg.metadata === 'string' ? JSON.parse(msg.metadata) : msg.metadata) || {}; } catch (_) {}
+    const deletedFor = Array.isArray(metadata.deletedFor) ? metadata.deletedFor : [];
+    if (!deletedFor.includes(userId)) deletedFor.push(userId);
+    metadata.deletedFor = deletedFor;
+    await sequelize.query(
+      `UPDATE "Messages" SET metadata = :metadata, "updatedAt" = NOW() WHERE id = :messageId`,
+      { replacements: { metadata: JSON.stringify(metadata), messageId } }
+    );
+  }
+
+  try {
+    const wsService = require('../services/webSocketService');
+    await wsService.broadcastToChatFull(msg.chatId, 'message:deleted', {
+      messageId, chatId: msg.chatId, deletedBy: userId, deleteForEveryone,
+      deletedFor: deleteForEveryone ? null : [userId],
+    });
+  } catch (err) { console.warn('[Messages] Failed to broadcast message:deleted:', err.message); }
+
+  return res.json({ success: true });
+}));
+
+// ── PATCH /:messageId — edit a message (sender-only, 15-minute window) ──────
+const _editMessageHandler = asyncHandler(async (req, res) => {
+  const userId = getUserId(req);
+  if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
+
+  const messageId = safeInt(req.params.messageId);
+  if (!messageId) return res.status(400).json({ success: false, message: 'Invalid messageId' });
+
+  const { content } = req.body || {};
+  if (!content || !content.trim()) return res.status(400).json({ success: false, message: 'Message content is required' });
+  const safeContent = stripHtmlTags(content).trim();
+
+  const sequelize = getSequelize();
+  const [msg] = await sequelize.query(
+    `SELECT id, "chatId", "senderId", "createdAt" FROM "Messages" WHERE id = :messageId AND "senderId" = :userId AND "isDeleted" = false LIMIT 1`,
+    { replacements: { messageId, userId }, type: sequelize.QueryTypes.SELECT }
+  );
+  if (!msg) return res.status(404).json({ success: false, message: 'Message not found or not authorized to edit' });
+
+  const EDIT_WINDOW_MS = 15 * 60 * 1000;
+  if (Date.now() - new Date(msg.createdAt).getTime() > EDIT_WINDOW_MS) {
+    return res.status(400).json({ success: false, message: 'Message can only be edited within 15 minutes' });
+  }
+
+  await sequelize.query(
+    `UPDATE "Messages" SET content = :content, "isEdited" = true, "editedAt" = NOW(), "updatedAt" = NOW() WHERE id = :messageId`,
+    { replacements: { content: safeContent, messageId } }
+  );
+
+  try {
+    const wsService = require('../services/webSocketService');
+    await wsService.broadcastToChatFull(msg.chatId, 'message:edited', {
+      messageId, chatId: msg.chatId, content: safeContent, editedAt: new Date().toISOString(), editedBy: userId,
+    });
+  } catch (err) { console.warn('[Messages] Failed to broadcast message:edited:', err.message); }
+
+  return res.json({ success: true, data: { messageId, content: safeContent, editedAt: new Date().toISOString() } });
+});
+// PUT alias — window.api.request (the frontend's REST wrapper) has no
+// .patch() method, only .get/.post/.put/.delete. Same convention the
+// previous routes/messages.js already used for this exact reason.
+router.patch('/:messageId', _editMessageHandler);
+router.put('/:messageId', _editMessageHandler);
+
 module.exports = router;
