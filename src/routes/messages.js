@@ -19,6 +19,9 @@
 const express = require('express');
 const router = express.Router();
 const asyncHandler = require('express-async-handler');
+const { apiRateLimiter } = require('../middleware/rateLimiter');
+
+router.use(apiRateLimiter);
 
 const messageDeliveryService = require('../services/messageDeliveryService');
 const { broadcastNewMessage } = require('../services/messageBroadcast');
@@ -76,6 +79,27 @@ router.get('/resolve/:userId', asyncHandler(async (req, res) => {
     const status = err.status || (err.name === 'ForbiddenError' ? 403 : 500);
     return res.status(status).json({ success: false, message: err.message });
   }
+}));
+
+// ── GET /starred — list this user's starred messages ────────────────────────
+router.get('/starred', asyncHandler(async (req, res) => {
+  const userId = getUserId(req);
+  if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
+
+  const sequelize = getSequelize();
+  const rows = await sequelize.query(
+    `SELECT sm."messageId", sm."chatId", sm."starredAt",
+            m.content, m.type, m."senderId", m."sentAt", m.metadata,
+            u.username AS "senderUsername", u.avatar AS "senderAvatar"
+     FROM starred_messages sm
+     JOIN "Messages" m ON m.id = sm."messageId"
+     LEFT JOIN "Users" u ON u.id = m."senderId"
+     WHERE sm."userId" = :userId AND m."isDeleted" = false
+     ORDER BY sm."starredAt" DESC
+     LIMIT 200`,
+    { replacements: { userId }, type: sequelize.QueryTypes.SELECT }
+  ).catch(() => []);
+  return res.json({ success: true, data: rows });
 }));
 
 // ── POST / — send a message ──────────────────────────────────────────────────
@@ -342,5 +366,163 @@ const _editMessageHandler = asyncHandler(async (req, res) => {
 // previous routes/messages.js already used for this exact reason.
 router.patch('/:messageId', _editMessageHandler);
 router.put('/:messageId', _editMessageHandler);
+
+// ── POST /:messageId/star — star a message ──────────────────────────────────
+router.post('/:messageId/star', asyncHandler(async (req, res) => {
+  const userId = getUserId(req);
+  if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
+
+  const messageId = safeInt(req.params.messageId);
+  if (!messageId) return res.status(400).json({ success: false, message: 'Invalid messageId' });
+
+  const sequelize = getSequelize();
+  const [msg] = await sequelize.query(
+    `SELECT m.id, m."chatId" FROM "Messages" m
+     JOIN chat_participants cp ON cp."chatId" = m."chatId" AND cp."userId" = :userId
+     WHERE m.id = :messageId AND m."isDeleted" = false LIMIT 1`,
+    { replacements: { userId, messageId }, type: sequelize.QueryTypes.SELECT }
+  );
+  if (!msg) return res.status(404).json({ success: false, message: 'Message not found or access denied' });
+
+  await sequelize.query(
+    `INSERT INTO starred_messages ("userId","messageId","chatId","starredAt")
+     VALUES (:userId,:messageId,:chatId,NOW())
+     ON CONFLICT ("userId","messageId") DO NOTHING`,
+    { replacements: { userId, messageId, chatId: msg.chatId } }
+  );
+  return res.json({ success: true });
+}));
+
+// ── DELETE /:messageId/star — unstar a message ───────────────────────────────
+router.delete('/:messageId/star', asyncHandler(async (req, res) => {
+  const userId = getUserId(req);
+  if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
+
+  const messageId = safeInt(req.params.messageId);
+  if (!messageId) return res.status(400).json({ success: false, message: 'Invalid messageId' });
+
+  await getSequelize().query(
+    `DELETE FROM starred_messages WHERE "userId" = :userId AND "messageId" = :messageId`,
+    { replacements: { userId, messageId } }
+  );
+  return res.json({ success: true });
+}));
+
+// ── PUT /:chatId/mute — mute a conversation (with optional duration) ────────
+// Body: { muted: bool, duration?: '8h'|'1d'|'1w' }
+router.put('/:chatId/mute', asyncHandler(async (req, res) => {
+  const userId = getUserId(req);
+  if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
+
+  const chatId = safeInt(req.params.chatId);
+  if (!chatId) return res.status(400).json({ success: false, message: 'Invalid chatId' });
+
+  const { muted = true, duration } = req.body || {};
+  let mutedUntil = null;
+  if (muted && duration) {
+    const d = { '8h': 8 * 3600, '1d': 86400, '1w': 604800 }[duration];
+    if (d) mutedUntil = new Date(Date.now() + d * 1000);
+  }
+
+  await getSequelize().query(
+    `UPDATE chat_participants SET "isMuted" = :muted, "mutedUntil" = :mutedUntil, "updatedAt" = NOW()
+     WHERE "chatId" = :chatId AND "userId" = :userId`,
+    { replacements: { chatId, userId, muted: Boolean(muted), mutedUntil } }
+  );
+  return res.json({ success: true, muted: Boolean(muted), mutedUntil });
+}));
+
+// DELETE alias for unmute — matches the app's existing toggleMute() convention
+// (sends DELETE to unmute, PUT to mute), same fix the old code already made.
+router.delete('/:chatId/mute', asyncHandler(async (req, res) => {
+  const userId = getUserId(req);
+  if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
+
+  const chatId = safeInt(req.params.chatId);
+  if (!chatId) return res.status(400).json({ success: false, message: 'Invalid chatId' });
+
+  await getSequelize().query(
+    `UPDATE chat_participants SET "isMuted" = false, "mutedUntil" = NULL, "updatedAt" = NOW()
+     WHERE "chatId" = :chatId AND "userId" = :userId`,
+    { replacements: { chatId, userId } }
+  );
+  return res.json({ success: true, muted: false });
+}));
+
+// ── POST /:messageId/react — add/replace this user's reaction ───────────────
+// Body: { emoji: string }. One reaction per user per message (replaces prior).
+router.post('/:messageId/react', asyncHandler(async (req, res) => {
+  const userId = getUserId(req);
+  if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
+
+  const messageId = safeInt(req.params.messageId);
+  if (!messageId) return res.status(400).json({ success: false, message: 'Invalid messageId' });
+
+  const { emoji } = req.body || {};
+  if (!emoji || typeof emoji !== 'string' || emoji.length > 8) {
+    return res.status(400).json({ success: false, message: 'A valid emoji is required' });
+  }
+
+  const sequelize = getSequelize();
+  const [msg] = await sequelize.query(
+    `SELECT m.id, m."chatId", m.metadata FROM "Messages" m
+     JOIN chat_participants cp ON cp."chatId" = m."chatId" AND cp."userId" = :userId
+     WHERE m.id = :messageId AND m."isDeleted" = false LIMIT 1`,
+    { replacements: { userId, messageId }, type: sequelize.QueryTypes.SELECT }
+  );
+  if (!msg) return res.status(404).json({ success: false, message: 'Message not found or access denied' });
+
+  let metadata = {};
+  try { metadata = (typeof msg.metadata === 'string' ? JSON.parse(msg.metadata) : msg.metadata) || {}; } catch (_) {}
+  const reactions = metadata.reactions || {};
+  reactions[userId] = emoji;
+  metadata.reactions = reactions;
+
+  await sequelize.query(
+    `UPDATE "Messages" SET metadata = :metadata, "updatedAt" = NOW() WHERE id = :messageId`,
+    { replacements: { metadata: JSON.stringify(metadata), messageId } }
+  );
+
+  try {
+    const wsService = require('../services/webSocketService');
+    await wsService.broadcastToChatFull(msg.chatId, 'message:reaction', { messageId, chatId: msg.chatId, userId, emoji, reactions });
+  } catch (err) { console.warn('[Messages] Failed to broadcast message:reaction:', err.message); }
+
+  return res.json({ success: true, data: { reactions } });
+}));
+
+// ── DELETE /:messageId/react — remove this user's reaction ──────────────────
+router.delete('/:messageId/react', asyncHandler(async (req, res) => {
+  const userId = getUserId(req);
+  if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
+
+  const messageId = safeInt(req.params.messageId);
+  if (!messageId) return res.status(400).json({ success: false, message: 'Invalid messageId' });
+
+  const sequelize = getSequelize();
+  const [msg] = await sequelize.query(
+    `SELECT id, "chatId", metadata FROM "Messages" WHERE id = :messageId AND "isDeleted" = false LIMIT 1`,
+    { replacements: { messageId }, type: sequelize.QueryTypes.SELECT }
+  );
+  if (!msg) return res.status(404).json({ success: false, message: 'Message not found' });
+
+  let metadata = {};
+  try { metadata = (typeof msg.metadata === 'string' ? JSON.parse(msg.metadata) : msg.metadata) || {}; } catch (_) {}
+  const reactions = metadata.reactions || {};
+  delete reactions[userId];
+  metadata.reactions = reactions;
+
+  await sequelize.query(
+    `UPDATE "Messages" SET metadata = :metadata, "updatedAt" = NOW() WHERE id = :messageId`,
+    { replacements: { metadata: JSON.stringify(metadata), messageId } }
+  );
+
+  try {
+    const wsService = require('../services/webSocketService');
+    await wsService.broadcastToChatFull(msg.chatId, 'message:reaction', { messageId, chatId: msg.chatId, userId, emoji: null, reactions });
+  } catch (err) { console.warn('[Messages] Failed to broadcast message:reaction removal:', err.message); }
+
+  return res.json({ success: true, data: { reactions } });
+}));
 
 module.exports = router;
