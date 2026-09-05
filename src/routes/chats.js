@@ -1580,6 +1580,28 @@ router.post(
 );
 
 // FIX: PATCH alias — frontend api_core.js may use PATCH /chats/:id/archive
+// PUT alias — window.api.request (the frontend's REST wrapper) has no
+// .patch() method, only .get/.post/.put/.delete. Same convention already
+// used in routes/messages.js's edit endpoint for this exact reason.
+router.put('/:chatId/archive', apiRateLimiter, asyncHandler(async (req, res) => {
+    try {
+        const userId = getUserId(req);
+        if (!userId) return res.status(401).json({ status: 'error', message: 'Authentication required' });
+        if (!checkModels(res)) return;
+        const { chatId } = req.params;
+        if (!chatId) return res.status(400).json({ status: 'error', message: 'Chat ID is required' });
+        const isParticipant = await ChatParticipant.findOne({ where: { chatId, userId } });
+        if (!isParticipant) return res.status(403).json({ status: 'error', message: 'You are not a participant of this chat' });
+        const chat = await Chat.findByPk(chatId);
+        if (!chat) return res.status(404).json({ status: 'error', message: 'Chat not found' });
+        await chat.update({ isArchived: true, archivedBy: userId, archivedAt: new Date(), updatedAt: new Date() });
+        res.status(200).json({ status: 'success', message: 'Chat archived successfully' });
+    } catch (error) {
+        console.error('[Chats] Error archiving chat (PUT):', error.message);
+        res.status(500).json({ status: 'error', message: 'Failed to archive chat' });
+    }
+}));
+
 router.patch('/:chatId/archive', apiRateLimiter, asyncHandler(async (req, res) => {
     req.method = 'POST';
     // Re-use same handler by delegating to the archive logic inline
