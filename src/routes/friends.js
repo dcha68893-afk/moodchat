@@ -340,8 +340,16 @@ router.get('/users/all', apiRateLimiter, asyncHandler(async (req, res) => {
             }
         });
     } catch (e) {
+        // FIX (masked failures indistinguishable from "no people found"):
+        // this used to swallow genuine failures (timeout, pool exhaustion)
+        // and respond success:true with an empty users array — identical
+        // on the wire to "you really have zero people to chat with". That
+        // made message.html's own success:false → "Could not load people:
+        // <reason>" branch unreachable, and looked like a real empty state
+        // instead of a backend error. Respond with a real error status so
+        // the frontend can tell the difference and show/retry accordingly.
         console.error('[Friends GET /users/all]', e.message);
-        return res.json({ success: true, data: { users: [], pagination: { total: 0, page: 1, limit: 200, pages: 0 } } });
+        return res.status(503).json({ success: false, message: e.message || 'Failed to load users' });
     }
 }));
 
