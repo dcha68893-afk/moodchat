@@ -446,6 +446,50 @@ router.get('/keys/:userId', asyncHandler(async (req, res) => {
   res.json({ status: 'success', data: rows[0] });
 }));
 
+// GET /api/encryption/keys/:userId/version/:keyId — fetch a SPECIFIC
+// historical public key for a user, regardless of whether it is still the
+// active one.
+//
+// FIX (HISTORICAL-KEY-LOOKUP): every v2 message envelope carries `kid` —
+// the exact keyId that was active on the sender's side at encryption time
+// — but until now the server could only answer "give me whatever key is
+// active right now" (the route above), never "give me key <keyId>
+// specifically". If the sender has since rotated keys (new device,
+// reinstall, cleared storage), that "current key" answer is the WRONG key
+// for an older message and AES-GCM auth on it fails.
+//
+// Rows are never deleted on rotation — POST /keys above sets
+// "isActive"=false, it does not DELETE — so every keyId a user has ever
+// registered is still here. This route lets a client resolve the EXACT key
+// that authenticated a given ciphertext instead of gambling on whatever
+// happens to be current. Gated by the same authorization as the
+// current-key route; a specific historical key is exactly as sensitive as
+// the current one.
+router.get('/keys/:userId/version/:keyId', asyncHandler(async (req, res) => {
+  const targetId = parseInt(req.params.userId, 10);
+  const { keyId } = req.params;
+  if (!targetId) return res.status(400).json({ status: 'error', message: 'Invalid userId' });
+  if (!keyId || typeof keyId !== 'string') {
+    return res.status(400).json({ status: 'error', message: 'Invalid keyId' });
+  }
+
+  const sequelize = getSequelize();
+  const authorized = await _canSeeEncryptionKey(req.user.id, targetId, sequelize);
+  if (!authorized) {
+    return res.status(403).json({ status: 'error', message: 'You cannot message this user' });
+  }
+
+  const rows = await sequelize.query(
+    `SELECT "keyId","publicKey","createdAt","isActive" FROM user_encryption_keys
+     WHERE "userId"=:targetId AND "keyId"=:keyId LIMIT 1`,
+    { replacements: { targetId, keyId }, type: sequelize.QueryTypes.SELECT }
+  );
+  if (!rows || rows.length === 0) {
+    return res.json({ status: 'success', data: null, message: 'That key version is not on record for this user' });
+  }
+  res.json({ status: 'success', data: rows[0] });
+}));
+
 // DELETE /api/encryption/keys — revoke own key
 router.delete('/keys', asyncHandler(async (req, res) => {
   const userId    = req.user.id;
