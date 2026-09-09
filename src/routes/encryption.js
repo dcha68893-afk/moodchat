@@ -100,6 +100,84 @@ let _prekeysReady = ensurePrekeyTables();
 router.use((req, res, next) => { _prekeysReady.then(() => next()).catch(() => next()); });
 router.use((req, res, next) => { _encKeysReady.then(() => next()).catch(() => next()); });
 
+// ── PHASE 2 (MULTI-DEVICE): user_devices registry + deviceId-scoped prekeys ─
+// FIX (SINGLE-DEVICE-ONLY): every table above was keyed on userId alone —
+// one identity key, one signed prekey, one one-time-prekey pool PER USER,
+// not per device. That's fine for "one browser, one session" but means a
+// second device (or even a second browser on the same account) either
+// silently overwrote the first device's identity key (ON CONFLICT
+// ("userId") DO UPDATE in user_signed_prekeys) or fought over the same
+// one-time prekey pool — neither device could reliably decrypt what was
+// sent to the other. Real multi-device (Signal/WhatsApp linked devices)
+// gives EACH device its own identity/signed-prekey/one-time-prekey set, and
+// a sender fans a message out to every one of the recipient's active
+// devices individually. This block adds that additively:
+//   - user_devices: the registry of a user's active devices
+//   - "deviceId" column added to the existing prekey tables (default
+//     'primary', backward-compatible: an old client that never sends
+//     deviceId keeps behaving exactly as it does today, scoped to the
+//     implicit 'primary' device)
+// ADD COLUMN ... DEFAULT is safe/non-blocking on modern Postgres (11+):
+// existing rows are backfilled with the default without a table rewrite.
+let _devicesMigrated = false;
+async function ensureDeviceTables() {
+  if (_devicesMigrated) return;
+  _devicesMigrated = true;
+  try {
+    const sequelize = getSequelize();
+    await sequelize.query(`
+      CREATE TABLE IF NOT EXISTS user_devices (
+        id            SERIAL PRIMARY KEY,
+        "userId"      INTEGER NOT NULL,
+        "deviceId"    VARCHAR(64) NOT NULL,
+        "deviceName"  VARCHAR(120),
+        platform      VARCHAR(40),
+        active        BOOLEAN NOT NULL DEFAULT true,
+        "createdAt"   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        "lastSeenAt"  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CONSTRAINT user_devices_user_device_unique UNIQUE ("userId", "deviceId")
+      );
+    `);
+    await sequelize.query(`CREATE INDEX IF NOT EXISTS user_devices_active_idx ON user_devices ("userId") WHERE active = true;`);
+
+    // Backward-compatible deviceId columns on the existing per-user tables.
+    await sequelize.query(`ALTER TABLE user_encryption_keys ADD COLUMN IF NOT EXISTS "deviceId" VARCHAR(64) NOT NULL DEFAULT 'primary';`);
+    await sequelize.query(`ALTER TABLE user_signed_prekeys  ADD COLUMN IF NOT EXISTS "deviceId" VARCHAR(64) NOT NULL DEFAULT 'primary';`);
+    await sequelize.query(`ALTER TABLE user_one_time_prekeys ADD COLUMN IF NOT EXISTS "deviceId" VARCHAR(64) NOT NULL DEFAULT 'primary';`);
+
+    // user_signed_prekeys originally had userId as its sole primary key —
+    // one row per user. Multi-device needs one row per (user, device). If
+    // the old single-column primary key is still in place, replace it with
+    // a composite one; a fresh deploy of this file creates the composite
+    // key directly (see ensurePrekeyTables — left as-is above on purpose,
+    // this migration only runs the ALTER on a database that already has
+    // the old shape).
+    await sequelize.query(`
+      DO $$
+      BEGIN
+        IF EXISTS (
+          SELECT 1 FROM information_schema.table_constraints
+          WHERE table_name = 'user_signed_prekeys' AND constraint_type = 'PRIMARY KEY'
+            AND constraint_name = 'user_signed_prekeys_pkey'
+        ) AND NOT EXISTS (
+          SELECT 1 FROM information_schema.key_column_usage
+          WHERE table_name = 'user_signed_prekeys' AND column_name = 'deviceId'
+            AND constraint_name = 'user_signed_prekeys_pkey'
+        ) THEN
+          ALTER TABLE user_signed_prekeys DROP CONSTRAINT user_signed_prekeys_pkey;
+          ALTER TABLE user_signed_prekeys ADD CONSTRAINT user_signed_prekeys_pkey PRIMARY KEY ("userId", "deviceId");
+        END IF;
+      END $$;
+    `);
+
+    console.log('[encryption.js] ✅ multi-device tables verified/created');
+  } catch (err) {
+    console.error('[encryption.js] ⚠️ Could not verify/create multi-device tables:', err.message);
+  }
+}
+let _devicesReady = ensureDeviceTables();
+router.use((req, res, next) => { _devicesReady.then(() => next()).catch(() => next()); });
+
 // ── FIX (KEY-ANNOUNCEMENT / ITEM 5,6,7 — WebSocket key push): previously the
 // only way another user's client ever learned about a public key was a REST
 // GET the moment IT needed to encrypt/decrypt something — there was no push
@@ -141,10 +219,69 @@ async function _broadcastKeyEvent(userId, eventName, data, sequelize) {
   }
 }
 
-// POST /api/encryption/keys — register or update public key
+// POST /api/encryption/devices — register or "touch" (update lastSeenAt of)
+// one of the caller's own devices. deviceId is client-generated and stable
+// per browser/install (see js/e2e-store-v2.js's getOrCreateDeviceId()) —
+// the server never invents or reassigns it.
+router.post('/devices', asyncHandler(async (req, res) => {
+  const userId = req.user.id;
+  const { deviceId, deviceName, platform } = req.body;
+  if (!deviceId || typeof deviceId !== 'string') {
+    return res.status(400).json({ status: 'error', message: 'deviceId required' });
+  }
+  const sequelize = getSequelize();
+  await sequelize.query(
+    `INSERT INTO user_devices ("userId","deviceId","deviceName",platform,active,"createdAt","lastSeenAt")
+     VALUES (:userId,:deviceId,:deviceName,:platform,true,NOW(),NOW())
+     ON CONFLICT ("userId","deviceId") DO UPDATE
+       SET "deviceName"=COALESCE(:deviceName, user_devices."deviceName"),
+           platform=COALESCE(:platform, user_devices.platform),
+           active=true, "lastSeenAt"=NOW()`,
+    { replacements: { userId, deviceId, deviceName: deviceName || null, platform: platform || null } }
+  );
+  res.status(201).json({ status: 'success', data: { deviceId } });
+}));
+
+// GET /api/encryption/devices/:userId — list another user's active devices,
+// so a sender knows how many sub-envelopes to fan a message out to. Gated
+// by the same authorization as key/prekey access — a device list otherwise
+// leaks nothing sensitive (no keys), but it's still account metadata.
+router.get('/devices/:userId', asyncHandler(async (req, res) => {
+  const targetId = parseInt(req.params.userId, 10);
+  if (!targetId) return res.status(400).json({ status: 'error', message: 'Invalid userId' });
+  const sequelize = getSequelize();
+  const authorized = await _canSeeEncryptionKey(req.user.id, targetId, sequelize);
+  if (!authorized) return res.status(403).json({ status: 'error', message: 'No shared conversation or friendship' });
+  const rows = await sequelize.query(
+    `SELECT "deviceId","deviceName",platform,"lastSeenAt" FROM user_devices WHERE "userId"=:targetId AND active=true ORDER BY "lastSeenAt" DESC`,
+    { replacements: { targetId }, type: sequelize.QueryTypes.SELECT }
+  );
+  // A user who has never registered under the multi-device scheme still has
+  // exactly one implicit device: 'primary' — keeps fan-out logic correct
+  // for accounts that haven't touched /devices yet.
+  const devices = (rows && rows.length) ? rows : [{ deviceId: 'primary', deviceName: null, platform: null, lastSeenAt: null }];
+  res.json({ status: 'success', data: { devices } });
+}));
+
+// DELETE /api/encryption/devices/:deviceId — unlink one of the CALLER's own
+// devices (e.g. "remove this device" in settings after losing a phone).
+// Deliberately cannot target another user's device.
+router.delete('/devices/:deviceId', asyncHandler(async (req, res) => {
+  const userId = req.user.id;
+  const { deviceId } = req.params;
+  const sequelize = getSequelize();
+  await sequelize.query(
+    `UPDATE user_devices SET active=false WHERE "userId"=:userId AND "deviceId"=:deviceId`,
+    { replacements: { userId, deviceId } }
+  );
+  res.json({ status: 'success', message: 'Device unlinked' });
+}));
+
+
 router.post('/keys', asyncHandler(async (req, res) => {
   const userId    = req.user.id;
-  const { publicKey, keyId } = req.body;
+  const { publicKey, keyId, deviceId: rawDeviceId } = req.body;
+  const deviceId = (typeof rawDeviceId === 'string' && rawDeviceId) || 'primary';
 
   if (!publicKey || typeof publicKey !== 'string') {
     return res.status(400).json({ status: 'error', message: 'publicKey required' });
@@ -161,25 +298,29 @@ router.post('/keys', asyncHandler(async (req, res) => {
   // (e2e:key_rotated) — the two need different client-side handling (a
   // rotation should also purge any stale cached key derived from the old
   // one; see js/e2e-encryption.js's _handleKeyAnnouncement).
+  // FIX (MULTI-DEVICE-KEY-CLOBBER): scoped to this deviceId only now — this
+  // used to look up (and, below, deactivate) ALL of the user's keys, so a
+  // second device registering its own identity key silently deactivated the
+  // first device's key too. Each device's identity key is independent.
   const previousActive = await sequelize.query(
-    `SELECT "keyId" FROM user_encryption_keys WHERE "userId"=:userId AND "isActive"=true LIMIT 1`,
-    { replacements: { userId }, type: sequelize.QueryTypes.SELECT }
+    `SELECT "keyId" FROM user_encryption_keys WHERE "userId"=:userId AND "deviceId"=:deviceId AND "isActive"=true LIMIT 1`,
+    { replacements: { userId, deviceId }, type: sequelize.QueryTypes.SELECT }
   );
   const isRotation = !!(previousActive && previousActive.length && previousActive[0].keyId !== keyId);
 
-  // Deactivate old keys
+  // Deactivate old keys FOR THIS DEVICE ONLY
   await sequelize.query(
-    `UPDATE user_encryption_keys SET "isActive"=false, "updatedAt"=NOW() WHERE "userId"=:userId`,
-    { replacements: { userId } }
+    `UPDATE user_encryption_keys SET "isActive"=false, "updatedAt"=NOW() WHERE "userId"=:userId AND "deviceId"=:deviceId`,
+    { replacements: { userId, deviceId } }
   );
 
   // Insert new key
   await sequelize.query(
-    `INSERT INTO user_encryption_keys ("userId","publicKey","keyId","algorithm","isActive","createdAt","updatedAt")
-     VALUES (:userId,:publicKey,:keyId,'ECDH-P256-AES256GCM',true,NOW(),NOW())
+    `INSERT INTO user_encryption_keys ("userId","deviceId","publicKey","keyId","algorithm","isActive","createdAt","updatedAt")
+     VALUES (:userId,:deviceId,:publicKey,:keyId,'ECDH-P256-AES256GCM',true,NOW(),NOW())
      ON CONFLICT ("userId","keyId") DO UPDATE
        SET "publicKey"=:publicKey, "isActive"=true, "updatedAt"=NOW()`,
-    { replacements: { userId, publicKey, keyId } }
+    { replacements: { userId, deviceId, publicKey, keyId } }
   );
 
   // Fire-and-forget: never let a slow/failed socket push delay or fail the
@@ -324,7 +465,8 @@ router.post('/verify/:userId', asyncHandler(async (req, res) => {
 // FIX (X3DH-UPGRADE): see ensurePrekeyTables() above for why this exists.
 router.post('/prekeys', asyncHandler(async (req, res) => {
   const userId = req.user.id;
-  const { signingPubKey, signedPreKey, oneTimePreKeys } = req.body;
+  const { signingPubKey, signedPreKey, oneTimePreKeys, deviceId: rawDeviceId } = req.body;
+  const deviceId = (typeof rawDeviceId === 'string' && rawDeviceId) || 'primary';
 
   if (!signingPubKey || typeof signingPubKey !== 'string') {
     return res.status(400).json({ status: 'error', message: 'signingPubKey required' });
@@ -336,12 +478,12 @@ router.post('/prekeys', asyncHandler(async (req, res) => {
   const sequelize = getSequelize();
 
   await sequelize.query(
-    `INSERT INTO user_signed_prekeys ("userId","signingPubKey","signedPreKeyId","signedPreKey","signature","createdAt","updatedAt")
-     VALUES (:userId,:signingPubKey,:keyId,:pubKey,:signature,NOW(),NOW())
-     ON CONFLICT ("userId") DO UPDATE
+    `INSERT INTO user_signed_prekeys ("userId","deviceId","signingPubKey","signedPreKeyId","signedPreKey","signature","createdAt","updatedAt")
+     VALUES (:userId,:deviceId,:signingPubKey,:keyId,:pubKey,:signature,NOW(),NOW())
+     ON CONFLICT ("userId","deviceId") DO UPDATE
        SET "signingPubKey"=:signingPubKey, "signedPreKeyId"=:keyId, "signedPreKey"=:pubKey,
            "signature"=:signature, "updatedAt"=NOW()`,
-    { replacements: { userId, signingPubKey, keyId: signedPreKey.keyId, pubKey: signedPreKey.publicKey, signature: signedPreKey.signature } }
+    { replacements: { userId, deviceId, signingPubKey, keyId: signedPreKey.keyId, pubKey: signedPreKey.publicKey, signature: signedPreKey.signature } }
   );
 
   let inserted = 0;
@@ -349,37 +491,50 @@ router.post('/prekeys', asyncHandler(async (req, res) => {
     for (const otpk of oneTimePreKeys.slice(0, 200)) { // hard cap per request
       if (!otpk?.keyId || !otpk?.publicKey) continue;
       await sequelize.query(
-        `INSERT INTO user_one_time_prekeys ("userId","keyId","publicKey","createdAt")
-         VALUES (:userId,:keyId,:pubKey,NOW())
+        `INSERT INTO user_one_time_prekeys ("userId","deviceId","keyId","publicKey","createdAt")
+         VALUES (:userId,:deviceId,:keyId,:pubKey,NOW())
          ON CONFLICT ("userId","keyId") DO NOTHING`,
-        { replacements: { userId, keyId: otpk.keyId, pubKey: otpk.publicKey } }
+        { replacements: { userId, deviceId, keyId: otpk.keyId, pubKey: otpk.publicKey } }
       );
       inserted++;
     }
   }
 
-  res.status(201).json({ status: 'success', data: { signedPreKeyId: signedPreKey.keyId, oneTimePreKeysAdded: inserted } });
+  // Registering prekeys is also proof-of-life for the device — touch it so
+  // it shows up for fan-out without needing a separate /devices call first.
+  await sequelize.query(
+    `INSERT INTO user_devices ("userId","deviceId",active,"createdAt","lastSeenAt")
+     VALUES (:userId,:deviceId,true,NOW(),NOW())
+     ON CONFLICT ("userId","deviceId") DO UPDATE SET active=true, "lastSeenAt"=NOW()`,
+    { replacements: { userId, deviceId } }
+  ).catch(() => {});
+
+  res.status(201).json({ status: 'success', data: { deviceId, signedPreKeyId: signedPreKey.keyId, oneTimePreKeysAdded: inserted } });
 }));
 
 // GET /api/encryption/prekeys/count — how many unconsumed one-time prekeys
 // this user still has server-side, so the client knows when to top up.
+// ?deviceId= scopes to one device; omitted defaults to 'primary' (matches
+// pre-multi-device client behavior exactly).
 router.get('/prekeys/count', asyncHandler(async (req, res) => {
   const sequelize = getSequelize();
+  const deviceId = (typeof req.query.deviceId === 'string' && req.query.deviceId) || 'primary';
   const rows = await sequelize.query(
-    `SELECT COUNT(*)::int AS count FROM user_one_time_prekeys WHERE "userId"=:userId AND consumed=false`,
-    { replacements: { userId: req.user.id }, type: sequelize.QueryTypes.SELECT }
+    `SELECT COUNT(*)::int AS count FROM user_one_time_prekeys WHERE "userId"=:userId AND "deviceId"=:deviceId AND consumed=false`,
+    { replacements: { userId: req.user.id, deviceId }, type: sequelize.QueryTypes.SELECT }
   );
   res.json({ status: 'success', data: { count: rows?.[0]?.count ?? 0 } });
 }));
 
 // GET /api/encryption/prekeys/:userId — fetch a prekey bundle to start a new
-// X3DH session with this user, atomically claiming (and permanently
-// consuming) ONE of their one-time prekeys so it can never be reused for a
-// second session. `FOR UPDATE SKIP LOCKED` makes the claim race-safe if two
-// people start a session with this user at the same moment.
+// X3DH session with ONE specific device of this user (?deviceId=, default
+// 'primary' — unchanged behavior for clients that don't know about
+// multi-device yet), atomically claiming (and permanently consuming) ONE of
+// that device's one-time prekeys.
 router.get('/prekeys/:userId', asyncHandler(async (req, res) => {
   const targetId = parseInt(req.params.userId, 10);
   if (!targetId) return res.status(400).json({ status: 'error', message: 'Invalid userId' });
+  const deviceId = (typeof req.query.deviceId === 'string' && req.query.deviceId) || 'primary';
 
   const sequelize = getSequelize();
 
@@ -391,17 +546,17 @@ router.get('/prekeys/:userId', asyncHandler(async (req, res) => {
 
   const [identityRows, spkRows] = await Promise.all([
     sequelize.query(
-      `SELECT "keyId","publicKey" FROM user_encryption_keys WHERE "userId"=:targetId AND "isActive"=true ORDER BY "createdAt" DESC LIMIT 1`,
-      { replacements: { targetId }, type: sequelize.QueryTypes.SELECT }
+      `SELECT "keyId","publicKey" FROM user_encryption_keys WHERE "userId"=:targetId AND "deviceId"=:deviceId AND "isActive"=true ORDER BY "createdAt" DESC LIMIT 1`,
+      { replacements: { targetId, deviceId }, type: sequelize.QueryTypes.SELECT }
     ),
     sequelize.query(
-      `SELECT "signingPubKey","signedPreKeyId","signedPreKey","signature" FROM user_signed_prekeys WHERE "userId"=:targetId LIMIT 1`,
-      { replacements: { targetId }, type: sequelize.QueryTypes.SELECT }
+      `SELECT "signingPubKey","signedPreKeyId","signedPreKey","signature" FROM user_signed_prekeys WHERE "userId"=:targetId AND "deviceId"=:deviceId LIMIT 1`,
+      { replacements: { targetId, deviceId }, type: sequelize.QueryTypes.SELECT }
     ),
   ]);
 
   if (!identityRows?.length) {
-    return res.json({ status: 'success', data: null, message: 'User has not enabled encryption' });
+    return res.json({ status: 'success', data: null, message: 'User has not enabled encryption on this device' });
   }
   if (!spkRows?.length) {
     // Identity key exists but they haven't uploaded X3DH prekeys yet (e.g.
@@ -410,17 +565,17 @@ router.get('/prekeys/:userId', asyncHandler(async (req, res) => {
     return res.json({ status: 'success', data: { identityKeyId: identityRows[0].keyId, identityPubKey: identityRows[0].publicKey, signingPubKey: null, signedPreKey: null, oneTimePreKey: null } });
   }
 
-  // Atomically claim and consume one unused one-time prekey.
+  // Atomically claim and consume one unused one-time prekey FROM THIS DEVICE.
   const claimed = await sequelize.query(
     `UPDATE user_one_time_prekeys SET consumed=true, "consumedAt"=NOW(), "consumedBy"=:requesterId
      WHERE id = (
        SELECT id FROM user_one_time_prekeys
-       WHERE "userId"=:targetId AND consumed=false
+       WHERE "userId"=:targetId AND "deviceId"=:deviceId AND consumed=false
        ORDER BY id LIMIT 1
        FOR UPDATE SKIP LOCKED
      )
      RETURNING "keyId","publicKey"`,
-    { replacements: { targetId, requesterId: req.user.id }, type: sequelize.QueryTypes.UPDATE }
+    { replacements: { targetId, deviceId, requesterId: req.user.id }, type: sequelize.QueryTypes.UPDATE }
   );
   const otpkRow = Array.isArray(claimed) && Array.isArray(claimed[0]) ? claimed[0][0] : (claimed?.[0] || null);
 
@@ -428,6 +583,7 @@ router.get('/prekeys/:userId', asyncHandler(async (req, res) => {
   res.json({
     status: 'success',
     data: {
+      deviceId,
       identityKeyId: identityRows[0].keyId,
       identityPubKey: identityRows[0].publicKey,
       signingPubKey: spk.signingPubKey,
