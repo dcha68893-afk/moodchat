@@ -383,6 +383,47 @@ async function _canSeeEncryptionKey(requesterId, targetId, sequelize) {
   return !(blocked && blocked.length > 0);
 }
 
+// GET /api/encryption/keys/batch?userIds=1,2,3 — fetch several users' public
+// keys in one round trip.
+//
+// FIX (LOGIN-TIME-KEY-WARMUP): decryption was only ever fetching a
+// recipient's key lazily — the first time a chat with them was opened —
+// which meant every cold app start (or a device that had its localStorage
+// cleared) needed a live network round trip, one at a time, before ANY
+// message from a given contact could be decrypted. Real messaging apps
+// (Signal, WhatsApp) resolve this by fetching + caching every known
+// contact's identity key once, right after login, so later decrypts never
+// wait on the network at all unless the contact is genuinely new. This
+// route is the batch primitive the frontend's login-time warmup (see
+// message-client.js's loadConversations()) calls with every existing
+// conversation's other-participant id in a single request instead of N
+// separate /keys/:userId calls. Registered BEFORE /keys/:userId so the
+// literal path 'batch' is never swallowed by that route's :userId param.
+router.get('/keys/batch', asyncHandler(async (req, res) => {
+  const raw = String(req.query.userIds || '');
+  const ids = Array.from(new Set(
+    raw.split(',').map(s => parseInt(s.trim(), 10)).filter(n => Number.isInteger(n) && n > 0)
+  )).slice(0, 200); // cap — this is a warmup convenience call, not a directory dump
+  if (!ids.length) return res.json({ status: 'success', data: {} });
+
+  const sequelize = getSequelize();
+  const authorizedIds = [];
+  for (const id of ids) {
+    // eslint-disable-next-line no-await-in-loop
+    if (await _canSeeEncryptionKey(req.user.id, id, sequelize)) authorizedIds.push(id);
+  }
+  if (!authorizedIds.length) return res.json({ status: 'success', data: {} });
+
+  const rows = await sequelize.query(
+    `SELECT DISTINCT ON ("userId") "userId","keyId","publicKey" FROM user_encryption_keys
+     WHERE "userId" IN (:ids) AND "isActive"=true ORDER BY "userId","createdAt" DESC`,
+    { replacements: { ids: authorizedIds }, type: sequelize.QueryTypes.SELECT }
+  );
+  const data = {};
+  for (const row of rows) data[row.userId] = { keyId: row.keyId, publicKey: row.publicKey };
+  res.json({ status: 'success', data });
+}));
+
 router.get('/keys/:userId', asyncHandler(async (req, res) => {
   const targetId  = parseInt(req.params.userId, 10);
   if (!targetId)  return res.status(400).json({ status: 'error', message: 'Invalid userId' });
