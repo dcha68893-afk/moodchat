@@ -121,6 +121,32 @@ module.exports = (sequelize, DataTypes) => {
     }
   );
 
+  // FIX (CHATS-LAST-MESSAGE-SEPARATE-ALIAS): Sequelize executes a HasMany
+  // include with `limit` as a separate query. In that query the Messages
+  // model is aliased by its model name (`Messages`), not by the association
+  // alias (`chatMessages`). A raw condition that qualifies the JSONB column
+  // as "chatMessages" therefore fails in PostgreSQL with:
+  //   missing FROM-clause entry for table "chatMessages"
+  // Normalize that one legacy condition before Sequelize builds the query.
+  // The column is deliberately left unqualified because it is unambiguous
+  // in the separate Messages query and this keeps the fix compatible with
+  // both Sequelize's main include and separate-include SQL generation.
+  Chats.addHook('beforeFind', (options) => {
+    const includes = Array.isArray(options?.include) ? options.include : [];
+    for (const include of includes) {
+      if (!include || include.as !== 'chatMessages' || !include.where) continue;
+      const andConditions = include.where[Op.and];
+      if (!Array.isArray(andConditions)) continue;
+
+      for (const condition of andConditions) {
+        if (!condition || typeof condition !== 'object') continue;
+        if (typeof condition.val === 'string' && condition.val.includes('"chatMessages"."metadata"')) {
+          condition.val = condition.val.replaceAll('"chatMessages"."metadata"', '"metadata"');
+        }
+      }
+    }
+  });
+
   // Instance methods
   Chats.prototype.updateLastMessage = async function (messageId) {
     this.lastMessageId = messageId;
@@ -206,7 +232,7 @@ module.exports = (sequelize, DataTypes) => {
       
       includeArray.push(messagesInclude);
     }
-
+    
     try {
       return await this.findAll({
         include: includeArray,
