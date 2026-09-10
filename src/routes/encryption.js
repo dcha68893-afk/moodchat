@@ -302,16 +302,45 @@ router.post('/keys', asyncHandler(async (req, res) => {
   // used to look up (and, below, deactivate) ALL of the user's keys, so a
   // second device registering its own identity key silently deactivated the
   // first device's key too. Each device's identity key is independent.
+  // ROOT-CAUSE FIX (CROSS-DEVICE-KEY-AMBIGUITY / persistent "Unable to
+  // decrypt this message"): GET /keys/:userId and GET /keys/batch below —
+  // the only lookups every peer ever uses to decide which public key to
+  // encrypt a NEW message against — are intentionally NOT scoped by
+  // deviceId; they just take whichever row is "isActive"=true with the
+  // newest createdAt for that userId. The DM identity model on the client
+  // (e2e-identity-core.js) is not multi-device-aware either: each
+  // browser/device generates and keeps its own single keypair in
+  // localStorage, with no cross-device sync or per-device message fan-out
+  // (message-e2e-core.js encrypts once, to one derived key). Scoping
+  // deactivation to :deviceId here — as this used to do — let two
+  // devices/browsers for the SAME account (a second browser, an
+  // incognito/cleared-storage session, a reinstall) both hold
+  // "isActive"=true rows for that user at once. GET /keys/:userId would
+  // then arbitrarily pick whichever was registered more recently, which is
+  // very often NOT the device the account is actually chatting from right
+  // now — any message a peer encrypts against "the other" device's key is
+  // then permanently undecryptable here, no retry can fix it, and it looks
+  // exactly like a real, persistent decrypt failure (distinct from the
+  // separate silent-plaintext-send bug fixed in message-client.js, which
+  // only explains messages that were never encrypted at all). Fixed by
+  // deactivating EVERY previously active key for this user on each new
+  // registration, regardless of device, so there is always exactly one
+  // unambiguous active DM key per user — matching what GET /keys/:userId's
+  // un-scoped single-row query already assumes. This does not touch the
+  // separate X3DH prekey/device tables (user_signed_prekeys/
+  // user_one_time_prekeys/user_devices), which remain unused by the 1:1 DM
+  // path per the Sep 9 2026 architecture audit.
   const previousActive = await sequelize.query(
-    `SELECT "keyId" FROM user_encryption_keys WHERE "userId"=:userId AND "deviceId"=:deviceId AND "isActive"=true LIMIT 1`,
-    { replacements: { userId, deviceId }, type: sequelize.QueryTypes.SELECT }
+    `SELECT "keyId" FROM user_encryption_keys WHERE "userId"=:userId AND "isActive"=true LIMIT 1`,
+    { replacements: { userId }, type: sequelize.QueryTypes.SELECT }
   );
   const isRotation = !!(previousActive && previousActive.length && previousActive[0].keyId !== keyId);
 
-  // Deactivate old keys FOR THIS DEVICE ONLY
+  // Deactivate every previously active key for this user, across ALL
+  // devices — see comment above for why per-device scoping here was wrong.
   await sequelize.query(
-    `UPDATE user_encryption_keys SET "isActive"=false, "updatedAt"=NOW() WHERE "userId"=:userId AND "deviceId"=:deviceId`,
-    { replacements: { userId, deviceId } }
+    `UPDATE user_encryption_keys SET "isActive"=false, "updatedAt"=NOW() WHERE "userId"=:userId AND "isActive"=true`,
+    { replacements: { userId } }
   );
 
   // Insert new key
