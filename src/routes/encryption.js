@@ -280,7 +280,7 @@ router.delete('/devices/:deviceId', asyncHandler(async (req, res) => {
 
 router.post('/keys', asyncHandler(async (req, res) => {
   const userId    = req.user.id;
-  const { publicKey, keyId, deviceId: rawDeviceId } = req.body;
+  const { publicKey, keyId, deviceId: rawDeviceId, encryptedPrivateKey } = req.body;
   const deviceId = (typeof rawDeviceId === 'string' && rawDeviceId) || 'primary';
 
   if (!publicKey || typeof publicKey !== 'string') {
@@ -344,12 +344,32 @@ router.post('/keys', asyncHandler(async (req, res) => {
   );
 
   // Insert new key
+  //
+  // ROOT-CAUSE FIX (MULTI-DEVICE-CANNOT-DECRYPT-OLD-MESSAGES): the
+  // "encryptedPrivateKey" column has existed on this table since it was
+  // first created, but nothing ever wrote to it — each device generated its
+  // own ECDH keypair locally (js/e2e-encryption.js's init()) and only ever
+  // persisted the wrapped private key in THAT BROWSER's localStorage. A
+  // second device (or the same device after storage was cleared) had no way
+  // to recover the first device's private key, so it minted a brand-new
+  // identity instead — every message previously encrypted against the old
+  // device's public key (i.e. the entire prior chat history) became
+  // permanently undecryptable there, exactly matching the reported "switch
+  // devices, every old chat says Unable to decrypt". Accepting and storing
+  // the caller's own password-wrapped private key here (still opaque
+  // ciphertext to the server — see js/e2e-encryption.js's
+  // _encryptPrivateKey/_decryptPrivateKey, AES-256-GCM under a
+  // PBKDF2-derived key that never leaves the client) lets a new device pull
+  // the SAME identity back down via GET /identity-backup below instead of
+  // generating a replacement.
   await sequelize.query(
-    `INSERT INTO user_encryption_keys ("userId","deviceId","publicKey","keyId","algorithm","isActive","createdAt","updatedAt")
-     VALUES (:userId,:deviceId,:publicKey,:keyId,'ECDH-P256-AES256GCM',true,NOW(),NOW())
+    `INSERT INTO user_encryption_keys ("userId","deviceId","publicKey","keyId","encryptedPrivateKey","algorithm","isActive","createdAt","updatedAt")
+     VALUES (:userId,:deviceId,:publicKey,:keyId,:encryptedPrivateKey,'ECDH-P256-AES256GCM',true,NOW(),NOW())
      ON CONFLICT ("userId","keyId") DO UPDATE
-       SET "publicKey"=:publicKey, "isActive"=true, "updatedAt"=NOW()`,
-    { replacements: { userId, deviceId, publicKey, keyId } }
+       SET "publicKey"=:publicKey,
+           "encryptedPrivateKey"=COALESCE(:encryptedPrivateKey, user_encryption_keys."encryptedPrivateKey"),
+           "isActive"=true, "updatedAt"=NOW()`,
+    { replacements: { userId, deviceId, publicKey, keyId, encryptedPrivateKey: encryptedPrivateKey || null } }
   );
 
   // Fire-and-forget: never let a slow/failed socket push delay or fail the
@@ -371,6 +391,31 @@ router.get('/keys', asyncHandler(async (req, res) => {
   const rows      = await sequelize.query(
     `SELECT "keyId","publicKey","createdAt" FROM user_encryption_keys
      WHERE "userId"=:userId AND "isActive"=true ORDER BY "createdAt" DESC LIMIT 1`,
+    { replacements: { userId }, type: sequelize.QueryTypes.SELECT }
+  );
+  if (!rows || rows.length === 0) {
+    return res.json({ status: 'success', data: null });
+  }
+  res.json({ status: 'success', data: rows[0] });
+}));
+
+// GET /api/encryption/identity-backup — the caller's own most recent
+// password-wrapped private key blob (see the ROOT-CAUSE FIX comment on
+// POST /keys above), so a new/cleared device can restore the SAME DM
+// identity instead of generating a replacement one. Deliberately scoped to
+// req.user.id only — this must never be reachable for any other userId, and
+// takes the newest row that actually has a backup on file (an older device
+// registered before this fix shipped won't have one; that's a normal
+// "nothing to restore" case, not an error). The client still needs the
+// correct password/wrap-secret to decrypt what's returned — the server
+// never sees the plaintext private key.
+router.get('/identity-backup', asyncHandler(async (req, res) => {
+  const userId    = req.user.id;
+  const sequelize = getSequelize();
+  const rows      = await sequelize.query(
+    `SELECT "keyId","publicKey","encryptedPrivateKey" FROM user_encryption_keys
+     WHERE "userId"=:userId AND "encryptedPrivateKey" IS NOT NULL
+     ORDER BY "createdAt" DESC LIMIT 1`,
     { replacements: { userId }, type: sequelize.QueryTypes.SELECT }
   );
   if (!rows || rows.length === 0) {
