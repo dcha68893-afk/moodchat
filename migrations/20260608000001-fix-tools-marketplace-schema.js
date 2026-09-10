@@ -65,9 +65,11 @@ module.exports = {
 
       // PostgreSQL index names are schema-wide. A failed historical run can
       // leave one of these names attached to Tools_legacy (or another table).
-      // In that case IF NOT EXISTS would silently skip creating the required
-      // index on Tools. Move the stale index out of the way first.
+      // Never drop an unrelated index just to reclaim a name: rename the
+      // stale Tools index when possible, otherwise create a distinct name on
+      // the new Tools table.
       for (const [name, column] of indexes) {
+        let targetName = name;
         const [rows] = await queryInterface.sequelize.query(
           `SELECT tablename FROM pg_indexes WHERE schemaname = current_schema() AND indexname = :name LIMIT 1`,
           { replacements: { name }, transaction }
@@ -85,12 +87,12 @@ module.exports = {
               { transaction }
             );
           } else {
-            await queryInterface.sequelize.query(`DROP INDEX "${name}"`, { transaction });
+            targetName = `${name}_tools`;
           }
         }
 
         await queryInterface.sequelize.query(
-          `CREATE INDEX IF NOT EXISTS "${name}" ON "Tools" ("${column}")`,
+          `CREATE INDEX IF NOT EXISTS "${targetName}" ON "Tools" ("${column}")`,
           { transaction }
         );
       }
