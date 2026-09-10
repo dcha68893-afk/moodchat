@@ -153,8 +153,22 @@ router.get('/:chatId', asyncHandler(async (req, res) => {
   const before = safeInt(req.query.before);
   const limit = Math.min(safeInt(req.query.limit) || 50, 100);
 
-  const conditions = [`m."chatId" = :chatId`, `m."isDeleted" = false`];
-  const replacements = { chatId, limit };
+  // ROOT-CAUSE FIX (DELETED-FOR-ME-MESSAGE-REAPPEARS-ON-RELOGIN): "delete
+  // for me" (DELETE /:messageId with deleteForEveryone=false, below) has
+  // always correctly recorded the deletion server-side, in
+  // metadata.deletedFor — but this history query never excluded rows on
+  // that basis, only on the (unrelated) global "isDeleted" flag used by
+  // "delete for everyone". In the same browser/session, the message still
+  // disappeared correctly because js/message-local-db.js's client-side
+  // cache already had it flagged deleted, and js/message-client.js's
+  // getMessages() filters those out before ever re-checking the server.
+  // But on a fresh session with no local cache — a different device, a
+  // cleared browser, or (as reported) a relogin where the cache doesn't
+  // carry over — this query handed the "deleted for me" message straight
+  // back, undoing the delete. metadata->>'deletedFor' is a JSON array of
+  // userIds; ? checks containment without needing to parse it further.
+  const conditions = [`m."chatId" = :chatId`, `m."isDeleted" = false`, `NOT (m.metadata -> 'deletedFor' ? :userIdStr)`];
+  const replacements = { chatId, limit, userIdStr: String(userId) };
   if (before) {
     conditions.push(`m.id < :before`);
     replacements.before = before;

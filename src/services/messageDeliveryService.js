@@ -207,18 +207,61 @@ class MessageDeliveryService {
     // localId is merged in without clobbering it.
     const mergedMetadata = { ...(metadata && typeof metadata === 'object' ? metadata : {}), localId: clientMessageId };
 
+    // ROOT-CAUSE FIX (SENT-MESSAGE-UNDECRYPTABLE-AFTER-RELOAD /
+    // "Unable to decrypt this message" on your OWN messages specifically):
+    // traced this by reading the actual encrypt/decrypt code, not the
+    // comments — js/message-e2e-core.js's decryptMessageForDisplay() needs
+    // to know who the OTHER party of the conversation is to re-derive the
+    // shared secret, and for a message you sent it looks that up as
+    // `message.receiverId || message.recipientId`, falling back to whatever
+    // conversation metadata happens to already be in memory client-side
+    // only if both of those are empty (js/message-e2e-core.js's peerFor()).
+    // The Messages table HAS a receiverId column (see models/Message.js),
+    // but this — the one and only INSERT path for every message in the app,
+    // per this file's own header comment — never included it in the column
+    // list below, and the frontend (message.html's doSend()) never passes
+    // a receiverId either once a conversation already exists (it only sends
+    // {chatId, content, replyToId} for a reply — see the frontend call
+    // site). Net effect: every message row for an ongoing conversation was
+    // persisted with receiverId = NULL, forever. Decrypting a message you
+    // sent then depended entirely on the client's in-memory conversation
+    // list already being populated for that chat at the exact moment
+    // decryption ran — a fragile, load-order-dependent condition that a
+    // fresh page load/relogin frequently loses (the conversation list and
+    // the chat history both load asynchronously, in no guaranteed order),
+    // producing exactly the reported "Unable to decrypt this message" on
+    // sent/replayed messages specifically, while received messages (which
+    // resolve their peer from the always-present senderId, never
+    // receiverId) were unaffected. Fix: resolve the direct chat's other
+    // participant here — once, server-side, authoritatively — whenever the
+    // caller didn't already supply a receiverId, and persist it, so every
+    // row is self-describing and decryption never again depends on client
+    // timing. No-op for group chats (receiverId legitimately stays NULL —
+    // there is no single "other participant").
+    let resolvedReceiverId = receiverId ? parseInt(receiverId, 10) : null;
+    if (!resolvedReceiverId) {
+      const [otherParticipant] = await sequelize.query(
+        `SELECT cp."userId" AS "userId" FROM chat_participants cp
+           JOIN chats c ON c.id = cp."chatId"
+          WHERE cp."chatId" = :chatId AND cp."userId" != :senderId AND c.type = 'direct'
+          LIMIT 1`,
+        { replacements: { chatId: chatIdInt, senderId: senderIdInt }, type: sequelize.QueryTypes.SELECT }
+      ).catch(() => [null]);
+      if (otherParticipant) resolvedReceiverId = otherParticipant.userId;
+    }
+
     let rows;
     try {
       [rows] = await sequelize.query(
         `INSERT INTO "Messages"
-           ("chatId","senderId",content,type,reactions,metadata,"isEdited","isDeleted","replyToId",
+           ("chatId","senderId","receiverId",content,type,reactions,metadata,"isEdited","isDeleted","replyToId",
             "clientMessageId","expiresAt","status","deliveryAttempts","sentAt","deliveredAt","createdAt","updatedAt")
-         VALUES (:chatId,:senderId,:content,:type,'{}',:metadata,false,false,:replyToId,
+         VALUES (:chatId,:senderId,:receiverId,:content,:type,'{}',:metadata,false,false,:replyToId,
                  :clientMessageId,:expiresAt,'sent',0,NOW(),NULL,NOW(),NOW())
          RETURNING *`,
         {
           replacements: {
-            chatId: chatIdInt, senderId: senderIdInt, content: sanitizedContent, type,
+            chatId: chatIdInt, senderId: senderIdInt, receiverId: resolvedReceiverId, content: sanitizedContent, type,
             replyToId: replyToId || null, clientMessageId, metadata: JSON.stringify(mergedMetadata),
             expiresAt: expiresAt || null,
           },
@@ -480,8 +523,13 @@ class MessageDeliveryService {
     ).catch(() => [null]);
     if (!participant) throw new ValidationError('User is not a participant in this chat');
 
-    const conditions = [`m."chatId" = :chatId`, `m."isDeleted" = false`];
-    const replacements = { chatId: chatIdInt, limit: Math.min(limit, 200) };
+    // ROOT-CAUSE FIX (DELETED-FOR-ME-MESSAGE-REAPPEARS-ON-RELOGIN): same gap
+    // as routes/messages.js's GET /:chatId — see the matching comment
+    // there. This is the reconnect/catch-up query (also reachable via the
+    // msg:* socket sync path), so it needs the same exclusion or a message
+    // deleted "for me" resurfaces the next time this device reconnects.
+    const conditions = [`m."chatId" = :chatId`, `m."isDeleted" = false`, `NOT (m.metadata -> 'deletedFor' ? :userIdStr)`];
+    const replacements = { chatId: chatIdInt, limit: Math.min(limit, 200), userIdStr: String(userIdInt) };
 
     if (sinceId) {
       conditions.push(`m.id > :sinceId`);
