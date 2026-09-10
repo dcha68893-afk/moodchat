@@ -25,4 +25,8 @@ EXPOSE ${PORT}
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD node -e "require('http').get('http://localhost:${PORT}/api/health', r => { if (r.statusCode !== 200) throw new Error() })"
 
-CMD ["node", "src/server.js"]
+# Production must apply versioned migrations before the API starts. Running
+# node src/server.js directly bypassed migrations/, which is why the database
+# could contain an older chat_participants schema while the model expected
+# hiddenAt/clearedAt.
+CMD ["sh", "-c", "npm run db:migrate && node src/server.js"]
