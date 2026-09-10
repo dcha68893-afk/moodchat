@@ -77,6 +77,34 @@ const checkModels = (res) => {
     return true;
 };
 
+// FIX (deleted-message-reappears-as-chat-preview): GET /:chatId (messages.js)
+// already excludes a message from a chat's history once it's globally
+// deleted (isDeleted) or deleted just for this user (metadata.deletedFor
+// contains their id) — see that route's comment for the full story. This
+// list endpoint's "last message" include had neither filter, so a message
+// the user deleted for themselves (or that was deleted for everyone) kept
+// being picked as the chat's preview/lastMessage here even though it no
+// longer appears in the open thread, and could resurface when the chat is
+// reopened from Friends/Calls. Mirrors messages.js's `isDeleted = false AND
+// NOT (metadata->'deletedFor' ? userId)` filter, translated to the ORM
+// include used by this route (and by /archived/list below).
+const buildVisibleLastMessageInclude = (userId) => ({
+    model: Message,
+    as: 'chatMessages',
+    required: false,
+    where: {
+        isDeleted: false,
+        [Op.and]: [
+            db.sequelize.literal(
+                `NOT ("chatMessages"."metadata" -> 'deletedFor' ? ${db.sequelize.escape(String(userId))})`
+            )
+        ]
+    },
+    limit: 1,
+    order: [['createdAt', 'DESC']],
+    attributes: ['id', 'content', 'type', 'createdAt', 'senderId']
+});
+
 // Helper function to get participant user IDs for a chat
 const getChatParticipantIds = async (chatId) => {
     const participants = await ChatParticipant.findAll({
@@ -151,14 +179,7 @@ router.get(
                         as: 'chatCreator',
                         attributes: ['id', 'username', 'avatar', 'firstName', 'lastName']
                     },
-                    {
-                        model: Message,
-                        as: 'chatMessages',
-                        required: false,
-                        limit: 1,
-                        order: [['createdAt', 'DESC']],
-                        attributes: ['id', 'content', 'type', 'createdAt', 'senderId']
-                    }
+                    buildVisibleLastMessageInclude(userId)
                 ],
                 order: [['updatedAt', 'DESC']],
                 offset,
@@ -1863,14 +1884,7 @@ router.get(
                         required: true,
                         attributes: ['userId']
                     },
-                    {
-                        model: Message,
-                        as: 'chatMessages',
-                        required: false,
-                        limit: 1,
-                        order: [['createdAt', 'DESC']],
-                        attributes: ['id', 'content', 'type', 'createdAt', 'senderId']
-                    },
+                    buildVisibleLastMessageInclude(userId),
                     {
                         model: User,
                         as: 'chatCreator',
