@@ -1,0 +1,17 @@
+diff --git a/message.html b/message.html
+index af05093..03aa973 100644
+--- a/message.html
++++ b/message.html
+@@ -293,6 +293,12 @@
+   <!-- Phase 1 redesign: durable IndexedDB-backed session/identity store. -->
+   <script src="/js/e2e-store-v2.js" defer></script>
+   <script src="/js/e2e-session-init.js" defer></script>
++  <!-- Persistent local cache (messages + conversation list) — read/written
++       by message-client.js so reload/relogin never needs to refetch or
++       re-decrypt anything already seen. Must load before message-client.js,
++       not deferred, since message-client.js's top-level bootstrap reads it
++       synchronously on first run. -->
++  <script src="/js/message-local-db.js"></script>
+   <script src="/js/message-client.js"></script>
+ 
+   <script>

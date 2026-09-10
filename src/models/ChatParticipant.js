@@ -46,6 +46,21 @@ module.exports = (sequelize, DataTypes) => {
         defaultValue: DataTypes.NOW,
         allowNull: false,
       },
+      // "Delete chat": this participant removed the conversation from their
+      // own chat list. NULL = visible. Automatically un-hidden once the
+      // chat's lastMessageAt moves past this timestamp (see chatService's
+      // getUserChats). See migration 2026999990019.
+      hiddenAt: {
+        type: DataTypes.DATE,
+        allowNull: true,
+      },
+      // "Clear chat": messages created at/before this timestamp are hidden
+      // from this participant's message list only. See migration
+      // 2026999990019.
+      clearedAt: {
+        type: DataTypes.DATE,
+        allowNull: true,
+      },
       createdAt: {
         type: DataTypes.DATE,
         allowNull: false,

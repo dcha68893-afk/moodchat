@@ -1406,7 +1406,18 @@ router.post(
 );
 
 // ============================================================================
-// DELETE CHAT (Soft delete - mark as inactive)
+// DELETE CHAT
+// -----------------------------------------------------------------------------
+// FIX (DELETE-CHAT-WAS-GLOBAL): this used to flip chats.isActive = false —
+// a column on the SHARED conversation row — so one participant deleting a
+// direct chat silently deleted it for the other participant too, and even
+// broadcast 'chat:deleted' to them. Delegated to chatService.deleteChat now,
+// which (for direct chats) only ever touches this user's own
+// chat_participants row (hiddenAt) — see that method and migration
+// 2026999990019 for the full explanation. Group-delete-by-creator is still a
+// real, shared deletion (unchanged behavior) since that's a distinct,
+// intentional "tear down the group for everyone" action, not "remove this
+// conversation from my list".
 // ============================================================================
 router.delete(
     '/:chatId',
@@ -1414,96 +1425,126 @@ router.delete(
     asyncHandler(async (req, res) => {
         try {
             const userId = getUserId(req);
-            
+
             if (!userId) {
                 return res.status(401).json({
                     status: 'error',
                     message: 'Authentication required'
                 });
             }
-            
+
             if (!checkModels(res)) return;
-            
+
             const { chatId } = req.params;
-            
+
             if (!chatId) {
                 return res.status(400).json({
                     status: 'error',
                     message: 'Chat ID is required'
                 });
             }
-            
+
             const chat = await Chat.findByPk(chatId);
-            
             if (!chat) {
                 return res.status(404).json({
                     status: 'error',
                     message: 'Chat not found'
                 });
             }
-            
-            // Check permissions
-            if (chat.type === 'group') {
-                // Only group creator can delete group
-                if (chat.createdBy !== userId) {
-                    return res.status(403).json({
-                        status: 'error',
-                        message: 'Only group creator can delete the group'
-                    });
-                }
-            } else {
-                // For direct chats, either participant can "delete" (archive for themselves)
-                const isParticipant = await ChatParticipant.findOne({
-                    where: {
-                        chatId: chat.id,
-                        userId: userId
-                    }
-                });
-                
-                if (!isParticipant) {
-                    return res.status(403).json({
-                        status: 'error',
-                        message: 'You are not a participant of this chat'
-                    });
-                }
-            }
-            
-            // Soft delete - mark as inactive
-            await chat.update({
-                isActive: false,
-                deletedAt: new Date(),
-                deletedBy: userId
-            });
-            
-            // Broadcast deletion to all participants
-            if (req.io) {
+
+            const wasGroup = chat.type === 'group';
+            const chatService = require('../services/chatService');
+            await chatService.deleteChat(parseInt(chatId, 10), userId);
+
+            // Only broadcast when the whole group was actually torn down —
+            // never for a direct-chat "delete chat", which must stay
+            // invisible to the other participant.
+            if (wasGroup && req.io) {
                 await broadcastToChat(req, chat.id, 'chat:deleted', {
                     chatId: chat.id,
                     deletedBy: userId,
                     timestamp: new Date().toISOString()
                 });
             }
-            
-            // For group chats, also remove all participants
-            if (chat.type === 'group') {
-                await ChatParticipant.destroy({
-                    where: { chatId: chat.id }
-                });
-            }
-            
+
             res.status(200).json({
                 status: 'success',
                 message: 'Chat deleted successfully'
             });
         } catch (error) {
             console.error('[Chats] Error deleting chat:', error.message);
-            res.status(500).json({
+            const status = error.name === 'NotFoundError' ? 404
+                : error.name === 'AuthorizationError' ? 403
+                : 500;
+            res.status(status).json({
                 status: 'error',
-                message: 'Failed to delete chat'
+                message: status === 500 ? 'Failed to delete chat' : error.message
             });
         }
     })
 );
+
+// ============================================================================
+// CLEAR CHAT — wipe MY OWN message history in this conversation only.
+// The conversation stays in my chat list; the other participant's copy of
+// every message is untouched. See chatService.clearChatForUser and
+// migration 2026999990019 (chat_participants.clearedAt).
+// FIX (CLEAR-CHAT-DID-NOT-EXIST): the frontend (js/api.core.js
+// clearChatHistory()) already calls DELETE /:chatId/history — that route
+// simply never existed server-side and 404'd silently. This adds it.
+// ============================================================================
+router.delete(
+    '/:chatId/history',
+    apiRateLimiter,
+    asyncHandler(async (req, res) => {
+        try {
+            const userId = getUserId(req);
+            if (!userId) {
+                return res.status(401).json({ status: 'error', message: 'Authentication required' });
+            }
+            if (!checkModels(res)) return;
+
+            const { chatId } = req.params;
+            if (!chatId) {
+                return res.status(400).json({ status: 'error', message: 'Chat ID is required' });
+            }
+
+            const chatService = require('../services/chatService');
+            await chatService.clearChatForUser(parseInt(chatId, 10), userId);
+
+            res.status(200).json({ status: 'success', message: 'Chat history cleared' });
+        } catch (error) {
+            console.error('[Chats] Error clearing chat history:', error.message);
+            const status = error.name === 'NotFoundError' ? 404
+                : error.name === 'AuthorizationError' ? 403
+                : 500;
+            res.status(status).json({
+                status: 'error',
+                message: status === 500 ? 'Failed to clear chat history' : error.message
+            });
+        }
+    })
+);
+// Same-behavior POST alias — this app consistently offers a POST alias
+// alongside DELETE/PATCH for endpoints the frontend's REST wrapper (only
+// .get/.post/.put/.delete — see the archive-route comments above) might call
+// under a different verb.
+router.post('/:chatId/clear', apiRateLimiter, asyncHandler(async (req, res) => {
+    try {
+        const userId = getUserId(req);
+        if (!userId) return res.status(401).json({ status: 'error', message: 'Authentication required' });
+        if (!checkModels(res)) return;
+        const { chatId } = req.params;
+        if (!chatId) return res.status(400).json({ status: 'error', message: 'Chat ID is required' });
+        const chatService = require('../services/chatService');
+        await chatService.clearChatForUser(parseInt(chatId, 10), userId);
+        res.status(200).json({ status: 'success', message: 'Chat history cleared' });
+    } catch (error) {
+        console.error('[Chats] Error clearing chat history (POST):', error.message);
+        const status = error.name === 'NotFoundError' ? 404 : error.name === 'AuthorizationError' ? 403 : 500;
+        res.status(status).json({ status: 'error', message: status === 500 ? 'Failed to clear chat history' : error.message });
+    }
+}));
 
 // ============================================================================
 // ARCHIVE CHAT

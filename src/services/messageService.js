@@ -320,6 +320,17 @@ class MessageService {
         return { success:true, markedCount: parseInt(count,10) };
     }
 
+    // NOTE (DEAD CODE — not wired into any route): the live "delete
+    // message" endpoint is routes/messages.js's `DELETE /:messageId`, which
+    // implements delete-for-me/delete-for-everyone independently of this
+    // class (and does it correctly — see that file). This method is never
+    // called from anywhere in the app; messageController.js, which calls it,
+    // is likewise unmounted (grep confirms no `require('../controllers/
+    // messageController')` in src/routes/index.js or src/routes/messages.js).
+    // Left in place rather than deleted to avoid an unrelated diff, but do
+    // not treat this as the source of truth for delete behavior — it would
+    // also delete for BOTH sides even when deleteForEveryone=false, which
+    // the live endpoint fixed.
     async deleteMessage(messageId, userId, deleteForEveryone = false) {
         const sequelize = getDB();
         if (!messageId||!userId) throw new ValidationError('messageId and userId are required');

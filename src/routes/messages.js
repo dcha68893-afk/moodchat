@@ -145,7 +145,7 @@ router.get('/:chatId', asyncHandler(async (req, res) => {
 
   const sequelize = getSequelize();
   const [participant] = await sequelize.query(
-    `SELECT 1 FROM chat_participants WHERE "chatId" = :chatId AND "userId" = :userId LIMIT 1`,
+    `SELECT "clearedAt" FROM chat_participants WHERE "chatId" = :chatId AND "userId" = :userId LIMIT 1`,
     { replacements: { chatId, userId }, type: sequelize.QueryTypes.SELECT }
   ).catch(() => [null]);
   if (!participant) return res.status(403).json({ success: false, message: 'Not a participant of this chat' });
@@ -172,6 +172,14 @@ router.get('/:chatId', asyncHandler(async (req, res) => {
   if (before) {
     conditions.push(`m.id < :before`);
     replacements.before = before;
+  }
+  // FIX (CLEAR-CHAT-DID-NOT-EXIST): honor this user's own "clear chat"
+  // watermark (chat_participants.clearedAt) — messages from before they
+  // cleared their history stay hidden from THEM only; the other
+  // participant's history/unread state is untouched.
+  if (participant.clearedAt) {
+    conditions.push(`m."createdAt" > :clearedAt`);
+    replacements.clearedAt = participant.clearedAt;
   }
 
   const rows = await sequelize.query(
@@ -275,40 +283,39 @@ function stripHtmlTags(str) {
     .replace(/\bon\w+\s*=/gi, 'data-blocked=');
 }
 
-// ── DELETE /:messageId — delete a message ────────────────────────────────────
-// Body/query: deleteForEveryone (bool). Matches the app's existing convention
-// (see the previous routes/messages.js): "delete for me" stores the caller's
-// id in metadata.deletedFor (message still exists for everyone else);
-// "delete for everyone" sets isDeleted (sender-only — no group-admin concept
-// exists for direct chats). Broadcasts via broadcastToChatFull, the existing
-// generic helper that already covers both the chat room and each
-// participant's user room — not reimplemented here.
-router.delete('/:messageId', asyncHandler(async (req, res) => {
-  const userId = getUserId(req);
-  if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
+// "Delete for everyone" time window — mirrors the WhatsApp(~2 days)/Signal
+// (24h) policies described in the spec; this app's own default is 48h.
+// Configurable via env so ops can tighten/loosen it without a code change.
+const DELETE_FOR_EVERYONE_WINDOW_MS = (
+  parseInt(process.env.DELETE_FOR_EVERYONE_WINDOW_HOURS, 10) || 48
+) * 60 * 60 * 1000;
 
-  const messageId = safeInt(req.params.messageId);
-  if (!messageId) return res.status(400).json({ success: false, message: 'Invalid messageId' });
-
-  const rawForEveryone = req.body?.deleteForEveryone ?? req.query.deleteForEveryone ?? false;
-  const deleteForEveryone = rawForEveryone === true || rawForEveryone === 'true';
-
-  const sequelize = getSequelize();
+async function _deleteOneMessage(sequelize, wsService, { messageId, userId, deleteForEveryone }) {
   const [msg] = await sequelize.query(
-    `SELECT id, "chatId", "senderId", metadata FROM "Messages" WHERE id = :messageId AND "isDeleted" = false LIMIT 1`,
+    `SELECT id, "chatId", "senderId", metadata, "createdAt" FROM "Messages" WHERE id = :messageId AND "isDeleted" = false LIMIT 1`,
     { replacements: { messageId }, type: sequelize.QueryTypes.SELECT }
   );
-  if (!msg) return res.status(404).json({ success: false, message: 'Message not found' });
+  if (!msg) return { messageId, ok: false, status: 404, message: 'Message not found' };
 
   const [participant] = await sequelize.query(
     `SELECT 1 FROM chat_participants WHERE "chatId" = :chatId AND "userId" = :userId LIMIT 1`,
     { replacements: { chatId: msg.chatId, userId }, type: sequelize.QueryTypes.SELECT }
   ).catch(() => [null]);
-  if (!participant) return res.status(403).json({ success: false, message: 'Not a participant of this chat' });
+  if (!participant) return { messageId, ok: false, status: 403, message: 'Not a participant of this chat' };
 
   if (deleteForEveryone) {
     if (msg.senderId !== userId) {
-      return res.status(403).json({ success: false, message: 'Only the sender can delete a message for everyone' });
+      return { messageId, ok: false, status: 403, message: 'Only the sender can delete a message for everyone' };
+    }
+    // FIX (NO-DELETE-FOR-EVERYONE-TIME-LIMIT): the spec explicitly calls for
+    // a WhatsApp/Signal-style window on this — previously there was none, so
+    // a sender could retroactively erase any message, of any age, for both
+    // sides. Past the window it silently falls back to "delete for me" so
+    // the request still succeeds instead of just failing.
+    const ageMs = Date.now() - new Date(msg.createdAt).getTime();
+    if (ageMs > DELETE_FOR_EVERYONE_WINDOW_MS) {
+      return _deleteOneMessage(sequelize, wsService, { messageId, userId, deleteForEveryone: false })
+        .then((r) => ({ ...r, windowExpired: true }));
     }
     await sequelize.query(
       `UPDATE "Messages" SET "isDeleted" = true, "deletedAt" = NOW(), "deletedBy" = :userId, "updatedAt" = NOW() WHERE id = :messageId`,
@@ -327,14 +334,85 @@ router.delete('/:messageId', asyncHandler(async (req, res) => {
   }
 
   try {
-    const wsService = require('../services/webSocketService');
-    await wsService.broadcastToChatFull(msg.chatId, 'message:deleted', {
-      messageId, chatId: msg.chatId, deletedBy: userId, deleteForEveryone,
-      deletedFor: deleteForEveryone ? null : [userId],
-    });
+    if (deleteForEveryone) {
+      // Both sides need to know — broadcast to the whole chat as before.
+      await wsService.broadcastToChatFull(msg.chatId, 'message:deleted', {
+        messageId, chatId: msg.chatId, deletedBy: userId, deleteForEveryone: true, deletedFor: null,
+      });
+    } else {
+      // FIX (DELETE-FOR-ME-LEAKED-TO-OTHER-PARTICIPANT): this used to call
+      // broadcastToChatFull for "delete for me" too, which told the OTHER
+      // participant (over their live socket) that a deletion had happened
+      // and even included the deleting user's id in `deletedFor`. "Delete
+      // for me" must have zero visible effect on the other side. Sync this
+      // user's OWN other devices/sessions only, over their private user
+      // room, if that capability exists.
+      if (typeof wsService.sendToUser === 'function') {
+        await wsService.sendToUser(userId, 'message:deleted', {
+          messageId, chatId: msg.chatId, deletedBy: userId, deleteForEveryone: false, deletedFor: [userId],
+        });
+      }
+    }
   } catch (err) { console.warn('[Messages] Failed to broadcast message:deleted:', err.message); }
 
-  return res.json({ success: true });
+  return { messageId, ok: true };
+}
+
+// ── DELETE /:messageId — delete a message ────────────────────────────────────
+// Body/query: deleteForEveryone (bool). "delete for me" stores the caller's
+// id in metadata.deletedFor (message still exists for everyone else, and the
+// other participant is never notified); "delete for everyone" sets isDeleted
+// (sender-only, within DELETE_FOR_EVERYONE_WINDOW_MS of send).
+router.delete('/:messageId', asyncHandler(async (req, res) => {
+  const userId = getUserId(req);
+  if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
+
+  const messageId = safeInt(req.params.messageId);
+  if (!messageId) return res.status(400).json({ success: false, message: 'Invalid messageId' });
+
+  const rawForEveryone = req.body?.deleteForEveryone ?? req.query.deleteForEveryone ?? false;
+  const deleteForEveryone = rawForEveryone === true || rawForEveryone === 'true';
+
+  const sequelize = getSequelize();
+  const wsService = require('../services/webSocketService');
+  const result = await _deleteOneMessage(sequelize, wsService, { messageId, userId, deleteForEveryone });
+  if (!result.ok) return res.status(result.status).json({ success: false, message: result.message });
+
+  return res.json({
+    success: true,
+    ...(result.windowExpired ? { windowExpired: true, message: 'Too old to delete for everyone — deleted for you instead' } : {}),
+  });
+}));
+
+// ── POST /bulk-delete — delete multiple messages at once ────────────────────
+// Body: { messageIds: number[], deleteForEveryone: bool }. Selection-mode
+// multi-delete from the chat panel (spec §4) without N round trips. Each
+// message is still checked/authorized individually — e.g. a mixed selection
+// of your own and someone else's messages with deleteForEveryone=true will
+// delete-for-everyone yours and reject theirs, reported per-id in `results`.
+router.post('/bulk-delete', asyncHandler(async (req, res) => {
+  const userId = getUserId(req);
+  if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
+
+  const { messageIds, deleteForEveryone } = req.body || {};
+  if (!Array.isArray(messageIds) || messageIds.length === 0) {
+    return res.status(400).json({ success: false, message: 'messageIds array is required' });
+  }
+  const ids = [...new Set(messageIds.map((id) => safeInt(id)).filter(Boolean))].slice(0, 200);
+  if (ids.length === 0) return res.status(400).json({ success: false, message: 'messageIds must be numeric' });
+
+  const wantsForEveryone = deleteForEveryone === true || deleteForEveryone === 'true';
+  const sequelize = getSequelize();
+  const wsService = require('../services/webSocketService');
+
+  const results = [];
+  for (const messageId of ids) {
+    results.push(await _deleteOneMessage(sequelize, wsService, { messageId, userId, deleteForEveryone: wantsForEveryone }));
+  }
+
+  const deleted = results.filter((r) => r.ok).map((r) => r.messageId);
+  const failed = results.filter((r) => !r.ok);
+  return res.json({ success: failed.length === 0, deleted, failed });
 }));
 
 // ── PATCH /:messageId — edit a message (sender-only, 15-minute window) ──────

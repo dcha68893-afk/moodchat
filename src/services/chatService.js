@@ -222,10 +222,19 @@ class ChatService {
             const orderCol = sortBy === 'lastMessage' ? 'c."lastMessageAt"' : 'c."updatedAt"';
             const orderDir = sortOrder === 'asc' ? 'ASC' : 'DESC';
 
+            // FIX (DELETE-CHAT-WAS-GLOBAL): "Delete chat" hides the
+            // conversation from THIS user's list only via
+            // chat_participants.hiddenAt (see migration 2026999990019) — it
+            // no longer touches the shared chats.isActive flag, so the other
+            // participant's list is untouched. A hidden chat automatically
+            // reappears here once c."lastMessageAt" moves past cp."hiddenAt",
+            // i.e. as soon as the other person sends a new message — same
+            // behavior WhatsApp/Signal use, no explicit "undelete" needed.
             const chats = await sequelize.query(
                 `SELECT
                    c.id, c.type, c.name, c."createdBy", c."isArchived", c."updatedAt", c."createdAt",
-                   c.avatar, c.description, c.settings,
+                   c.avatar, c.description, c.settings, c."lastMessageAt",
+                   cp."clearedAt" AS "myClearedAt",
                    (
                      SELECT jsonb_build_object(
                        'id', m.id, 'content', m.content, 'senderId', m."senderId",
@@ -234,6 +243,8 @@ class ChatService {
                      )
                      FROM "Messages" m LEFT JOIN "Users" u ON u.id = m."senderId"
                      WHERE m."chatId" = c.id AND m."isDeleted" = false
+                       AND (cp."clearedAt" IS NULL OR m."createdAt" > cp."clearedAt")
+                       AND NOT (m.metadata -> 'deletedFor' ? :userIdStr)
                      ORDER BY m."createdAt" DESC LIMIT 1
                    ) AS "lastMessage",
                    (
@@ -241,16 +252,17 @@ class ChatService {
                      LEFT JOIN "ReadReceipts" rr ON rr."messageId" = m2.id AND rr."userId" = :userId
                      WHERE m2."chatId" = c.id AND m2."isDeleted" = false
                        AND m2."senderId" != :userId AND rr.id IS NULL
+                       AND (cp."clearedAt" IS NULL OR m2."createdAt" > cp."clearedAt")
+                       AND NOT (m2.metadata -> 'deletedFor' ? :userIdStr)
                    ) AS "unreadCount"
                  FROM chats c
-                 WHERE EXISTS (
-                   SELECT 1 FROM chat_participants cp WHERE cp."chatId" = c.id AND cp."userId" = :userId
-                 )
-                 AND c."isActive" = true
+                 INNER JOIN chat_participants cp ON cp."chatId" = c.id AND cp."userId" = :userId
+                 WHERE c."isActive" = true
+                   AND (cp."hiddenAt" IS NULL OR c."lastMessageAt" IS NULL OR c."lastMessageAt" > cp."hiddenAt")
                  ${typeClause} ${searchClause}
                  ORDER BY ${orderCol} ${orderDir} NULLS LAST
                  LIMIT :limit OFFSET :offset`,
-                { replacements, type: sequelize.QueryTypes.SELECT }
+                { replacements: { ...replacements, userIdStr: String(userId) }, type: sequelize.QueryTypes.SELECT }
             );
 
             const processed = await Promise.all(chats.map(async (chat) => {
@@ -260,11 +272,11 @@ class ChatService {
 
             const [{ total }] = await sequelize.query(
                 `SELECT COUNT(*) AS total FROM chats c
-                 WHERE EXISTS (
-                   SELECT 1 FROM chat_participants cp WHERE cp."chatId" = c.id AND cp."userId" = :userId
-                 )
-                 AND c."isActive" = true ${typeClause} ${searchClause}`,
-                { replacements, type: sequelize.QueryTypes.SELECT }
+                 INNER JOIN chat_participants cp ON cp."chatId" = c.id AND cp."userId" = :userId
+                 WHERE c."isActive" = true
+                   AND (cp."hiddenAt" IS NULL OR c."lastMessageAt" IS NULL OR c."lastMessageAt" > cp."hiddenAt")
+                 ${typeClause} ${searchClause}`,
+                { replacements: { ...replacements, userIdStr: String(userId) }, type: sequelize.QueryTypes.SELECT }
             );
 
             return {
@@ -1032,11 +1044,20 @@ class ChatService {
         return ChatService.removeGroupParticipant(chatId, userId, userId);
     }
 
+    // "Delete chat": removes the conversation from the requesting user's own
+    // chat list only. Direct chats: flips chat_participants.hiddenAt for
+    // this user — the participant ROW stays intact (unlike the previous
+    // implementation, which deleted it), so the other person can still
+    // message/notify this user, and the chat correctly reappears in this
+    // user's list the moment a newer message arrives (see getUserChats).
+    // Group chats: only the creator can delete the whole group (for
+    // everyone) via this path; anyone else should use "leave group" instead
+    // — that restriction is unchanged from before.
     static async deleteChat(chatId, userId) {
         const sequelize = getDB();
         try {
             const [chat] = await sequelize.query(
-                `SELECT id, type, "createdBy", metadata FROM chats WHERE id = :chatId AND "isActive" = true LIMIT 1`,
+                `SELECT id, type, "createdBy" FROM chats WHERE id = :chatId AND "isActive" = true LIMIT 1`,
                 { replacements: { chatId }, type: sequelize.QueryTypes.SELECT }
             );
             if (!chat) throw new NotFoundError('Chat not found');
@@ -1048,8 +1069,12 @@ class ChatService {
             );
             if (!participant) throw new AuthorizationError('Not a participant in this chat');
 
-            if (chat.type === 'group' && String(chat.createdBy) === String(userId)) {
-                // Group creator deletes for everyone
+            if (chat.type === 'group') {
+                if (String(chat.createdBy) !== String(userId)) {
+                    throw new AuthorizationError('Only the group creator can delete the group — other members should leave instead');
+                }
+                // Group creator deletes for everyone — this IS a real,
+                // shared deletion, unlike direct-chat "delete chat" above.
                 await sequelize.query(
                     `UPDATE chats SET "isActive" = false, "deletedAt" = NOW(), "deletedBy" = :userId, "updatedAt" = NOW()
                      WHERE id = :chatId`,
@@ -1057,27 +1082,44 @@ class ChatService {
                 );
                 await sequelize.query(`DELETE FROM chat_participants WHERE "chatId" = :chatId`, { replacements: { chatId } });
             } else {
-                // Any user: remove them from participants (hides chat for them only)
-                // Store deleted userId in chat metadata so it persists after refresh
-                let metadata = {};
-                try { metadata = (typeof chat.metadata === 'string' ? JSON.parse(chat.metadata) : chat.metadata) || {}; } catch (_) {}
-                const deletedFor = Array.isArray(metadata.deletedFor) ? metadata.deletedFor : [];
-                if (!deletedFor.includes(userId)) deletedFor.push(userId);
-                metadata.deletedFor = deletedFor;
-
+                // Direct chat: per-user hide only. Do NOT touch the shared
+                // chats row and do NOT remove/destroy the participant row.
                 await sequelize.query(
-                    `UPDATE chats SET metadata = :metadata, "updatedAt" = NOW() WHERE id = :chatId`,
-                    { replacements: { metadata: JSON.stringify(metadata), chatId } }
-                );
-                // Remove them from participants so getUserChats won't return it
-                await sequelize.query(
-                    `DELETE FROM chat_participants WHERE "chatId" = :chatId AND "userId" = :userId`,
+                    `UPDATE chat_participants SET "hiddenAt" = NOW(), "updatedAt" = NOW()
+                     WHERE "chatId" = :chatId AND "userId" = :userId`,
                     { replacements: { chatId, userId } }
                 );
             }
             return true;
         } catch (error) {
             logger.error('Delete chat failed:', error);
+            throw error;
+        }
+    }
+
+    // "Clear chat": wipes the requesting user's own view of the message
+    // history without touching the conversation itself or the other
+    // participant's copy. Implemented as a per-participant watermark
+    // (chat_participants.clearedAt) rather than deleting/mutating any
+    // Messages rows, so it composes cleanly with "delete for me/everyone"
+    // on individual messages and can never affect the other side.
+    static async clearChatForUser(chatId, userId) {
+        const sequelize = getDB();
+        try {
+            const [participant] = await sequelize.query(
+                `SELECT 1 FROM chat_participants WHERE "chatId" = :chatId AND "userId" = :userId LIMIT 1`,
+                { replacements: { chatId, userId }, type: sequelize.QueryTypes.SELECT }
+            );
+            if (!participant) throw new AuthorizationError('Not a participant in this chat');
+
+            await sequelize.query(
+                `UPDATE chat_participants SET "clearedAt" = NOW(), "updatedAt" = NOW()
+                 WHERE "chatId" = :chatId AND "userId" = :userId`,
+                { replacements: { chatId, userId } }
+            );
+            return true;
+        } catch (error) {
+            logger.error('Clear chat failed:', error);
             throw error;
         }
     }
