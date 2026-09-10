@@ -26,28 +26,13 @@ module.exports = {
       }
 
       await queryInterface.createTable('Tools', {
-        id: {
-          type: Sequelize.UUID,
-          defaultValue: Sequelize.UUIDV4,
-          primaryKey: true,
-          allowNull: false,
-        },
-        seller_id: {
-          type: Sequelize.INTEGER,
-          allowNull: false,
-          references: { model: 'Users', key: 'id' },
-          onUpdate: 'CASCADE',
-          onDelete: 'CASCADE',
-        },
+        id: { type: Sequelize.UUID, defaultValue: Sequelize.UUIDV4, primaryKey: true, allowNull: false },
+        seller_id: { type: Sequelize.INTEGER, allowNull: false, references: { model: 'Users', key: 'id' }, onUpdate: 'CASCADE', onDelete: 'CASCADE' },
         title: { type: Sequelize.STRING(255), allowNull: false },
         description: { type: Sequelize.TEXT, allowNull: true },
         price: { type: Sequelize.DECIMAL(10, 2), allowNull: false, defaultValue: 0 },
         category: { type: Sequelize.STRING(100), allowNull: false, defaultValue: 'other' },
-        type: {
-          type: Sequelize.ENUM('service', 'digital', 'premium', 'physical'),
-          allowNull: false,
-          defaultValue: 'physical',
-        },
+        type: { type: Sequelize.ENUM('service', 'digital', 'premium', 'physical'), allowNull: false, defaultValue: 'physical' },
         images: { type: Sequelize.ARRAY(Sequelize.TEXT), defaultValue: [] },
         tags: { type: Sequelize.ARRAY(Sequelize.STRING), defaultValue: [] },
         available: { type: Sequelize.BOOLEAN, defaultValue: true },
@@ -61,11 +46,7 @@ module.exports = {
         purchased_by: { type: Sequelize.ARRAY(Sequelize.INTEGER), defaultValue: [] },
         rating: { type: Sequelize.DECIMAL(3, 2), defaultValue: 0 },
         rating_count: { type: Sequelize.INTEGER, defaultValue: 0 },
-        status: {
-          type: Sequelize.ENUM('active', 'inactive', 'sold', 'deleted'),
-          defaultValue: 'active',
-          allowNull: false,
-        },
+        status: { type: Sequelize.ENUM('active', 'inactive', 'sold', 'deleted'), defaultValue: 'active', allowNull: false },
         currency: { type: Sequelize.STRING(10), defaultValue: 'USD' },
         stock: { type: Sequelize.INTEGER, allowNull: true },
         metadata: { type: Sequelize.JSONB, defaultValue: {} },
@@ -73,9 +54,6 @@ module.exports = {
         updatedAt: { type: Sequelize.DATE, allowNull: false, defaultValue: Sequelize.NOW },
       }, { transaction });
 
-      // PostgreSQL index names are schema-wide. Use CREATE INDEX IF NOT EXISTS
-      // so a partially-applied historical deployment cannot block the whole
-      // migration chain merely because the named index already exists.
       const indexes = [
         ['idx_tools_seller_id', 'seller_id'],
         ['idx_tools_status', 'status'],
@@ -85,19 +63,34 @@ module.exports = {
         ['idx_tools_created_at', 'createdAt'],
       ];
 
+      // PostgreSQL index names are schema-wide. A failed historical run can
+      // leave one of these names attached to Tools_legacy (or another table).
+      // In that case IF NOT EXISTS would silently skip creating the required
+      // index on Tools. Move the stale index out of the way first.
       for (const [name, column] of indexes) {
-        const quotedTable = queryInterface.sequelize.getQueryInterface()
-          ? queryInterface.sequelize.getQueryInterface().quoteIdentifier('Tools')
-          : '"Tools"';
-        const quotedColumn = queryInterface.sequelize.getQueryInterface()
-          ? queryInterface.sequelize.getQueryInterface().quoteIdentifier(column)
-          : `"${column}"`;
-        const quotedName = queryInterface.sequelize.getQueryInterface()
-          ? queryInterface.sequelize.getQueryInterface().quoteIdentifier(name)
-          : `"${name}"`;
+        const [rows] = await queryInterface.sequelize.query(
+          `SELECT tablename FROM pg_indexes WHERE schemaname = current_schema() AND indexname = :name LIMIT 1`,
+          { replacements: { name }, transaction }
+        );
+
+        if (rows.length && rows[0].tablename !== 'Tools') {
+          const legacyName = `${name}_legacy`;
+          const [legacyRows] = await queryInterface.sequelize.query(
+            `SELECT 1 FROM pg_indexes WHERE schemaname = current_schema() AND indexname = :name LIMIT 1`,
+            { replacements: { name: legacyName }, transaction }
+          );
+          if (!legacyRows.length) {
+            await queryInterface.sequelize.query(
+              `ALTER INDEX "${name}" RENAME TO "${legacyName}"`,
+              { transaction }
+            );
+          } else {
+            await queryInterface.sequelize.query(`DROP INDEX "${name}"`, { transaction });
+          }
+        }
 
         await queryInterface.sequelize.query(
-          `CREATE INDEX IF NOT EXISTS ${quotedName} ON ${quotedTable} (${quotedColumn})`,
+          `CREATE INDEX IF NOT EXISTS "${name}" ON "Tools" ("${column}")`,
           { transaction }
         );
       }
@@ -116,9 +109,7 @@ module.exports = {
     try {
       await queryInterface.dropTable('Tools', { transaction });
       const hasLegacy = await queryInterface.describeTable('Tools_legacy').catch(() => null);
-      if (hasLegacy) {
-        await queryInterface.renameTable('Tools_legacy', 'Tools', { transaction });
-      }
+      if (hasLegacy) await queryInterface.renameTable('Tools_legacy', 'Tools', { transaction });
       await transaction.commit();
     } catch (err) {
       await transaction.rollback();
