@@ -1,13 +1,8 @@
 // services/tokenService.js
-// VERSION: 2.1.2 - Per-user security session timeout + refresh grace + response expiry metadata
+// VERSION: 2.1.3 - Per-user security session timeout + non-expiring option + refresh grace
 const jwt = require('jsonwebtoken');
 const express = require('express');
 
-// Auth routes historically returned a hard-coded 24h expiresIn/expiresAt even
-// after tokenService began issuing access tokens with the user's configured
-// session timeout. Normalize auth JSON responses from the actual JWT so API
-// metadata always describes the token the client received. This is intentionally
-// narrow: only successful responses containing an access token are changed.
 if (!express.response.__moodSessionExpiryPatched) {
   const originalJson = express.response.json;
   express.response.json = function normalizedAuthJson(body) {
@@ -19,12 +14,14 @@ if (!express.response.__moodSessionExpiryPatched) {
           if (decoded && Number.isFinite(decoded.exp)) {
             body.expiresIn = Math.max(0, decoded.exp - Math.floor(Date.now() / 1000));
             body.expiresAt = new Date(decoded.exp * 1000).toISOString();
+          } else if (decoded && decoded.sessionTimeoutMs === 0) {
+            body.expiresIn = null;
+            body.expiresAt = null;
+            body.sessionTimeout = 'off';
           }
         }
       }
-    } catch (_) {
-      // Response metadata must never break an otherwise valid auth response.
-    }
+    } catch (_) {}
     return originalJson.call(this, body);
   };
   express.response.__moodSessionExpiryPatched = true;
@@ -55,8 +52,11 @@ class TokenService {
 
   parseSessionTimeout(value) {
     if (value === undefined || value === null || value === '' || value === 'default') value = this.defaultSessionTimeout;
+    if (String(value).trim().toLowerCase() === 'off' || String(value).trim().toLowerCase() === 'never' || value === 0) return 0;
     if (typeof value === 'number' && Number.isFinite(value) && value > 0) return Math.max(60, Math.floor(value));
-    const match = String(value).trim().toLowerCase().match(/^(\d+)\s*(s|m|h|d)$/);
+    const normalized = String(value).trim().toLowerCase().replace(/minutes?$/, 'min').replace(/hours?$/, 'hr');
+    const compact = normalized === '15min' ? '15m' : normalized === '30min' ? '30m' : normalized === '1hr' ? '1h' : normalized === '8hr' ? '8h' : normalized;
+    const match = compact.match(/^(\d+)\s*(s|m|h|d)$/);
     if (!match) return this.parseSessionTimeout(this.defaultSessionTimeout);
     const seconds = Number(match[1]) * ({ s: 1, m: 60, h: 3600, d: 86400 }[match[2]]);
     return Number.isFinite(seconds) && seconds > 0 ? Math.max(60, Math.floor(seconds)) : this.parseSessionTimeout(this.defaultSessionTimeout);
@@ -68,29 +68,30 @@ class TokenService {
     return this.parseSessionTimeout(security && security.sessionTimeout);
   }
 
-  getSessionTimeoutMs(user) { return this.getSessionTimeoutSeconds(user) * 1000; }
+  getSessionTimeoutMs(user) { const seconds = this.getSessionTimeoutSeconds(user); return seconds === 0 ? 0 : seconds * 1000; }
 
   generateAccessToken(user) {
     const userId = user.id || user.userId || user._id;
     if (!userId) throw new Error('Cannot generate token: Missing user ID');
     const sessionTimeoutSeconds = this.getSessionTimeoutSeconds(user);
-    return jwt.sign({
+    const payload = {
       userId, id: userId, email: user.email || null, username: user.username || null,
       role: user.role || 'user', type: 'access', sessionTimeoutMs: sessionTimeoutSeconds * 1000
-    }, this.accessSecret, { expiresIn: sessionTimeoutSeconds });
+    };
+    return sessionTimeoutSeconds === 0
+      ? jwt.sign(payload, this.accessSecret)
+      : jwt.sign(payload, this.accessSecret, { expiresIn: sessionTimeoutSeconds });
   }
 
   generateRefreshToken(user) {
     const userId = user.id || user.userId || user._id;
     if (!userId) throw new Error('Cannot generate refresh token: Missing user ID');
     const sessionTimeoutSeconds = this.getSessionTimeoutSeconds(user);
-    // Refresh gets a grace window so the client can renew an access token just
-    // before/around expiry. The client still enforces inactivity using the
-    // exact sessionTimeoutMs value from the access token.
+    if (sessionTimeoutSeconds === 0) {
+      return jwt.sign({ userId, id: userId, type: 'refresh', sessionTimeoutMs: 0 }, this.refreshSecret);
+    }
     const refreshSeconds = Math.max(sessionTimeoutSeconds + 120, sessionTimeoutSeconds * 2);
-    return jwt.sign({
-      userId, id: userId, type: 'refresh', sessionTimeoutMs: sessionTimeoutSeconds * 1000
-    }, this.refreshSecret, { expiresIn: refreshSeconds });
+    return jwt.sign({ userId, id: userId, type: 'refresh', sessionTimeoutMs: sessionTimeoutSeconds * 1000 }, this.refreshSecret, { expiresIn: refreshSeconds });
   }
 
   verifyAccessToken(token) {
@@ -140,6 +141,7 @@ class TokenService {
     try {
       const decoded = jwt.decode(token);
       if (decoded && decoded.exp) effectiveExpiresIn = Math.min(expiresIn, Math.max(1000, decoded.exp * 1000 - Date.now()));
+      else if (decoded && decoded.sessionTimeoutMs === 0) effectiveExpiresIn = 365 * 24 * 60 * 60 * 1000 * 100;
     } catch (_) {}
 
     const result = await this._tryStoreInDb(token, userId, effectiveExpiresIn, metadata);
@@ -167,10 +169,7 @@ class TokenService {
     const TokenModel = this.getTokenModel();
     if (!TokenModel) return null;
     try {
-      await TokenModel.create({
-        userId, token, tokenType: 'refresh', expiresAt: new Date(Date.now() + expiresIn), isRevoked: false,
-        userAgent: metadata.userAgent || null, ipAddress: metadata.ipAddress || null, deviceInfo: metadata.deviceInfo || null
-      });
+      await TokenModel.create({ userId, token, tokenType: 'refresh', expiresAt: new Date(Date.now() + expiresIn), isRevoked: false, userAgent: metadata.userAgent || null, ipAddress: metadata.ipAddress || null, deviceInfo: metadata.deviceInfo || null });
       console.log('[TokenService] ✅ Refresh token stored in DB for user:', userId);
       return { valid: true, source: 'db', userId };
     } catch (error) {
@@ -236,11 +235,7 @@ class TokenService {
     if (!TokenModel) return [];
     try {
       const rows = await TokenModel.findAll({ where: { userId, tokenType: 'refresh', isRevoked: false }, order: [['createdAt', 'DESC']] });
-      return rows.filter(row => new Date(row.expiresAt).getTime() > Date.now()).map(row => ({
-        id: row.id, createdAt: row.createdAt, expiresAt: row.expiresAt,
-        userAgent: row.userAgent || 'Unknown', ipAddress: row.ipAddress || 'Unknown',
-        deviceInfo: row.deviceInfo || null, tokenType: row.tokenType
-      }));
+      return rows.filter(row => new Date(row.expiresAt).getTime() > Date.now()).map(row => ({ id: row.id, createdAt: row.createdAt, expiresAt: row.expiresAt, userAgent: row.userAgent || 'Unknown', ipAddress: row.ipAddress || 'Unknown', deviceInfo: row.deviceInfo || null, tokenType: row.tokenType }));
     } catch (error) {
       console.warn('[TokenService] Failed to list refresh sessions:', error.message);
       return [];
