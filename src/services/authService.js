@@ -291,6 +291,27 @@ class AuthService {
         googleGivenName = nameParts[0] || null;
         googleFamilyName = nameParts.length > 1 ? nameParts.slice(1).join(' ') : null;
       }
+      // FIX (google-shows-literal-"user"): the two fixes above cover
+      // accounts where Google returned *some* name in given_name/
+      // family_name/name. Some Google sign-ins (Workspace accounts whose
+      // admin restricts the profile scope, or an ID token requested with
+      // only openid+email) return NONE of those three fields — only email
+      // is guaranteed. That left googleGivenName/googleFamilyName both
+      // null, so displayName's `[firstName, lastName].filter(Boolean)... ||
+      // username` fell through to username, and — for a brand-new account
+      // whose derived username base also ended up empty (non-Latin email
+      // local-part, symbols-only, etc.) — username itself was the literal
+      // fallback string 'user' a few lines below. Derive a presentable name
+      // from the email's local part as a last resort, so a real (if
+      // imperfect) name always exists before username is ever consulted.
+      if (!googleGivenName && !googleFamilyName) {
+        const localPart = email.split('@')[0].replace(/[._+-]+/g, ' ').trim();
+        if (localPart) {
+          const words = localPart.split(/\s+/).filter(Boolean).map(w => w.charAt(0).toUpperCase() + w.slice(1));
+          googleGivenName = words[0] || null;
+          googleFamilyName = words.length > 1 ? words.slice(1).join(' ') : null;
+        }
+      }
 
       // Match an existing account by googleId first, then by email so a user
       // who registered with email/password can also sign in with Google.
@@ -316,7 +337,7 @@ class AuthService {
         // Derive a unique username from the Google profile since Nexopa
         // requires one; fall back to appending part of the Google id on collision.
         const base = (googleGivenName || payload.name || email.split('@')[0])
-          .toLowerCase().replace(/[^a-z0-9_]/g, '') || 'user';
+          .toLowerCase().replace(/[^a-z0-9_]/g, '') || (email.split('@')[0].replace(/[^a-zA-Z0-9_]/g, '') || 'user');
         let username = base;
         let suffix = 0;
         // eslint-disable-next-line no-await-in-loop
