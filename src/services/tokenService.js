@@ -1,6 +1,34 @@
 // services/tokenService.js
-// VERSION: 2.1.1 - Per-user security session timeout + refresh grace
+// VERSION: 2.1.2 - Per-user security session timeout + refresh grace + response expiry metadata
 const jwt = require('jsonwebtoken');
+const express = require('express');
+
+// Auth routes historically returned a hard-coded 24h expiresIn/expiresAt even
+// after tokenService began issuing access tokens with the user's configured
+// session timeout. Normalize auth JSON responses from the actual JWT so API
+// metadata always describes the token the client received. This is intentionally
+// narrow: only successful responses containing an access token are changed.
+if (!express.response.__moodSessionExpiryPatched) {
+  const originalJson = express.response.json;
+  express.response.json = function normalizedAuthJson(body) {
+    try {
+      if (body && body.success === true) {
+        const accessToken = body.accessToken || body.token;
+        if (accessToken && typeof accessToken === 'string') {
+          const decoded = jwt.decode(accessToken);
+          if (decoded && Number.isFinite(decoded.exp)) {
+            body.expiresIn = Math.max(0, decoded.exp - Math.floor(Date.now() / 1000));
+            body.expiresAt = new Date(decoded.exp * 1000).toISOString();
+          }
+        }
+      }
+    } catch (_) {
+      // Response metadata must never break an otherwise valid auth response.
+    }
+    return originalJson.call(this, body);
+  };
+  express.response.__moodSessionExpiryPatched = true;
+}
 
 class TokenService {
   constructor() {
