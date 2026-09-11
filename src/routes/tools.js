@@ -32,7 +32,21 @@ try {
     marketplaceLimiter = apiRateLimiter;
 }
 
-
+// Compatibility response adapter for legacy and current Tools clients.
+// The canonical controller returns { success, data: { listing } }, while some
+// older Create Listing flows read response.listing directly. Keep the
+// controller's canonical envelope intact and expose the same listing at the
+// top level so both clients consume the exact DB-created record and its real ID.
+function createListingCompat(req, res, next) {
+    const originalJson = res.json.bind(res);
+    res.json = function compatListingJson(body) {
+        if (body && body.success && body.data && body.data.listing && !body.listing) {
+            body = { ...body, listing: body.data.listing };
+        }
+        return originalJson(body);
+    };
+    return toolsController.createListing(req, res, next);
+}
 
 // ═════════════════════════════════════════════════════════════════════════════
 // [FIX 1] TOOL MANIFEST — returns ALL tools the frontend should know about.
@@ -185,12 +199,12 @@ router.get('/marketplace/listings/premium', marketplaceLimiter, toolsController.
 router.get('/marketplace/listings',         marketplaceLimiter, toolsController.getListings.bind(toolsController));
 router.get('/marketplace/listings/:listingId', marketplaceLimiter, toolsController.getListing.bind(toolsController));
 
-router.post('/marketplace/listings',         marketplaceLimiter, toolsController.createListing.bind(toolsController));
+router.post('/marketplace/listings',         marketplaceLimiter, createListingCompat);
 // FIX (2026-07-22): frontend has always POSTed here for Premium tab listings,
 // but only a GET existed for this path — every premium submission 404'd.
 // Reuses the same (now premium-aware) createListing controller rather than
 // duplicating listing-creation logic in a second function.
-router.post('/marketplace/listings/premium', marketplaceLimiter, toolsController.createListing.bind(toolsController));
+router.post('/marketplace/listings/premium', marketplaceLimiter, createListingCompat);
 router.post('/marketplace/listings/bulk',    marketplaceLimiter, toolsController.bulkCreateListings.bind(toolsController));
 router.put('/marketplace/listings/:listingId',    marketplaceLimiter, toolsController.updateListing.bind(toolsController));
 router.delete('/marketplace/listings/:listingId', marketplaceLimiter, toolsController.deleteListing.bind(toolsController));
