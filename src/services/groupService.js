@@ -670,11 +670,28 @@ class GroupService {
             if (slowSecs !== undefined) updatePayload.slowModeInterval = Math.max(0, parseInt(slowSecs) || 0);
 
             // postingRule: open / read_only / announcement / admin_only / scheduled
+            //
+            // FIX-ROOT-CAUSE-POSTING-RULE-STUCK-ADMIN-ONLY: this used to only
+            // ever WRITE updatePayload.postingRule when onlyAdminsCanPost was
+            // true (→ 'admin_only'), and did nothing at all when it was false.
+            // POST /:groupId/messages enforces the dedicated `postingRule`
+            // column, not `settings.onlyAdminsCanPost` — so once a group had
+            // been switched to admin-only even once, toggling the checkbox
+            // back off correctly saved settings.onlyAdminsCanPost:false (and
+            // the settings panel correctly showed "allow all members"), but
+            // the `postingRule` column silently stayed 'admin_only' forever,
+            // permanently 403-blocking every non-admin member's send with
+            // no way to fix it from this endpoint. Now the column is kept in
+            // sync with the checkbox any time the caller explicitly sets
+            // onlyAdminsCanPost, in both directions, unless an explicit
+            // postingRule string (from the advanced moderation panel) is
+            // also present in this same request, which takes precedence.
+            const onlyAdminsCanPostProvided = settings.onlyAdminsCanPost !== undefined || mod.onlyAdminsCanPost !== undefined;
             if (settings.postingRule) {
                 const validRules = ['open', 'read_only', 'announcement', 'admin_only', 'scheduled'];
                 if (validRules.includes(settings.postingRule)) updatePayload.postingRule = settings.postingRule;
-            } else if (filtered.onlyAdminsCanPost) {
-                updatePayload.postingRule = 'admin_only';
+            } else if (onlyAdminsCanPostProvided) {
+                updatePayload.postingRule = filtered.onlyAdminsCanPost ? 'admin_only' : 'open';
             }
 
             // disappearingTimer (seconds, 0 = disabled). Also accept boolean flag
