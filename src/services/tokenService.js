@@ -1,5 +1,5 @@
 // services/tokenService.js
-// VERSION: 2.1.3 - Per-user security session timeout + non-expiring option + refresh grace
+// VERSION: 2.1.4 - Per-user security session timeout + production-safe Token model readiness
 const jwt = require('jsonwebtoken');
 const express = require('express');
 
@@ -40,10 +40,41 @@ class TokenService {
     console.log('[TokenService] Initialized');
   }
 
+  /**
+   * Return the canonical Token model from the application's single Sequelize
+   * registry.  Older deployments could reach this service while the custom
+   * model loader had not exposed Token yet, producing a misleading production
+   * 401 even though Token.js existed.  If the registry is not exposed but the
+   * Sequelize instance is available, register Token.js directly against that
+   * SAME instance; never create a second database connection.
+   */
   getTokenModel() {
     try {
       const freshDb = require('../models');
-      return freshDb.Token || freshDb.models?.Token || freshDb.sequelize?.models?.Token || freshDb.getModel?.('Token') || null;
+      const existing = freshDb.Token || freshDb.models?.Token || freshDb.sequelize?.models?.Token;
+      if (existing) return existing;
+
+      if (freshDb.sequelize && freshDb.Sequelize?.DataTypes) {
+        try {
+          const alreadyRegistered = freshDb.sequelize.models?.Token;
+          if (alreadyRegistered) return alreadyRegistered;
+
+          const tokenFactory = require('../models/Token');
+          const TokenModel = tokenFactory(freshDb.sequelize, freshDb.Sequelize.DataTypes);
+
+          if (TokenModel) {
+            // Keep the public registry consistent as well, so subsequent
+            // callers and diagnostics see the same model instance.
+            if (freshDb.models && !freshDb.models.Token) freshDb.models.Token = TokenModel;
+            console.warn('[TokenService] Token model was missing from registry; registered Token.js on the canonical Sequelize instance.');
+            return TokenModel;
+          }
+        } catch (registerError) {
+          console.warn('[TokenService] Failed to register Token.js on canonical Sequelize instance:', registerError.message);
+        }
+      }
+
+      return freshDb.getModel?.('Token') || null;
     } catch (err) {
       console.warn('[TokenService] Could not load model registry:', err.message);
       return null;
@@ -185,19 +216,6 @@ class TokenService {
       try {
         const tokenRow = await TokenModel.findOne({ where: { token, tokenType: 'refresh', isRevoked: false } });
         if (!tokenRow) {
-          // SECURITY FIX (audit-driven — was: no reuse detection): a
-          // revoked-but-still-known token (i.e. one that WAS issued, and
-          // was already used/rotated away or explicitly logged out) used
-          // to fall into this same "not found" branch as a token that
-          // never existed at all. That's the wrong behavior: replaying an
-          // already-rotated refresh token is the single strongest signal
-          // this codebase has that a token was stolen and is being reused
-          // by an attacker in parallel with the legitimate device (in
-          // normal single-use rotation, the legitimate client only ever
-          // presents each refresh token once). Distinguish the two cases
-          // and, on detected reuse, revoke every refresh token this user
-          // has — on the assumption an attacker has a copy — rather than
-          // silently treating it as an ordinary expired-token 401.
           const revokedRow = await TokenModel.findOne({ where: { token, tokenType: 'refresh', isRevoked: true } }).catch(() => null);
           if (revokedRow) {
             const affected = await TokenModel.update(
