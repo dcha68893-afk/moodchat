@@ -187,8 +187,9 @@ class MarketplaceController {
             if (!userId) return next(new AppError('Authentication required', 401));
 
             const {
-                title, description, price=0, category='other', type='physical',
-                images=[], tags=[], condition, brand, delivery_fee,
+                title, description, short_description, price=0, original_price,
+                category='other', subcategory, type='physical',
+                images=[], tags=[], condition, brand, sku, weight, delivery_fee,
                 location, available=true, metadata={}
             } = req.body;
             // AUDIT FIX: marketplace-seller.js's create-listing form sends
@@ -219,6 +220,20 @@ class MarketplaceController {
                     ...metadata,
                     condition: condition || 'new',
                     brand:     brand || '',
+                    // FIX (PUBLISH-DATA-LOSS): the Create Listing → Physical
+                    // form has always sent subcategory/sku/original_price/
+                    // short_description/weight, but this destructure never
+                    // picked any of them up, so every physical listing
+                    // silently lost that data on save — the seller filled
+                    // it in, "Publish" reported success, but none of it
+                    // actually persisted. Stored in metadata (same place
+                    // materials/variants/specs already live) since the Tool
+                    // model has no dedicated columns for these.
+                    subcategory: subcategory || '',
+                    sku: sku || '',
+                    original_price: original_price != null ? parseFloat(original_price) || null : null,
+                    short_description: short_description || '',
+                    weight: weight != null ? parseFloat(weight) || null : null,
                     delivery_fee: parseFloat(delivery_fee) || 0,
                     location:  location || '',
                 },

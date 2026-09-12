@@ -367,7 +367,34 @@ class AuthService {
         console.log('✅ [AuthService] New user created via Google sign-in:', user.id);
       }
 
-      const tokens = this.generateTokens(user.id);
+      // FIX (admin-features-not-recognized, Google sign-in path): same
+      // ADMIN_EMAIL/ADMIN_USERNAME promotion added to /auth/login and
+      // /auth/register — Google sign-in went through this separate service
+      // and had it too, so an admin logging in via Google never got
+      // role='admin'.
+      try {
+        const adminEmail    = (process.env.ADMIN_EMAIL    || '').toLowerCase().trim();
+        const adminUsername = (process.env.ADMIN_USERNAME || '').toLowerCase().trim();
+        const googleUserEmail    = (user.email    || '').toLowerCase().trim();
+        const googleUserUsername = (user.username || '').toLowerCase().trim();
+        const matchesAdminEnv =
+          (adminEmail    && googleUserEmail    && googleUserEmail    === adminEmail) ||
+          (adminUsername && googleUserUsername && googleUserUsername === adminUsername);
+        if (matchesAdminEnv && user.role !== 'admin' && typeof user.update === 'function') {
+          await user.update({ role: 'admin' });
+          console.log(`[Auth] Promoted ${user.email || user.username} to admin role (matched ADMIN_EMAIL/ADMIN_USERNAME in .env, Google sign-in)`);
+        }
+      } catch (adminBootstrapError) {
+        console.error('[Auth] Admin bootstrap check failed (Google sign-in):', adminBootstrapError.message);
+      }
+
+      // FIX: generateTokens(user.id) was called with no userData, so its
+      // internal `role: userData.role || 'user'` always hardcoded 'user'
+      // into the JWT regardless of the real DB role — meaning a Google
+      // sign-in's access token could never carry role='admin' (or any other
+      // non-default role) even after the promotion above. Pass the real
+      // email/username/role through so the token matches the DB row.
+      const tokens = this.generateTokens(user.id, { email: user.email, username: user.username, role: user.role });
       await require('../services/tokenService').storeRefreshToken(tokens.refreshToken, user.id);
 
       const userWithoutPassword = user.toJSON();

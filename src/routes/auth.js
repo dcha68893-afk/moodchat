@@ -157,6 +157,30 @@ router.post('/register', asyncHandler(async (req, res) => {
             ...(acceptPrivacyPolicy === true && { acceptedPrivacyPolicyAt: new Date() })
         });
 
+        // FIX (admin-features-not-recognized): ADMIN_EMAIL/ADMIN_USERNAME in
+        // .env was never actually read anywhere in this file (the only place
+        // that promotion logic existed was src/controllers/authController.js,
+        // which is dead code — nothing in src/routes ever requires it, so
+        // saving admin credentials in .env had no effect no matter how the
+        // matching account registered or logged in). Promote here, before the
+        // JWT (which embeds role) is generated, so a brand-new account whose
+        // email/username matches .env is admin immediately.
+        try {
+            const adminEmail    = (process.env.ADMIN_EMAIL    || '').toLowerCase().trim();
+            const adminUsername = (process.env.ADMIN_USERNAME || '').toLowerCase().trim();
+            const newUserEmail     = (newUser.email    || '').toLowerCase().trim();
+            const newUserUsername  = (newUser.username || '').toLowerCase().trim();
+            const matchesAdminEnv =
+                (adminEmail    && newUserEmail    && newUserEmail    === adminEmail) ||
+                (adminUsername && newUserUsername && newUserUsername === adminUsername);
+            if (matchesAdminEnv && newUser.role !== 'admin' && typeof newUser.update === 'function') {
+                await newUser.update({ role: 'admin' });
+                _slog(`[Auth] Promoted ${newUser.email || newUser.username} to admin role (matched ADMIN_EMAIL/ADMIN_USERNAME in .env)`);
+            }
+        } catch (adminBootstrapError) {
+            console.error('[Auth] Admin bootstrap check failed:', adminBootstrapError.message);
+        }
+
         // Generate tokens
         const token = tokenService.generateAccessToken(newUser);
         const refreshToken = tokenService.generateRefreshToken(newUser);
@@ -358,6 +382,29 @@ router.post('/login', asyncHandler(async (req, res) => {
                     }).catch(e => console.warn('[Auth] Failed to send new-device alert:', e.message));
                 }
             }).catch(() => {});
+        }
+
+        // FIX (admin-features-not-recognized): ADMIN_EMAIL/ADMIN_USERNAME in
+        // .env was never actually read anywhere in this file — the only
+        // place that promotion logic existed was the dead-code
+        // src/controllers/authController.js (nothing under src/routes
+        // requires it), so saving admin credentials as env vars had no
+        // effect and logging in with that account never got role='admin'.
+        // Promote here, before the JWT (which embeds role) is generated.
+        try {
+            const adminEmail    = (process.env.ADMIN_EMAIL    || '').toLowerCase().trim();
+            const adminUsername = (process.env.ADMIN_USERNAME || '').toLowerCase().trim();
+            const loginUserEmail    = (user.email    || '').toLowerCase().trim();
+            const loginUserUsername = (user.username || '').toLowerCase().trim();
+            const matchesAdminEnv =
+                (adminEmail    && loginUserEmail    && loginUserEmail    === adminEmail) ||
+                (adminUsername && loginUserUsername && loginUserUsername === adminUsername);
+            if (matchesAdminEnv && user.role !== 'admin' && typeof user.update === 'function') {
+                await user.update({ role: 'admin' });
+                _slog(`[Auth] Promoted ${user.email || user.username} to admin role (matched ADMIN_EMAIL/ADMIN_USERNAME in .env)`);
+            }
+        } catch (adminBootstrapError) {
+            console.error('[Auth] Admin bootstrap check failed:', adminBootstrapError.message);
         }
 
         // P2 FIX (Forensic Audit): if 2FA/MFA is enabled, do not issue real
