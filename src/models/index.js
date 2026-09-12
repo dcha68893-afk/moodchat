@@ -906,6 +906,32 @@ async function fixColumnNames() {
         await backfill('expiresAt', 'expires_at');
         await backfill('isRevoked', 'is_revoked');
         await backfill('type', 'token_type');
+
+        // ROOT-CAUSE FIX (actual runtime error: 'null value in column
+        // "userId" of relation "Tokens" violates not-null constraint'):
+        // the legacy camelCase columns are still NOT NULL from the
+        // original schema, but the current Token model only ever
+        // populates the snake_case columns — it has no idea "userId"/
+        // "expiresAt" still exist. Every insert was rejected by Postgres
+        // before it ever reached application code, which is what
+        // surfaced as the generic "DB write failed" error on both login
+        // paths. These legacy columns are superseded by user_id/
+        // expires_at (already backfilled above), so it's safe to drop
+        // the constraint rather than teach the model about a column
+        // naming scheme it no longer uses.
+        const dropLegacyNotNull = async legacy => {
+          if (tokenColumns[legacy]) {
+            try {
+              await sequelize.query(`ALTER TABLE "Tokens" ALTER COLUMN "${legacy}" DROP NOT NULL;`);
+              _slog(`[Migration] ✅ Dropped NOT NULL on legacy Tokens.${legacy}`);
+            } catch (dropError) {
+              _slog(`[Migration] ⚠️ Could not drop NOT NULL on Tokens.${legacy}: ${dropError.message}`);
+            }
+          }
+        };
+        await dropLegacyNotNull('userId');
+        await dropLegacyNotNull('expiresAt');
+
         _slog('[Migration] ✅ Backfilled legacy Tokens columns into current schema');
       } catch (tokenBackfillError) {
         _slog('[Migration] ⚠️ Error backfilling Tokens columns:', tokenBackfillError.message);
