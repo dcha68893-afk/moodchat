@@ -3,7 +3,9 @@ const { Op } = require('sequelize');
 
 module.exports = (sequelize, DataTypes) => {
   const Token = sequelize.define('Token', {
-    id: { type: DataTypes.UUID, primaryKey: true, allowNull: false, defaultValue: DataTypes.UUIDV4 },
+    // Tokens were originally created with an INTEGER primary key and existing
+    // production rows use that contract. Keep the model compatible with them.
+    id: { type: DataTypes.INTEGER, primaryKey: true, allowNull: false, autoIncrement: true },
     userId: { type: DataTypes.INTEGER, allowNull: false, field: 'user_id' },
     token: { type: DataTypes.TEXT, allowNull: false },
     tokenType: { type: DataTypes.STRING, defaultValue: 'refresh', allowNull: false, field: 'token_type' },
@@ -69,6 +71,6 @@ module.exports = (sequelize, DataTypes) => {
     if (UserModel) Token.belongsTo(UserModel, { foreignKey: 'userId', as: 'user', constraints: true, onDelete: 'CASCADE', onUpdate: 'CASCADE' });
   };
 
-  // Schema changes are intentionally handled by versioned migrations, not by model loading.
+  // Production schema changes are handled by versioned migrations.
   return Token;
 };
