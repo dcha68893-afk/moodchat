@@ -237,6 +237,26 @@ const REQUIRED_COLUMNS = [
     table: 'Groups', column: 'scheduledPostingEnd',
     sql: `ALTER TABLE "Groups" ADD COLUMN IF NOT EXISTS "scheduledPostingEnd" TIME`,
   },
+  {
+    // FIX (GROUP-LIST-500, 2026-09): groupService.js's getUserGroups()
+    // explicitly SELECTs 'settings' on every group-list request (see the
+    // `attributes: [...,'settings','stats']` include in getUserGroups()),
+    // and the Group model (src/models/Group.js) has declared this column
+    // since it was written — but, same gap as Groups.location above, it
+    // was never added to this self-healing list, so if the versioned
+    // migration step failed/was skipped on a given boot, the column simply
+    // never existed and every "get my groups" request 500'd with
+    // "column userGroup.settings does not exist".
+    table: 'Groups', column: 'settings',
+    sql: `ALTER TABLE "Groups" ADD COLUMN IF NOT EXISTS "settings" JSONB NOT NULL DEFAULT '{"allowMedia":true,"allowCalls":true,"allowReactions":true,"allowReplies":true,"allowEditing":true,"allowDeleting":true,"slowMode":0,"requireAdminApproval":false,"allowInvites":true,"onlyAdminsCanPost":false,"disappearingMessages":false,"archived":false}'::jsonb`,
+  },
+  {
+    // Same gap as 'settings' immediately above — also selected on every
+    // getUserGroups() call and would throw the identical error once
+    // 'settings' was fixed.
+    table: 'Groups', column: 'stats',
+    sql: `ALTER TABLE "Groups" ADD COLUMN IF NOT EXISTS "stats" JSONB NOT NULL DEFAULT '{"totalMessages":0,"totalMembers":0,"dailyActiveUsers":0,"weeklyActiveUsers":0}'::jsonb`,
+  },
 
   // ── GroupMembers ──────────────────────────────────────────────────────────
   {
@@ -1370,6 +1390,15 @@ const REQUIRED_TYPE_FIXES = [
   { table: 'tools',               column: 'purchased_by',  arrayType: true },
   { table: 'wallets',             column: 'user_id',       arrayType: false },
   { table: 'wallet_transactions', column: 'user_id',       arrayType: false },
+  // FIX-500 (/api/calls/history, /api/calls/scheduled): same gap as the
+  // tools.saved_by/purchased_by rows above, just never added here. Both
+  // routes run `participants: { [Op.contains]: [userId] }` (see
+  // src/routes/calls.js), which Postgres rejects with "invalid input
+  // syntax for type uuid" if this column was ever created as uuid[].
+  // See migrations/20260912000001_fix_calls_participants_types.js.
+  { table: 'calls',               column: 'participants',         arrayType: true },
+  { table: 'calls',               column: 'participants_joined',  arrayType: true },
+  { table: 'calls',               column: 'participants_left',    arrayType: true },
 ];
 
 // ─── Column-level DEFAULTs that were never set at the DB level ────────────────
