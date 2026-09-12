@@ -621,29 +621,26 @@ router.post('/refresh', asyncHandler(async (req, res) => {
     
     const stored = await tokenService.validateStoredRefreshToken(refreshToken);
     if (!stored.valid) {
-        // ROOT-CAUSE FIX (refresh-kills-session-on-transient-blip): this used
-        // to return 401 unconditionally, collapsing two very different
-        // situations into one terminal response. tokenService.js's
-        // validateStoredRefreshToken() (see its own FIX-REFRESH-FALSE-REAUTH
-        // comment, confirmed live Aug 28 2026) already tells us which one we
-        // have: `stored.transient === true` means the DB lookup itself
-        // failed (cold start / pool reconnect) and we genuinely don't know
-        // if the refresh token is valid, vs. a real TOKEN_NOT_FOUND/
-        // TOKEN_EXPIRED meaning it definitely isn't. The frontend's
-        // refreshTokenIfNeeded() (js/api.core.js) already treats a non-401/
-        // 403 status as retryable and only sets requiresReauth on 401/403 —
-        // but this route never read `stored.transient`, so it always sent
-        // 401 either way, and a single transient DB blip was enough to make
-        // the frontend dispatch 'auth:session:ended', permanently disconnect
-        // the realtime socket, and wipe the token for every module sharing
-        // it — even though the user's actual refresh token was still good.
-        // 503 here lets the frontend retry shortly instead of ending the
-        // session outright.
         if (stored.transient) {
             return res.status(503).json({
                 success: false,
                 message: 'Could not verify refresh token right now — please retry',
                 errorCode: 'REFRESH_VALIDATION_UNAVAILABLE'
+            });
+        }
+        // SECURITY FIX (audit-driven, paired with tokenService.js's new
+        // reuse-detection branch above): a detected replay of an
+        // already-used refresh token now gets its own distinct error
+        // instead of the generic "not found or expired" 401. This matters
+        // because every other refresh token for this user was just
+        // revoked server-side (see tokenService.js) — the client needs to
+        // know this was a forced full logout due to a suspected stolen
+        // token, not an ordinary expiry it can quietly recover from.
+        if (stored.error === 'TOKEN_REUSE_DETECTED') {
+            return res.status(401).json({
+                success: false,
+                message: 'This session was ended because a refresh token was reused, which can indicate it was stolen. Please log in again on all devices.',
+                errorCode: 'REFRESH_TOKEN_REUSE_DETECTED'
             });
         }
         return res.status(401).json({

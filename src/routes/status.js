@@ -1949,10 +1949,20 @@ router.get('/:statusId/reactions', optionalAuthenticateToken, apiRateLimiter, as
     res.json({ success: true, data: { reactions } });
 }));
 
-// ── Reply to Status (PROTECTED)  POST /:statusId/reply  { content: "..." }
+// ── Reply to Status (PROTECTED)  POST /:statusId/reply  { content: "...", encrypted: bool }
 // Replies become chat messages — NOT stored as statuses
+//
+// FIX (audit-driven, paired with the client-side encryption fix in
+// js/status-api.js): the previous 1000-char cap was sized for plaintext
+// reply text. An encrypted v2 envelope ({v,kid,spk,rkid,rpk,iv,ct}) carries
+// ~250+ chars of key/IV overhead on top of the ciphertext itself, so any
+// encrypted reply longer than roughly a sentence would have been silently
+// rejected by this validator — the opposite of what we want now that
+// replies are encrypted by default. Raised to 5000 to match the content
+// length cap the canonical DM path (messageDeliveryService.sendMessage)
+// already uses for the same reason.
 router.post('/:statusId/reply', authenticateToken, [
-    body('content').notEmpty().withMessage('Reply content required').isLength({ max: 1000 }),
+    body('content').notEmpty().withMessage('Reply content required').isLength({ max: 5000 }),
 ], apiRateLimiter, asyncHandler(async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });

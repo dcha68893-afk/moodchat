@@ -434,6 +434,22 @@ router.get('/challenges', async (req, res) => {
 // ══════════════════════════════════════════════════════════════════════════════
 // POST /api/games/share  — share score or achievement to a chat/group
 // ══════════════════════════════════════════════════════════════════════════════
+//
+// SECURITY FIX (audit-driven — was: IDOR / unauthorized message injection):
+// this route had no membership check at all — any authenticated user could
+// POST a fabricated "game share" message into ANY chatId or groupId they
+// specified, regardless of whether they were actually a participant.
+// Traced this route's frontend caller as part of the same pass: no
+// frontend code anywhere in the repo actually calls POST /games/share (no
+// matching request found for its exact parameter shape), so — like the
+// disconnected poll system flagged separately in the audit — this isn't
+// leaking through the app's normal UI today, but it was still a live,
+// reachable, unauthenticated-by-membership endpoint. Content here (a
+// score/achievement announcement) is server-generated from low-sensitivity
+// data, not user-typed free text, so unlike status replies this was left
+// as plaintext rather than retrofitted with client-side encryption it has
+// no client-side caller to supply — the IDOR is the real, serious part of
+// this finding, and that's what's fixed.
 router.post('/share', async (req, res) => {
   try {
     if (!Message) return res.status(503).json({ error: 'Message model unavailable' });
@@ -444,6 +460,22 @@ router.post('/share', async (req, res) => {
     const { chatId, groupId, gameType, score, achievementName, achievementIcon, shareType } = req.body;
 
     if (!chatId && !groupId) return res.status(400).json({ error: 'chatId or groupId required' });
+
+    const models = req.app.locals.models;
+    if (chatId) {
+      const ChatParticipant = models?.ChatParticipant;
+      const ok = ChatParticipant && typeof ChatParticipant.isUserInChat === 'function'
+        ? await ChatParticipant.isUserInChat(userId, chatId).catch(() => false)
+        : false;
+      if (!ok) return res.status(403).json({ error: 'You are not a participant of this chat' });
+    }
+    if (groupId) {
+      const GroupMembers = models?.GroupMembers;
+      const member = GroupMembers
+        ? await GroupMembers.findOne({ where: { groupId, userId } }).catch(() => null)
+        : null;
+      if (!member) return res.status(403).json({ error: 'You are not a member of this group' });
+    }
 
     let text;
     if (shareType === 'achievement') {

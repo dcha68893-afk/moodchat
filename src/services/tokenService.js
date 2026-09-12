@@ -184,7 +184,31 @@ class TokenService {
     if (TokenModel) {
       try {
         const tokenRow = await TokenModel.findOne({ where: { token, tokenType: 'refresh', isRevoked: false } });
-        if (!tokenRow) return { valid: false, error: 'TOKEN_NOT_FOUND' };
+        if (!tokenRow) {
+          // SECURITY FIX (audit-driven — was: no reuse detection): a
+          // revoked-but-still-known token (i.e. one that WAS issued, and
+          // was already used/rotated away or explicitly logged out) used
+          // to fall into this same "not found" branch as a token that
+          // never existed at all. That's the wrong behavior: replaying an
+          // already-rotated refresh token is the single strongest signal
+          // this codebase has that a token was stolen and is being reused
+          // by an attacker in parallel with the legitimate device (in
+          // normal single-use rotation, the legitimate client only ever
+          // presents each refresh token once). Distinguish the two cases
+          // and, on detected reuse, revoke every refresh token this user
+          // has — on the assumption an attacker has a copy — rather than
+          // silently treating it as an ordinary expired-token 401.
+          const revokedRow = await TokenModel.findOne({ where: { token, tokenType: 'refresh', isRevoked: true } }).catch(() => null);
+          if (revokedRow) {
+            const affected = await TokenModel.update(
+              { isRevoked: true },
+              { where: { userId: revokedRow.userId, tokenType: 'refresh', isRevoked: false } }
+            ).catch(() => [0]);
+            console.warn(`[TokenService] SECURITY: refresh token reuse detected for user ${revokedRow.userId} — revoked ${affected[0]} active session(s)`);
+            return { valid: false, error: 'TOKEN_REUSE_DETECTED', userId: revokedRow.userId };
+          }
+          return { valid: false, error: 'TOKEN_NOT_FOUND' };
+        }
         if (new Date(tokenRow.expiresAt).getTime() < Date.now()) {
           await tokenRow.update({ isRevoked: true }).catch(() => {});
           return { valid: false, error: 'TOKEN_EXPIRED' };
