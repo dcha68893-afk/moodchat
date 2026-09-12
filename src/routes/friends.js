@@ -1302,14 +1302,26 @@ router.get('/groups/user', apiRateLimiter, asyncHandler(async (req, res) => {
 
         if (Group && GroupMember) {
             try {
+                // FIX (empty groups list / "no groups shown" when adding friends
+                // from a group): this query used to include the Group model with
+                // as: 'group', but GroupMembers.associate() only ever registered
+                // the belongsTo(Groups) association under the alias 'userGroup'
+                // (see src/models/GroupMembers.js). Sequelize throws on an
+                // unknown alias, and that throw was being swallowed by the
+                // catch below, so this endpoint silently fell through to
+                // `{ groups: [] }` on every single call — the frontend's
+                // "Select a group" dropdown always showed "No groups found"
+                // no matter how many groups the user was actually in.
                 const memberships = await withTimeout(GroupMember.findAll({
                     where: { userId },
-                    include: [{ model: Group, as: 'group', attributes: ['id','name','avatar','description','createdBy','createdAt'] }],
+                    include: [{ model: Group, as: 'userGroup', attributes: ['id','name','avatar','description','createdBy','createdAt'] }],
                     limit: 100
                 }));
-                const groups = memberships.map(m => ({ id: m.group?.id, name: m.group?.name, avatar: m.group?.avatar, description: m.group?.description, role: m.role, joinedAt: m.createdAt })).filter(g => g.id);
+                const groups = memberships.map(m => ({ id: m.userGroup?.id, name: m.userGroup?.name, avatar: m.userGroup?.avatar, description: m.userGroup?.description, role: m.role, joinedAt: m.createdAt })).filter(g => g.id);
                 return res.json({ success: true, data: { groups } });
-            } catch (e) { /* non-fatal */ }
+            } catch (e) {
+                console.error('[Friends GET /groups/user] query failed:', e.message);
+            }
         }
         return res.json({ success: true, data: { groups: [] } });
     } catch (e) {

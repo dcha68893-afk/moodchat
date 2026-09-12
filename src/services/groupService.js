@@ -107,10 +107,17 @@ const formatMember = (m, extraFields = {}) => {
         notificationsMuted: d.notificationsMuted || false,
         customSettings    : d.customSettings     || {},
         user: u ? {
-            id      : u.id,
-            username: u.username || '',
-            avatar  : u.avatar   || null,
-            status  : u.status   || 'offline',
+            id         : u.id,
+            username   : u.username  || '',
+            avatar     : u.avatar    || null,
+            status     : u.status    || 'offline',
+            // FIX (add-friend-from-group showed blank/garbled names): these two
+            // fields were already being fetched by the GroupMembers query's
+            // `attributes` list but were dropped here before ever reaching a
+            // caller, so every consumer of formatMember() only ever saw a bare
+            // username with no way to build a proper display name.
+            firstName  : u.firstName || '',
+            lastName   : u.lastName  || '',
         } : null,
         // LOCAL-FIRST fields
         isLocalOnly: false,
