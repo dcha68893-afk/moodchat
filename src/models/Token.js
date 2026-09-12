@@ -60,7 +60,7 @@ module.exports = (sequelize, DataTypes) => {
     total: await Token.count({ where: { userId }}),
     active: await Token.count({ where: { userId, isRevoked: false, expiresAt: { [Op.gt]: new Date() } }}),
     revoked: await Token.count({ where: { userId, isRevoked: true }}),
-    expired: await Token.count({ where: { userId, expiresAt: { [Op.lt]: new Date() }}),
+    expired: await Token.count({ where: { userId, expiresAt: { [Op.lt]: new Date() } } }),
   });
 
   let associationsSetUp = false;
