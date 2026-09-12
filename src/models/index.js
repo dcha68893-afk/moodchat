@@ -570,11 +570,24 @@ async function addMissingColumns() {
       { name: 'isVerified', type: Sequelize.BOOLEAN, defaultValue: false, allowNull: false },
       { name: 'stats', type: Sequelize.JSONB, defaultValue: {}, allowNull: false }
     ],
+    // ROOT-CAUSE FIX (login "DB write failed in production" after the
+    // Token.js syntax error was fixed): user_id/expires_at were declared
+    // allowNull:false with no defaultValue. Postgres refuses to ADD a
+    // NOT NULL column with no default to a table that already has rows —
+    // and this table already has production token rows from the old
+    // camelCase (userId/expiresAt) schema. That ADD COLUMN was silently
+    // failing (swallowed by the catch below), so user_id/expires_at never
+    // actually existed on the live table, and every TokenModel.create()
+    // call in tokenService.js failed with "column ... does not exist" —
+    // surfacing as the generic "DB write failed" error. Adding them as
+    // nullable lets the column creation succeed unconditionally; new rows
+    // always populate both fields via the model, and fixColumnNames()
+    // below backfills the snake_case columns for any pre-existing rows.
     'Tokens': [
-      { name: 'user_id', type: Sequelize.INTEGER, allowNull: false },
+      { name: 'user_id', type: Sequelize.INTEGER, allowNull: true },
       { name: 'token', type: Sequelize.TEXT, allowNull: false },
       { name: 'token_type', type: Sequelize.STRING, defaultValue: 'refresh', allowNull: false },
-      { name: 'expires_at', type: Sequelize.DATE, allowNull: false },
+      { name: 'expires_at', type: Sequelize.DATE, allowNull: true },
       { name: 'is_revoked', type: Sequelize.BOOLEAN, defaultValue: false, allowNull: false },
       { name: 'user_agent', type: Sequelize.STRING, allowNull: true },
       { name: 'ip_address', type: Sequelize.STRING(45), allowNull: true },
@@ -868,6 +881,37 @@ async function fixColumnNames() {
       }
     }
     
+    // ROOT-CAUSE FIX (login "DB write failed in production"): the Token
+    // model reads/writes snake_case columns (user_id, expires_at,
+    // is_revoked, token_type), but production's Tokens table predates that
+    // and only has the legacy camelCase columns (userId, expiresAt,
+    // isRevoked, type). addMissingColumns() above adds the snake_case
+    // columns if missing, but a fresh ADD COLUMN starts every existing row
+    // out NULL — so old sessions would still be unusable, and any row
+    // Sequelize revalidates could fail the model's allowNull expectations.
+    // Backfill from whichever legacy column is present, once, for any row
+    // where the new column is still empty. Safe to run every boot: the
+    // WHERE clause only ever touches rows that still need it.
+    if (tables.includes('Tokens')) {
+      try {
+        const tokenColumns = await queryInterface.describeTable('Tokens');
+        const backfill = async (legacy, current) => {
+          if (tokenColumns[legacy] && tokenColumns[current]) {
+            await sequelize.query(
+              `UPDATE "Tokens" SET "${current}" = "${legacy}" WHERE "${current}" IS NULL AND "${legacy}" IS NOT NULL;`
+            );
+          }
+        };
+        await backfill('userId', 'user_id');
+        await backfill('expiresAt', 'expires_at');
+        await backfill('isRevoked', 'is_revoked');
+        await backfill('type', 'token_type');
+        _slog('[Migration] ✅ Backfilled legacy Tokens columns into current schema');
+      } catch (tokenBackfillError) {
+        _slog('[Migration] ⚠️ Error backfilling Tokens columns:', tokenBackfillError.message);
+      }
+    }
+
     if (fixedColumns.length > 0) {
       _slog(`[Migration] ✅ Fixed ${fixedColumns.length} column names:`, fixedColumns);
     } else {
