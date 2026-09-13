@@ -459,6 +459,33 @@ router.get('/:groupId/messages', async (req, res) => {
     }
 });
 
+// ── FIX: frontend group-core-operations.js POSTs a REST fallback to this
+// endpoint whenever the socket transport isn't ready/connected yet, but no
+// matching route ever existed here — every call 404'd (see Render logs:
+// "POST /api/groups/:id/typing 404"). The socket handlers already emit
+// 'typing' / 'stop_typing' to the room (see setupGroupSocket below); this
+// gives the REST fallback the same effect so typing indicators work even
+// when the client's socket hasn't (re)connected yet.
+router.post('/:groupId/typing', async (req, res) => {
+    try {
+        const userId   = getUserId(req);
+        const groupId  = parseInt(req.params.groupId);
+        const isTyping = req.body?.isTyping !== false; // default true unless explicitly stopped
+        const userName = req.body?.userName || req.user?.firstName || req.user?.username || 'Someone';
+
+        if (req.io) {
+            const event = isTyping ? 'typing' : 'stop_typing';
+            req.io.to(`group:${groupId}`).emit(event, { groupId, userId, userName });
+            req.io.to(`group:${groupId}`).emit('group:typing', { groupId, userId, userName, isTyping });
+        }
+        return res.json({ success: true });
+    } catch (error) {
+        console.error('[Groups] POST typing error:', error.message);
+        // Non-fatal — typing indicators are best-effort.
+        return res.json({ success: true });
+    }
+});
+
 router.post('/:groupId/messages', async (req, res) => {
     try {
         const userId  = getUserId(req);
