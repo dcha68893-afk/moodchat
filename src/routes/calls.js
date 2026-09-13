@@ -15,6 +15,8 @@
 'use strict';
 
 const path          = require('path');
+const crypto        = require('crypto');
+const bcrypt        = require('bcryptjs');
 const asyncHandler  = require('express-async-handler');
 const express       = require('express');
 const router        = express.Router();
@@ -1502,8 +1504,18 @@ router.post('/:callId/join', apiRateLimiter, asyncHandler(async (req, res) => {
     // any authenticated account.
     const wasInvited   = Array.isArray(call.participants) && call.participants.includes(userId);
     const isOpenCall   = !!call.isOpen; // future-proofing for joinable-link flows
-    const isCallLinked = !!(req.query.token); // join-via-link flow uses separate auth
-    if (!wasInvited && !isOpenCall && !isCallLinked) {
+    // FIX-SEC-CALL-LINK-BYPASS: this used to accept ANY truthy `?token=`
+    // value as proof of a valid call-link invite (`!!(req.query.token)`),
+    // without ever checking it actually matched this call, was unexpired, or
+    // that its passcode/approval step had happened. That's not "join-via-link
+    // uses separate auth" — it's no auth at all: appending "?token=x" to this
+    // URL let any authenticated user bypass the SEC-01 check above entirely
+    // and join *any* in-progress call, including private 1:1 calls. The real
+    // call-link flow (POST /link/:token/join) already adds an approved
+    // joiner to call.participants directly — by the time a legitimately
+    // link-admitted user reaches this route, wasInvited above is already
+    // true, so no separate bypass is needed here at all.
+    if (!wasInvited && !isOpenCall) {
       return res.status(403).json({
         status:  'error',
         message: 'You were not invited to this call',
@@ -1933,7 +1945,166 @@ router.post('/:callId/waiting-room/reject', apiRateLimiter, asyncHandler(async (
 }));
 
 // ─────────────────────────────────────────────────────────────────────────────
-// BREAKOUT ROOMS
+// SECURE CALL LINKS
+// A host generates a shareable link for a call. Each generated link gets its
+// own cryptographically random, unique, unguessable token (crypto.randomBytes —
+// astronomically unlikely to collide, so two different users, or the same user
+// generating twice, always get two different links). Joining via the link
+// requires the correct passcode (if the host set one) and, by default, the
+// host's explicit approval before the joiner is actually admitted — reusing
+// the existing waiting-room admit/reject flow above so there's exactly one
+// approval mechanism in the codebase, not two.
+//
+// POST /link              — host creates a link for a (new) call
+// GET  /link/:token        — resolve a link to public call info (no passcode)
+// POST /link/:token/join   — submit passcode; joins directly or enters the
+//                            waiting room depending on the host's settings
+// ─────────────────────────────────────────────────────────────────────────────
+
+router.post('/link', apiRateLimiter, callInitiationLimiter, asyncHandler(async (req, res) => {
+  try {
+    const auth = checkAuth(req, res); if (!auth) return;
+    if (!checkModels(res)) return;
+    const { userId } = auth;
+    const { callType, passcode, requireApproval } = req.body || {};
+
+    const type = callType === 'video' ? 'video' : 'audio';
+    // 20 random bytes → 40 hex chars: unique and unguessable per link, every time.
+    const token = crypto.randomBytes(20).toString('hex');
+    const passcodeHash = (passcode && String(passcode).trim())
+      ? await bcrypt.hash(String(passcode).trim(), 10)
+      : null;
+
+    const call = await Call.create({
+      callerId: userId,
+      type,
+      // A link-based call has no ring/answer step for the host — they're
+      // already "in" the call waiting for others — so it starts as
+      // in-progress immediately. POST /:callId/join (used once a joiner is
+      // approved) only accepts calls with status:'in-progress'.
+      status: 'in-progress',
+      startedAt: new Date(),
+      isGroupCall: true,
+      participants: [userId],
+      metadata: {
+        linkToken: token,
+        linkPasscodeHash: passcodeHash,
+        // Defaults closed: no explicit false means approval is required, so a
+        // link can never be made to bypass host approval by omission.
+        linkRequireApproval: requireApproval !== false,
+        waitingRoom: [],
+      },
+    });
+
+    res.json({
+      success: true,
+      data: {
+        callId: call.id,
+        token,
+        callType: type,
+        requiresPasscode: !!passcodeHash,
+        requiresApproval: requireApproval !== false,
+        // Frontend builds the shareable URL from this path + its own origin,
+        // e.g. `${location.origin}/join-call.html?token=${token}`.
+        joinPath: `/join-call.html?token=${token}`,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to create call link' });
+  }
+}));
+
+router.get('/link/:token', apiRateLimiter, asyncHandler(async (req, res) => {
+  try {
+    const auth = checkAuth(req, res); if (!auth) return;
+    if (!checkModels(res)) return;
+    const { token } = req.params;
+    if (!token) return res.status(400).json({ success: false, message: 'token required' });
+
+    const call = await Call.findOne({
+      // Sequelize's dot-notation targets a key inside a JSON/JSONB column on
+      // Postgres (translates to the `->>` / `#>>` operator) — a plain nested
+      // object here (`{ metadata: { linkToken: token } }`) is NOT the same
+      // thing and does not query inside the JSONB value.
+      where: { 'metadata.linkToken': token },
+    });
+    if (!call || ['completed', 'cancelled', 'failed'].includes(call.status)) {
+      return res.status(404).json({ success: false, message: 'This call link is no longer valid' });
+    }
+
+    const host = await User.findByPk(call.callerId, { attributes: ['id', 'username', 'displayName', 'avatar'] });
+    const meta = call.metadata || {};
+    res.json({
+      success: true,
+      data: {
+        callId: call.id,
+        callType: call.type,
+        hostName: (host && (host.displayName || host.username)) || 'Someone',
+        hostAvatar: (host && host.avatar) || null,
+        requiresPasscode: !!meta.linkPasscodeHash,
+        alreadyJoined: Array.isArray(call.participants) && call.participants.includes(auth.userId),
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to resolve call link' });
+  }
+}));
+
+router.post('/link/:token/join', apiRateLimiter, asyncHandler(async (req, res) => {
+  try {
+    const auth = checkAuth(req, res); if (!auth) return;
+    const { userId } = auth;
+    if (!checkModels(res)) return;
+    const { token } = req.params;
+    const { passcode } = req.body || {};
+
+    const call = await Call.findOne({ where: { 'metadata.linkToken': token } });
+    if (!call || ['completed', 'cancelled', 'failed'].includes(call.status)) {
+      return res.status(404).json({ success: false, message: 'This call link is no longer valid' });
+    }
+
+    const meta = call.metadata || {};
+
+    if (meta.linkPasscodeHash) {
+      const supplied = (passcode && String(passcode).trim()) || '';
+      const ok = supplied && await bcrypt.compare(supplied, meta.linkPasscodeHash);
+      if (!ok) {
+        return res.status(401).json({ success: false, message: 'Incorrect passcode' });
+      }
+    }
+
+    // Host joining their own link, or someone already admitted — let them
+    // straight back in without re-entering the waiting room.
+    if (call.callerId === userId || (call.participants || []).includes(userId)) {
+      return res.json({ success: true, data: { callId: call.id, status: 'approved' } });
+    }
+
+    if (meta.linkRequireApproval === false) {
+      const participants = call.participants || [];
+      if (!participants.includes(userId)) participants.push(userId);
+      await call.update({ participants });
+      await notifyUser(req.io, call.callerId, 'call:link:participant_joined', { callId: call.id, userId });
+      return res.json({ success: true, data: { callId: call.id, status: 'approved' } });
+    }
+
+    // Approval required — reuse the exact same waiting-room record shape and
+    // notification the manual /waiting-room/join endpoint uses, so the host
+    // sees one consistent request queue regardless of how someone tried to join.
+    const user = await User.findByPk(userId, { attributes: ['id', 'username', 'avatar'] });
+    const entry = { userId, username: user?.username || `User ${userId}`, avatar: user?.avatar || null, requestedAt: Date.now() };
+    const wr = meta.waitingRoom || [];
+    if (!wr.find(w => w.userId === userId)) wr.push(entry);
+    await call.update({ metadata: { ...meta, waitingRoom: wr } });
+
+    await notifyUser(req.io, call.callerId, 'call:waiting_room_join', { callId: call.id, participant: entry });
+
+    res.json({ success: true, data: { callId: call.id, status: 'waiting' } });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to join call link' });
+  }
+}));
+
+
 // POST /:callId/breakout/create  — Host creates breakout rooms
 // POST /:callId/breakout/assign  — Assign participants to rooms
 // POST /:callId/breakout/end     — End all breakout rooms
