@@ -2009,9 +2009,6 @@ router.post('/:statusId/reply', authenticateToken, [
     // notification (which targets the user directly, not a chat row)
     // still fires normally. Delegate to the same locked, type:'direct'
     // resolver POST /messages and the call flow now use.
-    const Message = db.Message || db.Messages || db.ChatMessage || db.ChatMessages;
-    if (!Message) return res.status(503).json({ success: false, message: 'Message service unavailable' });
-
     const messageDeliveryService = require('../services/messageDeliveryService');
     let chatId = null;
     try {
@@ -2020,17 +2017,49 @@ router.post('/:statusId/reply', authenticateToken, [
         return res.status(400).json({ success: false, message: resolveErr.message || 'Could not resolve conversation' });
     }
 
-    const message = await Message.create({
-        chatId,
-        senderId,
-        receiverId: ownerId,
-        content: content.trim(),
-        type: 'status_reply',
-        replyToStatusId: +statusId,
-        statusPreview,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-    }).catch(e => { throw Object.assign(new Error('Failed to save reply: ' + e.message), { statusCode: 500 }); });
+    // ROOT-CAUSE FIX (STATUS-REPLY-CONTENT-LOST / SHOWS-AS-"user"):
+    // this route used to run its own raw `Message.create()` + hand-built
+    // `io.emit('new_message', {statusId, message:{...}, chatId, ...})` —
+    // a THIRD, independent send+broadcast pipeline alongside the app's one
+    // canonical pair (messageDeliveryService.sendMessage() for the INSERT,
+    // messageBroadcast.broadcastNewMessage() for real-time delivery — see
+    // that file's own header comment: "the one authoritative post-create
+    // step"). Two concrete, confirmed breaks came from that:
+    //   1. The hand-built socket payload nested the real message under
+    //      `payload.message` instead of the flat canonical wire shape
+    //      (`{id, chatId, senderId, content, sender, ...}` at the TOP
+    //      level) that messageBroadcast.js defines and every frontend
+    //      listener (js/message-client.js's applyIncomingMessage()) is
+    //      written to expect. `payload.id`/`payload.content` were
+    //      `undefined` on arrival, so the reply appeared to send (the 201
+    //      response succeeded) but rendered nothing / got lost client-side.
+    //   2. The raw `Message.create()` never resolved+attached `.sender`
+    //      the way messageDeliveryService.sendMessage() does (a real
+    //      {id, username, avatar, firstName, lastName} lookup). Downstream
+    //      conversation-list code that reads `message.sender.username`
+    //      for a still-unknown chat had nothing to read, so it fell back
+    //      to a generic "user" placeholder instead of the friend's real
+    //      name — and, combined with (1)'s malformed payload, could look
+    //      like a brand-new/duplicate conversation rather than a reply
+    //      landing in the existing thread.
+    // Fixed by routing through the exact same two canonical calls the
+    // normal 1:1 send path uses, keyed to the chatId already resolved
+    // above — same conversation, same wire shape, same sender lookup.
+    const messageBroadcast = require('../services/messageBroadcast');
+    const crypto = require('crypto');
+    const clientMessageId = `status-reply:${statusId}:${senderId}:${crypto.randomUUID()}`;
+    let message;
+    try {
+        const result = await messageDeliveryService.sendMessage({
+            chatId, receiverId: ownerId, senderId,
+            content: content.trim(), type: 'status_reply', clientMessageId,
+            metadata: { statusReply: { statusId: +statusId, statusPreview: JSON.parse(statusPreview) } },
+        });
+        message = result.message;
+    } catch (sendErr) {
+        const status = sendErr.status || (sendErr.name === 'ValidationError' ? 400 : 500);
+        return res.status(status).json({ success: false, message: sendErr.message || 'Failed to save reply' });
+    }
 
     if (StatusReply) {
         await StatusReply.create({
@@ -2044,12 +2073,21 @@ router.post('/:statusId/reply', authenticateToken, [
         }).catch(() => {});
     }
 
-    // Real-time: deliver to owner via socket
+    // Canonical real-time delivery — same call the normal 1:1 send path
+    // uses, so the message reaches the recipient in the exact wire shape
+    // js/message-client.js already knows how to render (flat id/content/
+    // sender fields, correct event name 'message:new').
+    await messageBroadcast.broadcastNewMessage(message, senderId).catch(() => {});
+
+    // Status-specific notification (separate concern from message
+    // delivery above) — lets the status feed UI show "X replied to your
+    // status" / update reply counts without message.html needing to know
+    // anything about statuses at all.
     const io = getIO(req);
     if (io) {
-        const payload = {
+        const statusPayload = {
             statusId: Number(statusId),
-            message: message.toJSON ? message.toJSON() : message,
+            message,
             chatId,
             type: 'status_reply',
             senderId,
@@ -2057,17 +2095,15 @@ router.post('/:statusId/reply', authenticateToken, [
             statusPreview: JSON.parse(statusPreview),
             timestamp: new Date().toISOString(),
         };
-        io.to(`user:${ownerId}`).emit('new_message',    payload);
-        io.to(`user:${ownerId}`).emit('status:reply',   payload);
-        io.to(`user:${senderId}`).emit('new_message',   payload); // sender's other tabs
-        io.to(`user:${senderId}`).emit('status:reply',  payload);
+        io.to(`user:${ownerId}`).emit('status:reply', statusPayload);
+        io.to(`user:${senderId}`).emit('status:reply', statusPayload);
     }
 
     res.status(201).json({
         success: true,
         message: 'Reply sent',
         data: {
-            message: message.toJSON ? message.toJSON() : message,
+            message,
             chatId,
             statusPreview: JSON.parse(statusPreview),
         }
