@@ -104,7 +104,7 @@ class GroupController {
                     if (cloudinaryService.isConfigured()) {
                         const tmpResult = await cloudinaryService.uploadToCloudinary(
                             req.file.buffer || require('fs').readFileSync(req.file.path),
-                            { folder: 'nexopa/group-avatars', width: 400, height: 400 }
+                            { folder: 'necpa/group-avatars', width: 400, height: 400 }
                         );
                         if (tmpResult?.url) avatarUrl = tmpResult.url;
                         if (req.file.path) try { require('fs').unlinkSync(req.file.path); } catch (_) {}

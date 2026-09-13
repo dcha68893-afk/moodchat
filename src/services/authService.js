@@ -334,7 +334,7 @@ class AuthService {
         }
         await user.update(updates);
       } else {
-        // Derive a unique username from the Google profile since Nexopa
+        // Derive a unique username from the Google profile since Necpa
         // requires one; fall back to appending part of the Google id on collision.
         const base = (googleGivenName || payload.name || email.split('@')[0])
           .toLowerCase().replace(/[^a-z0-9_]/g, '') || (email.split('@')[0].replace(/[^a-zA-Z0-9_]/g, '') || 'user');

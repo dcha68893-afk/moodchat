@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Nexopa Backend Deployment Script
+# Necpa Backend Deployment Script
 # Deploys the latest version of the application
 
 set -e
@@ -13,14 +13,14 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Configuration
-APP_NAME="nexopa-backend"
-APP_DIR="/opt/nexopa/backend"
-LOG_DIR="/var/log/nexopa"
-BACKUP_DIR="/opt/nexopa/backups"
+APP_NAME="necpa-backend"
+APP_DIR="/opt/necpa/backend"
+LOG_DIR="/var/log/necpa"
+BACKUP_DIR="/opt/necpa/backups"
 ENV_FILE="$APP_DIR/.env"
-PM2_APP_NAME="nexopa-backend"
+PM2_APP_NAME="necpa-backend"
 BRANCH="main"
-GIT_REPO="https://github.com/your-org/nexopa-backend.git"
+GIT_REPO="https://github.com/your-org/necpa-backend.git"
 
 # Logging functions
 log_info() {

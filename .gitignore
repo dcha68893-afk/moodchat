@@ -101,8 +101,8 @@ public
 .vscode-test
 
 # Local docker volumes
-nexopa-postgres-data/
-nexopa-redis-data/
+necpa-postgres-data/
+necpa-redis-data/
 
 # Docker compose
 docker-compose.override.yml

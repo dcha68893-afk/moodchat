@@ -738,7 +738,7 @@ const updateProfileHandler = asyncHandler(async (req, res) => {
                     return res.status(413).json({ status: 'error', success: false, message: 'Cover photo too large (max 10MB)' });
                 }
                 const uploadResult = await cloudinaryService.uploadToCloudinary(buffer, {
-                    folder: 'nexopa/user-covers',
+                    folder: 'necpa/user-covers',
                     publicId: `user_${userId}_cover`,
                     width: 1600,
                     height: 600,
@@ -1370,7 +1370,7 @@ router.post('/2fa/setup', apiRateLimiter, asyncHandler(async (req, res) => {
         const crypto = require('crypto');
 
         const secret = authenticator.generateSecret();
-        const otpUrl = authenticator.keyuri(user.email || user.username, 'Nexopa', secret);
+        const otpUrl = authenticator.keyuri(user.email || user.username, 'Necpa', secret);
         const qrCode = await QRCode.toDataURL(otpUrl);
         const backupCodes = Array.from({ length: 8 }, () => crypto.randomBytes(4).toString('hex').toUpperCase());
 

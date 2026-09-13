@@ -43,7 +43,7 @@ function _fetchHtml(rawUrl) {
     const req = lib.get(rawUrl, {
       timeout: 5000,
       headers: {
-        'User-Agent': 'Nexopa/1.0 LinkPreview (+https://nexopa.app)',
+        'User-Agent': 'Necpa/1.0 LinkPreview (+https://necpa.app)',
         'Accept': 'text/html,application/xhtml+xml',
         'Accept-Language': 'en',
       },

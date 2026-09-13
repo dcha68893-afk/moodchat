@@ -1725,7 +1725,7 @@ class ProfessionalLogger {
     
     startupBanner(port, host) {
         _slog(`\n${this.colors.green}══════════════════════════════════════════════════════════════════════════════${this.colors.reset}`);
-        _slog(`${this.colors.green}                    🚀 Nexopa Server Initializing                              ${this.colors.reset}`);
+        _slog(`${this.colors.green}                    🚀 Necpa Server Initializing                              ${this.colors.reset}`);
         _slog(`${this.colors.green}══════════════════════════════════════════════════════════════════════════════${this.colors.reset}`);
         _slog(`${this.colors.cyan}   Optimizations Enabled:${this.colors.reset}`);
         _slog(`${this.colors.cyan}   • UV_THREADPOOL_SIZE: ${process.env.UV_THREADPOOL_SIZE}${this.colors.reset}`);
@@ -1836,7 +1836,7 @@ class ConfigurationManager {
         this.set('PORT', parseInt(process.env.PORT, 10) || 4000);
         this.set('HOST', isRenderRuntime ? '0.0.0.0' : (process.env.HOST || '0.0.0.0'));
         this.set('API_VERSION', process.env.API_VERSION || '1.0.0');
-        this.set('APP_NAME', process.env.APP_NAME || 'Nexopa');
+        this.set('APP_NAME', process.env.APP_NAME || 'Necpa');
        
         const jwtSecret = process.env.JWT_SECRET;
     
@@ -4714,7 +4714,7 @@ class Application {
             systemState.incrementMetric('publicRouteAccess');
             return res.json({
                 success: true,
-                message: 'Nexopa API Server',
+                message: 'Necpa API Server',
                 version: config.get('API_VERSION'),
                 environment: config.get('NODE_ENV'),
                 timestamp: new Date().toISOString(),
@@ -5362,7 +5362,7 @@ class Application {
                     logger.success('Socket.IO initialized with middleware auth ✅', 'WEBSOCKET');
 
                     // ═══════════════════════════════════════════════════════════════════════
-                    // NEXOPA INFRASTRUCTURE PHASES 1-6 — AUTO-INITIALIZES AFTER SOCKET INIT
+                    // NECPA INFRASTRUCTURE PHASES 1-6 — AUTO-INITIALIZES AFTER SOCKET INIT
                     // Non-destructive: each phase wraps existing services, never replaces them.
                     // ═══════════════════════════════════════════════════════════════════════
 
@@ -5374,13 +5374,13 @@ class Application {
                             adminPath:  '/internal/diagnostics',
                             logger:     console,
                         });
-                        logger.success('Nexopa Phase 1 — Foundation Layer ✅', 'PHASE1');
+                        logger.success('Necpa Phase 1 — Foundation Layer ✅', 'PHASE1');
 
                     // ── PHASE 15: Message & Call delivery hardening ───────────
                     try {
                         const { installMessageDeliveryPatch } = require('./services/phase15/MessageDeliveryPatch');
                         installMessageDeliveryPatch(this.io, this.app);
-                        logger.success('Nexopa Phase 15 — Delivery Patch ✅', 'PHASE15');
+                        logger.success('Necpa Phase 15 — Delivery Patch ✅', 'PHASE15');
                     } catch (err) {
                         console.warn('[Phase15] Init failed (non-fatal):', err.message);
                     }
@@ -5396,7 +5396,7 @@ class Application {
                             global.__phase2 = initPhase2(this.io, this.app, {
                                 phase1: global.__phase1, logger: console,
                             });
-                            logger.success('Nexopa Phase 2 — Hybrid Transport Engine ✅', 'PHASE2');
+                            logger.success('Necpa Phase 2 — Hybrid Transport Engine ✅', 'PHASE2');
                         } catch (err) {
                             console.warn('[Phase2] Init failed (non-fatal):', err.message);
                             global.__phase2 = {};
@@ -5423,7 +5423,7 @@ class Application {
                                 phase1: global.__phase1, phase2: global.__phase2,
                                 wsService: this.websocket, logger: console,
                             });
-                            logger.success('Nexopa Phase 3 — WebRTC Call Engine ✅', 'PHASE3');
+                            logger.success('Necpa Phase 3 — WebRTC Call Engine ✅', 'PHASE3');
                         } catch (err) {
                             if (attempt < maxAttempts) {
                                 const delay = Math.min(2000 * attempt, 15000);
@@ -5451,7 +5451,7 @@ class Application {
                                 phase3: global.__phase3, wsService: this.websocket,
                                 logger: console,
                             });
-                            logger.success('Nexopa Phase 4 — Social Ecosystem ✅', 'PHASE4');
+                            logger.success('Necpa Phase 4 — Social Ecosystem ✅', 'PHASE4');
                         } catch (err) {
                             console.warn('[Phase4] Init failed (non-fatal):', err.message);
                             global.__phase4 = {};
@@ -5467,7 +5467,7 @@ class Application {
                                 phase3: global.__phase3, phase4: global.__phase4,
                                 wsService: this.websocket, logger: console,
                             });
-                            logger.success('Nexopa Phase 5 — Production Reliability ✅', 'PHASE5');
+                            logger.success('Necpa Phase 5 — Production Reliability ✅', 'PHASE5');
                         } catch (err) {
                             console.warn('[Phase5] Init failed (non-fatal):', err.message);
                             global.__phase5 = {};
@@ -5484,7 +5484,7 @@ class Application {
                                 phase5: global.__phase5, wsService: this.websocket,
                                 logger: console,
                             });
-                            logger.success('Nexopa Phase 6 — Runtime Integration ✅', 'PHASE6');
+                            logger.success('Necpa Phase 6 — Runtime Integration ✅', 'PHASE6');
                         } catch (err) {
                             console.warn('[Phase6] Init failed (non-fatal):', err.message);
                             global.__phase6 = {};

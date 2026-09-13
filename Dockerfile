@@ -14,10 +14,10 @@ RUN if [ -f package-lock.json ]; then \
 COPY . .
 
 RUN addgroup -g 1001 -S nodejs && \
-    adduser -S nexopa -u 1001
+    adduser -S necpa -u 1001
 
-RUN chown -R nexopa:nodejs /usr/src/app
-USER nexopa
+RUN chown -R necpa:nodejs /usr/src/app
+USER necpa
 
 ARG PORT=3000
 EXPOSE ${PORT}

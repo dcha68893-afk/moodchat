@@ -733,8 +733,8 @@ const statusUpload = multer ? multer({
 async function resolveUploadedFileUrl(req, file) {
     if (!file) return null;
     if (_statusCloudinaryEnabled) {
-        const folder = file.mimetype.startsWith('image/') ? 'nexopa/status/images' :
-                       file.mimetype.startsWith('video/') ? 'nexopa/status/videos' : 'nexopa/status/audio';
+        const folder = file.mimetype.startsWith('image/') ? 'necpa/status/images' :
+                       file.mimetype.startsWith('video/') ? 'necpa/status/videos' : 'necpa/status/audio';
         const result = await cloudinaryService.uploadToCloudinary(file.buffer, { folder });
         if (!result) throw new Error('Cloudinary upload failed');
         return result.url;

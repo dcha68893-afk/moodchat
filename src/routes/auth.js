@@ -1110,7 +1110,7 @@ router.post('/2fa/enable', authenticateToken, asyncHandler(async (req, res) => {
         }
 
         const secret = authenticator.generateSecret();
-        const otpauthUrl = authenticator.keyuri(user.email, 'Nexopa', secret);
+        const otpauthUrl = authenticator.keyuri(user.email, 'Necpa', secret);
         const qrCodeDataUrl = await QRCode.toDataURL(otpauthUrl);
 
         // Store secret but DO NOT enable 2FA yet — must verify first via /2fa/verify

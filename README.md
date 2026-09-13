@@ -1,6 +1,6 @@
-# Nexopa Backend
+# Necpa Backend
 
-A production-ready backend service for Nexopa application, providing RESTful APIs for real-time mood tracking and social interaction features.
+A production-ready backend service for Necpa application, providing RESTful APIs for real-time mood tracking and social interaction features.
 
 ## Features
 
@@ -38,4 +38,4 @@ A production-ready backend service for Nexopa application, providing RESTful API
 1. **Clone the repository**
    ```bash
    git clone <repository-url>
-   cd nexopa-backend
+   cd necpa-backend

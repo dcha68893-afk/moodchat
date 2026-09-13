@@ -3431,7 +3431,7 @@ class MarketplaceExtensions {
                 currency: 'KES',
                 min_payout: parseFloat(process.env.MIN_PAYOUT||'100'),
                 require_kyc: process.env.REQUIRE_KYC !== 'false',
-                marketplace_name: process.env.MARKETPLACE_NAME || 'Nexopa Market',
+                marketplace_name: process.env.MARKETPLACE_NAME || 'Necpa Market',
                 support_email: process.env.SUPPORT_EMAIL || '',
             });
         } catch(e) { err(next, e, 'adminGetSettings'); }

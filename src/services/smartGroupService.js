@@ -284,14 +284,14 @@ const EventService = {
       const dt = new Date(d);
       return dt.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
     };
-    const uid  = `${event.id}-${groupId}@nexopa.app`;
+    const uid  = `${event.id}-${groupId}@necpa.app`;
     const now  = fmt(new Date());
     const dtStart = fmt(event.startTime);
     const dtEnd   = event.endTime ? fmt(event.endTime) : fmt(new Date(new Date(event.startTime).getTime() + 3600_000));
     const ics = [
       'BEGIN:VCALENDAR',
       'VERSION:2.0',
-      'PRODID:-//Nexopa//Group Events//EN',
+      'PRODID:-//Necpa//Group Events//EN',
       'CALSCALE:GREGORIAN',
       'METHOD:PUBLISH',
       'BEGIN:VEVENT',

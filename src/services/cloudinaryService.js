@@ -48,7 +48,7 @@ async function uploadToCloudinary(fileData, options = {}) {
   if (!cld) return null;
 
   const {
-    folder = 'nexopa/uploads',
+    folder = 'necpa/uploads',
     publicId = null,
     width = null,
     height = null,
@@ -106,15 +106,15 @@ async function uploadToCloudinary(fileData, options = {}) {
 }
 
 async function uploadGroupAvatar(fileBuffer, groupId) {
-  return uploadToCloudinary(fileBuffer, { folder: 'nexopa/group-avatars', publicId: `group_${groupId}_avatar`, width: 400, height: 400, crop: 'fill', gravity: 'face:auto' });
+  return uploadToCloudinary(fileBuffer, { folder: 'necpa/group-avatars', publicId: `group_${groupId}_avatar`, width: 400, height: 400, crop: 'fill', gravity: 'face:auto' });
 }
 
 async function uploadGroupCover(fileBuffer, groupId) {
-  return uploadToCloudinary(fileBuffer, { folder: 'nexopa/group-covers', publicId: `group_${groupId}_cover`, width: 1600, height: 500, crop: 'fill' });
+  return uploadToCloudinary(fileBuffer, { folder: 'necpa/group-covers', publicId: `group_${groupId}_cover`, width: 1600, height: 500, crop: 'fill' });
 }
 
 async function uploadUserAvatar(fileBuffer, userId) {
-  return uploadToCloudinary(fileBuffer, { folder: 'nexopa/user-avatars', publicId: `user_${userId}_avatar`, width: 400, height: 400, crop: 'fill', gravity: 'face:auto' });
+  return uploadToCloudinary(fileBuffer, { folder: 'necpa/user-avatars', publicId: `user_${userId}_avatar`, width: 400, height: 400, crop: 'fill', gravity: 'face:auto' });
 }
 
 async function deleteFromCloudinary(publicId) {
