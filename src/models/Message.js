@@ -77,17 +77,10 @@ module.exports = (sequelize, DataTypes) => {
       },
       // ===== END ADDED COLUMNS =====
       // ===== MESSAGE LIFECYCLE REBUILD (see migrations/2026999990013) =====
-      // clientMessageId: the sender's locally-generated ID, set BEFORE the
-      // message ever reaches the server. Enables idempotent resend — if a
-      // client retries after a dropped connection, the unique index on
-      // (senderId, clientMessageId) means the server returns the existing
-      // row instead of creating a duplicate.
       clientMessageId: {
         type: DataTypes.STRING(64),
         allowNull: true,
       },
-      // Explicit lifecycle state: 'sent' | 'delivered' | 'read' | 'failed'.
-      // ('pending' is a client-only, pre-server state and never stored here.)
       status: {
         type: DataTypes.STRING(20),
         defaultValue: 'sent',
@@ -132,7 +125,6 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: true,
         comment: 'Timer in seconds: 86400=24h, 604800=7d, 2592000=30d, 7776000=90d',
       },
-      // NEW FEATURE: View Once media tracking (see migration 2026999990004)
       viewOnceViewedAt: {
         type: DataTypes.DATE,
         allowNull: true,
@@ -174,42 +166,38 @@ module.exports = (sequelize, DataTypes) => {
       underscored: false,
       freezeTableName: true,
       indexes: [
+        { fields: ['chatId'] },
+        { fields: ['senderId'] },
+        { fields: ['receiverId'] },
+        { fields: ['replyToId'] },
+        { fields: ['replyToStatusId'] },
+        { fields: ['createdAt'] },
+        { fields: ['chatId', 'createdAt'] },
         {
-          fields: ['chatId'],
-        },
-        {
-          fields: ['senderId'],
-        },
-        {
-          fields: ['receiverId'],
-        },
-        {
-          fields: ['replyToId'],
-        },
-        {
-          fields: ['replyToStatusId'],
-        },
-        {
-          fields: ['createdAt'],
-        },
-        {
-          fields: ['chatId', 'createdAt'],
-        },
-        {
-          // FIX-AUDIT (MSG-DB-001): covers the hottest query pattern —
-          // WHERE chatId = X AND isDeleted = false ORDER BY createdAt DESC.
-          // Kept in sync with migrations/2026999990001_add_messages_perf_indexes.js
           fields: ['chatId', 'isDeleted', 'createdAt'],
           name: 'idx_messages_chat_deleted_created',
         },
-        {
-          fields: ['isRead'],  // Add index for isRead
-        },
+        { fields: ['isRead'] },
       ],
+      hooks: {
+        // Group messages are broadcast to a set of recipients, so a group
+        // message is NOT "delivered" merely because the server inserted the
+        // row. The group POST route previously wrote deliveredAt=NOW() during
+        // INSERT, which made the sender see a false "Delivered" state even
+        // when no member socket had received the message. Keep group messages
+        // at SENT until a real delivery/read path explicitly advances them.
+        beforeCreate(message) {
+          const metadata = message.metadata;
+          const isGroupMessage = metadata && typeof metadata === 'object' && metadata.groupId != null;
+          if (isGroupMessage) {
+            message.deliveredAt = null;
+            message.status = 'sent';
+          }
+        },
+      },
     }
   );
 
-  // Instance methods
   Messages.prototype.edit = async function (newContent) {
     this.content = newContent;
     this.isEdited = true;
@@ -258,20 +246,11 @@ module.exports = (sequelize, DataTypes) => {
     return await this.save();
   };
 
-  // Static methods
   Messages.getChatMessages = async function (chatId, options = {}) {
-    const where = {
-      chatId: chatId,
-      isDeleted: false,
-    };
+    const where = { chatId: chatId, isDeleted: false };
 
-    if (options.beforeId) {
-      where.id = { [Op.lt]: options.beforeId };
-    }
-
-    if (options.afterId) {
-      where.id = { [Op.gt]: options.afterId };
-    }
+    if (options.beforeId) where.id = { [Op.lt]: options.beforeId };
+    if (options.afterId) where.id = { [Op.gt]: options.afterId };
 
     return await this.findAll({
       where: where,
@@ -285,13 +264,11 @@ module.exports = (sequelize, DataTypes) => {
           model: this,
           as: 'messageParent',
           attributes: ['id', 'content', 'type', 'senderId'],
-          include: [
-            {
-              model: this.sequelize.models.Users,
-              as: 'messageSender',
-              attributes: ['id', 'username', 'avatar'],
-            },
-          ],
+          include: [{
+            model: this.sequelize.models.Users,
+            as: 'messageSender',
+            attributes: ['id', 'username', 'avatar'],
+          }],
         },
         {
           model: this.sequelize.models.Media,
@@ -311,13 +288,11 @@ module.exports = (sequelize, DataTypes) => {
         isDeleted: false,
         content: { [Op.iLike]: `%${query}%` },
       },
-      include: [
-        {
-          model: this.sequelize.models.Users,
-          as: 'messageSender',
-          attributes: ['id', 'username', 'avatar'],
-        },
-      ],
+      include: [{
+        model: this.sequelize.models.Users,
+        as: 'messageSender',
+        attributes: ['id', 'username', 'avatar'],
+      }],
       order: [['createdAt', 'DESC']],
       limit: 100,
     });
@@ -325,10 +300,7 @@ module.exports = (sequelize, DataTypes) => {
 
   Messages.markAllAsRead = async function (chatId, userId) {
     const [affectedRows] = await this.update(
-      { 
-        isRead: true,
-        readAt: new Date()
-      },
+      { isRead: true, readAt: new Date() },
       {
         where: {
           chatId: chatId,
@@ -351,7 +323,6 @@ module.exports = (sequelize, DataTypes) => {
     });
   };
 
-  // Associations
   Messages.associate = function(models) {
     if (Messages._associationsDefined) return;
     Messages._associationsDefined = true;
