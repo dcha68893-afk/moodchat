@@ -1577,10 +1577,38 @@ class MarketplaceController {
                 byDay.push({ day: d.toLocaleDateString('en-KE', { weekday: 'short' }), date: d.toISOString().slice(0,10), revenue: parseFloat(rev) });
             }
 
-            const [totalUsers, totalSellers] = await Promise.all([
+            // FIX (item 11 — "0 sellers" despite users having marketplace
+            // listings): this only ever counted Users.role === 'seller',
+            // but product creation (createProduct) sets sellerId to the
+            // authenticated user's id regardless of their global role — a
+            // normal user can list products without ever being granted the
+            // 'seller' role. A marketplace seller should be recognized by
+            // actually owning a listing, not only by a global role flag.
+            // Count the union of both (distinct sellerId on Tool + role
+            // === 'seller') so this never under-counts real sellers and
+            // never requires converting every listing owner into a global
+            // 'seller' role to be recognized as one.
+            const [totalUsers, roleSellers, listingSellerRows] = await Promise.all([
                 Users ? Users.count() : 0,
                 Users ? Users.count({ where: { role: 'seller' } }) : 0,
+                T ? T.findAll({
+                    attributes: ['sellerId'],
+                    where: { status: { [Op.ne]: 'deleted' } },
+                    raw: true,
+                }) : [],
             ]);
+            let totalSellers = roleSellers;
+            if (Users && Array.isArray(listingSellerRows) && listingSellerRows.length) {
+                const listingIds = [...new Set(listingSellerRows.map(r => r.sellerId).filter(Boolean).map(String))];
+                if (listingIds.length) {
+                    const roleSellerRows = await Users.findAll({
+                        where: { role: 'seller' }, attributes: ['id'], raw: true,
+                    });
+                    const roleSellerIdSet = new Set(roleSellerRows.map(r => String(r.id)));
+                    const unionIds = new Set([...roleSellerIdSet, ...listingIds]);
+                    totalSellers = unionIds.size;
+                }
+            }
             const [totalProducts, activeProducts, pendingProducts] = await Promise.all([
                 T ? T.count({ where: { status: { [Op.ne]: 'deleted' } } }) : 0,
                 T ? T.count({ where: { status: 'active' } }) : 0,
@@ -2269,6 +2297,8 @@ function _formatProduct(row) {
         seller: {
             id:       r.seller?.id || r.sellerId,
             name:     r.seller?.displayName || r.seller?.username || 'Seller',
+            username: r.seller?.username || '',
+            email:    r.seller?.email || '',
             avatar:   r.seller?.avatar || '',
             verified: false,
             rating:   0,
@@ -3173,8 +3203,19 @@ class MarketplaceExtensions {
             if (!T) return ok(res, { products: [] });
             const { status, page=1, limit=50 } = req.query;
             const where = status ? { status } : {};
+            // FIX (item 12 — admin Products showing "Unknown seller"/"0
+            // seller"): this query never included the seller association,
+            // so _formatProduct()'s r.seller was always undefined and fell
+            // through to its generic placeholder. Include the actual
+            // seller (Tool.belongsTo(Users, {as:'seller'})) so admin sees
+            // the real creator.
+            const sellerInclude = T.associations?.seller ? [{
+                association: T.associations.seller,
+                attributes: ['id', 'username', 'email', 'displayName', 'avatar'],
+                required: false,
+            }] : [];
             const [products, total] = await Promise.all([
-                T.findAll({ where, order: [['createdAt','DESC']], limit: parseInt(limit), offset: (parseInt(page)-1)*parseInt(limit) }),
+                T.findAll({ where, include: sellerInclude, order: [['createdAt','DESC']], limit: parseInt(limit), offset: (parseInt(page)-1)*parseInt(limit) }),
                 T.count({ where }),
             ]);
             return ok(res, { products: products.map(p => _formatProduct(p)), total, page: parseInt(page) });
@@ -3185,12 +3226,45 @@ class MarketplaceExtensions {
         try {
             const db = getDb();
             const Users = db.Users || db.User;
+            const T = Model.Tool;
             if (!Users) return ok(res, { sellers: [], total: 0 });
             const { limit=50, page=1 } = req.query;
-            const [sellers, total] = await Promise.all([
-                Users.findAll({ where: { role: 'seller' }, attributes: ['id','username','email','role','createdAt','isBanned'], order: [['createdAt','DESC']], limit: parseInt(limit), offset: (parseInt(page)-1)*parseInt(limit) }),
-                Users.count({ where: { role: 'seller' } }),
+
+            // FIX (item 11 — "0 sellers" despite real marketplace listings):
+            // this only ever looked at Users.role === 'seller'. A user can
+            // create a marketplace listing (sellerId: req.user.id, set in
+            // createProduct) without ever having the global 'seller' role.
+            // Recognize sellers via the union of role==='seller' AND users
+            // who actually own a (non-deleted) Tool listing — without
+            // mutating anyone's role. Also attach each seller's real
+            // listing count so admin isn't left guessing.
+            let listingCountByUser = new Map();
+            if (T) {
+                const rows = await T.findAll({
+                    attributes: ['sellerId'],
+                    where: { status: { [Op.ne]: 'deleted' } },
+                    raw: true,
+                }).catch(() => []);
+                rows.forEach(r => {
+                    const id = String(r.sellerId || '');
+                    if (!id) return;
+                    listingCountByUser.set(id, (listingCountByUser.get(id) || 0) + 1);
+                });
+            }
+            const listingOwnerIds = [...listingCountByUser.keys()];
+
+            const where = listingOwnerIds.length
+                ? { [Op.or]: [{ role: 'seller' }, { id: { [Op.in]: listingOwnerIds } }] }
+                : { role: 'seller' };
+
+            const [sellerRows, total] = await Promise.all([
+                Users.findAll({ where, attributes: ['id','username','email','role','createdAt','isBanned'], order: [['createdAt','DESC']], limit: parseInt(limit), offset: (parseInt(page)-1)*parseInt(limit) }),
+                Users.count({ where }),
             ]);
+            const sellers = sellerRows.map(u => {
+                const plain = u.toJSON ? u.toJSON() : u;
+                return { ...plain, listingCount: listingCountByUser.get(String(plain.id)) || 0 };
+            });
             return ok(res, { sellers, total });
         } catch(e) { err(next, e, 'adminGetSellers'); }
     }

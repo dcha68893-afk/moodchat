@@ -85,10 +85,15 @@ const formatUser = (u) => {
     };
 };
 
-const formatStatus = (s) => {
+// `viewedMap`, when provided, is a Map<statusId, viewedAtISOString> for the
+// CURRENT authenticated viewer, used to attach viewedByMe/viewedAt so the
+// frontend never needs to rely on localStorage as the source of truth
+// (see /friends route below). Omitting it (existing callers) leaves the
+// behavior unchanged.
+const formatStatus = (s, viewedMap) => {
     if (!s) return null;
     const d = s.toJSON ? s.toJSON() : s;
-    return {
+    const out = {
         id: d.id,
         userId: d.userId,
         content: d.content,
@@ -114,6 +119,12 @@ const formatStatus = (s) => {
         updatedAt: d.updatedAt,
         user: formatUser(d.statusUser || d.user),
     };
+    if (viewedMap) {
+        const viewedAt = viewedMap.get(Number(d.id)) || null;
+        out.viewedByMe = !!viewedAt;
+        out.viewedAt = viewedAt;
+    }
+    return out;
 };
 
 const getUserId = (req) => req.user?.userId || req.user?.id || null;
@@ -329,18 +340,30 @@ const recordStatusView = async (req, status, viewerId) => {
     }
 
     let alreadyViewed = false;
+    let viewedAt = new Date();
     if (StatusView) {
-        const existing = await StatusView.findOne({
-            where: { statusId: Number(status.id), userId: Number(viewerId) }
-        }).catch(() => null);
-        alreadyViewed = !!existing;
-
-        if (!alreadyViewed) {
-            await StatusView.create({
-                statusId: Number(status.id),
-                userId: Number(viewerId),
-                viewedAt: new Date(),
-            }).catch(() => {});
+        // Race-safe: rely on the unique (statusId, userId) DB constraint via
+        // findOrCreate instead of a separate find-then-create, which can race
+        // under concurrent requests and double-count viewCount.
+        try {
+            const [viewRow, created] = await StatusView.findOrCreate({
+                where: { statusId: Number(status.id), userId: Number(viewerId) },
+                defaults: { statusId: Number(status.id), userId: Number(viewerId), viewedAt },
+            });
+            alreadyViewed = !created;
+            viewedAt = viewRow.viewedAt || viewedAt;
+        } catch (err) {
+            // Unique constraint race: another concurrent request inserted first.
+            // Treat as already viewed so we never double-increment viewCount.
+            if (err && (err.name === 'SequelizeUniqueConstraintError')) {
+                alreadyViewed = true;
+                const existing = await StatusView.findOne({
+                    where: { statusId: Number(status.id), userId: Number(viewerId) }
+                }).catch(() => null);
+                if (existing) viewedAt = existing.viewedAt || viewedAt;
+            } else {
+                alreadyViewed = true; // fail safe: never increment on unexpected error
+            }
         }
     }
 
@@ -1029,10 +1052,23 @@ router.get('/friends', authenticateToken, apiRateLimiter, asyncHandler(async (re
     rows = await filterStatusesForViewer(rows, userId, friendContext);
     total = rows.length;
 
+    // DATABASE is the source of truth for viewed state (not localStorage):
+    // look up every StatusView row the current user has for the statuses in
+    // this page and attach viewedByMe/viewedAt to each status.
+    let viewedMap = new Map();
+    if (StatusView && rows.length) {
+        const statusIds = rows.map((s) => Number(s.id));
+        const viewRows = await StatusView.findAll({
+            where: { userId: Number(userId), statusId: { [Op.in]: statusIds } },
+            attributes: ['statusId', 'viewedAt'],
+        }).catch(() => []);
+        viewedMap = new Map(viewRows.map((v) => [Number(v.statusId), v.viewedAt]));
+    }
+
     res.json({
         success: true,
         data: {
-            statuses: rows.map(formatStatus),
+            statuses: rows.map((s) => formatStatus(s, viewedMap)),
             pagination: { limit: +limit, offset: +offset, total, hasMore: +offset + rows.length < total },
         }
     });
