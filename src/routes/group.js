@@ -418,8 +418,15 @@ router.get('/:groupId/messages', async (req, res) => {
         if (!userId)      return res.status(401).json({ success: false, message: 'Authentication required' });
         if (isNaN(groupId)) return res.status(400).json({ success: false, message: 'Invalid group ID' });
 
+        // FIX: this check previously omitted `leftAt: null`, so a user who had
+        // left the group (a soft-deleted GroupMembers row still exists with
+        // leftAt set) was still treated as an active member and could keep
+        // loading message history. Every other membership check in the
+        // codebase (groupService.js, groupMembersService.js, webSocketService.js
+        // group:join) filters on leftAt: null — this brings history loading in
+        // line with that so "You are not a member" is enforced consistently.
         if (GroupMember) {
-            const membership = await GroupMember.findOne({ where: { groupId, userId } });
+            const membership = await GroupMember.findOne({ where: { groupId, userId, leftAt: null } });
             if (!membership) return res.status(403).json({ success: false, message: 'You are not a member of this group' });
         }
 
@@ -502,8 +509,11 @@ router.post('/:groupId/messages', async (req, res) => {
 
         if (!trimmedContent && !attachment) return res.status(400).json({ success: false, message: 'Message content is required' });
 
+        // FIX: add leftAt: null — was missing here, so a user who had left
+        // the group could still send messages into it (see matching fix on
+        // GET /:groupId/messages above for the same issue on history loading).
         if (GroupMember) {
-            const membership = await GroupMember.findOne({ where: { groupId, userId } });
+            const membership = await GroupMember.findOne({ where: { groupId, userId, leftAt: null } });
             if (!membership) return res.status(403).json({ success: false, message: 'You are not a member of this group' });
         }
 
@@ -518,7 +528,8 @@ router.post('/:groupId/messages', async (req, res) => {
         // ── P1 FIX: Enforce posting rule server-side ───────────────────────
         const postingRule = group.postingRule || 'open';
         if (postingRule !== 'open') {
-            let membership = GroupMember ? await GroupMember.findOne({ where: { groupId, userId } }) : null;
+            // FIX: add leftAt: null for consistency with the membership check above.
+            let membership = GroupMember ? await GroupMember.findOne({ where: { groupId, userId, leftAt: null } }) : null;
             const isAdmin = membership && ['owner', 'admin', 'moderator'].includes(membership.role);
             if (postingRule === 'read_only') {
                 return res.status(403).json({ success: false, message: 'This group is in read-only mode', code: 'READ_ONLY' });
@@ -569,8 +580,9 @@ router.post('/:groupId/messages', async (req, res) => {
         }
 
         // ── P2 FIX: Check mute status ──────────────────────────────────────
+        // FIX: add leftAt: null for consistency with the membership checks above.
         if (GroupMember) {
-            const membership = await GroupMember.findOne({ where: { groupId, userId } });
+            const membership = await GroupMember.findOne({ where: { groupId, userId, leftAt: null } });
             if (membership?.mutedUntil && new Date(membership.mutedUntil) > new Date()) {
                 return res.status(403).json({ success: false, message: 'You are muted in this group', mutedUntil: membership.mutedUntil, code: 'MUTED' });
             }

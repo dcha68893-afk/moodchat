@@ -302,6 +302,20 @@ class MessageDeliveryService {
       `SELECT id, username, avatar, "firstName", "lastName" FROM "Users" WHERE id = :senderId`,
       { replacements: { senderId: senderIdInt }, type: sequelize.QueryTypes.SELECT }
     ).catch(() => [null]);
+    // FIX (RECEIVER-SEES-"User"-INSTEAD-OF-REAL-NAME): this used to hand back
+    // only the raw columns (username/firstName/lastName), with no computed
+    // display name — chatService.js's GET /chats already builds
+    // `displayName = [firstName, lastName].join(' ') || username` for the
+    // exact same reason, but this message:new broadcast payload (used to
+    // populate a BRAND-NEW conversation the receiver has no prior /chats
+    // data for — e.g. right after "start chat") never got the same
+    // treatment. The frontend (message-client.js's applyIncomingMessage)
+    // only ever read message.sender.username, so any account whose
+    // `username` column is empty (common for accounts that only ever set
+    // firstName/lastName) rendered as the sidebar's generic "User" fallback
+    // on the very first message of a new chat. Compute the same displayName
+    // here so every consumer of this payload can use it exactly like /chats.
+    if (sender) sender.displayName = [sender.firstName, sender.lastName].filter(Boolean).join(' ').trim() || sender.username || null;
     message.sender = sender || null;
 
     return { message, alreadyExisted: false };

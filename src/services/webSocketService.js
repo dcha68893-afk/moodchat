@@ -275,10 +275,36 @@ class WebSocketService {
 
             // Allow client to join additional rooms
             // FIX-002: socket.off() before every socket.on() prevents listener accumulation on reconnect
-            socket.removeAllListeners('join').on('join', ({ room } = {}) => {
-                if (room && typeof room === 'string') {
+            // FIX: this used to join ANY room string blindly, including
+            // group:<id> / group_<id> rooms, with no membership check at
+            // all — unlike the dedicated 'group:join' handler below, which
+            // correctly requires active membership (leftAt IS NULL) before
+            // joining. That let a socket subscribe to (and receive
+            // broadcasts for) a group's room without ever being a member,
+            // and let a user who had left a group keep receiving its
+            // messages through this generic path. Apply the same
+            // active-membership check here for group rooms so both join
+            // paths enforce membership consistently.
+            socket.removeAllListeners('join').on('join', async ({ room } = {}) => {
+                if (!room || typeof room !== 'string') return;
+                try {
+                    const groupRoomMatch = /^group[:_](\d+)$/.exec(room);
+                    if (groupRoomMatch) {
+                        const groupId = parseInt(groupRoomMatch[1], 10);
+                        const sequelize = require('../models').sequelize;
+                        const [member] = await sequelize.query(
+                            `SELECT 1 FROM "GroupMembers" WHERE "groupId"=:groupId AND "userId"=:userId AND "leftAt" IS NULL LIMIT 1`,
+                            { replacements: { groupId, userId }, type: sequelize.QueryTypes.SELECT }
+                        ).catch(() => [null]);
+                        if (!member) {
+                            _flog(`[WSService] uid=${userId} denied join to ${room}: not an active member`);
+                            return;
+                        }
+                    }
                     socket.join(room);
-                         _flog(`[WSService] uid=${userId} joined room: ${room}`);
+                    _flog(`[WSService] uid=${userId} joined room: ${room}`);
+                } catch (err) {
+                    console.warn('[WSService] join error:', err.message);
                 }
             });
 
