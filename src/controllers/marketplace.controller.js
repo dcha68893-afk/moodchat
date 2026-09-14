@@ -3202,7 +3202,31 @@ class MarketplaceExtensions {
             const T = Model.Tool;
             if (!T) return ok(res, { products: [] });
             const { status, page=1, limit=50 } = req.query;
-            const where = status ? { status } : {};
+            // FIX (admin Products tabs always empty for Pending/Approved/
+            // Suspended — root cause of "no option to see items that are
+            // already approved or still pending"): marketplace-admin.js's
+            // filter tabs send status=pending|approved|rejected|suspended
+            // literally, but those words are NOT the values ever written to
+            // Tool.status. The Tool model's status ENUM only contains
+            // 'active' | 'inactive' | 'sold' | 'deleted' | 'pending_review'
+            // | 'rejected', and admin actions write:
+            //   adminApproveProduct  -> status: 'active'
+            //   adminSuspendProduct  -> status: 'inactive'
+            //   adminRejectProduct   -> status: 'rejected'
+            //   product creation     -> status: 'pending_review'
+            // so querying {status:'pending'}, {status:'approved'}, or
+            // {status:'suspended'} matched zero rows every time — the
+            // pending/approved/suspended tabs looked empty even though the
+            // products existed, which made it look like there was no way
+            // to review or delete them. Map the admin UI's filter word to
+            // the real column value it actually corresponds to.
+            const STATUS_FILTER_MAP = {
+                pending:   'pending_review',
+                approved:  'active',
+                suspended: 'inactive',
+                rejected:  'rejected',
+            };
+            const where = status ? { status: STATUS_FILTER_MAP[status] || status } : {};
             // FIX (item 12 — admin Products showing "Unknown seller"/"0
             // seller"): this query never included the seller association,
             // so _formatProduct()'s r.seller was always undefined and fell
