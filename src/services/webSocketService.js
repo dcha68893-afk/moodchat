@@ -2086,10 +2086,19 @@ class WebSocketService {
             }
 
             // Join group rooms
+            // FIX: GroupMembers has no `status` column — active membership is
+            // tracked via `leftAt IS NULL`, the same convention used by every
+            // other membership check in this codebase (routes/group.js,
+            // groupMembersService.js, the group:join socket handler below).
+            // The old query here referenced a nonexistent `status` column and
+            // threw on every single connection for every user, silently
+            // falling through to an unfiltered fallback that (harmlessly,
+            // but wastefully) also joined rooms for groups the user had
+            // left. Query the real column directly.
             let groupRows = [];
             try {
                 groupRows = await sequelize.query(
-                    'SELECT "groupId" FROM "GroupMembers" WHERE "userId" = :userId AND status != \'left\' AND status != \'banned\'',
+                    'SELECT "groupId" FROM "GroupMembers" WHERE "userId" = :userId AND "leftAt" IS NULL',
                     { replacements: { userId }, type: sequelize.QueryTypes.SELECT }
                 );
             } catch (_) {

@@ -497,7 +497,7 @@ router.post('/:groupId/messages', async (req, res) => {
     try {
         const userId  = getUserId(req);
         const groupId = parseInt(req.params.groupId);
-        const { content = '', type = 'text', topic = null, anonymous = false, metadata = {}, replyToId = null } = req.body;
+        const { content = '', type = 'text', topic = null, anonymous = false, metadata = {}, replyToId = null, clientMessageId = null } = req.body;
 
         if (!userId)      return res.status(401).json({ success: false, message: 'Authentication required' });
         if (isNaN(groupId)) return res.status(400).json({ success: false, message: 'Invalid group ID' });
@@ -523,6 +523,42 @@ router.post('/:groupId/messages', async (req, res) => {
         }
         if (!Message || !group.chatId) {
             return res.status(503).json({ success: false, message: 'Group chat storage is not available' });
+        }
+
+        // FIX-DUPLICATE-CLIENT-MESSAGE-ID: a prior version of this route
+        // silently dropped clientMessageId entirely (never read from
+        // req.body, never stored, never echoed back) despite an inline
+        // comment claiming it deduped on (senderId, clientMessageId) — it
+        // did not. That meant the frontend's optimistic-bubble dedup logic
+        // (which matches an incoming message against its own pending bubble
+        // via metadata.localId / clientMessageId) could never succeed,
+        // and any retry of the same send (offline-queue retry, a
+        // double-tap on Send) created a second row. If the client supplied
+        // a clientMessageId, look for an existing message from this same
+        // sender with that id already stored and short-circuit to it
+        // instead of creating a duplicate.
+        if (clientMessageId) {
+            try {
+                const dupe = await Message.findOne({
+                    where: {
+                        chatId: group.chatId,
+                        senderId: userId,
+                        [Op.and]: [db.sequelize.where(db.sequelize.json('metadata.localId'), String(clientMessageId))]
+                    },
+                    include: [
+                        { model: User, as: 'messageSender', attributes: ['id','username','firstName','lastName','avatar'], required: false }
+                    ]
+                });
+                if (dupe) {
+                    const existingMessage = _fmtMessage(dupe, userId, groupId);
+                    return res.status(200).json({ success: true, message: 'Message already sent', data: { message: existingMessage } });
+                }
+            } catch (dupeErr) {
+                // Non-fatal: if the idempotency lookup itself fails (e.g. a
+                // JSONB operator quirk on an older Postgres version), fall
+                // through and send normally rather than blocking the user.
+                console.warn('[Groups] clientMessageId dedupe lookup failed (non-fatal):', dupeErr.message);
+            }
         }
 
         // ── P1 FIX: Enforce posting rule server-side ───────────────────────
@@ -629,7 +665,13 @@ router.post('/:groupId/messages', async (req, res) => {
                 senderName: anonymous ? 'Anonymous' : senderName,
                 senderAvatar: anonymous ? null : senderAvatar,
                 readBy: [userId],
-                attachment
+                attachment,
+                // FIX-DUPLICATE-CLIENT-MESSAGE-ID: round-trip the client's
+                // own id for this send back through metadata.localId, both
+                // in this HTTP response and in the socket broadcast below
+                // (which reuses this same saved record) — see the dedupe
+                // lookup above for the other half of this fix.
+                ...(clientMessageId ? { localId: String(clientMessageId) } : {})
             },
             sentAt: new Date(),
             deliveredAt: new Date(),
