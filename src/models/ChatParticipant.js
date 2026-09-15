@@ -8,8 +8,8 @@ module.exports = (sequelize, DataTypes) => {
       chatId: { type: DataTypes.INTEGER, allowNull: false },
       role: { type: DataTypes.ENUM('admin', 'member'), defaultValue: 'member', allowNull: false },
       isMuted: { type: DataTypes.BOOLEAN, defaultValue: false, allowNull: false },
-      mutedUntil: { type: DataTypes.DATE, allowNull: true },
-      isPinned: { type: DataTypes.BOOLEAN, defaultValue: false, allowNull: false },
+      mutedUntil: { type: DataTypes.DATE, allowNull: true, comment: 'NULL = muted indefinitely when isMuted=true. Set timestamp for timed mute.' },
+      isPinned: { type: DataTypes.BOOLEAN, defaultValue: false, allowNull: false, comment: 'Server-synced chat pinning — replaces localStorage kyn_pinned_chats_v1' },
       pinnedAt: { type: DataTypes.DATE, allowNull: true },
       joinedAt: { type: DataTypes.DATE, defaultValue: DataTypes.NOW, allowNull: false },
       hiddenAt: { type: DataTypes.DATE, allowNull: true },
@@ -24,9 +24,11 @@ module.exports = (sequelize, DataTypes) => {
       underscored: false,
       freezeTableName: true,
       indexes: [
-        { fields: ['userId'] }, { fields: ['chatId'] },
+        { fields: ['userId'] },
+        { fields: ['chatId'] },
         { fields: ['chatId', 'userId'], unique: true },
-        { fields: ['role'] }, { fields: ['isMuted'] },
+        { fields: ['role'] },
+        { fields: ['isMuted'] },
       ],
       hooks: {
         beforeCreate: (participant) => {
@@ -38,10 +40,10 @@ module.exports = (sequelize, DataTypes) => {
             if (!Chat) return;
             const chat = await Chat.findByPk(participant.chatId);
             if (!chat || chat.type !== 'group') return;
-            const svc = require('../services/groupEncryptionService');
-            await svc.markMembershipChange(chat, ChatParticipant, 'member_added', null, participant.userId);
-          } catch (err) {
-            console.warn('[ChatParticipant] group key rotation afterCreate failed:', err.message);
+            const service = require('../services/groupEncryptionService');
+            await service.markMembershipChange(chat, ChatParticipant, 'member_added', null, participant.userId);
+          } catch (error) {
+            console.warn('[ChatParticipant] group security afterCreate failed:', error.message);
           }
         },
         afterDestroy: async (participant) => {
@@ -50,10 +52,10 @@ module.exports = (sequelize, DataTypes) => {
             if (!Chat) return;
             const chat = await Chat.findByPk(participant.chatId);
             if (!chat || chat.type !== 'group') return;
-            const svc = require('../services/groupEncryptionService');
-            await svc.markMembershipChange(chat, ChatParticipant, 'member_removed', null, participant.userId);
-          } catch (err) {
-            console.warn('[ChatParticipant] group key rotation afterDestroy failed:', err.message);
+            const service = require('../services/groupEncryptionService');
+            await service.markMembershipChange(chat, ChatParticipant, 'member_removed', null, participant.userId);
+          } catch (error) {
+            console.warn('[ChatParticipant] group security afterDestroy failed:', error.message);
           }
         },
         afterUpdate: async (participant) => {
@@ -63,23 +65,37 @@ module.exports = (sequelize, DataTypes) => {
             if (!Chat) return;
             const chat = await Chat.findByPk(participant.chatId);
             if (!chat || chat.type !== 'group') return;
-            const svc = require('../services/groupEncryptionService');
-            await svc.markMembershipChange(chat, ChatParticipant, 'member_role_changed', null, participant.userId);
-          } catch (err) {
-            console.warn('[ChatParticipant] group key rotation afterUpdate failed:', err.message);
+            const service = require('../services/groupEncryptionService');
+            await service.markMembershipChange(chat, ChatParticipant, 'member_role_changed', null, participant.userId);
+          } catch (error) {
+            console.warn('[ChatParticipant] group security afterUpdate failed:', error.message);
           }
         },
       },
     }
   );
 
-  ChatParticipant.prototype.promoteToAdmin = async function () { this.role = 'admin'; return await this.save(); };
-  ChatParticipant.prototype.demoteToMember = async function () { this.role = 'member'; return await this.save(); };
-  ChatParticipant.prototype.mute = async function () { this.isMuted = true; return await this.save(); };
-  ChatParticipant.prototype.unmute = async function () { this.isMuted = false; return await this.save(); };
+  ChatParticipant.prototype.promoteToAdmin = async function () {
+    this.role = 'admin';
+    return await this.save();
+  };
+  ChatParticipant.prototype.demoteToMember = async function () {
+    this.role = 'member';
+    return await this.save();
+  };
+  ChatParticipant.prototype.mute = async function () {
+    this.isMuted = true;
+    return await this.save();
+  };
+  ChatParticipant.prototype.unmute = async function () {
+    this.isMuted = false;
+    return await this.save();
+  };
 
   ChatParticipant.prototype.getTimeInChat = function () {
-    const now = new Date(); const joined = new Date(this.joinedAt); const diffMs = now - joined;
+    const now = new Date();
+    const joined = new Date(this.joinedAt);
+    const diffMs = now - joined;
     return {
       days: Math.floor(diffMs / (1000 * 60 * 60 * 24)),
       hours: Math.floor((diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60)),
@@ -89,53 +105,108 @@ module.exports = (sequelize, DataTypes) => {
   };
 
   ChatParticipant.getChatParticipants = async function (chatId, options = {}) {
-    const where = { chatId }; if (options.role) where.role = options.role; if (options.isMuted !== undefined) where.isMuted = options.isMuted;
+    const where = { chatId };
+    if (options.role) where.role = options.role;
+    if (options.isMuted !== undefined) where.isMuted = options.isMuted;
     const include = [];
-    if (options.includeUser) include.push({ model: this.sequelize.models.Users, as: 'chatParticipantUser', attributes: ['id', 'username', 'avatar', 'status', 'lastSeen'] });
+    if (options.includeUser) {
+      include.push({ model: this.sequelize.models.Users, as: 'chatParticipantUser', attributes: ['id', 'username', 'avatar', 'status', 'lastSeen'] });
+    }
     return await this.findAll({ where, include: include.length ? include : undefined, order: [['joinedAt', 'ASC']], limit: options.limit || 100, offset: options.offset || 0 });
   };
+
   ChatParticipant.getUserChats = async function (userId, options = {}) {
-    const where = { userId }; if (options.role) where.role = options.role;
+    const where = { userId };
+    if (options.role) where.role = options.role;
     return await this.findAll({ where, order: [['joinedAt', 'DESC']], limit: options.limit || 100, offset: options.offset || 0 });
   };
+
   ChatParticipant.getChatAdmins = async function (chatId) {
-    return await this.findAll({ where: { chatId, role: 'admin' }, include: [{ model: this.sequelize.models.Users, as: 'chatParticipantUser', attributes: ['id', 'username', 'avatar', 'email'] }], order: [['joinedAt', 'ASC']] });
+    return await this.findAll({
+      where: { chatId, role: 'admin' },
+      include: [{ model: this.sequelize.models.Users, as: 'chatParticipantUser', attributes: ['id', 'username', 'avatar', 'email'] }],
+      order: [['joinedAt', 'ASC']],
+    });
   };
-  ChatParticipant.isUserInChat = async function (userId, chatId) { return !!await this.findOne({ where: { userId, chatId } }); };
-  ChatParticipant.getParticipantCount = async function (chatId) { return await this.count({ where: { chatId } }); };
+
+  ChatParticipant.isUserInChat = async function (userId, chatId) {
+    return !!(await this.findOne({ where: { userId, chatId } }));
+  };
+
+  ChatParticipant.getParticipantCount = async function (chatId) {
+    return await this.count({ where: { chatId } });
+  };
 
   ChatParticipant.addParticipant = async function (userId, chatId, role = 'member', isMuted = false) {
-    const [participant, created] = await this.findOrCreate({ where: { userId, chatId }, defaults: { userId, chatId, role, isMuted, joinedAt: new Date() } });
-    if (!created) { participant.role = role; participant.isMuted = isMuted; await participant.save(); }
+    const [participant, created] = await this.findOrCreate({
+      where: { userId, chatId },
+      defaults: { userId, chatId, role, isMuted, joinedAt: new Date() },
+    });
+    if (!created) {
+      participant.role = role;
+      participant.isMuted = isMuted;
+      await participant.save();
+    }
     return participant;
   };
-  ChatParticipant.removeParticipant = async function (userId, chatId) { return (await this.destroy({ where: { userId, chatId } })) > 0; };
+
+  ChatParticipant.removeParticipant = async function (userId, chatId) {
+    const result = await this.destroy({ where: { userId, chatId }, individualHooks: true });
+    return result > 0;
+  };
+
   ChatParticipant.updateParticipantRole = async function (userId, chatId, newRole) {
-    const [affectedRows] = await this.update({ role: newRole }, { where: { userId, chatId }, individualHooks: true });
+    const [affectedRows] = await this.update(
+      { role: newRole },
+      { where: { userId, chatId }, individualHooks: true }
+    );
     return affectedRows > 0;
   };
+
   ChatParticipant.muteParticipant = async function (userId, chatId, muteStatus = true) {
     const [affectedRows] = await this.update({ isMuted: muteStatus }, { where: { userId, chatId } });
     return affectedRows > 0;
   };
+
   ChatParticipant.bulkAddParticipants = async function (participantsData) {
     const participants = [];
     for (const data of participantsData) {
-      const [participant] = await this.findOrCreate({ where: { userId: data.userId, chatId: data.chatId }, defaults: { ...data, joinedAt: new Date() } });
-      if (!participant.isNewRecord) await participant.update(data);
+      const [participant, created] = await this.findOrCreate({
+        where: { userId: data.userId, chatId: data.chatId },
+        defaults: { ...data, joinedAt: new Date() },
+      });
+      if (!created) await participant.update(data);
       participants.push(participant);
     }
     return participants;
   };
+
   ChatParticipant.cleanupOrphanedParticipants = async function () {
     const query = `DELETE FROM chat_participants cp WHERE NOT EXISTS (SELECT 1 FROM Users u WHERE u.id = cp.userId)`;
-    const [result] = await this.sequelize.query(query); return result.rowCount || 0;
+    const [result] = await this.sequelize.query(query);
+    return result.rowCount || 0;
   };
 
   ChatParticipant.associate = function (models) {
     if (this.associations && Object.keys(this.associations).length > 0) return;
-    if (models.Users) this.belongsTo(models.Users, { foreignKey: 'userId', as: 'chatParticipantUser', constraints: true, onDelete: 'CASCADE', onUpdate: 'CASCADE' });
-    if (models.Chats) this.belongsTo(models.Chats, { foreignKey: 'chatId', as: 'chatParticipantChat', constraints: true, onDelete: 'CASCADE', onUpdate: 'CASCADE' });
+    if (models.Users) {
+      ChatParticipant.belongsTo(models.Users, {
+        foreignKey: 'userId',
+        as: 'chatParticipantUser',
+        constraints: true,
+        onDelete: 'CASCADE',
+        onUpdate: 'CASCADE',
+      });
+    }
+    if (models.Chats) {
+      ChatParticipant.belongsTo(models.Chats, {
+        foreignKey: 'chatId',
+        as: 'chatParticipantChat',
+        constraints: true,
+        onDelete: 'CASCADE',
+        onUpdate: 'CASCADE',
+      });
+    }
   };
 
   return ChatParticipant;
