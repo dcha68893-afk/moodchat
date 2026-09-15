@@ -2,13 +2,13 @@
 
 const express = require('express');
 const router = express.Router();
-const { Op } = require('sequelize');
 const db = require('../models');
 const Chat = db.Chat;
 const User = db.User;
 const ChatParticipant = db.ChatParticipant;
 
 function uid(req) { return req.user?.userId || req.user?.id || req.user?.sub; }
+
 async function loadGroup(chatId) {
   const chat = await Chat.findByPk(chatId);
   if (!chat || chat.type !== 'group' || chat.isActive === false) {
@@ -16,16 +16,25 @@ async function loadGroup(chatId) {
   }
   return chat;
 }
+
 async function membership(chatId, userId) {
   return ChatParticipant.findOne({ where: { chatId, userId } });
 }
-async function requireManager(chat, userId) {
+
+async function requireMember(chat, userId) {
   const p = await membership(chat.id, userId);
   if (!p) { const e = new Error('You are not a member of this group'); e.status = 403; throw e; }
-  const owner = String(chat.createdBy) === String(userId);
-  if (!owner && p.role !== 'admin') { const e = new Error('Admin permission required'); e.status = 403; throw e; }
-  return { participant: p, owner };
+  return { participant: p, owner: String(chat.createdBy) === String(userId) };
 }
+
+async function requireManager(chat, userId) {
+  const result = await requireMember(chat, userId);
+  if (!result.owner && result.participant.role !== 'admin') {
+    const e = new Error('Admin permission required'); e.status = 403; throw e;
+  }
+  return result;
+}
+
 async function emitGroup(req, event, payload) {
   const io = req.io || global.__socketIO;
   if (!io) return;
@@ -42,16 +51,19 @@ async function emitGroup(req, event, payload) {
 router.get('/:chatId/members', async (req, res) => {
   try {
     const chat = await loadGroup(req.params.chatId);
-    const me = await membership(chat.id, uid(req));
-    if (!me) return res.status(403).json({ success:false, message:'Not a group member' });
+    await requireMember(chat, uid(req));
     const rows = await ChatParticipant.findAll({
       where: { chatId: chat.id },
       include: [{ model: User, as: 'chatParticipantUser', attributes: ['id','username','avatar','firstName','lastName','status','lastSeen'] }],
       order: [['joinedAt','ASC']]
     });
-    return res.json({ success:true, data: rows.map(p => ({
-      id:p.userId, role:p.role, isMuted:p.isMuted, mutedUntil:p.mutedUntil, joinedAt:p.joinedAt,
-      user:p.chatParticipantUser
+    return res.json({ success: true, data: rows.map(p => ({
+      id: p.userId,
+      role: String(p.userId) === String(chat.createdBy) ? 'owner' : (p.role || 'member'),
+      isMuted: !!p.isMuted,
+      mutedUntil: p.mutedUntil,
+      joinedAt: p.joinedAt,
+      user: p.chatParticipantUser
     })) });
   } catch (e) { return res.status(e.status || 500).json({ success:false, message:e.message }); }
 });
@@ -80,13 +92,12 @@ router.delete('/:chatId/members/:userId', async (req, res) => {
   try {
     const chat = await loadGroup(req.params.chatId);
     const actor = uid(req);
-    await requireManager(chat, actor);
+    const { owner, participant: actorMembership } = await requireManager(chat, actor);
     const targetId = Number(req.params.userId);
     if (String(targetId) === String(chat.createdBy)) return res.status(403).json({success:false,message:'The group owner cannot be removed'});
     const target = await membership(chat.id, targetId);
     if (!target) return res.status(404).json({success:false,message:'Member not found'});
-    const actorMembership = await membership(chat.id, actor);
-    if (target.role === 'admin' && String(chat.createdBy) !== String(actor) && actorMembership.role !== 'admin') return res.status(403).json({success:false,message:'Cannot remove an administrator'});
+    if (target.role === 'admin' && !owner) return res.status(403).json({success:false,message:'Only the group owner can remove an administrator'});
     await ChatParticipant.destroy({ where:{ chatId:chat.id, userId:targetId } });
     const payload = { groupId:chat.id, userId:targetId, removedBy:actor, timestamp:new Date().toISOString() };
     await emitGroup(req,'GROUP_MEMBER_REMOVED',payload);
@@ -108,8 +119,10 @@ router.patch('/:chatId/members/:userId/role', async (req, res) => {
     if (!owner) return res.status(403).json({success:false,message:'Only the group owner can change administrator roles'});
     const target = await membership(chat.id, targetId);
     if (!target) return res.status(404).json({success:false,message:'Member not found'});
-    target.role = role; await target.save();
+    target.role = role;
+    await target.save();
     const payload={groupId:chat.id,userId:targetId,role,updatedBy:actor,timestamp:new Date().toISOString()};
+    await emitGroup(req,'GROUP_ROLE_UPDATED',payload);
     await emitGroup(req,'group:role_update',payload);
     return res.json({success:true,data:payload});
   } catch(e){ return res.status(e.status||500).json({success:false,message:e.message}); }
@@ -120,15 +133,18 @@ router.patch('/:chatId/members/:userId/mute', async (req, res) => {
   try {
     const chat = await loadGroup(req.params.chatId);
     const actor = uid(req);
-    await requireManager(chat, actor);
+    const { owner } = await requireManager(chat, actor);
     const targetId = Number(req.params.userId);
     const target = await membership(chat.id, targetId);
     if (!target) return res.status(404).json({success:false,message:'Member not found'});
+    if (String(targetId) === String(chat.createdBy)) return res.status(403).json({success:false,message:'The group owner cannot be muted'});
+    if (target.role === 'admin' && !owner) return res.status(403).json({success:false,message:'Only the group owner can mute an administrator'});
     const muted = req.body?.muted !== false;
     target.isMuted = muted;
     target.mutedUntil = muted && req.body?.mutedUntil ? new Date(req.body.mutedUntil) : null;
     await target.save();
     const payload={groupId:chat.id,userId:targetId,muted,mutedUntil:target.mutedUntil,updatedBy:actor,timestamp:new Date().toISOString()};
+    await emitGroup(req,'GROUP_MEMBER_MUTE_UPDATED',payload);
     await emitGroup(req,'group:mute',payload);
     return res.json({success:true,data:payload});
   } catch(e){ return res.status(e.status||500).json({success:false,message:e.message}); }
@@ -146,6 +162,7 @@ router.patch('/:chatId/settings', async (req, res) => {
     for(const key of allowed) if(Object.prototype.hasOwnProperty.call(incoming,key)) next[key]=incoming[key];
     await chat.update({settings:next,updatedAt:new Date()});
     const payload={groupId:chat.id,settings:next,updatedBy:actor,timestamp:new Date().toISOString()};
+    await emitGroup(req,'GROUP_SETTINGS_UPDATED',payload);
     await emitGroup(req,'group:settings:updated',payload);
     return res.json({success:true,data:{settings:next}});
   } catch(e){ return res.status(e.status||500).json({success:false,message:e.message}); }
