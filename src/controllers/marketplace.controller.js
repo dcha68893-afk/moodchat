@@ -525,45 +525,72 @@ class MarketplaceController {
     // WISHLIST / SAVED
     // ══════════════════════════════════════════════════════════════════════════
 
+    // FIX (uuid[] @> integer[] on /api/marketplace/wishlist): these three
+    // handlers used to query Tool.savedBy/purchasedBy — INTEGER[] columns on
+    // the model, but only reliably that type in the live DB if a prior
+    // self-healing pass (ensureSchema.js REQUIRED_TYPE_FIXES) or the
+    // standalone migrations/20260711_fix_tool_saved_purchased_by_types.js
+    // actually ran against that specific database. Any environment where
+    // that hasn't happened still has tools.saved_by/purchased_by as UUID[],
+    // so Op.contains([integerUserId]) compiles to `saved_by @> ARRAY[123]`
+    // and Postgres rejects it with "operator does not exist: uuid[] @>
+    // integer[]" — a live 500, not a console cosmetic. The dedicated
+    // `wishlists` table (src/models/Wishlist.js) was already built to
+    // replace this array approach entirely (user_id INTEGER, product_id
+    // UUID, plain equality — no array containment, so this whole class of
+    // type-drift bug cannot occur here) but these three handlers were never
+    // switched over to it. Doing so now removes the dependency on any
+    // migration having run, rather than just re-verifying that it did.
     async getWishlist(req, res, next) {
         try {
             const T = Model.Tool;
+            const W = Model.Wishlist;
             const userId = req.user?.id;
-            if (!T || !userId) return ok(res, { items: [] });
+            if (!W || !userId) return ok(res, { items: [] });
 
-            const products = await T.findAll({
-                where: { savedBy: { [Op.contains]: [parseInt(userId, 10)] }, status: 'active' },
-                include: _sellerInclude(T),
-                order: [['updatedAt', 'DESC']],
+            const rows = await W.findAll({
+                where: { userId },
+                include: [{ association: 'product', include: T ? _sellerInclude(T) : [] }],
+                order: [['createdAt', 'DESC']],
                 limit: 100,
             });
-            return ok(res, { items: products.map(p => ({ product_id: p.id, ..._formatProduct(p) })) });
+            const items = rows
+                .filter(w => w.product && w.product.status === 'active')
+                .map(w => ({ product_id: w.productId, ..._formatProduct(w.product) }));
+            return ok(res, { items });
         } catch(e) { err(next, e, 'getWishlist'); }
     }
 
     async toggleWishlist(req, res, next) {
         try {
             const T = Model.Tool;
+            const W = Model.Wishlist;
             const userId = req.user?.id;
             const { product_id } = req.body;
-            if (!T || !userId || !product_id) return next(new AppError('Invalid request', 400));
+            if (!T || !W || !userId || !product_id) return next(new AppError('Invalid request', 400));
 
             const product = await T.findByPk(product_id);
             if (!product) return next(new AppError('Product not found', 404));
 
-            const saved = await product.toggleSave(userId);
-            return ok(res, { saved: (product.savedBy||[]).includes(userId), product_id }, 'Wishlist updated');
+            const existing = await W.findOne({ where: { userId, productId: product_id } });
+            let saved;
+            if (existing) {
+                await existing.destroy();
+                saved = false;
+            } else {
+                await W.create({ userId, productId: product_id, priceAtAdd: product.price || null });
+                saved = true;
+            }
+            return ok(res, { saved, product_id }, 'Wishlist updated');
         } catch(e) { err(next, e, 'toggleWishlist'); }
     }
 
     async removeFromWishlist(req, res, next) {
         try {
-            const T = Model.Tool;
+            const W = Model.Wishlist;
             const userId = req.user?.id;
-            const product = await T?.findByPk(req.params.id);
-            if (!product) return next(new AppError('Product not found', 404));
-            product.savedBy = (product.savedBy||[]).filter(id => id !== userId);
-            await product.save();
+            if (!W || !userId) return next(new AppError('Invalid request', 400));
+            await W.destroy({ where: { userId, productId: req.params.id } });
             return ok(res, null, 'Removed from wishlist');
         } catch(e) { err(next, e, 'removeFromWishlist'); }
     }
