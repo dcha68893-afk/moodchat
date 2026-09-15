@@ -1,9 +1,6 @@
 // =============================================================================
-// messageBroadcast.js
-// -----------------------------------------------------------------------------
-// Single authoritative post-create realtime delivery step.
+// messageBroadcast.js — canonical post-create realtime delivery
 // =============================================================================
-
 'use strict';
 
 function getSequelize() {
@@ -22,17 +19,15 @@ async function broadcastNewMessage(message, senderId) {
     `SELECT DISTINCT "userId" FROM chat_participants WHERE "chatId" = :chatId AND "userId" != :senderId`,
     { replacements: { chatId: chatIdInt, senderId: senderIdInt }, type: sequelize.QueryTypes.SELECT }
   ).catch(() => []);
-
   const recipientIds = participants.map(p => p.userId);
-  if (recipientIds.length === 0) return { recipientIds: [], delivered: [], offline: [] };
+  if (!recipientIds.length) return { recipientIds: [], delivered: [], offline: [] };
 
-  // Explicitly classify the conversation so the private Message module can
-  // ignore group traffic while the Group module can consume it independently.
   const [chat] = await sequelize.query(
     `SELECT "type" FROM "Chats" WHERE id = :chatId LIMIT 1`,
     { replacements: { chatId: chatIdInt }, type: sequelize.QueryTypes.SELECT }
   ).catch(() => [null]);
   const chatType = chat?.type || 'direct';
+  const eventName = chatType === 'group' ? 'group:message:new' : 'message:new';
 
   const payload = {
     id: message.id,
@@ -52,14 +47,16 @@ async function broadcastNewMessage(message, senderId) {
     status: 'sent',
   };
 
+  // Direct/private messages stay on message:new. Group messages use their own
+  // event so the private Message module never consumes group traffic.
   const results = await Promise.allSettled(
-    recipientIds.map(uid => wsService.sendToUser(uid, 'message:new', payload))
+    recipientIds.map(uid => wsService.sendToUser(uid, eventName, payload))
   );
   const delivered = [];
   const offline = [];
   recipientIds.forEach((uid, i) => {
-    const wasDelivered = results[i].status === 'fulfilled' && results[i].value === true;
-    (wasDelivered ? delivered : offline).push(uid);
+    const ok = results[i].status === 'fulfilled' && results[i].value === true;
+    (ok ? delivered : offline).push(uid);
   });
 
   await messageDeliveryService.notifyMessageRecipients(message, recipientIds, {
