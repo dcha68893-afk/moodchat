@@ -32,11 +32,11 @@ function verifyEvent(event, signature) {
 }
 
 function memberFingerprint(members) {
-  const ids = (members || [])
-    .map(m => String(m.userId ?? m.id))
+  const entries = (members || [])
+    .map(m => `${String(m.userId ?? m.id)}:${String(m.role || 'member')}`)
     .filter(Boolean)
     .sort();
-  return crypto.createHash('sha256').update(ids.join(',')).digest('hex');
+  return crypto.createHash('sha256').update(entries.join(',')).digest('hex');
 }
 
 function cleanDistribution(item) {
@@ -66,6 +66,7 @@ function normalizeState(metadata) {
       updatedAt: null,
       lastRotationAt: null,
       eventSequence: 0,
+      lastEvent: null,
     };
   }
   return {
@@ -78,12 +79,72 @@ function normalizeState(metadata) {
     updatedAt: state.updatedAt || null,
     lastRotationAt: state.lastRotationAt || null,
     eventSequence: Number(state.eventSequence) || 0,
+    lastEvent: state.lastEvent || null,
   };
 }
 
 async function currentMembers(ChatParticipant, chatId) {
-  const rows = await ChatParticipant.findAll({ where: { chatId }, attributes: ['userId'] });
-  return rows.map(r => ({ userId: r.userId }));
+  const rows = await ChatParticipant.findAll({ where: { chatId }, attributes: ['userId', 'role'] });
+  return rows.map(r => ({ userId: r.userId, role: r.role }));
+}
+
+async function emitMembershipEvent(chat, ChatParticipant, event) {
+  try {
+    const io = global.__socketIO;
+    if (!io) return;
+    const rows = await ChatParticipant.findAll({ where: { chatId: chat.id }, attributes: ['userId'] });
+    const payload = { ...event };
+    for (const row of rows) {
+      io.to(`user:${row.userId}`).emit('group:security:membership_changed', payload);
+      io.to(`user_${row.userId}`).emit('group:security:membership_changed', payload);
+      io.to(`user:${row.userId}`).emit('GROUP_MEMBERSHIP_CHANGED', payload);
+      io.to(`user_${row.userId}`).emit('GROUP_MEMBERSHIP_CHANGED', payload);
+    }
+  } catch (err) {
+    console.warn('[groupEncryption] membership event broadcast failed:', err.message);
+  }
+}
+
+/**
+ * Immediately invalidates the current group key after a membership/role change.
+ * The server never creates or receives the plaintext group key. It only
+ * advances the version, clears old encrypted envelopes and records a signed
+ * event. A client must generate the new key and POST fresh envelopes through
+ * /group-encryption/:chatId/rotate before messages can use the new version.
+ */
+async function markMembershipChange(chat, ChatParticipant, changeType, actorId = null, targetUserId = null) {
+  if (!chat || chat.type !== 'group') return null;
+
+  const metadata = (chat.metadata && typeof chat.metadata === 'object') ? { ...chat.metadata } : {};
+  const state = normalizeState(metadata);
+  const members = await currentMembers(ChatParticipant, chat.id);
+  const fingerprint = memberFingerprint(members);
+  const nextVersion = Math.max(1, state.version + 1);
+  const event = {
+    type: 'group:membership_changed',
+    groupId: String(chat.id),
+    version: nextVersion,
+    reason: String(changeType || 'membership_changed').slice(0, 120),
+    actorId: actorId == null ? null : Number(actorId),
+    targetUserId: targetUserId == null ? null : Number(targetUserId),
+    memberFingerprint: fingerprint,
+    timestamp: now(),
+    eventSequence: state.eventSequence + 1,
+  };
+
+  state.version = nextVersion;
+  state.memberFingerprint = fingerprint;
+  state.distributions = [];
+  state.pendingRotation = true;
+  state.reason = event.reason;
+  state.updatedAt = event.timestamp;
+  state.lastEvent = { ...event, signature: signEvent(event) };
+  state.eventSequence = event.eventSequence;
+  metadata.groupEncryption = state;
+  await chat.update({ metadata, updatedAt: new Date() });
+
+  await emitMembershipEvent(chat, ChatParticipant, state.lastEvent);
+  return state.lastEvent;
 }
 
 async function reconcile(chat, ChatParticipant) {
@@ -93,14 +154,7 @@ async function reconcile(chat, ChatParticipant) {
   const fingerprint = memberFingerprint(members);
 
   if (state.memberFingerprint && state.memberFingerprint !== fingerprint) {
-    state.version = Math.max(1, state.version + 1);
-    state.pendingRotation = true;
-    state.reason = 'membership_changed';
-    state.distributions = [];
-    state.eventSequence += 1;
-    state.updatedAt = now();
-    metadata.groupEncryption = state;
-    await chat.update({ metadata, updatedAt: new Date() });
+    return { state: await markMembershipChange(chat, ChatParticipant, 'membership_changed'), members };
   } else if (!state.memberFingerprint) {
     state.memberFingerprint = fingerprint;
     state.updatedAt = now();
@@ -135,8 +189,6 @@ async function saveRotation(chat, ChatParticipant, actorId, input) {
     throw err;
   }
 
-  // The server stores only encrypted key envelopes. The actual group key must
-  // be generated and encrypted by the client for each recipient device.
   const event = {
     type: 'group:key_rotated',
     groupId: String(chat.id),
@@ -167,8 +219,10 @@ async function saveRotation(chat, ChatParticipant, actorId, input) {
 module.exports = {
   memberFingerprint,
   normalizeState,
+  currentMembers,
   reconcile,
   saveRotation,
+  markMembershipChange,
   signEvent,
   verifyEvent,
 };
