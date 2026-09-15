@@ -431,6 +431,18 @@ module.exports = (sequelize, DataTypes) => {
 
         // Each entry: { name: DB column name, sql: column definition, aliases: [] }
         const colsToAdd = [
+          // ── FIX (CALLS-CHATID-MISSING): the original createcalls migration
+          // never created chatId, type, or duration — the model has always
+          // defined them, but they were absent from both the base migration
+          // AND this self-heal list, so every query (findAll/findAndCountAll
+          // implicitly SELECTs all model attributes) failed with
+          // 'column "chatId" does not exist'. See migration
+          // 2026999990023_fix_calls_missing_columns.js for the deploy-time fix;
+          // this entry makes already-running processes self-heal too.
+          { name: 'chatId',   sql: 'INTEGER' },
+          { name: 'type',     sql: "VARCHAR(10) NOT NULL DEFAULT 'audio'" },
+          { name: 'duration', sql: 'INTEGER NOT NULL DEFAULT 0' },
+
           // ── Array tracking fields (camelCase model → snake_case DB column) ──
           // FIX (CALLS-PARTICIPANTS-MISSING): `participants` (the base array of
           // all call participant user IDs — used by getUserCalls' history

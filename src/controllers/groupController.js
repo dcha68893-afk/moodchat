@@ -570,6 +570,27 @@ class GroupController {
                 membership = await GM.create({ groupId, userId, role: 'member', joinedAt: new Date() });
             }
 
+            // FIX (GROUP-JOIN-CHATPARTICIPANT-GAP): this is the actual endpoint
+            // POST /groups/:id/join hits, and unlike groupService.addMember and
+            // groupMembersService.addMemberToGroup — the app's other two
+            // "add member" code paths — this one never mirrored the new
+            // membership into chat_participants for the group's underlying
+            // Chats row (group.chatId). Every query that resolves "which chats
+            // does this user belong to" via chat_participants (the general chat
+            // list, unread-count aggregation, etc.) never saw this membership,
+            // even though GroupMembers itself was correct. Bringing this in
+            // line with the other two add-member paths so join state is
+            // consistent everywhere, not just within the dedicated group UI.
+            try {
+                const CP = db.models?.ChatParticipant || db.models?.ChatParticipants
+                        || db.ChatParticipant        || db.ChatParticipants;
+                if (CP && group.chatId) {
+                    await CP.findOrCreate({ where: { chatId: group.chatId, userId } });
+                }
+            } catch (cpErr) {
+                console.warn('[GroupController] joinGroup: ChatParticipant sync failed (non-fatal):', cpErr.message);
+            }
+
             // Update group member count
             try {
                 const liveCount = await GM.count({ where: { groupId, leftAt: null } });
