@@ -1,14 +1,7 @@
 // =============================================================================
 // messageBroadcast.js
 // -----------------------------------------------------------------------------
-// The single "a message was created — now deliver it live and notify" step.
-//
-// This exists so REST (routes/messages.js) and realtime (webSocketService.js's
-// 'message:send' handler) never each maintain their own copy of "look up the
-// other participants, push message:new over the socket, decide who needs an
-// OS push". Both transports create the message via
-// messageDeliveryService.sendMessage(), then both call broadcastNewMessage()
-// here. This is the one authoritative post-create step (spec §10).
+// Single authoritative post-create realtime delivery step.
 // =============================================================================
 
 'use strict';
@@ -18,16 +11,10 @@ function getSequelize() {
   return db.sequelize;
 }
 
-/**
- * @param {object} message  the row returned by messageDeliveryService.sendMessage()
- * @param {number} senderId the id of the user who sent it (excluded from recipients)
- * @returns {Promise<{recipientIds: number[], delivered: number[], offline: number[]}>}
- */
 async function broadcastNewMessage(message, senderId) {
   const sequelize = getSequelize();
   const wsService = require('./webSocketService');
   const messageDeliveryService = require('./messageDeliveryService');
-
   const senderIdInt = parseInt(senderId, 10);
   const chatIdInt = parseInt(message.chatId, 10);
 
@@ -37,17 +24,22 @@ async function broadcastNewMessage(message, senderId) {
   ).catch(() => []);
 
   const recipientIds = participants.map(p => p.userId);
-  if (recipientIds.length === 0) {
-    return { recipientIds: [], delivered: [], offline: [] };
-  }
+  if (recipientIds.length === 0) return { recipientIds: [], delivered: [], offline: [] };
 
-  // Canonical wire shape for the 'message:new' event — REST and socket
-  // sends both produce exactly this, so the frontend has one shape to
-  // handle regardless of which transport the message came in over.
+  // Explicitly classify the conversation so the private Message module can
+  // ignore group traffic while the Group module can consume it independently.
+  const [chat] = await sequelize.query(
+    `SELECT "type" FROM "Chats" WHERE id = :chatId LIMIT 1`,
+    { replacements: { chatId: chatIdInt }, type: sequelize.QueryTypes.SELECT }
+  ).catch(() => [null]);
+  const chatType = chat?.type || 'direct';
+
   const payload = {
     id: message.id,
     chatId: message.chatId,
     conversationId: message.chatId,
+    chatType,
+    isGroup: chatType === 'group',
     senderId: message.senderId,
     content: message.content,
     type: message.type,
@@ -63,7 +55,6 @@ async function broadcastNewMessage(message, senderId) {
   const results = await Promise.allSettled(
     recipientIds.map(uid => wsService.sendToUser(uid, 'message:new', payload))
   );
-
   const delivered = [];
   const offline = [];
   recipientIds.forEach((uid, i) => {
