@@ -5,15 +5,18 @@ module.exports = (sequelize, DataTypes) => {
   const Calls = sequelize.define(
     'Calls',
     {
+      // The production Calls table was created with INTEGER SERIAL ids.
+      // Keep the model aligned with that canonical schema; UUID defaults here
+      // caused POST /api/calls to fail before a call could be signaled.
       id: {
-        type: DataTypes.UUID,
+        type: DataTypes.INTEGER,
         primaryKey: true,
         allowNull: false,
-        defaultValue: DataTypes.UUIDV4,
+        autoIncrement: true,
       },
       chatId: {
         type: DataTypes.INTEGER,
-        allowNull: true,   // null when call started directly via participantIds (chat created lazily)
+        allowNull: true,
       },
       callerId: {
         type: DataTypes.INTEGER,
@@ -27,8 +30,12 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.INTEGER,
         allowNull: true,
       },
+      // The original production table calls this column `callType`.
+      // Expose it to the rest of the service as `type` without requiring a
+      // second physical column.
       type: {
         type: DataTypes.ENUM('audio', 'video'),
+        field: 'callType',
         defaultValue: 'audio',
         allowNull: false,
       },
@@ -101,7 +108,6 @@ module.exports = (sequelize, DataTypes) => {
         defaultValue: {},
         allowNull: false,
       },
-      // ── NEW: tracks who answered / declined / read this call ──────────────
       answeredBy: {
         type: DataTypes.ARRAY(DataTypes.INTEGER),
         field: 'answered_by',
@@ -128,12 +134,10 @@ module.exports = (sequelize, DataTypes) => {
         defaultValue: false,
         allowNull: false,
       },
-      // ─────────────────────────────────────────────────────────────────────
       errorReason: {
         type: DataTypes.STRING(200),
         allowNull: true,
       },
-      // ── Quality & Network Metrics ─────────────────────────────────────────
       qualityScore: {
         type: DataTypes.FLOAT,
         allowNull: true,
@@ -194,25 +198,17 @@ module.exports = (sequelize, DataTypes) => {
         { fields: ['status'] },
         { fields: ['createdAt'] },
         { fields: ['receiverId', 'status'], name: 'calls_receiver_status_idx' },
-        // H-06 FIX: _cleanupTimedOut() runs WHERE status IN (...) AND
-        // createdAt < ? on every call — full table scan with only
-        // single-column indexes. A composite index makes this O(log n)
-        // regardless of table size. Second composite covers the history
-        // query: WHERE participants @> [userId] AND endedAt IS NOT NULL
-        // ORDER BY endedAt DESC — the GIN index makes the array contains
-        // check fast; the (endedAt) index covers the sort.
         { fields: ['status', 'createdAt'], name: 'calls_status_created_idx' },
-        { fields: ['status', 'endedAt'],   name: 'calls_status_ended_idx' },
+        { fields: ['status', 'endedAt'], name: 'calls_status_ended_idx' },
         {
           fields: ['participants'],
-          using:  'gin',
-          name:   'calls_participants_gin_idx',
+          using: 'gin',
+          name: 'calls_participants_gin_idx',
         },
       ],
     }
   );
 
-  // Instance methods (PRESERVED)
   Calls.prototype.start = async function () {
     this.status = 'in-progress';
     this.startedAt = new Date();
@@ -222,11 +218,7 @@ module.exports = (sequelize, DataTypes) => {
   Calls.prototype.end = async function () {
     this.status = 'completed';
     this.endedAt = new Date();
-
-    if (this.startedAt) {
-      this.duration = Math.floor((this.endedAt - this.startedAt) / 1000);
-    }
-
+    if (this.startedAt) this.duration = Math.floor((this.endedAt - this.startedAt) / 1000);
     return await this.save();
   };
 
@@ -234,31 +226,18 @@ module.exports = (sequelize, DataTypes) => {
     this.status = 'failed';
     this.endedAt = new Date();
     this.errorReason = reason;
-
-    if (this.startedAt) {
-      this.duration = Math.floor((this.endedAt - this.startedAt) / 1000);
-    }
-
+    if (this.startedAt) this.duration = Math.floor((this.endedAt - this.startedAt) / 1000);
     return await this.save();
   };
 
   Calls.prototype.addParticipant = async function (userId) {
-    if (!this.participants.includes(userId)) {
-      this.participants = [...this.participants, userId];
-    }
-
-    if (!this.participantsJoined.includes(userId)) {
-      this.participantsJoined = [...this.participantsJoined, userId];
-    }
-
+    if (!this.participants.includes(userId)) this.participants = [...this.participants, userId];
+    if (!this.participantsJoined.includes(userId)) this.participantsJoined = [...this.participantsJoined, userId];
     return await this.save();
   };
 
   Calls.prototype.removeParticipant = async function (userId) {
-    if (!this.participantsLeft.includes(userId)) {
-      this.participantsLeft = [...this.participantsLeft, userId];
-    }
-
+    if (!this.participantsLeft.includes(userId)) this.participantsLeft = [...this.participantsLeft, userId];
     return await this.save();
   };
 
@@ -267,246 +246,98 @@ module.exports = (sequelize, DataTypes) => {
     return await this.save();
   };
 
-  // Static methods (PRESERVED)
   Calls.getActiveCalls = async function (chatId = null) {
-    const where = {
-      status: { [Op.in]: ['initiated', 'ringing', 'in-progress'] },
-    };
-
-    if (chatId) {
-      where.chatId = chatId;
-    }
-
+    const where = { status: { [Op.in]: ['initiated', 'ringing', 'in-progress'] } };
+    if (chatId) where.chatId = chatId;
     const include = [];
-    
-    if (this.sequelize.models.Chats) {
-      include.push({
-        model: this.sequelize.models.Chats,
-        as: 'callChatDetails',
-        attributes: ['id', 'name', 'type'],
-      });
-    }
-    
+    if (this.sequelize.models.Chats) include.push({ model: this.sequelize.models.Chats, as: 'callChatDetails', attributes: ['id', 'name', 'type'] });
     if (this.sequelize.models.Users) {
-      include.push({
-        model: this.sequelize.models.Users,
-        as: 'callInitiatorUser',
-        attributes: ['id', 'username', 'avatar'],
-      });
-      
-      include.push({
-        model: this.sequelize.models.Users,
-        as: 'callTargetUser',
-        attributes: ['id', 'username', 'avatar'],
-      });
+      include.push({ model: this.sequelize.models.Users, as: 'callInitiatorUser', attributes: ['id', 'username', 'avatar'] });
+      include.push({ model: this.sequelize.models.Users, as: 'callTargetUser', attributes: ['id', 'username', 'avatar'] });
     }
-
-    return await this.findAll({
-      where: where,
-      include: include.length > 0 ? include : undefined,
-    });
+    return await this.findAll({ where, include: include.length > 0 ? include : undefined });
   };
 
   Calls.getUserCalls = async function (userId, options = {}) {
-    const where = {
-      [Op.or]: [
-        { callerId: userId }, 
-        { receiverId: userId }, 
-        { participants: { [Op.contains]: [userId] } }
-      ],
-    };
-
-    if (options.status) {
-      where.status = options.status;
-    }
-
-    if (options.type) {
-      where.type = options.type;
-    }
-
+    const where = { [Op.or]: [{ callerId: userId }, { receiverId: userId }, { participants: { [Op.contains]: [userId] } }] };
+    if (options.status) where.status = options.status;
+    if (options.type) where.type = options.type;
     const include = [];
-    
-    if (this.sequelize.models.Chats) {
-      include.push({
-        model: this.sequelize.models.Chats,
-        as: 'callChatDetails',
-        attributes: ['id', 'name', 'type'],
-      });
-    }
-    
+    if (this.sequelize.models.Chats) include.push({ model: this.sequelize.models.Chats, as: 'callChatDetails', attributes: ['id', 'name', 'type'] });
     if (this.sequelize.models.Users) {
-      include.push({
-        model: this.sequelize.models.Users,
-        as: 'callInitiatorUser',
-        attributes: ['id', 'username', 'avatar'],
-      });
-      
-      include.push({
-        model: this.sequelize.models.Users,
-        as: 'callTargetUser',
-        attributes: ['id', 'username', 'avatar'],
-      });
+      include.push({ model: this.sequelize.models.Users, as: 'callInitiatorUser', attributes: ['id', 'username', 'avatar'] });
+      include.push({ model: this.sequelize.models.Users, as: 'callTargetUser', attributes: ['id', 'username', 'avatar'] });
     }
-
-    return await this.findAll({
-      where: where,
-      include: include.length > 0 ? include : undefined,
-      order: [['createdAt', 'DESC']],
-      limit: options.limit || 50,
-      offset: options.offset || 0,
-    });
+    return await this.findAll({ where, include: include.length > 0 ? include : undefined, order: [['createdAt', 'DESC']], limit: options.limit || 50, offset: options.offset || 0 });
   };
 
   Calls.findActiveCall = async function (chatId) {
-    return await this.findOne({
-      where: {
-        chatId: chatId,
-        status: { [Op.in]: ['initiated', 'ringing', 'in-progress'] },
-      },
-    });
+    return await this.findOne({ where: { chatId, status: { [Op.in]: ['initiated', 'ringing', 'in-progress'] } } });
   };
 
-  // FIXED: Associations with unique aliases
-  // Use a module-level flag to prevent double-association on hot-reload
   let _associationsSetUp = false;
   Calls.associate = function (models) {
     if (_associationsSetUp) return;
     _associationsSetUp = true;
-
-    if (models.Chats) {
-      Calls.belongsTo(models.Chats, {
-        foreignKey: 'chatId',
-        as: 'callChatDetails',
-        constraints: false,
-        onDelete: 'SET NULL',
-        onUpdate: 'CASCADE',
-      });
-    }
-
+    if (models.Chats) Calls.belongsTo(models.Chats, { foreignKey: 'chatId', as: 'callChatDetails', constraints: false, onDelete: 'SET NULL', onUpdate: 'CASCADE' });
     if (models.Users) {
-      Calls.belongsTo(models.Users, {
-        foreignKey: 'callerId',
-        as: 'callInitiatorUser',
-        constraints: false,
-        onDelete: 'SET NULL',
-        onUpdate: 'CASCADE',
-      });
-
-      Calls.belongsTo(models.Users, {
-        foreignKey: 'receiverId',
-        as: 'callTargetUser',
-        constraints: false,
-        onDelete: 'SET NULL',
-        onUpdate: 'CASCADE',
-      });
+      Calls.belongsTo(models.Users, { foreignKey: 'callerId', as: 'callInitiatorUser', constraints: false, onDelete: 'SET NULL', onUpdate: 'CASCADE' });
+      Calls.belongsTo(models.Users, { foreignKey: 'receiverId', as: 'callTargetUser', constraints: false, onDelete: 'SET NULL', onUpdate: 'CASCADE' });
     }
-
-    if (models.Groups) {
-      Calls.belongsTo(models.Groups, {
-        foreignKey: 'groupId',
-        as: 'callGroupDetails',
-        constraints: false,
-        onDelete: 'SET NULL',
-        onUpdate: 'CASCADE',
-      });
-    }
+    if (models.Groups) Calls.belongsTo(models.Groups, { foreignKey: 'groupId', as: 'callGroupDetails', constraints: false, onDelete: 'SET NULL', onUpdate: 'CASCADE' });
   };
 
-  // ── AUTO-MIGRATION: add ALL missing columns if they don't exist ───────────
-  // Covers every column added after the initial table creation so the server
-  // never crashes with "column X does not exist".
-  // Runs once per process via a flag on the sequelize instance (idempotent).
+  // Self-heal missing columns and the legacy startedAt constraint. This is
+  // deliberately non-fatal and idempotent so a cold Render instance can boot
+  // even when migrations were skipped.
   if (!sequelize._callsColumnsMigrated) {
     sequelize._callsColumnsMigrated = true;
     setImmediate(async () => {
       try {
         const qi = sequelize.getQueryInterface();
         const tableDesc = await qi.describeTable('Calls').catch(() => null);
-        if (!tableDesc) return; // table doesn't exist yet — sync will create it
+        if (!tableDesc) return;
 
-        // ── CRITICAL: ensure chatId allows NULL (was originally NOT NULL in some migrations)
-        try {
-          await sequelize.query(`ALTER TABLE "Calls" ALTER COLUMN "chatId" DROP NOT NULL;`);
-        } catch(e) { /* already nullable — ignore */ }
+        try { await sequelize.query('ALTER TABLE "Calls" ALTER COLUMN "chatId" DROP NOT NULL;'); } catch (_) {}
+        try { await sequelize.query('ALTER TABLE "Calls" ALTER COLUMN "startedAt" DROP NOT NULL;'); } catch (_) {}
 
-        // Each entry: { name: DB column name, sql: column definition, aliases: [] }
         const colsToAdd = [
-          // ── FIX (CALLS-CHATID-MISSING): the original createcalls migration
-          // never created chatId, type, or duration — the model has always
-          // defined them, but they were absent from both the base migration
-          // AND this self-heal list, so every query (findAll/findAndCountAll
-          // implicitly SELECTs all model attributes) failed with
-          // 'column "chatId" does not exist'. See migration
-          // 2026999990023_fix_calls_missing_columns.js for the deploy-time fix;
-          // this entry makes already-running processes self-heal too.
-          { name: 'chatId',   sql: 'INTEGER' },
-          { name: 'type',     sql: "VARCHAR(10) NOT NULL DEFAULT 'audio'" },
+          { name: 'chatId', sql: 'INTEGER' },
+          { name: 'type', sql: "VARCHAR(10) NOT NULL DEFAULT 'audio'" },
           { name: 'duration', sql: 'INTEGER NOT NULL DEFAULT 0' },
-
-          // ── Array tracking fields (camelCase model → snake_case DB column) ──
-          // FIX (CALLS-PARTICIPANTS-MISSING): `participants` (the base array of
-          // all call participant user IDs — used by getUserCalls' history
-          // query and by the calls_participants_gin index) was never in this
-          // self-heal list, even though the derived participantsJoined/
-          // participantsLeft arrays right below it were. On any database
-          // where the original createcalls migration didn't already have this
-          // column, 20260701000001-add-call-composite-indexes.js's
-          // `CREATE INDEX ... ON "Calls" USING gin (participants)` failed
-          // with "column participants does not exist" — a hard failure in
-          // the strict production migrate path that blocked every migration
-          // after it (including 2026999990017_create_offline_message_queue.js,
-          // which is why offline-message redelivery was failing in
-          // production). Reproduced against a real deploy.
-          { name: 'participants',       sql: "INTEGER[] NOT NULL DEFAULT '{}'" },
-          { name: 'answered_by',        sql: "INTEGER[] NOT NULL DEFAULT '{}'" },
-          { name: 'declined_by',        sql: "INTEGER[] NOT NULL DEFAULT '{}'" },
-          { name: 'read_by',            sql: "INTEGER[] NOT NULL DEFAULT '{}'" },
+          { name: 'participants', sql: "INTEGER[] NOT NULL DEFAULT '{}'" },
+          { name: 'answered_by', sql: "INTEGER[] NOT NULL DEFAULT '{}'" },
+          { name: 'declined_by', sql: "INTEGER[] NOT NULL DEFAULT '{}'" },
+          { name: 'read_by', sql: "INTEGER[] NOT NULL DEFAULT '{}'" },
           { name: 'participantsJoined', sql: "INTEGER[] NOT NULL DEFAULT '{}'" },
-          { name: 'participantsLeft',   sql: "INTEGER[] NOT NULL DEFAULT '{}'" },
-
-          // ── WebRTC signalling fields ──────────────────────────────────────
-          { name: 'sdpOffer',    sql: 'TEXT' },
-          { name: 'sdpAnswer',   sql: 'TEXT' },
+          { name: 'participantsLeft', sql: "INTEGER[] NOT NULL DEFAULT '{}'" },
+          { name: 'sdpOffer', sql: 'TEXT' },
+          { name: 'sdpAnswer', sql: 'TEXT' },
           { name: 'iceCandidates', sql: "JSONB NOT NULL DEFAULT '[]'" },
-
-          // ── Recording / transcript links ───────────────────────────────────
-          { name: 'recordingUrl',  sql: 'VARCHAR(255)' },
+          { name: 'recordingUrl', sql: 'VARCHAR(255)' },
           { name: 'transcriptUrl', sql: 'VARCHAR(255)' },
-
-          // ── Metadata JSONB blob ────────────────────────────────────────────
           { name: 'metadata', sql: "JSONB NOT NULL DEFAULT '{}'" },
-
-          // ── Group-call flag ────────────────────────────────────────────────
           { name: 'isGroupCall', sql: 'BOOLEAN NOT NULL DEFAULT FALSE' },
-
-          // ── Error reason ──────────────────────────────────────────────────
           { name: 'errorReason', sql: 'VARCHAR(200)' },
-
-          // ── Quality & Network Metrics (added audit fix) ───────────────────
-          { name: 'qualityScore',     sql: 'FLOAT' },
-          { name: 'networkStats',     sql: "JSONB NOT NULL DEFAULT '{}'" },
-          { name: 'postCallRating',   sql: 'INTEGER' },
+          { name: 'qualityScore', sql: 'FLOAT' },
+          { name: 'networkStats', sql: "JSONB NOT NULL DEFAULT '{}'" },
+          { name: 'postCallRating', sql: 'INTEGER' },
           { name: 'postCallFeedback', sql: 'TEXT' },
-          { name: 'recordingStatus',  sql: "VARCHAR(20) NOT NULL DEFAULT 'none'" },
-          { name: 'scheduledAt',      sql: 'TIMESTAMPTZ' },
-          { name: 'scheduledTitle',   sql: 'VARCHAR(200)' },
+          { name: 'recordingStatus', sql: "VARCHAR(20) NOT NULL DEFAULT 'none'" },
+          { name: 'scheduledAt', sql: 'TIMESTAMPTZ' },
+          { name: 'scheduledTitle', sql: 'VARCHAR(200)' },
         ];
 
         for (const col of colsToAdd) {
-          // Check both the exact name and common camelCase/snake_case variants
           const present = tableDesc[col.name]
             || tableDesc[col.name.toLowerCase()]
             || tableDesc[col.name.replace(/([A-Z])/g, '_$1').toLowerCase().replace(/^_/, '')];
-
           if (!present) {
             try {
-              await sequelize.query(
-                `ALTER TABLE "Calls" ADD COLUMN IF NOT EXISTS "${col.name}" ${col.sql};`
-              );
-              console.log(`[Call model] ✅ Added missing column: ${col.name}`);
+              await sequelize.query(`ALTER TABLE "Calls" ADD COLUMN IF NOT EXISTS "${col.name}" ${col.sql};`);
+              console.log(`[Call model] Added missing column: ${col.name}`);
             } catch (colErr) {
-              // Non-fatal: column may have been added by a concurrent process
-              console.warn(`[Call model] Could not add column ${col.name} (non-fatal):`, colErr.message);
+              console.warn(`[Call model] Could not add column ${col.name}:`, colErr.message);
             }
           }
         }
@@ -515,7 +346,6 @@ module.exports = (sequelize, DataTypes) => {
       }
     });
   }
-  // ──────────────────────────────────────────────────────────────────────────
 
   return Calls;
 };
