@@ -13,6 +13,13 @@ const { Op } = require('sequelize');
 const crypto = require('crypto');
 const path   = require('path');
 const fs     = require('fs');
+// CATEGORY-UNIFICATION FIX: _sanitizeCategory's VALID list and
+// getCategories()'s displayed list used to be two more independent,
+// drifted-apart copies of the category whitelist (on top of the ones in
+// Tool.js and toolsController.js) — see src/utils/constants.js for the
+// full history and why this matters (picking "Building & Construction"
+// from the displayed list used to silently save as 'other').
+const { MARKETPLACE_CATEGORIES, MARKETPLACE_CATEGORY_DISPLAY } = require('../utils/constants');
 const multer = require('multer');
 
 // ─── Ensure marketplace uploads directory exists ──────────────────────────────
@@ -328,24 +335,11 @@ class MarketplaceController {
     // ── GET /api/marketplace/categories ───────────────────────────────────────
     async getCategories(req, res, next) {
         try {
-            const categories = [
-                { id:'electronics', name:'Electronics',     icon:'📱', color:'#2196F3' },
-                { id:'fashion',     name:'Fashion',         icon:'👗', color:'#E91E63' },
-                { id:'home',        name:'Home & Garden',   icon:'🏠', color:'#4CAF50' },
-                { id:'furniture',   name:'Furniture & Home',icon:'🛋️', color:'#8D6E63' },
-                { id:'construction',name:'Building & Construction', icon:'🧱', color:'#78909C' },
-                { id:'beauty',      name:'Beauty',          icon:'💄', color:'#FF4081' },
-                { id:'sports',      name:'Sports',          icon:'⚽', color:'#FF9800' },
-                { id:'books',       name:'Books',           icon:'📚', color:'#795548' },
-                { id:'toys',        name:'Toys',            icon:'🧸', color:'#FFC107' },
-                { id:'food',        name:'Food & Groceries',icon:'🛒', color:'#66BB6A' },
-                { id:'automotive',  name:'Automotive',      icon:'🚗', color:'#607D8B' },
-                { id:'services',    name:'Services',        icon:'🔧', color:'#9C27B0' },
-                { id:'digital',     name:'Digital',         icon:'💾', color:'#00BCD4' },
-                { id:'health',      name:'Health',          icon:'💊', color:'#F44336' },
-                { id:'other',       name:'Other',           icon:'📦', color:'#9E9E9E' },
-            ];
-            return ok(res, { categories }, 'Categories fetched');
+            // CATEGORY-UNIFICATION FIX: was its own hardcoded array here,
+            // separate from _sanitizeCategory's whitelist — now the same
+            // canonical source (src/utils/constants.js), so every category
+            // shown to buyers is guaranteed to be one that actually saves.
+            return ok(res, { categories: MARKETPLACE_CATEGORY_DISPLAY }, 'Categories fetched');
         } catch(e) { err(next, e, 'getCategories'); }
     }
 
@@ -2415,9 +2409,7 @@ function _formatReview(row) {
 }
 
 function _sanitizeCategory(cat) {
-    const VALID = ['electronics','furniture','clothing','books','services','digital','premium',
-                   'fashion','home','beauty','sports','toys','food','automotive','health','other'];
-    return VALID.includes(cat) ? cat : 'other';
+    return MARKETPLACE_CATEGORIES.includes(cat) ? cat : 'other';
 }
 function _sanitizeType(type) {
     return ['service','digital','premium','physical'].includes(type) ? type : 'physical';

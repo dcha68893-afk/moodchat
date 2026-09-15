@@ -12,6 +12,7 @@
 'use strict';
 
 const toolsService = require('../services/toolsService');
+const { MARKETPLACE_CATEGORIES } = require('../utils/constants');
 
 let AppError;
 try {
@@ -676,21 +677,11 @@ class ToolsController {
 
             const typeMap          = { services: 'service', digital: 'digital', premium: 'premium', physical: 'physical' };
             const normalizedType   = typeMap[type] || type || 'service';
-            const validCategories  = ['electronics','furniture','clothing','books','services','digital','premium','other',
-                // FIX (2026-07-22): service subcategories (Service tab dropdown)
-                'tutoring','repair','design','tech','cleaning','events','beauty','transport',
-                // FIX (2026-07-22): digital-item subcategories (Digital Item tab dropdown)
-                'notes','templates','ebooks','software','audio','courses',
-                // FIX (category-not-shown-after-save): the "Physical Product" tab's
-                // #physCategory <select> in Tools.html sends these exact values
-                // (phones/appliances/health/home/fashion/computing/gaming/baby/
-                // sports/supermarket/garden), but none of them were in this
-                // whitelist. Every physical listing silently fell through to the
-                // `normalizedCat` default of 'services' below, so it saved fine
-                // and returned 201, but never showed up under the category the
-                // seller actually picked — it was filed under Services instead.
-                'phones','appliances','health','home','fashion','computing',
-                'gaming','baby','sports','supermarket','garden'];
+            // CATEGORY-UNIFICATION FIX: was a standalone list duplicated (and
+            // drifted out of sync with) the ones in Tool.js and
+            // marketplace.controller.js — see src/utils/constants.js. Now
+            // reads the same canonical array every other validator uses.
+            const validCategories  = MARKETPLACE_CATEGORIES;
             const normalizedCat    = validCategories.includes(category) ? category : (normalizedType === 'digital' ? 'digital' : normalizedType === 'premium' ? 'premium' : 'services');
             const validConditions  = ['new','used','refurbished'];
             const normalizedCond   = validConditions.includes(condition) ? condition : 'new';

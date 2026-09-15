@@ -34,6 +34,12 @@
 // CREATE INDEX IF NOT EXISTS idx_reviews_user    ON marketplace_reviews (user_id);
 // ─────────────────────────────────────────────────────────────────────────────
 const { Op } = require('sequelize');
+// CATEGORY-UNIFICATION FIX: this validator's category list used to be
+// independently duplicated (and drifted out of sync with) the whitelists in
+// toolsController.js and marketplace.controller.js — see
+// src/utils/constants.js for the full history. All three now read from one
+// canonical array so a category valid in the UI is always valid here too.
+const { MARKETPLACE_CATEGORIES } = require('../utils/constants');
 
 module.exports = (sequelize, DataTypes) => {
   const Tool = sequelize.define(
@@ -85,11 +91,7 @@ module.exports = (sequelize, DataTypes) => {
           // superset of every <option value="..."> across all four "Create
           // Listing" tabs (Service, Physical Product, Digital Item) in
           // Tools.html, or valid category picks get rejected/rewritten.
-          isIn: [['electronics', 'furniture', 'clothing', 'books', 'services', 'digital', 'premium', 'other',
-                  'tutoring', 'repair', 'design', 'tech', 'cleaning', 'events', 'beauty', 'transport',
-                  'notes', 'templates', 'ebooks', 'software', 'audio', 'courses',
-                  'phones', 'appliances', 'health', 'home', 'fashion', 'computing',
-                  'gaming', 'baby', 'sports', 'supermarket', 'garden']],
+          isIn: [MARKETPLACE_CATEGORIES],
         },
       },
       type: {
