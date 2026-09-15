@@ -5,30 +5,18 @@
 const express = require('express');
 const router  = express.Router({ mergeParams: true });
 
-// PHASE14 FIX: inject req.io so route handlers can emit socket events
 router.use((req, _res, next) => {
     if (!req.io) req.io = global.__socketIO || null;
     next();
 });
 
-// Helper: broadcast to group room via socket
 function _emitToGroup(io, groupId, event, payload) {
     if (!io || !groupId) return;
-    try {
-        io.to(`group:${groupId}`).emit(event, payload);
-        io.to(`group_${groupId}`).emit(event, payload);
-    } catch (_) {}
+    try { io.to(`group:${groupId}`).emit(event, payload); io.to(`group_${groupId}`).emit(event, payload); } catch (_) {}
 }
 
-// ── SAFE auth middleware ──────────────────────────────────────────────────
 function auth(req, res, next) {
-    // Try multiple auth middleware paths used in this project
-    const paths = [
-        '../middleware/auth',
-        '../middleware/authenticate', 
-        '../middleware/authMiddleware',
-        './auth'
-    ];
+    const paths = ['../middleware/auth','../middleware/authenticate','../middleware/authMiddleware','./auth'];
     for (const p of paths) {
         try {
             const mw = require(p);
@@ -36,129 +24,84 @@ function auth(req, res, next) {
             if (fn) return fn(req, res, next);
         } catch(_) {}
     }
-    // JWT fallback
     try {
         const jwt = require('jsonwebtoken');
         const tok = (req.headers.authorization||'').replace('Bearer ','').trim();
         if (!tok) return res.status(401).json({ success:false, message:'No token' });
-        // PHASE14 FIX: JWT_ACCESS_SECRET must take priority — tokenService signs with it first
         const secret = process.env.JWT_ACCESS_SECRET || process.env.JWT_SECRET;
-        if (!secret) return res.status(500).json({ success: false, message: 'Server misconfiguration: JWT secret not set', code: 'MISCONFIGURED' });
-        const decoded = jwt.verify(tok, secret);
-        req.user = decoded;
-        next();
-    } catch(e) { 
-        return res.status(401).json({ success:false, message:'Invalid token' }); 
-    }
+        if (!secret) return res.status(500).json({ success:false,message:'Server misconfiguration: JWT secret not set',code:'MISCONFIGURED' });
+        req.user = jwt.verify(tok, secret); next();
+    } catch(e) { return res.status(401).json({ success:false,message:'Invalid token' }); }
 }
 
-function uid(req) { 
-    return req.user?.id || req.user?.userId || req.user?.sub || req.userId; 
-}
-function gid(req) { 
-    return parseInt(req.params.groupId, 10); 
-}
+function uid(req) { return req.user?.id || req.user?.userId || req.user?.sub || req.userId; }
+function gid(req) { return parseInt(req.params.groupId, 10); }
+const wrap = fn => (req,res,next) => Promise.resolve(fn(req,res,next)).catch(err => { console.error('[SmartGroups] Route error:',err.message); if(!res.headersSent)res.status(err.status||500).json({success:false,message:err.message||'Server error'}); });
+function _svc() { try { return require('../services/smartGroupService'); } catch(e) { console.warn('[SmartGroups] Service unavailable:',e.message); return null; } }
+function _handler(serviceFn) { return wrap(async(req,res)=>{const svc=_svc();if(!svc)return res.status(503).json({success:false,message:'Smart Group service unavailable - run migration first'});res.json({success:true,data:await serviceFn(svc,req)});}); }
 
-const wrap = fn => (req,res,next) => {
-    Promise.resolve(fn(req,res,next)).catch(err => {
-        console.error('[SmartGroups] Route error:', err.message);
-        res.status(err.status||500).json({ success:false, message: err.message||'Server error' });
-    });
-};
-
-// Lazy-load service to prevent startup crash if models aren't ready
-function _svc() {
-    try { return require('../services/smartGroupService'); } 
-    catch(e) { 
-        console.warn('[SmartGroups] Service unavailable:', e.message);
-        return null; 
-    }
-}
-
-function _handler(serviceFn) {
-    return wrap(async (req, res) => {
-        const svc = _svc();
-        if (!svc) return res.status(503).json({ success:false, message:'Smart Group service unavailable - run migration first' });
-        const result = await serviceFn(svc, req);
-        res.json({ success:true, data: result });
-    });
-}
-
-// ── MODULES ───────────────────────────────────────────────────────────────
-router.get('/:groupId/modules', auth, _handler((svc,req) => svc.ModuleService.getEnabled(gid(req))));
-router.put('/:groupId/modules', auth, _handler((svc,req) => svc.ModuleService.setEnabled(gid(req), uid(req), req.body.modules)));
-
-// ── TASKS ─────────────────────────────────────────────────────────────────
-router.get('/:groupId/tasks',              auth, _handler((svc,req) => svc.TaskService.list(gid(req), uid(req), req.query)));
-router.post('/:groupId/tasks',             auth, wrap(async(req,res) => { const svc=_svc(); if(!svc) return res.status(503).json({success:false,message:'Service unavailable'}); const r=await svc.TaskService.create(gid(req),uid(req),req.body); _emitToGroup(req.io, gid(req), 'group:task:created', { groupId: gid(req), task: r, createdBy: uid(req) }); res.status(201).json({success:true,data:r}); }));
-router.put('/:groupId/tasks/:taskId',      auth, _handler((svc,req) => svc.TaskService.update(gid(req), uid(req), req.params.taskId, req.body)));
-router.delete('/:groupId/tasks/:taskId',   auth, _handler((svc,req) => svc.TaskService.delete(gid(req), uid(req), req.params.taskId)));
-
-// ── EVENTS ────────────────────────────────────────────────────────────────
-router.get('/:groupId/smart-events',                  auth, _handler((svc,req) => svc.EventService.list(gid(req), uid(req), req.query)));
-router.post('/:groupId/smart-events',                 auth, wrap(async(req,res) => { const svc=_svc(); if(!svc) return res.status(503).json({success:false,message:'Service unavailable'}); const r=await svc.EventService.create(gid(req),uid(req),req.body); _emitToGroup(req.io, gid(req), 'group:event:created', { groupId: gid(req), event: r, createdBy: uid(req) }); res.status(201).json({success:true,data:r}); }));
-router.post('/:groupId/smart-events/:eventId/rsvp',           auth, _handler((svc,req) => svc.EventService.rsvp(gid(req), uid(req), req.params.eventId, req.body.status)));
-router.post('/:groupId/smart-events/:eventId/attendance',     auth, _handler((svc,req) => svc.EventService.markAttendance(gid(req), uid(req), req.params.eventId, req.body.userId, req.body.status, req.body)));
-router.get('/:groupId/smart-events/:eventId/stats',           auth, _handler((svc,req) => svc.EventService.getStats(gid(req), uid(req), req.params.eventId)));
-
-// ── POLLS ─────────────────────────────────────────────────────────────────
-router.get('/:groupId/polls',               auth, _handler((svc,req) => svc.PollService.list(gid(req), uid(req), req.query)));
-router.post('/:groupId/polls',              auth, wrap(async(req,res) => { const svc=_svc(); if(!svc) return res.status(503).json({success:false,message:'Service unavailable'}); const r=await svc.PollService.create(gid(req),uid(req),req.body); _emitToGroup(req.io, gid(req), 'group:poll:created', { groupId: gid(req), poll: r, createdBy: uid(req) }); res.status(201).json({success:true,data:r}); }));
-router.post('/:groupId/polls/:pollId/vote', auth, _handler((svc,req) => svc.PollService.vote(gid(req), uid(req), req.params.pollId, req.body.optionIds)));
-router.post('/:groupId/polls/:pollId/close',auth, _handler((svc,req) => svc.PollService.close(gid(req), uid(req), req.params.pollId)));
-
-// ── NOTES ─────────────────────────────────────────────────────────────────
-router.get('/:groupId/notes',              auth, _handler((svc,req) => svc.NoteService.list(gid(req), uid(req), req.query)));
-router.post('/:groupId/notes',             auth, wrap(async(req,res) => { const svc=_svc(); if(!svc) return res.status(503).json({success:false,message:'Service unavailable'}); const r=await svc.NoteService.create(gid(req),uid(req),req.body); res.status(201).json({success:true,data:r}); }));
-router.put('/:groupId/notes/:noteId',      auth, _handler((svc,req) => svc.NoteService.update(gid(req), uid(req), req.params.noteId, req.body)));
-router.delete('/:groupId/notes/:noteId',   auth, _handler((svc,req) => svc.NoteService.delete(gid(req), uid(req), req.params.noteId)));
-
-// ── FILES ─────────────────────────────────────────────────────────────────
-router.get('/:groupId/group-files',              auth, _handler((svc,req) => svc.FileService.list(gid(req), uid(req), req.query)));
-router.post('/:groupId/group-files',             auth, wrap(async(req,res) => { const svc=_svc(); if(!svc) return res.status(503).json({success:false,message:'Service unavailable'}); const r=await svc.FileService.create(gid(req),uid(req),req.body); res.status(201).json({success:true,data:r}); }));
-router.delete('/:groupId/group-files/:fileId',   auth, _handler((svc,req) => svc.FileService.delete(gid(req), uid(req), req.params.fileId)));
-
-// ── FINANCES ──────────────────────────────────────────────────────────────
-router.get('/:groupId/finances',               auth, _handler((svc,req) => svc.FinanceService.list(gid(req), uid(req), req.query)));
-router.post('/:groupId/finances',              auth, wrap(async(req,res) => { const svc=_svc(); if(!svc) return res.status(503).json({success:false,message:'Service unavailable'}); const r=await svc.FinanceService.create(gid(req),uid(req),req.body); res.status(201).json({success:true,data:r}); }));
-router.post('/:groupId/finances/:txId/approve',auth, _handler((svc,req) => svc.FinanceService.approve(gid(req), uid(req), req.params.txId)));
-
-// ── ANALYTICS ─────────────────────────────────────────────────────────────
-router.get('/:groupId/analytics', auth, _handler((svc,req) => svc.AnalyticsService.getDashboard(gid(req), uid(req), parseInt(req.query.days)||30)));
-
-// ── AI SUMMARIES ──────────────────────────────────────────────────────────
-router.get('/:groupId/ai/summary',  auth, _handler((svc,req) => svc.AIService.getLatest(gid(req), uid(req), req.query.type||'daily')));
-router.post('/:groupId/ai/summary', auth, _handler((svc,req) => svc.AIService.queueSummary(gid(req), req.body.type||'daily')));
-
-// ── P3 FIX: SUB-TASKS ─────────────────────────────────────────────────────
-router.get('/:groupId/tasks/:taskId/subtasks',      auth, _handler((svc,req) => svc.TaskService.listSubTasks(gid(req), uid(req), req.params.taskId)));
-router.post('/:groupId/tasks/:taskId/subtasks',     auth, _handler((svc,req) => svc.TaskService.createSubTask(gid(req), uid(req), req.params.taskId, req.body)));
-
-// ── P3 FIX: TASK COMMENTS ─────────────────────────────────────────────────
-router.get('/:groupId/tasks/:taskId/comments',      auth, _handler((svc,req) => svc.TaskService.getComments(gid(req), uid(req), req.params.taskId)));
-router.post('/:groupId/tasks/:taskId/comments',     auth, _handler((svc,req) => svc.TaskService.addComment(gid(req), uid(req), req.params.taskId, req.body.content)));
-
-// ── P3 FIX: EXPENSE SPLITTING ─────────────────────────────────────────────
-router.post('/:groupId/finances/split',             auth, _handler((svc,req) => svc.FinanceService.splitExpense(gid(req), uid(req), req.body)));
-router.post('/:groupId/finances/:txId/settle',      auth, _handler((svc,req) => svc.FinanceService.settleExpense(gid(req), uid(req), req.params.txId)));
-
-// ── P3 FIX: RECURRING EVENTS ──────────────────────────────────────────────
-router.post('/:groupId/events/recurring',           auth, _handler((svc,req) => svc.EventService.createRecurring(gid(req), uid(req), req.body)));
-
-// ── P3 FIX: ICS EXPORT ────────────────────────────────────────────────────
-router.get('/:groupId/events/:eventId/ics', auth, wrap(async (req, res) => {
-    try {
-        const svc = _svc(); if (!svc) return res.status(503).json({ success: false, message: 'Service unavailable' });
-        const result = await svc.EventService.exportICS(gid(req), uid(req), req.params.eventId);
-        res.setHeader('Content-Type', result.contentType);
-        res.setHeader('Content-Disposition', `attachment; filename="${result.filename}"`);
-        res.send(result.ics);
-    } catch (e) {
-        res.status(e.status || 500).json({ success: false, message: e.message });
-    }
+// Compatibility endpoints for older Group OS clients. These deliberately use the
+// same Chats/ChatParticipant source as the normal chat system instead of inventing
+// a second group database. This removes legacy /api/groups 404s while clients migrate.
+router.get('/', auth, wrap(async (req,res) => {
+    const db = require('../models');
+    const Chat = db.Chats || db.Chat;
+    const ChatParticipant = db.ChatParticipant;
+    const userId = uid(req);
+    if (!Chat || !ChatParticipant) return res.json({success:true,data:[]});
+    const memberships = await ChatParticipant.findAll({ where:{userId}, attributes:['chatId'] });
+    const ids = memberships.map(x=>x.chatId).filter(Boolean);
+    if (!ids.length) return res.json({success:true,data:[]});
+    const chats = await Chat.findAll({ where:{id:ids,type:'group'}, order:[['updatedAt','DESC']] });
+    return res.json({success:true,data:chats});
+}));
+router.get('/user', auth, wrap(async (req,res) => {
+    const db = require('../models');
+    const Chat = db.Chats || db.Chat;
+    const ChatParticipant = db.ChatParticipant;
+    const userId = uid(req);
+    if (!Chat || !ChatParticipant) return res.json({success:true,data:[]});
+    const memberships = await ChatParticipant.findAll({ where:{userId}, attributes:['chatId'] });
+    const ids = memberships.map(x=>x.chatId).filter(Boolean);
+    const chats = ids.length ? await Chat.findAll({where:{id:ids,type:'group'},order:[['updatedAt','DESC']]}) : [];
+    return res.json({success:true,data:chats});
 }));
 
-// ── P2 FIX: THREAD ROUTES (re-exported from group.js via this router too) ─
-// (Group.js handles /:groupId/messages/:id/thread and /:groupId/threads/*)
+router.get('/:groupId/modules', auth, _handler((svc,req) => svc.ModuleService.getEnabled(gid(req))));
+router.put('/:groupId/modules', auth, _handler((svc,req) => svc.ModuleService.setEnabled(gid(req), uid(req), req.body.modules)));
+router.get('/:groupId/tasks', auth, _handler((svc,req) => svc.TaskService.list(gid(req),uid(req),req.query)));
+router.post('/:groupId/tasks', auth, wrap(async(req,res)=>{const svc=_svc();if(!svc)return res.status(503).json({success:false,message:'Service unavailable'});const r=await svc.TaskService.create(gid(req),uid(req),req.body);_emitToGroup(req.io,gid(req),'group:task:created',{groupId:gid(req),task:r,createdBy:uid(req)});res.status(201).json({success:true,data:r});}));
+router.put('/:groupId/tasks/:taskId',auth,_handler((svc,req)=>svc.TaskService.update(gid(req),uid(req),req.params.taskId,req.body)));
+router.delete('/:groupId/tasks/:taskId',auth,_handler((svc,req)=>svc.TaskService.delete(gid(req),uid(req),req.params.taskId)));
+router.get('/:groupId/smart-events',auth,_handler((svc,req)=>svc.EventService.list(gid(req),uid(req),req.query)));
+router.post('/:groupId/smart-events',auth,wrap(async(req,res)=>{const svc=_svc();if(!svc)return res.status(503).json({success:false,message:'Service unavailable'});const r=await svc.EventService.create(gid(req),uid(req),req.body);_emitToGroup(req.io,gid(req),'group:event:created',{groupId:gid(req),event:r,createdBy:uid(req)});res.status(201).json({success:true,data:r});}));
+router.post('/:groupId/smart-events/:eventId/rsvp',auth,_handler((svc,req)=>svc.EventService.rsvp(gid(req),uid(req),req.params.eventId,req.body.status)));
+router.post('/:groupId/smart-events/:eventId/attendance',auth,_handler((svc,req)=>svc.EventService.markAttendance(gid(req),uid(req),req.params.eventId,req.body.userId,req.body.status,req.body)));
+router.get('/:groupId/smart-events/:eventId/stats',auth,_handler((svc,req)=>svc.EventService.getStats(gid(req),uid(req),req.params.eventId)));
+router.get('/:groupId/polls',auth,_handler((svc,req)=>svc.PollService.list(gid(req),uid(req),req.query)));
+router.post('/:groupId/polls',auth,wrap(async(req,res)=>{const svc=_svc();if(!svc)return res.status(503).json({success:false,message:'Service unavailable'});const r=await svc.PollService.create(gid(req),uid(req),req.body);_emitToGroup(req.io,gid(req),'group:poll:created',{groupId:gid(req),poll:r,createdBy:uid(req)});res.status(201).json({success:true,data:r});}));
+router.post('/:groupId/polls/:pollId/vote',auth,_handler((svc,req)=>svc.PollService.vote(gid(req),uid(req),req.params.pollId,req.body.optionIds)));
+router.post('/:groupId/polls/:pollId/close',auth,_handler((svc,req)=>svc.PollService.close(gid(req),uid(req),req.params.pollId)));
+router.get('/:groupId/notes',auth,_handler((svc,req)=>svc.NoteService.list(gid(req),uid(req),req.query)));
+router.post('/:groupId/notes',auth,wrap(async(req,res)=>{const svc=_svc();if(!svc)return res.status(503).json({success:false,message:'Service unavailable'});const r=await svc.NoteService.create(gid(req),uid(req),req.body);res.status(201).json({success:true,data:r});}));
+router.put('/:groupId/notes/:noteId',auth,_handler((svc,req)=>svc.NoteService.update(gid(req),uid(req),req.params.noteId,req.body)));
+router.delete('/:groupId/notes/:noteId',auth,_handler((svc,req)=>svc.NoteService.delete(gid(req),uid(req),req.params.noteId)));
+router.get('/:groupId/group-files',auth,_handler((svc,req)=>svc.FileService.list(gid(req),uid(req),req.query)));
+router.post('/:groupId/group-files',auth,wrap(async(req,res)=>{const svc=_svc();if(!svc)return res.status(503).json({success:false,message:'Service unavailable'});const r=await svc.FileService.create(gid(req),uid(req),req.body);res.status(201).json({success:true,data:r});}));
+router.delete('/:groupId/group-files/:fileId',auth,_handler((svc,req)=>svc.FileService.delete(gid(req),uid(req),req.params.fileId)));
+router.get('/:groupId/finances',auth,_handler((svc,req)=>svc.FinanceService.list(gid(req),uid(req),req.query)));
+router.post('/:groupId/finances',auth,wrap(async(req,res)=>{const svc=_svc();if(!svc)return res.status(503).json({success:false,message:'Service unavailable'});const r=await svc.FinanceService.create(gid(req),uid(req),req.body);res.status(201).json({success:true,data:r});}));
+router.post('/:groupId/finances/:txId/approve',auth,_handler((svc,req)=>svc.FinanceService.approve(gid(req),uid(req),req.params.txId)));
+router.get('/:groupId/analytics',auth,_handler((svc,req)=>svc.AnalyticsService.getDashboard(gid(req),uid(req),parseInt(req.query.days)||30)));
+router.get('/:groupId/ai/summary',auth,_handler((svc,req)=>svc.AIService.getLatest(gid(req),uid(req),req.query.type||'daily')));
+router.post('/:groupId/ai/summary',auth,_handler((svc,req)=>svc.AIService.queueSummary(gid(req),req.body.type||'daily')));
+router.get('/:groupId/tasks/:taskId/subtasks',auth,_handler((svc,req)=>svc.TaskService.listSubTasks(gid(req),uid(req),req.params.taskId)));
+router.post('/:groupId/tasks/:taskId/subtasks',auth,_handler((svc,req)=>svc.TaskService.createSubTask(gid(req),uid(req),req.params.taskId,req.body)));
+router.get('/:groupId/tasks/:taskId/comments',auth,_handler((svc,req)=>svc.TaskService.getComments(gid(req),uid(req),req.params.taskId)));
+router.post('/:groupId/tasks/:taskId/comments',auth,_handler((svc,req)=>svc.TaskService.addComment(gid(req),uid(req),req.params.taskId,req.body.content)));
+router.post('/:groupId/finances/split',auth,_handler((svc,req)=>svc.FinanceService.splitExpense(gid(req),uid(req),req.body)));
+router.post('/:groupId/finances/:txId/settle',auth,_handler((svc,req)=>svc.FinanceService.settleExpense(gid(req),uid(req),req.params.txId)));
+router.post('/:groupId/events/recurring',auth,_handler((svc,req)=>svc.EventService.createRecurring(gid(req),uid(req),req.body)));
+router.get('/:groupId/events/:eventId/ics',auth,wrap(async(req,res)=>{const svc=_svc();if(!svc)return res.status(503).json({success:false,message:'Service unavailable'});const result=await svc.EventService.exportICS(gid(req),uid(req),req.params.eventId);res.setHeader('Content-Type',result.contentType);res.setHeader('Content-Disposition',`attachment; filename="${result.filename}"`);res.send(result.ics);}));
 
 module.exports = router;
