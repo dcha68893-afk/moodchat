@@ -1,7 +1,7 @@
 'use strict';
 
 module.exports = {
-  async up(queryInterface, Sequelize) {
+  async up(queryInterface) {
     await queryInterface.sequelize.query(`
       CREATE TABLE IF NOT EXISTS marketplace_accommodation_bookings (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -24,7 +24,6 @@ module.exports = {
         ON marketplace_accommodation_bookings (guest_id, created_at DESC);
     `);
   },
-
   async down(queryInterface) {
     await queryInterface.sequelize.query('DROP TABLE IF EXISTS marketplace_accommodation_bookings;');
   },
