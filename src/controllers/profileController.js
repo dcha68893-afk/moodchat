@@ -750,6 +750,36 @@ class ProfileController {
         throw new AppError('Cannot report yourself', 400);
       }
 
+      // ROOT-CAUSE FIX (ADMIN-NEVER-GETS-USER-REPORTS): this used to return a
+      // fake success response without saving the report ANYWHERE — not even
+      // a console log, let alone anything an admin could ever see. Persists
+      // a durable Notification for every admin user instead (see the
+      // matching fix in src/routes/friends.js's notifyAdminsOfReport for the
+      // full rationale — same approach, no new DB migration required).
+      try {
+        const db = require('../models');
+        const User = db.models?.Users || db.models?.User || db.User || db.Users;
+        const Notification = db.Notification || db.Notifications || db.models?.Notification || db.models?.Notifications;
+        if (User) {
+          const admins = await User.findAll({ where: { role: 'admin' }, attributes: ['id'] });
+          if (Notification && admins.length) {
+            await Promise.all(admins.map(a => Notification.create({
+              userId: a.id,
+              type: 'warning',
+              title: 'New profile report',
+              message: `${reason}${description ? ' — ' + String(description).slice(0, 140) : ''}`,
+              metadata: { reportType: 'profile', reporterId, targetId: userId, reason, description: description || null, evidence: evidence || null, ts: new Date().toISOString() },
+              isRead: false,
+            }).catch(e => logger.error('[ProfileReport] Notification.create failed:', e.message))));
+          }
+        }
+        if (global._wsService?.getIO) {
+          try { global._wsService.getIO().to('admin:reports').emit('new_report', { reportType: 'profile', reporterId, targetId: userId, reason }); } catch (_) {}
+        }
+      } catch (notifyErr) {
+        logger.error('[ProfileReport] admin notify failed:', notifyErr.message);
+      }
+
       res.status(201).json({
         success: true,
         message: 'Profile reported successfully',

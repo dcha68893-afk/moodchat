@@ -722,6 +722,35 @@ async function reportStatus(statusId, userId, reason, description) {
         reports.push({ userId, reason, description, reportedAt: new Date().toISOString() });
         await status.update({ metadata: { ...meta, reports } });
 
+        // ROOT-CAUSE FIX (ADMIN-NEVER-GETS-USER-REPORTS): this already saved
+        // the report onto the status's own metadata, but nothing ever
+        // surfaced it to an admin — it just sat there until someone thought
+        // to inspect that specific status row. Adds the same durable,
+        // per-admin Notification used by the other report endpoints (see
+        // src/routes/friends.js's notifyAdminsOfReport for the full
+        // rationale), so a report actually reaches an admin's notifications.
+        try {
+            const db = require('../models');
+            const User = db.models?.Users || db.models?.User || db.User || db.Users;
+            const Notification = db.Notification || db.Notifications || db.models?.Notification || db.models?.Notifications;
+            if (User) {
+                const admins = await User.findAll({ where: { role: 'admin' }, attributes: ['id'] });
+                if (Notification && admins.length) {
+                    await Promise.all(admins.map(a => Notification.create({
+                        userId: a.id,
+                        type: 'warning',
+                        title: 'New status report',
+                        message: `${reason}${description ? ' — ' + String(description).slice(0, 140) : ''}`,
+                        metadata: { reportType: 'status', reporterId: userId, targetId: statusId, reason, description: description || null, ts: new Date().toISOString() },
+                        isRead: false,
+                    }).catch(() => {})));
+                }
+            }
+            if (global._wsService?.getIO) {
+                try { global._wsService.getIO().to('admin:reports').emit('new_report', { reportType: 'status', reporterId: userId, targetId: statusId, reason }); } catch (_) {}
+            }
+        } catch (_) {}
+
         return { statusId, userId, reason, reportedAt: new Date() };
     } catch (e) { rethrow(e, 'Failed to report status'); }
 }

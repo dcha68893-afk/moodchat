@@ -81,6 +81,52 @@ try {
 
 console.log('✅ Friends routes initialized');
 
+// ===== ADMIN REPORT PERSISTENCE (shared by every /report endpoint) =====
+// ROOT-CAUSE FIX (ADMIN-NEVER-GETS-USER-REPORTS): none of this app's four
+// report endpoints (friends, groups, profiles, statuses) ever persisted a
+// report anywhere. This one (friends.js) only wrote to the server console
+// log and emitted a socket event to an 'admin:reports' room — which reaches
+// an admin ONLY if one happens to be connected and subscribed at that exact
+// moment; nothing else ever saw it. profiles.js's version was worse: it
+// didn't even log, just faked a success response back to the reporter.
+// Building a proper dedicated Report table needs a real migration against
+// the live DB, which isn't safe to author blind in this environment — so
+// this reuses the existing, already-migrated Notification model (generic
+// title/message/metadata JSONB, no schema change needed) to give every
+// admin user a durable, persistent notification for every report, so it's
+// still there next time they log in even if no admin was online when the
+// report came in. The live socket emit is kept as well, for whoever IS
+// online right now.
+async function notifyAdminsOfReport(req, { reportType, reporterId, targetId, reason, description }) {
+    try {
+        const _db = db || require('../models');
+        const _User = User || _db.models?.Users || _db.models?.User || _db.User || _db.Users;
+        const Notification = _db.Notification || _db.Notifications || _db.models?.Notification || _db.models?.Notifications;
+        if (_User) {
+            const admins = await _User.findAll({ where: { role: 'admin' }, attributes: ['id'] });
+            if (Notification && admins.length) {
+                const title = `New ${reportType} report`;
+                const message = `${reason || 'other'}${description ? ' — ' + String(description).slice(0, 140) : ''}`;
+                await Promise.all(admins.map(a => Notification.create({
+                    userId: a.id,
+                    type: 'warning',
+                    title,
+                    message,
+                    metadata: { reportType, reporterId, targetId, reason, description: description || null, ts: new Date().toISOString() },
+                    isRead: false,
+                }).catch(e => console.error('[AdminReport] Notification.create failed:', e.message))));
+            }
+        }
+    } catch (e) {
+        console.error('[AdminReport] notifyAdminsOfReport failed:', e.message);
+    }
+    // Live push for whoever's connected right now — unchanged behavior.
+    if (global._wsService?.getIO) {
+        try { global._wsService.getIO().to('admin:reports').emit('new_report', { reportType, reporterId, targetId, reason }); } catch (_) {}
+    }
+}
+router.notifyAdminsOfReport = notifyAdminsOfReport;
+
 // ===== APPLY AUTHENTICATION GLOBALLY =====
 // This ensures req.user is always populated for all routes
 router.use(authenticateToken);
@@ -1786,13 +1832,11 @@ router.post('/:friendId/report', apiRateLimiter, asyncHandler(async (req, res) =
         const reason      = (req.body.reason      || 'other').substring(0, 100);
         const description = (req.body.description || '').substring(0, 500);
 
-        // Log server-side — a full FriendReport model can be added in a future phase.
+        // Log server-side for immediate visibility, and persist a durable
+        // notification for every admin (see notifyAdminsOfReport above) so
+        // the report survives even if no admin is online right now.
         console.warn('[FriendReport]', { reporterId: userId, reportedId, reason, description, ts: new Date().toISOString() });
-
-        // Emit to admins if socket available
-        if (global._wsService?.getIO) {
-            try { global._wsService.getIO().to('admin:reports').emit('new_report', { reporterId: userId, reportedId, reason }); } catch (_) {}
-        }
+        await notifyAdminsOfReport(req, { reportType: 'friend', reporterId: userId, targetId: reportedId, reason, description });
 
         return res.json({ success: true, message: 'Report submitted. Our team will review it.' });
     } catch (e) {

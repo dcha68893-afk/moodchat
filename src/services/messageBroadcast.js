@@ -27,7 +27,6 @@ async function broadcastNewMessage(message, senderId) {
     { replacements: { chatId: chatIdInt }, type: sequelize.QueryTypes.SELECT }
   ).catch(() => [null]);
   const chatType = chat?.type || 'direct';
-  const eventName = chatType === 'group' ? 'group:message:new' : 'message:new';
 
   const payload = {
     id: message.id,
@@ -47,17 +46,36 @@ async function broadcastNewMessage(message, senderId) {
     status: 'sent',
   };
 
-  // Direct/private messages stay on message:new. Group messages use their own
-  // event so the private Message module never consumes group traffic.
-  const results = await Promise.allSettled(
-    recipientIds.map(uid => wsService.sendToUser(uid, eventName, payload))
-  );
-  const delivered = [];
-  const offline = [];
-  recipientIds.forEach((uid, i) => {
-    const ok = results[i].status === 'fulfilled' && results[i].value === true;
-    (ok ? delivered : offline).push(uid);
-  });
+  // ROOT-CAUSE FIX (GROUP-MESSAGE-DUPLICATES-INTO-1:1-PANEL): this used to
+  // emit a per-user 'group:message:new' for group chats — an event name
+  // NOTHING in the frontend listens for (the group panel's 17 listener
+  // registrations, and every other one of the 11 other backend broadcast
+  // call sites, all use the plain 'group:message' event, delivered via
+  // wsService's room-based broadcastToGroup, not per-user sendToUser).
+  // Because nothing consumed 'group:message:new', the message never
+  // rendered live in the group panel for anyone (sender included); it only
+  // surfaced later when a generic chat-history/sync pass — which does not
+  // filter by chat type — pulled the same chatId's rows into the 1:1
+  // message list. Routing group chats through the same room broadcast every
+  // other group feature already uses fixes both: it renders live in the
+  // group panel, and stops being per-user-delivered in a way indistinguishable
+  // from a direct message.
+  let delivered = [];
+  let offline = [];
+  if (chatType === 'group') {
+    const sent = wsService.broadcastToGroup(chatIdInt, 'group:message', { message: payload, groupId: chatIdInt }, senderIdInt);
+    if (sent) delivered = recipientIds.slice();
+    else offline = recipientIds.slice();
+  } else {
+    // Direct/private messages stay on message:new, per-user.
+    const results = await Promise.allSettled(
+      recipientIds.map(uid => wsService.sendToUser(uid, 'message:new', payload))
+    );
+    recipientIds.forEach((uid, i) => {
+      const ok = results[i].status === 'fulfilled' && results[i].value === true;
+      (ok ? delivered : offline).push(uid);
+    });
+  }
 
   await messageDeliveryService.notifyMessageRecipients(message, recipientIds, {
     push: true,
