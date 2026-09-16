@@ -15,23 +15,31 @@ async function broadcastNewMessage(message, senderId) {
   const senderIdInt = parseInt(senderId, 10);
   const chatIdInt = parseInt(message.chatId, 10);
 
-  const participants = await sequelize.query(
-    `SELECT DISTINCT "userId" FROM chat_participants WHERE "chatId" = :chatId AND "userId" != :senderId`,
-    { replacements: { chatId: chatIdInt, senderId: senderIdInt }, type: sequelize.QueryTypes.SELECT }
-  ).catch(() => []);
-  const recipientIds = participants.map(p => p.userId);
-  if (!recipientIds.length) return { recipientIds: [], delivered: [], offline: [] };
+  if (!Number.isInteger(chatIdInt) || chatIdInt <= 0) {
+    console.error('[Messages] Refusing realtime broadcast: invalid chatId');
+    return { recipientIds: [], delivered: [], offline: [] };
+  }
 
-  // GROUP/1:1 BOUNDARY: always determine the real chat type from the canonical
-  // lowercase chats table. A failed type lookup must NOT silently turn a group
-  // message into a direct-message event.
+  const participants = await sequelize.query(
+    `SELECT DISTINCT "userId" FROM chat_participants
+     WHERE "chatId" = :chatId AND "userId" != :senderId`,
+    {
+      replacements: { chatId: chatIdInt, senderId: senderIdInt },
+      type: sequelize.QueryTypes.SELECT,
+    }
+  ).catch(() => []);
+  const recipientIds = participants.map(p => p.userId).filter(Boolean);
+
+  // GROUP/1:1 BOUNDARY: determine the authoritative chat type before any
+  // realtime event is emitted. Never infer group/direct from recipient count.
   const [chat] = await sequelize.query(
     `SELECT "type" FROM "chats" WHERE id = :chatId LIMIT 1`,
     { replacements: { chatId: chatIdInt }, type: sequelize.QueryTypes.SELECT }
   ).catch(() => [null]);
-  const chatType = chat?.type;
-  if (!chatType) {
-    console.error(`[Messages] Refusing realtime broadcast: chat type unavailable for chatId=${chatIdInt}`);
+  const chatType = String(chat?.type || '').toLowerCase();
+
+  if (chatType !== 'group' && chatType !== 'direct') {
+    console.error(`[Messages] Refusing realtime broadcast: unsupported chat type for chatId=${chatIdInt}`);
     return { recipientIds, delivered: [], offline: recipientIds.slice() };
   }
 
@@ -53,37 +61,50 @@ async function broadcastNewMessage(message, senderId) {
     status: 'sent',
   };
 
+  if (!recipientIds.length) {
+    await messageDeliveryService.notifyMessageRecipients(message, [], {
+      push: false,
+      offlineRecipientIds: [],
+    }).catch(() => {});
+    return { recipientIds: [], delivered: [], offline: [] };
+  }
+
   let delivered = [];
   let offline = [];
+
   if (chatType === 'group') {
-    // Primary path: group room. Fallback path: personal user rooms. The latter
-    // is important when a member has not opened the group yet and therefore
-    // has not joined the group socket room. Client-side message-id dedup keeps
-    // the two paths from rendering duplicates when a member is in both.
-    const roomSent = wsService.broadcastToGroup(
-      chatIdInt,
-      'group:message',
-      { message: payload, groupId: chatIdInt },
-      senderIdInt
+    // GROUP DELIVERY CONTRACT:
+    //  - group messages use ONLY `group:message`.
+    //  - deliver through each member's canonical personal user room.
+    //  - do not also emit through group:<id>/group_<id> here; doing both
+    //    creates two transport paths for the same message when a member has
+    //    joined the group room AND their personal room.
+    //  - the group iframe consumes `kyn:group:message` and never receives
+    //    `message:new`, so this cannot enter the direct 1:1 chat pipeline.
+    //  - sender is excluded because the POST response is the sender's ACK;
+    //    the group UI appends that response locally and deduplicates by id.
+    const results = await Promise.allSettled(
+      recipientIds.map(uid =>
+        wsService.sendToUser(uid, 'group:message', {
+          message: payload,
+          groupId: chatIdInt,
+        })
+      )
     );
-    let memberSent = false;
-    if (typeof wsService.broadcastGroupMessageToMembers === 'function') {
-      memberSent = await wsService.broadcastGroupMessageToMembers(
-        chatIdInt,
-        'group:message',
-        { message: payload, groupId: chatIdInt }
-      ).catch(() => false);
-    }
-    if (roomSent || memberSent) delivered = recipientIds.slice();
-    else offline = recipientIds.slice();
+
+    recipientIds.forEach((uid, index) => {
+      const ok = results[index].status === 'fulfilled' && results[index].value === true;
+      (ok ? delivered : offline).push(uid);
+    });
   } else {
-    // Direct/private messages remain strictly on message:new and are never
-    // emitted through the group event path.
+    // DIRECT DELIVERY CONTRACT:
+    // Direct/private messages remain strictly on `message:new`. They never
+    // enter the group event namespace and are never sent to group members.
     const results = await Promise.allSettled(
       recipientIds.map(uid => wsService.sendToUser(uid, 'message:new', payload))
     );
-    recipientIds.forEach((uid, i) => {
-      const ok = results[i].status === 'fulfilled' && results[i].value === true;
+    recipientIds.forEach((uid, index) => {
+      const ok = results[index].status === 'fulfilled' && results[index].value === true;
       (ok ? delivered : offline).push(uid);
     });
   }
