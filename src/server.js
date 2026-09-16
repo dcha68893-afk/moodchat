@@ -1,4 +1,4 @@
-﻿// src/server.js - ADVANCED PRODUCTION SERVER WITH OPTIMIZED MIDDLEWARE ORDER
+// src/server.js - ADVANCED PRODUCTION SERVER WITH OPTIMIZED MIDDLEWARE ORDER
 // Complete implementation with FIXED middleware order and WebSocket
 // PATCHED: Fixed authentication handling, token extraction, and middleware consistency
 // CRITICAL FIX: Standardized token response format, fixed public route detection
@@ -153,11 +153,15 @@ if (this.environment === 'production' || this.isRender) {
    loadProductionOrigins() {
     _slog('🛡️ CORS: Configuring for PRODUCTION environment');
     
-    // Primary Render frontend URL
-    const renderFrontend = 'https://nexipa.onrender.com';
-    this.allowedOrigins.add(renderFrontend);
-    this.allowedOrigins.add(renderFrontend + '/'); // With trailing slash
-    _slog(`✅ CORS: Allowed production frontend: ${renderFrontend}`);
+    // Production frontend origins are configuration-driven. Do not embed a
+    // Render/frontend hostname here because deployments can move without a
+    // source-code change. FRONTEND_URL accepts a comma-separated list.
+    const configuredFrontends = String(this.frontendUrl || '').split(',').map(v => v.trim()).filter(Boolean);
+    configuredFrontends.forEach(origin => {
+        this.allowedOrigins.add(origin);
+        this.allowedOrigins.add(origin.replace(/\/$/, '') + '/');
+        _slog(`✅ CORS: Allowed configured production frontend: ${origin}`);
+    });
     
     // Also allow Render backend URL if running on Render
     if (this.isRender && process.env.RENDER_EXTERNAL_URL) {
@@ -173,12 +177,6 @@ if (this.environment === 'production' || this.isRender) {
             this.allowedOrigins.add(url + '/'); // With trailing slash
             _slog(`✅ CORS: Allowed custom frontend: ${url}`);
         });
-    }
-    
-    // CRITICAL: Ensure nexipa.onrender.com is always allowed
-    if (!this.allowedOrigins.has('https://nexipa.onrender.com')) {
-        this.allowedOrigins.add('https://nexipa.onrender.com');
-        _slog(`✅ CORS: Explicitly added nexipa.onrender.com`);
     }
     
     // Additional security for production: Remove any insecure origins
