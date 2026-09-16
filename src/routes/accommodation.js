@@ -20,11 +20,6 @@ const KENYA_REGIONS = {
 
 const userId = req => Number(req.user?.userId ?? req.user?.id);
 const accommodationOf = row => row?.metadata?.accommodation || row?.metadata?.accommodationDetails || null;
-// FIX: GET /listings used to spread row.toJSON() wholesale into the public
-// response, which leaked the whole metadata blob — including the
-// admin-only seller_contact field — to any anonymous visitor. Build an
-// explicit public-safe shape instead, and only include seller_contact for
-// the listing's own seller or an admin.
 const publicListing = (row, req) => {
   const r = row.toJSON ? row.toJSON() : row;
   const viewer = req.user;
@@ -42,35 +37,47 @@ const publicListing = (row, req) => {
 
 router.get('/regions', (req,res) => res.json({success:true,data:KENYA_REGIONS}));
 
-// GET /drilldown — cascades region → location → village → estate using
-// only values sellers have actually entered on live listings, so buyers
-// can never pick a combination that has zero matching listings.
+// Cascading accommodation location data. Region/county/sub-county are
+// authoritative selection levels; location/village/estate are populated
+// from accommodation records so every lower-level option is real data in
+// the marketplace. New sellers can add a new lower-level value when none
+// exists yet, and it becomes available to later sellers/buyers.
 router.get('/drilldown', async (req,res,next) => {
   try {
     const region = String(req.query.region || '').trim();
+    const county = String(req.query.county || '').trim();
+    const subCounty = String(req.query.subCounty || '').trim();
     const location = String(req.query.location || '').trim();
     const village = String(req.query.village || '').trim();
+    const level = String(req.query.level || '').trim().toLowerCase();
     const where = { status:'active', available:true, type:'service', category:'accommodation' };
     const rows = await Tool.findAll({ where, attributes:['id','metadata'] });
     const seen = new Set();
     for (const row of rows) {
       const a = accommodationOf(row) || {};
       if (region && String(a.region||'').toLowerCase() !== region.toLowerCase()) continue;
+      if (county && String(a.county||'').toLowerCase() !== county.toLowerCase()) continue;
+      if (subCounty && String(a.subCounty||'').toLowerCase() !== subCounty.toLowerCase()) continue;
       if (location && String(a.location||'').toLowerCase() !== location.toLowerCase()) continue;
-      if (village) {
-        if (String(a.village||'').toLowerCase() !== village.toLowerCase()) continue;
-        if (a.estate) seen.add(a.estate);
-      } else if (a.village) {
-        seen.add(a.village);
-      }
+      if (village && String(a.village||'').toLowerCase() !== village.toLowerCase()) continue;
+      if (level === 'location') { if (a.location) seen.add(a.location); }
+      else if (level === 'village') { if (a.village) seen.add(a.village); }
+      else if (level === 'estate') { if (a.estate) seen.add(a.estate); }
+      else if (village) { if (a.estate) seen.add(a.estate); }
+      else if (location) { if (a.village) seen.add(a.village); }
+      else if (subCounty) { if (a.location) seen.add(a.location); }
+      else if (county) { if (a.subCounty) seen.add(a.subCounty); }
+      else if (region) { if (a.county) seen.add(a.county); }
     }
-    res.json({success:true,data:Array.from(seen).sort(), level: village ? 'estate' : 'village'});
+    res.json({success:true,data:Array.from(seen).sort((a,b)=>String(a).localeCompare(String(b))),level:level||'county'});
   } catch(e){ next(e); }
 });
 
 router.get('/listings', optionalAuthenticateToken, async (req,res,next) => {
   try {
     const region = String(req.query.region || '').trim();
+    const county = String(req.query.county || '').trim();
+    const subCounty = String(req.query.subCounty || '').trim();
     const location = String(req.query.location || '').trim();
     const village = String(req.query.village || '').trim();
     const estate = String(req.query.estate || '').trim();
@@ -80,10 +87,12 @@ router.get('/listings', optionalAuthenticateToken, async (req,res,next) => {
     const data = rows.filter(row => {
       const a = accommodationOf(row) || {};
       if (region && String(a.region||'').toLowerCase() !== region.toLowerCase()) return false;
+      if (county && String(a.county||'').toLowerCase() !== county.toLowerCase()) return false;
+      if (subCounty && String(a.subCounty||'').toLowerCase() !== subCounty.toLowerCase()) return false;
       if (location && !String(a.location||'').toLowerCase().includes(location.toLowerCase())) return false;
       if (village && String(a.village||'').toLowerCase() !== village.toLowerCase()) return false;
       if (estate && String(a.estate||'').toLowerCase() !== estate.toLowerCase()) return false;
-      if (q && !`${row.title} ${row.description||''} ${a.location||''} ${a.region||''} ${a.village||''} ${a.estate||''}`.toLowerCase().includes(q.toLowerCase())) return false;
+      if (q && `${row.title} ${row.description||''} ${a.region||''} ${a.county||''} ${a.subCounty||''} ${a.location||''} ${a.village||''} ${a.estate||''}`.toLowerCase().includes(q.toLowerCase()) === false) return false;
       return true;
     }).map(row => publicListing(row, req));
     res.json({success:true,data,regions:KENYA_REGIONS});
