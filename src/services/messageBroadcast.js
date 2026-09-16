@@ -22,31 +22,18 @@ async function broadcastNewMessage(message, senderId) {
   const recipientIds = participants.map(p => p.userId);
   if (!recipientIds.length) return { recipientIds: [], delivered: [], offline: [] };
 
-  // ROOT-CAUSE FIX (GROUP-MESSAGE-CREATES-DUPLICATE-1:1-CONTACT — primary
-  // cause): this query referenced the table as "Chats" (capital C, quoted —
-  // meaning Postgres looks for a relation literally named "Chats"), but the
-  // actual physical table created by migrations/2026999990000_create_chats_
-  // and_chat_participants.js (and matching src/models/Chats.js's
-  // `tableName: 'chats'`) is lowercase "chats". Querying a relation that
-  // doesn't exist threw on every single call, was silently swallowed by the
-  // .catch(() => [null]) below, and made chatType default to 'direct' for
-  // EVERY message — group chats included. That defeated this whole
-  // function's reason for existing: the `if (chatType === 'group')` branch
-  // a few lines down never ran, so every group message was sent through the
-  // per-user, per-recipient 'message:new' socket event (the same event a
-  // real 1:1 DM uses) instead of the room-based 'group:message' broadcast.
-  // On the receiving client, the Messages module has no reliable way to
-  // know that a bare 'message:new' actually came from a group (see
-  // js/group-message-isolation.js's isKnownGroupMessage(), which can only
-  // catch it via a separately-loaded, async group-id list racing against
-  // message arrival) — so it very often got treated as a genuine new DM
-  // from the sender, creating a duplicate 1:1 conversation entry for that
-  // group member. Fixed to query the real "chats" table.
+  // GROUP/1:1 BOUNDARY: always determine the real chat type from the canonical
+  // lowercase chats table. A failed type lookup must NOT silently turn a group
+  // message into a direct-message event.
   const [chat] = await sequelize.query(
     `SELECT "type" FROM "chats" WHERE id = :chatId LIMIT 1`,
     { replacements: { chatId: chatIdInt }, type: sequelize.QueryTypes.SELECT }
   ).catch(() => [null]);
-  const chatType = chat?.type || 'direct';
+  const chatType = chat?.type;
+  if (!chatType) {
+    console.error(`[Messages] Refusing realtime broadcast: chat type unavailable for chatId=${chatIdInt}`);
+    return { recipientIds, delivered: [], offline: recipientIds.slice() };
+  }
 
   const payload = {
     id: message.id,
@@ -66,28 +53,32 @@ async function broadcastNewMessage(message, senderId) {
     status: 'sent',
   };
 
-  // ROOT-CAUSE FIX (GROUP-MESSAGE-DUPLICATES-INTO-1:1-PANEL): this used to
-  // emit a per-user 'group:message:new' for group chats — an event name
-  // NOTHING in the frontend listens for (the group panel's 17 listener
-  // registrations, and every other one of the 11 other backend broadcast
-  // call sites, all use the plain 'group:message' event, delivered via
-  // wsService's room-based broadcastToGroup, not per-user sendToUser).
-  // Because nothing consumed 'group:message:new', the message never
-  // rendered live in the group panel for anyone (sender included); it only
-  // surfaced later when a generic chat-history/sync pass — which does not
-  // filter by chat type — pulled the same chatId's rows into the 1:1
-  // message list. Routing group chats through the same room broadcast every
-  // other group feature already uses fixes both: it renders live in the
-  // group panel, and stops being per-user-delivered in a way indistinguishable
-  // from a direct message.
   let delivered = [];
   let offline = [];
   if (chatType === 'group') {
-    const sent = wsService.broadcastToGroup(chatIdInt, 'group:message', { message: payload, groupId: chatIdInt }, senderIdInt);
-    if (sent) delivered = recipientIds.slice();
+    // Primary path: group room. Fallback path: personal user rooms. The latter
+    // is important when a member has not opened the group yet and therefore
+    // has not joined the group socket room. Client-side message-id dedup keeps
+    // the two paths from rendering duplicates when a member is in both.
+    const roomSent = wsService.broadcastToGroup(
+      chatIdInt,
+      'group:message',
+      { message: payload, groupId: chatIdInt },
+      senderIdInt
+    );
+    let memberSent = false;
+    if (typeof wsService.broadcastGroupMessageToMembers === 'function') {
+      memberSent = await wsService.broadcastGroupMessageToMembers(
+        chatIdInt,
+        'group:message',
+        { message: payload, groupId: chatIdInt }
+      ).catch(() => false);
+    }
+    if (roomSent || memberSent) delivered = recipientIds.slice();
     else offline = recipientIds.slice();
   } else {
-    // Direct/private messages stay on message:new, per-user.
+    // Direct/private messages remain strictly on message:new and are never
+    // emitted through the group event path.
     const results = await Promise.allSettled(
       recipientIds.map(uid => wsService.sendToUser(uid, 'message:new', payload))
     );
