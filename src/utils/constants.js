@@ -3,7 +3,7 @@
 // to the catalog route so clients can build a hierarchical picker.
 const MARKETPLACE_CATEGORIES = [
   'electronics','furniture','clothing','books','services','digital','premium','other',
-  'tutoring','repair','design','tech','cleaning','events','beauty','transport',
+  'tutoring','repair','design','tech','cleaning','events','beauty','transport','accommodation',
   'notes','templates','ebooks','software','audio','courses',
   'phones','appliances','health','home','fashion','computing','gaming','baby','sports','supermarket','garden',
   'toys','food','automotive','construction',
@@ -18,6 +18,7 @@ const MARKETPLACE_CATEGORY_DISPLAY = [
   { id:'furniture',name:'Furniture & Home',icon:'🛋️' },
   { id:'gas-cylinders',name:'Gas Cylinders',icon:'🔥' },
   { id:'construction',name:'Building & Construction',icon:'🧱' },
+  { id:'accommodation',name:'Accommodation & Rentals',icon:'🛏️' },
   { id:'beauty',name:'Beauty',icon:'💄' },
   { id:'sports',name:'Sports',icon:'⚽' },
   { id:'books',name:'Books',icon:'📚' },
