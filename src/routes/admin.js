@@ -4,7 +4,7 @@ const express = require('express');
 const router = express.Router();
 const asyncHandler = require('express-async-handler');
 const { Op } = require('sequelize');
-const { MessageReport, Users, Notification, sequelize } = require('../models');
+const { MessageReport, Users, Notification } = require('../models');
 const messageDeliveryService = require('../services/messageDeliveryService');
 
 function callerId(req) { return Number(req.user?.userId || req.user?.id) || null; }
@@ -20,13 +20,12 @@ async function isAdmin(req) {
 }
 async function getAdminUsers() {
   const ids = configuredAdminIds();
-  const where = ids.length ? { [Op.or]: [{ role: { [Op.in]: ['admin', 'superadmin', 'administrator'] } }, { id: { [Op.in]: ids } }] } : { role: { [Op.in]: ['admin', 'superadmin', 'administrator'] } };
+  const where = ids.length
+    ? { [Op.or]: [{ role: { [Op.in]: ['admin', 'superadmin', 'administrator'] } }, { id: { [Op.in]: ids } }] }
+    : { role: { [Op.in]: ['admin', 'superadmin', 'administrator'] } };
   return Users.findAll({ where, attributes: ['id', 'username', 'displayName', 'role'], order: [['id', 'ASC']] }).catch(() => []);
 }
 
-// Submit a message abuse report. One report per user/message is enforced by
-// the model's unique index; the operation is transactional and also alerts
-// every configured admin through the existing notification pipeline.
 router.post('/reports', asyncHandler(async (req, res) => {
   const reporterId = callerId(req);
   if (!reporterId) return res.status(401).json({ success: false, message: 'Authentication required' });
@@ -67,9 +66,6 @@ router.patch('/reports/:id', asyncHandler(async (req, res) => {
   return res.json({ success:true, data:report });
 }));
 
-// Return the configured admin destination for the "Chat with admin" action.
-// The client then uses the canonical direct-chat resolver, so it never creates
-// a second private-chat pipeline.
 router.get('/contact', asyncHandler(async (req, res) => {
   const admins = await getAdminUsers();
   if (!admins.length) return res.status(404).json({ success:false, message:'No administrator account is configured' });
@@ -85,6 +81,18 @@ router.post('/contact', asyncHandler(async (req, res) => {
   if (!admin) return res.status(404).json({ success:false, message:'No administrator account is configured' });
   const chatId = await messageDeliveryService.resolveOrCreateDirectChat(userId, admin.id);
   return res.json({ success:true, data:{ chatId, admin:{ userId:admin.id, username:admin.username, displayName:admin.displayName || admin.username } } });
+}));
+
+// Uses environment configuration only; no phone number is embedded in source.
+// Accepted keys keep existing deployments compatible while allowing a clearer
+// ADMIN_WHATSAPP value going forward. Both international (+254...) and
+// whatsapp.com/wa.me URLs are normalized to a safe wa.me destination.
+router.get('/whatsapp', asyncHandler(async (req, res) => {
+  const raw = String(process.env.ADMIN_WHATSAPP || process.env.ADMIN_WHATSAPP_NUMBER || process.env.WHATSAPP_ADMIN_NUMBER || '').trim();
+  if (!raw) return res.status(404).json({ success:false, message:'Admin WhatsApp destination is not configured' });
+  const digits = raw.replace(/^https?:\/\/(?:www\.)?(?:wa\.me|api\.whatsapp\.com)\//i, '').replace(/[^0-9]/g, '');
+  if (!digits) return res.status(500).json({ success:false, message:'Admin WhatsApp destination is invalid' });
+  return res.json({ success:true, data:{ url:`https://wa.me/${digits}` } });
 }));
 
 module.exports = router;
