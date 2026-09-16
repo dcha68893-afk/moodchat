@@ -3,7 +3,7 @@
 const express = require('express');
 const { Op } = require('sequelize');
 const router = express.Router();
-const { Tool, Users } = require('../models');
+const { Tool } = require('../models');
 const marketplaceController = require('../controllers/marketplace.controller');
 
 const CATEGORY_TREE = [
@@ -50,16 +50,53 @@ router.get('/brands', async (req,res,next)=>{
   }catch(e){next(e)}
 });
 
-async function listings(req,res,next){
-  try{
-    const q=String(req.query.q||req.query.search||'').trim();
-    const result=await Tool.getListings({page:Number(req.query.page)||1,limit:Math.min(Number(req.query.limit)||24,100),category:req.query.category,type:req.query.type,search:q||undefined,minPrice:req.query.minPrice,maxPrice:req.query.maxPrice,sort:req.query.sort||'newest'});
-    return res.json({success:true,data:result.listings,total:result.total,page:result.page,limit:result.limit,totalPages:result.totalPages});
-  }catch(e){next(e)}
+function orderFor(sort){
+  return ({newest:[['createdAt','DESC']],oldest:[['createdAt','ASC']],price_asc:[['price','ASC']],price_desc:[['price','DESC']],popular:[['views','DESC']],rating:[['rating','DESC']]}[sort]||[['createdAt','DESC']]);
 }
-router.get('/listings',listings);
-router.get('/search',listings);
-router.get('/products',listings);
+
+function sellerInclude(){
+  return (Tool.associations && Tool.associations.seller)
+    ? [{ association: Tool.associations.seller, attributes:['id','username','avatar','displayName'], required:false }]
+    : [];
+}
+
+function normalizeRows(rows){
+  return rows.map(row=>{
+    const r=row.toJSON?row.toJSON():{...row};
+    r.userId=r.sellerId;
+    if(!r.user&&r.seller)r.user={id:r.seller.id,displayName:r.seller.displayName||r.seller.username||'User',photoURL:r.seller.avatar||''};
+    else if(!r.user)r.user={id:r.sellerId,displayName:'User',photoURL:''};
+    return r;
+  });
+}
+
+async function searchListings(req){
+  const q=String(req.query.q||req.query.search||'').trim();
+  const page=Math.max(Number(req.query.page)||1,1),limit=Math.min(Number(req.query.limit)||24,100);
+  const where={status:'active',available:true};
+  if(req.query.category)where.category=req.query.category;
+  if(req.query.type)where.type=req.query.type;
+  if(req.query.minPrice!==undefined||req.query.maxPrice!==undefined){where.price={};if(req.query.minPrice!==undefined)where.price[Op.gte]=req.query.minPrice;if(req.query.maxPrice!==undefined)where.price[Op.lte]=req.query.maxPrice;}
+  if(q){
+    // Search each word across the actual seller listing fields, not just the
+    // title. This makes direct searches such as "Samsung A10s" find listings
+    // whose brand/model was stored separately from the title.
+    const tokens=q.split(/\s+/).filter(Boolean).slice(0,8);
+    where[Op.and]=tokens.map(token=>({[Op.or]:[
+      {title:{[Op.iLike]:`%${token}%`}},{description:{[Op.iLike]:`%${token}%`}},{brand:{[Op.iLike]:`%${token}%`}},{sku:{[Op.iLike]:`%${token}%`}}
+    ]}));
+  }
+  const {count,rows}=await Tool.findAndCountAll({where,order:orderFor(String(req.query.sort||'newest')),limit,offset:(page-1)*limit,include:sellerInclude()});
+  return {listings:normalizeRows(rows),total:count,page,limit,totalPages:Math.ceil(count/limit)};
+}
+
+async function listings(req,res,next){try{return res.json({success:true,data:(await searchListings(req)).listings,total:(await searchListings(req)).total,page:(await searchListings(req)).page,limit:(await searchListings(req)).limit,totalPages:(await searchListings(req)).totalPages});}catch(e){next(e)}}
+
+// Avoid executing the database query multiple times for one request.
+async function listingsOnce(req,res,next){try{const result=await searchListings(req);return res.json({success:true,data:result.listings,total:result.total,page:result.page,limit:result.limit,totalPages:result.totalPages});}catch(e){next(e)}}
+router.get('/listings',listingsOnce);
+router.get('/search',listingsOnce);
+router.get('/products',listingsOnce);
 router.get('/products/:id',async(req,res,next)=>{try{const row=await Tool.findByPk(req.params.id);if(!row)return res.status(404).json({success:false,message:'Listing not found'});return res.json({success:true,data:row});}catch(e){next(e)}});
 
 router.post('/listings',async(req,res,next)=>{try{const row=await Tool.create({...req.body,sellerId:req.user?.userId||req.user?.id});return res.status(201).json({success:true,data:row});}catch(e){next(e)}});
