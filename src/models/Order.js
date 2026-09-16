@@ -1,5 +1,5 @@
 // --- MODEL: Order.js (Marketplace Orders) ---
-const { Op } = require('sequelize');
+const crypto = require('crypto');
 
 module.exports = (sequelize, DataTypes) => {
   const Order = sequelize.define(
@@ -29,21 +29,26 @@ module.exports = (sequelize, DataTypes) => {
       updatedAt: { type: DataTypes.DATE, field: 'updatedAt' },
     },
     {
-      tableName: 'marketplace_orders',
-      modelName: 'Order',
-      timestamps: true,
-      underscored: true,
-      freezeTableName: true,
+      tableName: 'marketplace_orders', modelName: 'Order', timestamps: true, underscored: true, freezeTableName: true,
       indexes: [
-        { fields: ['buyer_id'] },
-        { fields: ['seller_id'] },
-        { fields: ['product_id'] },
-        { fields: ['status'] },
-        { fields: ['created_at'] },
-        { fields: ['invoice_number'], unique: true },
+        { fields: ['buyer_id'] }, { fields: ['seller_id'] }, { fields: ['product_id'] }, { fields: ['status'] },
+        { fields: ['created_at'] }, { fields: ['invoice_number'], unique: true },
       ],
     }
   );
+
+  // Payment callbacks normally update the existing Order. This hook makes invoice
+  // issuance automatic regardless of which payment method performs that update.
+  Order.addHook('beforeUpdate', (order) => {
+    const becomesPaid = order.changed('status') && ['paid', 'shipped', 'delivered'].includes(String(order.status).toLowerCase());
+    const paymentConfirmed = order.changed('paidAt') && order.paidAt;
+    if ((becomesPaid || paymentConfirmed) && !order.invoiceNumber) {
+      const year = new Date().getUTCFullYear();
+      order.invoiceNumber = `NCP-${year}-${crypto.randomBytes(5).toString('hex').toUpperCase()}`;
+      order.invoiceToken = crypto.randomBytes(24).toString('hex');
+      order.invoiceIssuedAt = order.paidAt || new Date();
+    }
+  });
 
   Order.associate = function (models) {
     if (models.Tool) Order.belongsTo(models.Tool, { foreignKey: 'productId', as: 'product', constraints: false });
@@ -52,6 +57,5 @@ module.exports = (sequelize, DataTypes) => {
       Order.belongsTo(models.Users, { foreignKey: 'sellerId', as: 'seller', constraints: false });
     }
   };
-
   return Order;
 };
