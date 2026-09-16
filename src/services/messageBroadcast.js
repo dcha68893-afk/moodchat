@@ -22,8 +22,28 @@ async function broadcastNewMessage(message, senderId) {
   const recipientIds = participants.map(p => p.userId);
   if (!recipientIds.length) return { recipientIds: [], delivered: [], offline: [] };
 
+  // ROOT-CAUSE FIX (GROUP-MESSAGE-CREATES-DUPLICATE-1:1-CONTACT — primary
+  // cause): this query referenced the table as "Chats" (capital C, quoted —
+  // meaning Postgres looks for a relation literally named "Chats"), but the
+  // actual physical table created by migrations/2026999990000_create_chats_
+  // and_chat_participants.js (and matching src/models/Chats.js's
+  // `tableName: 'chats'`) is lowercase "chats". Querying a relation that
+  // doesn't exist threw on every single call, was silently swallowed by the
+  // .catch(() => [null]) below, and made chatType default to 'direct' for
+  // EVERY message — group chats included. That defeated this whole
+  // function's reason for existing: the `if (chatType === 'group')` branch
+  // a few lines down never ran, so every group message was sent through the
+  // per-user, per-recipient 'message:new' socket event (the same event a
+  // real 1:1 DM uses) instead of the room-based 'group:message' broadcast.
+  // On the receiving client, the Messages module has no reliable way to
+  // know that a bare 'message:new' actually came from a group (see
+  // js/group-message-isolation.js's isKnownGroupMessage(), which can only
+  // catch it via a separately-loaded, async group-id list racing against
+  // message arrival) — so it very often got treated as a genuine new DM
+  // from the sender, creating a duplicate 1:1 conversation entry for that
+  // group member. Fixed to query the real "chats" table.
   const [chat] = await sequelize.query(
-    `SELECT "type" FROM "Chats" WHERE id = :chatId LIMIT 1`,
+    `SELECT "type" FROM "chats" WHERE id = :chatId LIMIT 1`,
     { replacements: { chatId: chatIdInt }, type: sequelize.QueryTypes.SELECT }
   ).catch(() => [null]);
   const chatType = chat?.type || 'direct';

@@ -151,7 +151,13 @@ async function computeExpiresAt(sequelize, chatId, disappearingTimerSeconds) {
 
   try {
     const [chat] = await sequelize.query(
-      `SELECT "disappearingTimer" FROM "Chats" WHERE id = :chatId LIMIT 1`,
+      // Same "Chats" (capital, quoted) vs real physical table "chats"
+      // casing bug as messageBroadcast.js/webSocketService.js — this query
+      // was silently throwing on every call and being swallowed by the
+      // catch below, so a chat's disappearing-message timer setting was
+      // never actually being read (per-message override timers still
+      // worked; only the chat-level default silently never applied).
+      `SELECT "disappearingTimer" FROM "chats" WHERE id = :chatId LIMIT 1`,
       { replacements: { chatId }, type: sequelize.QueryTypes.SELECT }
     );
     const timer = chat?.disappearingTimer;

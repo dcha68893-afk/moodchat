@@ -661,20 +661,59 @@ class WebSocketService {
             // than left registered.
 
             // ── PHASE14 FIX: sync:missed_messages ────────────────────────────
+            // ROOT-CAUSE FIX (GROUP-MESSAGE-CREATES-DUPLICATE-1:1-CONTACT): this
+            // handler used to resolve chatList (when chatIds was empty, which
+            // js/core/recovery/ReconnectOrchestrator.js sends on every single
+            // connect) from ALL of the user's chat_participants rows, with no
+            // chat-type filter, and the per-chatId query below returned raw
+            // Messages rows with no chatType/isGroup tag at all. The only
+            // frontend consumer of sync:missed_messages_result is
+            // js/message-realtime-bridge.js, which runs directly inside
+            // message.html, binds straight to the raw Socket.IO client
+            // (bypassing app.realtime.socket.js's group-aware relay entirely),
+            // and forwards every returned message as a synthetic postMessage
+            // 'message:new' with zero chat-type checking of its own. The only
+            // thing that could have caught a group message at that point —
+            // group-message-isolation.js's isKnownGroupMessage() — depends on
+            // its own async loadGroups() fetch having already populated its
+            // GROUPS map by the time the sync result arrives; sync:missed_
+            // messages fires immediately on every connect/reconnect, so this
+            // is a real, frequently-lost race, not an edge case. Losing it
+            // means group-message-isolation.js never recognizes the message,
+            // message-client.js's plain 'message:new' handler treats it like
+            // any other DM, and applyIncomingMessage() creates a brand-new
+            // 1:1 conversation entry keyed on the sender — a group member —
+            // duplicating whatever real 1:1 conversation already existed with
+            // that same person.
+            // This sync path exists specifically to catch up the Messages
+            // (1:1 DM) module after a disconnect; the Group module does not
+            // use it at all — group.html already re-fetches full history on
+            // open and polls every 2.5s while a group is open. Scoping this
+            // query to type='direct' chats only (both for the "all chats"
+            // case and for any explicit chatIds a future caller might send)
+            // removes group messages from this pipeline at the source,
+            // instead of relying on a downstream race-prone filter.
             socket.removeAllListeners('sync:missed_messages').on('sync:missed_messages', async ({ chatIds, since } = {}) => {
                 try {
                     const sequelize = require('../models').sequelize;
                     if (!sequelize || !since) return;
                     const sinceDate = new Date(since);
                     if (isNaN(sinceDate.getTime())) return;
-                    const chatList = Array.isArray(chatIds) ? chatIds.slice(0, 20) : [];
-                    if (chatList.length === 0) {
-                        const chats = await sequelize.query(
-                            `SELECT DISTINCT "chatId" FROM chat_participants WHERE "userId" = :userId LIMIT 20`,
-                            { replacements: { userId }, type: sequelize.QueryTypes.SELECT }
-                        ).catch(() => []);
-                        chatList.push(...(chats || []).map(c => c.chatId));
-                    }
+
+                    const directChats = await sequelize.query(
+                        `SELECT DISTINCT cp."chatId" AS "chatId"
+                         FROM chat_participants cp
+                         JOIN "chats" c ON c.id = cp."chatId"
+                         WHERE cp."userId" = :userId AND COALESCE(c.type, 'direct') = 'direct'
+                         LIMIT 20`,
+                        { replacements: { userId }, type: sequelize.QueryTypes.SELECT }
+                    ).catch(() => []);
+                    const directChatIds = new Set((directChats || []).map(c => c.chatId));
+
+                    const requested = Array.isArray(chatIds) ? chatIds.slice(0, 20) : [];
+                    const chatList = requested.length
+                        ? requested.filter(id => directChatIds.has(id))
+                        : Array.from(directChatIds);
                     for (const chatId of chatList) {
                         try {
                             const messages = await sequelize.query(
