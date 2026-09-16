@@ -197,7 +197,7 @@ class MarketplaceController {
                 title, description, short_description, price=0, original_price,
                 category='other', subcategory, type='physical',
                 images=[], tags=[], condition, brand, sku, weight, delivery_fee,
-                location, available=true, metadata={}
+                location, available=true, metadata={}, seller_contact
             } = req.body;
             // AUDIT FIX: marketplace-seller.js's create-listing form sends
             // "stock_quantity", not "stock" — this was silently dropped,
@@ -208,12 +208,25 @@ class MarketplaceController {
             if (!title?.trim()) return next(new AppError('Title is required', 400));
             if (title.trim().length < 3) return next(new AppError('Title must be at least 3 characters', 400));
 
+            const sanitizedCategory = _sanitizeCategory(category);
+            // FIX: accommodation listings used to save with no village/estate
+            // at all (just a free-text "area" string), which made a real
+            // region → location → village → estate drilldown impossible on
+            // search. Now required at creation time so drilldown always has
+            // real, seller-entered values to work from.
+            if (sanitizedCategory === 'accommodation') {
+                const acc = metadata?.accommodation || {};
+                if (!String(acc.village || '').trim() || !String(acc.estate || '').trim()) {
+                    return next(new AppError('Village and estate/rental name are required for accommodation listings', 400));
+                }
+            }
+
             const product = await T.create({
                 sellerId:       userId,
                 title:          title.trim().substring(0, 255),
                 description:    (description||'').trim().substring(0, 10000),
                 price:          parseFloat(price) || 0,
-                category:       _sanitizeCategory(category),
+                category:       sanitizedCategory,
                 type:           _sanitizeType(type),
                 images:         Array.isArray(images) ? images.slice(0, 10) : [],
                 tags:           Array.isArray(tags)   ? tags.slice(0, 20)  : [],
@@ -243,6 +256,11 @@ class MarketplaceController {
                     weight: weight != null ? parseFloat(weight) || null : null,
                     delivery_fee: parseFloat(delivery_fee) || 0,
                     location:  location || '',
+                    // FIX: seller-only contact detail — admin-only field,
+                    // never shown to the general public. Stripped from
+                    // every public response in _formatProduct() unless the
+                    // viewer is this listing's own seller or an admin.
+                    seller_contact: String(seller_contact || '').trim().slice(0, 200),
                 },
             });
 
@@ -324,6 +342,7 @@ class MarketplaceController {
                 // Build absolute URL so the frontend can load the image cross-origin
                 const baseUrl = process.env.RENDER_EXTERNAL_URL ||
                                 process.env.BACKEND_URL ||
+                                require('../utils/requestContext').getRequestBaseUrl() ||
                                 `${req.protocol}://${req.get('host')}`;
                 const relativePath = `/uploads/marketplace/${req.file.filename}`;
                 const url = `${baseUrl.replace(/\/+$/, '')}${relativePath}`;
@@ -2306,7 +2325,12 @@ function _formatProduct(row) {
     const meta = r.metadata || {};
     // FIX: convert all image paths to absolute URLs so cross-origin frontend can load them
     const rawImages = Array.isArray(r.images) ? r.images : [];
-    const base = (process.env.RENDER_EXTERNAL_URL || process.env.BACKEND_URL || '').replace(/\/+$/, '');
+    // FIX: previously only fell back to env vars, which silently produced
+    // relative (404ing) image URLs whenever RENDER_EXTERNAL_URL/BACKEND_URL
+    // weren't set — now also falls back to the current request's own
+    // protocol+host via AsyncLocalStorage, so it always works in production
+    // regardless of env config.
+    const base = (process.env.RENDER_EXTERNAL_URL || process.env.BACKEND_URL || require('../utils/requestContext').getRequestBaseUrl() || '').replace(/\/+$/, '');
     const images = rawImages.map(u => {
         if (!u) return '';
         if (/^https?:\/\//.test(u)) return u;
@@ -2355,7 +2379,21 @@ function _formatProduct(row) {
             displayName: r.seller?.displayName || r.seller?.username || 'Seller',
             photoURL:    r.seller?.avatar || '',
         },
+        // FIX: seller_contact is admin-only — only ever included for the
+        // listing's own seller or an admin viewer, never in the general
+        // public response.
+        ...(_canSeeSellerContact(r) ? { seller_contact: meta.seller_contact || '' } : {}),
     };
+}
+
+function _canSeeSellerContact(r) {
+    try {
+        const viewer = require('../utils/requestContext').getRequestUser();
+        if (!viewer) return false;
+        if (viewer.role === 'admin') return true;
+        const sellerId = r.sellerId || r.seller_id;
+        return sellerId != null && Number(viewer.id) === Number(sellerId);
+    } catch (_) { return false; }
 }
 
 function _formatOrder(row) {

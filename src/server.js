@@ -4491,7 +4491,12 @@ class Application {
     // CRITICAL FIX: Setup middleware WITH CORRECT ORDER and OPTIMIZATIONS
     setupMiddleware() {
         _slog('🔄 Setting up middleware with correct order...');
-        
+
+        // -1. Request context (AsyncLocalStorage) — lets module-level helpers
+        // (e.g. marketplace image URL formatting) read the current request's
+        // own protocol/host without RENDER_EXTERNAL_URL/BACKEND_URL being set.
+        this.app.use(require('./utils/requestContext').requestContextMiddleware);
+
         // 0. Add query timeout middleware (highest priority for slow queries)
         this.app.use(queryTimeout.create());
         

@@ -2,6 +2,7 @@
 
 const express = require('express');
 const router = express.Router();
+const { optionalAuthenticateToken } = require('../middleware/auth');
 const db = require('../models');
 const Tool = db.Tool;
 const sequelize = db.sequelize;
@@ -19,12 +20,60 @@ const KENYA_REGIONS = {
 
 const userId = req => Number(req.user?.userId ?? req.user?.id);
 const accommodationOf = row => row?.metadata?.accommodation || row?.metadata?.accommodationDetails || null;
+// FIX: GET /listings used to spread row.toJSON() wholesale into the public
+// response, which leaked the whole metadata blob — including the
+// admin-only seller_contact field — to any anonymous visitor. Build an
+// explicit public-safe shape instead, and only include seller_contact for
+// the listing's own seller or an admin.
+const publicListing = (row, req) => {
+  const r = row.toJSON ? row.toJSON() : row;
+  const viewer = req.user;
+  const isOwner = viewer && Number(viewer.id ?? viewer.userId) === Number(r.sellerId ?? r.seller_id);
+  const isAdmin = viewer?.role === 'admin';
+  const a = accommodationOf(r) || {};
+  return {
+    id: r.id, sellerId: r.sellerId, title: r.title, description: r.description,
+    price: r.price, currency: r.currency, images: r.images, stock: r.stock,
+    status: r.status, available: r.available, createdAt: r.createdAt, updatedAt: r.updatedAt,
+    accommodation: a,
+    ...((isOwner || isAdmin) ? { seller_contact: r.metadata?.seller_contact || '' } : {}),
+  };
+};
 
 router.get('/regions', (req,res) => res.json({success:true,data:KENYA_REGIONS}));
-router.get('/listings', async (req,res,next) => {
+
+// GET /drilldown — cascades region → location → village → estate using
+// only values sellers have actually entered on live listings, so buyers
+// can never pick a combination that has zero matching listings.
+router.get('/drilldown', async (req,res,next) => {
   try {
     const region = String(req.query.region || '').trim();
     const location = String(req.query.location || '').trim();
+    const village = String(req.query.village || '').trim();
+    const where = { status:'active', available:true, type:'service', category:'accommodation' };
+    const rows = await Tool.findAll({ where, attributes:['id','metadata'] });
+    const seen = new Set();
+    for (const row of rows) {
+      const a = accommodationOf(row) || {};
+      if (region && String(a.region||'').toLowerCase() !== region.toLowerCase()) continue;
+      if (location && String(a.location||'').toLowerCase() !== location.toLowerCase()) continue;
+      if (village) {
+        if (String(a.village||'').toLowerCase() !== village.toLowerCase()) continue;
+        if (a.estate) seen.add(a.estate);
+      } else if (a.village) {
+        seen.add(a.village);
+      }
+    }
+    res.json({success:true,data:Array.from(seen).sort(), level: village ? 'estate' : 'village'});
+  } catch(e){ next(e); }
+});
+
+router.get('/listings', optionalAuthenticateToken, async (req,res,next) => {
+  try {
+    const region = String(req.query.region || '').trim();
+    const location = String(req.query.location || '').trim();
+    const village = String(req.query.village || '').trim();
+    const estate = String(req.query.estate || '').trim();
     const q = String(req.query.q || '').trim();
     const where = { status:'active', available:true, type:'service', category:'accommodation' };
     const rows = await Tool.findAll({where, order:[['createdAt','DESC']], limit:Math.min(Number(req.query.limit)||50,100)});
@@ -32,9 +81,11 @@ router.get('/listings', async (req,res,next) => {
       const a = accommodationOf(row) || {};
       if (region && String(a.region||'').toLowerCase() !== region.toLowerCase()) return false;
       if (location && !String(a.location||'').toLowerCase().includes(location.toLowerCase())) return false;
-      if (q && !`${row.title} ${row.description||''} ${a.location||''} ${a.region||''}`.toLowerCase().includes(q.toLowerCase())) return false;
+      if (village && String(a.village||'').toLowerCase() !== village.toLowerCase()) return false;
+      if (estate && String(a.estate||'').toLowerCase() !== estate.toLowerCase()) return false;
+      if (q && !`${row.title} ${row.description||''} ${a.location||''} ${a.region||''} ${a.village||''} ${a.estate||''}`.toLowerCase().includes(q.toLowerCase())) return false;
       return true;
-    }).map(row => ({...row.toJSON(), accommodation:accommodationOf(row)}));
+    }).map(row => publicListing(row, req));
     res.json({success:true,data,regions:KENYA_REGIONS});
   } catch(e){ next(e); }
 });
