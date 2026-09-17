@@ -2,9 +2,9 @@
 
 /**
  * Canonical friendship service.
- * Every module that needs to answer "are these users friends?" or retrieve
- * friendship state should use this service instead of querying the table with
- * legacy requester_id/receiver_id names.
+ * Every module that needs friendship state should use this service.
+ * The production table stores the two users as requester_id/receiver_id;
+ * there is no userLowId/userHighId pair column.
  */
 const { Op } = require('sequelize');
 const db = require('../models');
@@ -19,7 +19,12 @@ function validId(value) {
 function pair(userA, userB) {
   const a = validId(userA), b = validId(userB);
   if (!a || !b || a === b) return null;
-  return { userLowId: Math.min(a, b), userHighId: Math.max(a, b) };
+  return {
+    [Op.or]: [
+      { requesterId: a, addresseeId: b },
+      { requesterId: b, addresseeId: a }
+    ]
+  };
 }
 
 async function getRelationship(userA, userB, options = {}) {
