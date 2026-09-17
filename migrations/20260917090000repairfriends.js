@@ -2,7 +2,11 @@
 
 /**
  * Repair the Friends schema used by the current Friend model.
- * Idempotent so a failed Render startup can safely retry the same migration.
+ * Idempotent and safe to rerun after a failed Render startup.
+ *
+ * The application validates Friend.status through Sequelize. PostgreSQL does
+ * not need a database ENUM here, and removing the legacy enum dependency keeps
+ * migrations compatible with older Friends tables and newer status values.
  */
 module.exports = {
   async up(queryInterface, Sequelize) {
@@ -34,7 +38,7 @@ module.exports = {
       return qi.describeTable(tableName);
     };
 
-    // Normalize the legacy quoted table into the canonical lower-case table.
+    // Normalize the legacy quoted table into the canonical table.
     if (!(await exists('friends')) && await exists('Friends')) {
       await sequelize.query('ALTER TABLE "Friends" RENAME TO "friends"');
     }
@@ -49,21 +53,9 @@ module.exports = {
       const lf = legacy.receiver_id ? 'receiver_id' : (legacy.receiverId ? 'receiverId' : 'friendId');
 
       if (cr && cf && lr && lf && current.status && legacy.status) {
-        const [targetStatus] = await sequelize.query(`
-          SELECT data_type, udt_name
-          FROM information_schema.columns
-          WHERE table_schema = current_schema()
-            AND table_name = 'friends' AND column_name = 'status'
-          LIMIT 1
-        `);
-        const target = targetStatus[0];
-        const statusExpr = target?.data_type === 'USER-DEFINED'
-          ? `CAST("status" AS text)::"${String(target.udt_name).replace(/"/g, '""')}"`
-          : 'CAST("status" AS text)';
-
         await sequelize.query(`
           INSERT INTO "friends" ("${cr}", "${cf}", "status", "createdAt", "updatedAt")
-          SELECT "${lr}", "${lf}", ${statusExpr},
+          SELECT "${lr}", "${lf}", CAST("status" AS text),
                  COALESCE("createdAt", NOW()), COALESCE("updatedAt", NOW())
           FROM "Friends"
           WHERE "${lr}" IS NOT NULL AND "${lf}" IS NOT NULL
@@ -77,6 +69,7 @@ module.exports = {
       await sequelize.query('DROP TABLE "Friends"');
     }
 
+    // Create the canonical table if needed.
     if (!(await exists('friends'))) {
       await sequelize.query(`
         CREATE TABLE "friends" (
@@ -90,7 +83,7 @@ module.exports = {
       `);
     }
 
-    // Normalize every known legacy column spelling.
+    // Normalize every legacy spelling used by the original Friends migration.
     if (await columnExists('friends', 'userId') && !(await columnExists('friends', 'requester_id'))) {
       await sequelize.query('ALTER TABLE "friends" RENAME COLUMN "userId" TO "requester_id"');
     }
@@ -128,34 +121,21 @@ module.exports = {
     await add('snoozed_until', { type: Sequelize.DATE, allowNull: true });
     await add('is_restricted', { type: Sequelize.BOOLEAN, allowNull: true, defaultValue: false });
 
-    // Ensure the existing PostgreSQL enum contains every status the current
-    // Friend model legitimately writes before converting/casting anything.
-    const [enumRows] = await sequelize.query(`
-      SELECT 1 FROM pg_type t
-      JOIN pg_namespace n ON n.oid = t.typnamespace
-      WHERE t.typname = 'enum_friends_status' AND n.nspname = current_schema()
-      LIMIT 1
-    `);
-    if (enumRows.length) {
-      for (const value of ['pending', 'accepted', 'rejected', 'blocked', 'removed', 'cancelled', 'expired']) {
-        await sequelize.query(`ALTER TYPE "enum_friends_status" ADD VALUE IF NOT EXISTS ${sequelize.escape(value)}`);
-      }
-    }
-
-    // Convert a text/varchar status column only after the enum is guaranteed to
-    // accept every value used by the model.
+    // Eliminate the old PostgreSQL ENUM dependency. Sequelize still validates
+    // the allowed statuses in Friend.js, while the DB accepts all current
+    // values without enum migration ordering problems.
     const [statusMeta] = await sequelize.query(`
-      SELECT data_type, udt_name
+      SELECT data_type
       FROM information_schema.columns
       WHERE table_schema = current_schema()
         AND table_name = 'friends' AND column_name = 'status'
       LIMIT 1
     `);
-    if (enumRows.length && statusMeta[0]?.data_type !== 'USER-DEFINED') {
+    if (statusMeta[0]?.data_type === 'USER-DEFINED') {
       await sequelize.query(`
         ALTER TABLE "friends"
-        ALTER COLUMN "status" TYPE "enum_friends_status"
-        USING CAST("status" AS text)::"enum_friends_status"
+        ALTER COLUMN "status" TYPE VARCHAR(32)
+        USING CAST("status" AS text)
       `);
     }
 
