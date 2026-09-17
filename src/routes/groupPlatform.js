@@ -183,13 +183,26 @@ router.post('/:chatId/polls', async (req, res) => {
     voters: {},
   };
 
-  const message = await Message.create({
+  // FIX (COMPETING-PIPELINE): this used to be a raw Message.create() —
+  // exactly the bug class already found and fixed in status.js's reply
+  // route (see that route's own comment): no messageBroadcast real-time
+  // emit, no `.sender` lookup/attach (so the poll message would render with
+  // the generic "User" placeholder on first load), and no receiverId
+  // resolution. Routed through the one canonical send path instead —
+  // sendMessage() requires a clientMessageId even for a server-initiated
+  // send like this one, so a fresh one is generated here.
+  const messageDeliveryService = require('../services/messageDeliveryService');
+  const messageBroadcast = require('../services/messageBroadcast');
+  const sendResult = await messageDeliveryService.sendMessage({
     chatId: access.chat.id,
     senderId: userId,
     content: question,
     type: 'poll',
+    clientMessageId: `poll-${pollId}`,
     metadata: { groupId: access.chat.id, pollId, poll },
   });
+  const message = sendResult.message || sendResult;
+  try { await messageBroadcast.broadcastNewMessage(message, userId); } catch (_) {}
 
   const state = featureState(access.chat);
   state.polls.unshift(poll);
