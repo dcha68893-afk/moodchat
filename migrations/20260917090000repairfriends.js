@@ -2,12 +2,7 @@
 
 /**
  * Repair the Friends schema used by the current Friend model.
- *
- * The original migration created a quoted "Friends" table with userId/friendId,
- * while the live model queries "friends" with requester_id/receiver_id.
- * This migration normalizes the live database without deleting existing
- * friendships. It is safe to run against either the legacy or already-repaired
- * schema.
+ * Preserves existing friendship data and safely handles PostgreSQL ENUM status columns.
  */
 module.exports = {
   async up(queryInterface, Sequelize) {
@@ -19,17 +14,12 @@ module.exports = {
     let legacy = await tableInfo('Friends');
     let current = await tableInfo('friends');
 
-    // Legacy database: "Friends" -> "friends" and userId/friendId ->
-    // requester_id/receiver_id. PostgreSQL folds unquoted identifiers to lower
-    // case, but the original migration explicitly created "Friends".
     if (!current && legacy) {
       await qi.sequelize.query('ALTER TABLE "Friends" RENAME TO "friends"');
       current = await tableInfo('friends');
       legacy = null;
     }
 
-    // If both tables exist, merge legacy rows into the current table first.
-    // This avoids losing friendships after a partial/manual schema repair.
     if (current && legacy) {
       const currentCols = Object.keys(current);
       const legacyCols = Object.keys(legacy);
@@ -38,31 +28,29 @@ module.exports = {
       const currentRequester = currentCols.includes('requester_id') ? 'requester_id' : 'requesterId';
       const currentReceiver = currentCols.includes('receiver_id') ? 'receiver_id' : 'receiverId';
 
-      // Older production databases may already have a PostgreSQL enum on the
-      // target status column. PostgreSQL does not implicitly cast varchar to an
-      // enum during INSERT, so preserve the existing enum type when copying rows.
       const [statusTypeRows] = await qi.sequelize.query(`
-        SELECT udt_name
-        FROM information_schema.columns
-        WHERE table_schema = current_schema()
-          AND table_name = 'friends'
-          AND column_name = 'status'
+        SELECT c.udt_name
+        FROM information_schema.columns c
+        WHERE c.table_schema = current_schema()
+          AND c.table_name = 'friends'
+          AND c.column_name = 'status'
         LIMIT 1
       `);
       const targetStatusType = statusTypeRows?.[0]?.udt_name;
-      const statusExpression = targetStatusType && /^enum_[a-z0-9_]+$/i.test(String(targetStatusType))
-        ? `CAST("status" AS text)::"${targetStatusType.replace(/"/g, '""')}"`
+      const statusExpression = targetStatusType
+        ? `CAST("status" AS text)::"${String(targetStatusType).replace(/"/g, '""')}"`
         : '"status"';
 
       await qi.sequelize.query(`
-        INSERT INTO "friends" (${currentRequester}, ${currentReceiver}, "status", "createdAt", "updatedAt")
+        INSERT INTO "friends" ("${currentRequester}", "${currentReceiver}", "status", "createdAt", "updatedAt")
         SELECT "${legacyRequester}", "${legacyReceiver}", ${statusExpression}, "createdAt", "updatedAt"
         FROM "Friends"
-        WHERE "${legacyRequester}" IS NOT NULL AND "${legacyReceiver}" IS NOT NULL
+        WHERE "${legacyRequester}" IS NOT NULL
+          AND "${legacyReceiver}" IS NOT NULL
           AND NOT EXISTS (
             SELECT 1 FROM "friends" f
-            WHERE (f.${currentRequester} = "Friends"."${legacyRequester}" AND f.${currentReceiver} = "Friends"."${legacyReceiver}")
-               OR (f.${currentRequester} = "Friends"."${legacyReceiver}" AND f.${currentReceiver} = "Friends"."${legacyRequester}")
+            WHERE (f."${currentRequester}" = "Friends"."${legacyRequester}" AND f."${currentReceiver}" = "Friends"."${legacyReceiver}")
+               OR (f."${currentRequester}" = "Friends"."${legacyReceiver}" AND f."${currentReceiver}" = "Friends"."${legacyRequester}")
           )
       `);
       await qi.sequelize.query('DROP TABLE "Friends"');
@@ -70,23 +58,19 @@ module.exports = {
 
     current = await tableInfo('friends');
     if (!current) {
-      await qi.createTable('friends', {
-        id: { type: Sequelize.INTEGER, primaryKey: true, autoIncrement: true, allowNull: false },
-        requester_id: { type: Sequelize.INTEGER, allowNull: false },
-        receiver_id: { type: Sequelize.INTEGER, allowNull: false },
-        status: {
-          type: Sequelize.ENUM('pending', 'accepted', 'rejected', 'blocked', 'removed', 'cancelled', 'expired'),
-          allowNull: false,
-          defaultValue: 'pending'
-        },
-        createdAt: { type: Sequelize.DATE, allowNull: false, defaultValue: Sequelize.NOW },
-        updatedAt: { type: Sequelize.DATE, allowNull: false, defaultValue: Sequelize.NOW }
-      });
+      await qi.sequelize.query(`
+        CREATE TABLE "friends" (
+          "id" SERIAL PRIMARY KEY,
+          "requester_id" INTEGER NOT NULL,
+          "receiver_id" INTEGER NOT NULL,
+          "status" VARCHAR(32) NOT NULL DEFAULT 'pending',
+          "createdAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+          "updatedAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+        )
+      `);
       current = await tableInfo('friends');
     }
 
-    // Normalize old camelCase columns if a lowercase table was created by a
-    // previous repair but still has the legacy column names.
     if (current.userId && !current.requester_id) {
       await qi.sequelize.query('ALTER TABLE "friends" RENAME COLUMN "userId" TO "requester_id"');
     }
@@ -102,11 +86,13 @@ module.exports = {
 
     await add('requester_id', { type: Sequelize.INTEGER, allowNull: false });
     await add('receiver_id', { type: Sequelize.INTEGER, allowNull: false });
-    await add('status', {
-      type: Sequelize.ENUM('pending', 'accepted', 'rejected', 'blocked', 'removed', 'cancelled', 'expired'),
-      allowNull: false,
-      defaultValue: 'pending'
-    });
+
+    // Never use Sequelize's ENUM addColumn here: an existing PostgreSQL enum
+    // named enum_friends_status can make its generated DEFAULT expression fail.
+    if (!current.status) {
+      await qi.sequelize.query(`ALTER TABLE "friends" ADD COLUMN "status" VARCHAR(32) NOT NULL DEFAULT 'pending'`);
+    }
+
     await add('createdAt', { type: Sequelize.DATE, allowNull: false, defaultValue: Sequelize.NOW });
     await add('updatedAt', { type: Sequelize.DATE, allowNull: false, defaultValue: Sequelize.NOW });
     await add('accepted_at', { type: Sequelize.DATE, allowNull: true });
@@ -122,17 +108,31 @@ module.exports = {
     await add('snoozed_until', { type: Sequelize.DATE, allowNull: true });
     await add('is_restricted', { type: Sequelize.BOOLEAN, allowNull: true, defaultValue: false });
 
-    // Keep the hot paths used by the Friends API indexed and make duplicate
-    // friendship/request rows impossible going forward.
+    // If the database already has the enum_friends_status type, normalize a
+    // newly-created VARCHAR status column to that exact enum type.
+    const [enumRows] = await qi.sequelize.query(`
+      SELECT 1
+      FROM pg_type t
+      JOIN pg_namespace n ON n.oid = t.typnamespace
+      WHERE t.typname = 'enum_friends_status'
+        AND n.nspname = current_schema()
+      LIMIT 1
+    `);
+    if (enumRows.length && (await tableInfo('friends')).status?.type === 'VARCHAR(32)') {
+      await qi.sequelize.query(`
+        ALTER TABLE "friends"
+        ALTER COLUMN "status" TYPE "enum_friends_status"
+        USING CAST("status" AS text)::"enum_friends_status"
+      `);
+    }
+
     await qi.sequelize.query('CREATE INDEX IF NOT EXISTS "friends_requester_id_idx" ON "friends" ("requester_id")');
     await qi.sequelize.query('CREATE INDEX IF NOT EXISTS "friends_receiver_id_idx" ON "friends" ("receiver_id")');
     await qi.sequelize.query('CREATE INDEX IF NOT EXISTS "friends_status_idx" ON "friends" ("status")');
     await qi.sequelize.query('CREATE UNIQUE INDEX IF NOT EXISTS "friends_requester_receiver_unique" ON "friends" ("requester_id", "receiver_id")');
   },
 
-  async down(queryInterface) {
-    // Do not rename/drop the production Friends table on rollback. The repair
-    // is intentionally non-destructive because existing friendship data must
-    // survive deployments and rollback attempts.
+  async down() {
+    // Intentionally non-destructive: existing friendships must survive rollback attempts.
   }
 };
