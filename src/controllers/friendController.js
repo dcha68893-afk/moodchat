@@ -5,8 +5,23 @@ const logger = require('../utils/logger');
 // Canonicalize IDs coming from the Friends selection/request path.
 // Some clients can accidentally serialize the same numeric user ID twice as
 // "1::1". That is a transport/selection artifact, not a PostgreSQL ID.
-// Accept only a single numeric ID or a repeated numeric ID (e.g. 1::1), and
-// reject mixed/ambiguous composite values instead of sending them to Sequelize.
+//
+// HISTORY (Sep 17): the original version of this function threw a 400
+// "Invalid <field>" for any ID that wasn't a bare digit string or a repeated
+// "N::N" digit string, and ran on req.user.id/receiverId/friendId/targetId in
+// every controller method here — which produced a blanket 400 across the
+// whole Friend module whenever any ID didn't happen to be a clean digit
+// string. A same-day follow-up made this too permissive in the other
+// direction: it let genuinely non-numeric values fall through unchanged. That
+// is unsafe here specifically — `Friend.requesterId`/`receiverId` in
+// src/models/Friend.js are strict `DataTypes.INTEGER` (NOT NULL) columns, so
+// passing a non-numeric string through to Sequelize doesn't get caught as a
+// clean validation error, it becomes an uncaught SequelizeDatabaseError that
+// errorHandler.js turns into an opaque 500 "Database error occurred".
+// Given the schema, an ID that isn't a plain integer (or the specific "N::N"
+// duplicate artifact) truly is invalid for this table, so this now rejects it
+// with a controlled 400 again — the fix is scoped to the "N::N" repair itself,
+// not to being lenient about arbitrary non-integer input.
 function normalizeFriendUserId(rawId, fieldName = 'userId') {
     if (rawId === undefined || rawId === null) {
         throw new AppError(`Invalid ${fieldName}`, 400);
