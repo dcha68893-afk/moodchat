@@ -1,5 +1,8 @@
 // =============================================================================
 // messageBroadcast.js — canonical post-create realtime delivery
+// -----------------------------------------------------------------------------
+// Direct/group message delivery remains receiver-only. The sender receives
+// only a status acknowledgement; it is NEVER a message:new/group:message echo.
 // =============================================================================
 'use strict';
 
@@ -30,8 +33,6 @@ async function broadcastNewMessage(message, senderId) {
   ).catch(() => []);
   const recipientIds = participants.map(p => p.userId).filter(Boolean);
 
-  // GROUP/1:1 BOUNDARY: determine the authoritative chat type before any
-  // realtime event is emitted. Never infer group/direct from recipient count.
   const [chat] = await sequelize.query(
     `SELECT "type" FROM "chats" WHERE id = :chatId LIMIT 1`,
     { replacements: { chatId: chatIdInt }, type: sequelize.QueryTypes.SELECT }
@@ -61,12 +62,6 @@ async function broadcastNewMessage(message, senderId) {
     status: 'sent',
   };
 
-  // The sender is deliberately excluded from realtime message:new delivery.
-  // The sender already owns the optimistic bubble and the REST response is
-  // the canonical acknowledgement. Echoing the sender's own encrypted
-  // message through message:new causes a second bubble and sends the sender's
-  // ciphertext into their own decrypt path, where the ratchet correctly
-  // refuses to decrypt its own message.
   if (!recipientIds.length) {
     await messageDeliveryService.notifyMessageRecipients(message, [], {
       push: false,
@@ -79,8 +74,6 @@ async function broadcastNewMessage(message, senderId) {
   let offline = [];
 
   if (chatType === 'group') {
-    // Group messages use only group:message and are delivered through each
-    // member's canonical personal user room. They never enter message:new.
     const results = await Promise.allSettled(
       recipientIds.map(uid =>
         wsService.sendToUser(uid, 'group:message', {
@@ -95,8 +88,6 @@ async function broadcastNewMessage(message, senderId) {
       (ok ? delivered : offline).push(uid);
     });
   } else {
-    // Direct/private messages have exactly one realtime recipient path:
-    // message:new to the other participant.
     const results = await Promise.allSettled(
       recipientIds.map(uid => wsService.sendToUser(uid, 'message:new', payload))
     );
@@ -105,6 +96,22 @@ async function broadcastNewMessage(message, senderId) {
       const ok = results[index].status === 'fulfilled' && results[index].value === true;
       (ok ? delivered : offline).push(uid);
     });
+  }
+
+  // STATUS-ONLY SENDER ACK:
+  // This is deliberately a separate lifecycle acknowledgement, not a message
+  // delivery path. It contains no message body, so the sender's optimistic
+  // bubble is never re-rendered and E2E decrypt is never invoked on its own
+  // ciphertext. The existing frontend already understands message:delivered
+  // and updates the existing bubble by messageId.
+  if (delivered.length > 0 && Number.isInteger(senderIdInt) && senderIdInt > 0) {
+    await wsService.sendToUser(senderIdInt, 'message:delivered', {
+      chatId: chatIdInt,
+      messageId: message.id,
+      clientMessageId: message.clientMessageId || null,
+      status: 'delivered',
+      deliveredAt: new Date().toISOString(),
+    }).catch(() => {});
   }
 
   await messageDeliveryService.notifyMessageRecipients(message, recipientIds, {
