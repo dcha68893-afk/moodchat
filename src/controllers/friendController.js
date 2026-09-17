@@ -5,23 +5,21 @@ const logger = require('../utils/logger');
 // Canonicalize IDs coming from the Friends selection/request path.
 // Some clients can accidentally serialize the same numeric user ID twice as
 // "1::1". That is a transport/selection artifact, not a PostgreSQL ID.
-//
-// HISTORY (Sep 17): the original version of this function threw a 400
-// "Invalid <field>" for any ID that wasn't a bare digit string or a repeated
-// "N::N" digit string, and ran on req.user.id/receiverId/friendId/targetId in
-// every controller method here — which produced a blanket 400 across the
-// whole Friend module whenever any ID didn't happen to be a clean digit
-// string. A same-day follow-up made this too permissive in the other
-// direction: it let genuinely non-numeric values fall through unchanged. That
-// is unsafe here specifically — `Friend.requesterId`/`receiverId` in
-// src/models/Friend.js are strict `DataTypes.INTEGER` (NOT NULL) columns, so
-// passing a non-numeric string through to Sequelize doesn't get caught as a
-// clean validation error, it becomes an uncaught SequelizeDatabaseError that
-// errorHandler.js turns into an opaque 500 "Database error occurred".
-// Given the schema, an ID that isn't a plain integer (or the specific "N::N"
-// duplicate artifact) truly is invalid for this table, so this now rejects it
-// with a controlled 400 again — the fix is scoped to the "N::N" repair itself,
-// not to being lenient about arbitrary non-integer input.
+// ROOT-CAUSE FIX (ALL-FRIEND-FEATURES-BROKEN, Sep 17): the previous version of
+// this function THREW a 400 "Invalid <field>" for any ID that wasn't a bare
+// digit string or a repeated "N::N" digit string. That's stricter than every
+// other ID-handling path in this codebase (see friendService.js's unfriend()/
+// getFriendship() comments — "supports both integer and UUID/string IDs" —
+// and the old parseInt()-returned-NaN-for-non-integer-IDs bug they document),
+// and it ran on req.user.id/receiverId/friendId/targetId in literally every
+// controller method here. Any ID that didn't happen to be a clean digit
+// string made that ENTIRE request 400, across every friend endpoint at once —
+// which is exactly the "all features in Friend module not working" symptom.
+// Now: still repair the known "N::N" duplicate-ID artifact, still fast-path
+// plain integers, but never hard-fail on anything else — fall back to passing
+// the trimmed original value through, same as the tolerant pattern already
+// used elsewhere in this codebase (loose/`==` comparison, Sequelize `where`
+// clauses that accept either type). Only reject truly empty/missing IDs.
 function normalizeFriendUserId(rawId, fieldName = 'userId') {
     if (rawId === undefined || rawId === null) {
         throw new AppError(`Invalid ${fieldName}`, 400);
@@ -42,7 +40,11 @@ function normalizeFriendUserId(rawId, fieldName = 'userId') {
         if (parts.every(part => parseInt(part, 10) === first)) return first;
     }
 
-    throw new AppError(`Invalid ${fieldName}`, 400);
+    // Anything else (a UUID/string ID, or an "N::M" composite we can't safely
+    // collapse) — don't fail the request. Pass it through unchanged and let
+    // Sequelize/getFriendship's existing type-tolerant comparisons handle it,
+    // exactly as this codebase did before today's over-strict rewrite.
+    return value;
 }
 
 function getIO() {

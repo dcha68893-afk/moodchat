@@ -166,13 +166,40 @@ const getUserId = (req) => {
 // FIX: Safe ID parser — handles both integer PKs and UUID string PKs.
 // parseInt() silently returns NaN for UUIDs, causing all param-based routes to
 // return 400 "Invalid ID" for UUID-based users. Use this everywhere instead.
+//
+// ROOT-CAUSE FIX (invalid input syntax for type integer: "1::1"): the Friends
+// selection/request path on the frontend can accidentally serialize the same
+// numeric ID twice as "N::N" (a transport/selection artifact, not a real ID).
+// The roundtrip check below (`String(n) === s`) correctly rejects that as
+// "not purely numeric" — but this function's fallback then returned it
+// UNCHANGED as a raw string, which every caller (block/unblock/pin/mute/notes/
+// requests-send/etc.) passes straight into a strict `DataTypes.INTEGER`
+// Sequelize column (see src/models/Friend.js). Postgres then throws
+// `invalid input syntax for type integer: "1::1"` as an uncaught error,
+// which is exactly the failure seen when sending a friend request. Repair
+// that one specific pattern (N::N -> N) before falling back to "pass through
+// as a string" for anything else (genuine UUID/string PKs, which this
+// function is otherwise correct to support).
 const parseId = (raw) => {
     if (!raw) return null;
     const s = String(raw).trim();
     if (!s) return null;
     const n = parseInt(s, 10);
-    // If purely numeric AND roundtrips correctly, treat as integer; otherwise UUID/string
-    return !isNaN(n) && String(n) === s ? n : s;
+    // If purely numeric AND roundtrips correctly, treat as integer.
+    if (!isNaN(n) && String(n) === s) return n;
+
+    // Repair the specific duplicated-ID artifact "N::N" -> N. Never collapse
+    // "N::M" (different numbers) — that could silently select the wrong
+    // account — so only repair when every part is the same digit string.
+    const parts = s.split('::').map(p => p.trim());
+    if (parts.length > 1 && parts.every(p => /^\d+$/.test(p))) {
+        const first = parseInt(parts[0], 10);
+        if (parts.every(p => parseInt(p, 10) === first)) return first;
+    }
+
+    // Otherwise: not purely numeric and not a repairable duplicate — treat as
+    // a genuine UUID/string PK and pass it through unchanged, same as before.
+    return s;
 };
 
 const withTimeout = (promise, timeoutMs = 8000) => {
