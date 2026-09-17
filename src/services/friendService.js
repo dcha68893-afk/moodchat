@@ -73,6 +73,37 @@ async function areFriends(userA, userB, options = {}) {
   return rows.length > 0;
 }
 
+/**
+ * Return whether either side of a friendship pair has blocked the other.
+ *
+ * The production friends schema already carries `blocked_at`; use that
+ * canonical column rather than inventing a separate block table/model.
+ * A missing legacy column is treated as "not blocked" so deployments that
+ * have not yet run the friends schema repair do not turn every chat resolve
+ * into a 500.
+ */
+async function isBlocked(userA, userB, options = {}) {
+  const p = pair(userA, userB);
+  if (!p) return false;
+  try {
+    const [rows] = await sequelize.query(
+      `SELECT 1
+         FROM "friends"
+        WHERE ("requester_id" = :a AND "receiver_id" = :b)
+           OR ("requester_id" = :b AND "receiver_id" = :a)
+          AND "blocked_at" IS NOT NULL
+        LIMIT 1`,
+      { replacements: p, transaction: options.transaction }
+    );
+    return rows.length > 0;
+  } catch (error) {
+    // Older deployments may not have blocked_at yet. Do not make the
+    // conversation resolver unusable merely because block metadata is absent.
+    if (/blocked_at|column .* does not exist/i.test(error?.message || '')) return false;
+    throw error;
+  }
+}
+
 async function getFriendIds(userId, options = {}) {
   const id = validId(userId);
   if (!id) return [];
@@ -108,4 +139,4 @@ async function getPendingRequestIds(userId, options = {}) {
   return { incoming, outgoing };
 }
 
-module.exports = { areFriends, getRelationship, getFriendIds, getPendingRequestIds, validId, pair };
+module.exports = { areFriends, getRelationship, getFriendIds, getPendingRequestIds, isBlocked, validId, pair };
