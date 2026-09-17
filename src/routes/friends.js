@@ -37,9 +37,16 @@ const includeUser = (as) => ({
 });
 
 async function getPair(userId, otherId, transaction) {
-  const low = Math.min(userId, otherId);
-  const high = Math.max(userId, otherId);
-  return Friend.findOne({ where: { userLowId: low, userHighId: high }, transaction, lock: transaction ? transaction.LOCK.UPDATE : undefined });
+  return Friend.findOne({
+    where: {
+      [Op.or]: [
+        { requesterId: userId, addresseeId: otherId },
+        { requesterId: otherId, addresseeId: userId }
+      ]
+    },
+    transaction,
+    lock: transaction ? transaction.LOCK.UPDATE : undefined
+  });
 }
 
 function relationship(row, userId) {
