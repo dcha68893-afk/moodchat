@@ -2,19 +2,47 @@ const friendService = require('../services/friendService');
 const { AppError } = require('../middleware/errorHandler');
 const logger = require('../utils/logger');
 
-// Resolve Socket.IO without hard-coupling to server.js.
+// Canonicalize IDs coming from the Friends selection/request path.
+// Some clients can accidentally serialize the same numeric user ID twice as
+// "1::1". That is a transport/selection artifact, not a PostgreSQL ID.
+// Accept only a single numeric ID or a repeated numeric ID (e.g. 1::1), and
+// reject mixed/ambiguous composite values instead of sending them to Sequelize.
+function normalizeFriendUserId(rawId, fieldName = 'userId') {
+    if (rawId === undefined || rawId === null) {
+        throw new AppError(`Invalid ${fieldName}`, 400);
+    }
+
+    const value = String(rawId).trim();
+    if (!value) throw new AppError(`Invalid ${fieldName}`, 400);
+
+    // Normal canonical integer ID.
+    if (/^\d+$/.test(value)) return parseInt(value, 10);
+
+    // Repair the specific duplicated-ID representation produced by the Friends
+    // selection path: "N::N" -> N. Never collapse "N::M" because that could
+    // silently select the wrong account.
+    const parts = value.split('::').map(part => part.trim());
+    if (parts.length > 1 && parts.every(part => /^\d+$/.test(part))) {
+        const first = parseInt(parts[0], 10);
+        if (parts.every(part => parseInt(part, 10) === first)) return first;
+    }
+
+    throw new AppError(`Invalid ${fieldName}`, 400);
+}
+
 function getIO() {
     if (global.io) return global.io;
-    try { return require('../services/webSocketService').io || require('../services/webSocketService').io || null; } catch (_) { return null; }
+    try { return require('../services/webSocketService').io || null; } catch (_) { return null; }
 }
 
 class FriendController {
     async sendFriendRequest(req, res, next) {
         try {
-            const userId = req.user.id;
-            const { receiverId, notes } = req.body;
+            const userId = normalizeFriendUserId(req.user.id, 'user ID');
+            const receiverId = normalizeFriendUserId(req.body.receiverId, 'receiver ID');
+            const { notes } = req.body;
 
-            if (String(userId) === String(receiverId)) {
+            if (userId === receiverId) {
                 throw new AppError('Cannot send friend request to yourself', 400);
             }
 
@@ -26,28 +54,22 @@ class FriendController {
                 data: { friendRequest }
             });
 
-            // Emit real-time notification to the receiver AFTER responding (non-blocking)
             try {
                 const io = getIO();
                 if (io) {
-                    // FIX: Always include full sender profile in the socket payload so the
-                    // receiver's friend-core.js can populate the incoming-request card
-                    // immediately without a separate API lookup.
                     let senderProfile = {
-                        id:          req.user.id,
+                        id: userId,
                         username:    req.user.username    || '',
                         displayName: req.user.displayName || req.user.username || '',
                         avatar:      req.user.avatar      || null,
                         coverPhoto:  req.user.coverPhoto  || null,
                     };
 
-                    // Attempt to load full profile fields (firstName/lastName/status) so the
-                    // receiver's initials avatar and full display name are correct.
                     try {
                         const db   = require('../models');
                         const User = db.User || db.Users;
                         if (User) {
-                            const senderUser = await User.findByPk(req.user.id, {
+                            const senderUser = await User.findByPk(userId, {
                                 attributes: ['id', 'username', 'avatar', 'coverPhoto', 'firstName', 'lastName', 'status', 'lastSeen']
                             });
                             if (senderUser) {
@@ -65,7 +87,7 @@ class FriendController {
                                 };
                             }
                         }
-                    } catch (_) { /* non-fatal — use what we have from req.user */ }
+                    } catch (_) {}
 
                     const payload = {
                         id:             friendRequest.id,
@@ -73,12 +95,9 @@ class FriendController {
                         receiverId:     receiverId,
                         status:         'pending',
                         createdAt:      friendRequest.createdAt,
-                        // Flat fields for backwards-compat with older friend-core versions
                         senderName:     senderProfile.displayName,
                         senderUsername: senderProfile.username,
                         senderAvatar:   senderProfile.avatar,
-                        // Full nested user object so friend-core.js FRIEND_REQUEST_RECEIVED
-                        // handler can directly populate the card without a cache lookup.
                         user:           senderProfile,
                     };
 
@@ -96,7 +115,7 @@ class FriendController {
 
     async respondToFriendRequest(req, res, next) {
         try {
-            const userId   = req.user.id;
+            const userId = normalizeFriendUserId(req.user.id, 'user ID');
             const { requestId, action } = req.body;
 
             const friendRequest = await friendService.respondToFriendRequest(requestId, userId, action);
@@ -104,41 +123,35 @@ class FriendController {
             res.json({
                 success: true,
                 message: `Friend request ${action}ed successfully`,
-                data:    { friendRequest }
+                data: { friendRequest }
             });
 
-            // Emit real-time notification AFTER responding (non-blocking)
             try {
                 const io = getIO();
                 if (io) {
-                    const originalRequesterId = friendRequest.requesterId;
+                    const originalRequesterId = normalizeFriendUserId(friendRequest.requesterId, 'requester ID');
 
                     if (action === 'accept') {
-                        // Full profile of the user who ACCEPTED (receiver)
                         const accepterInfo = {
-                            id:          req.user.id,
+                            id:          userId,
                             username:    req.user.username    || '',
                             displayName: req.user.displayName || req.user.username || '',
                             avatar:      req.user.avatar      || null,
                             coverPhoto:  req.user.coverPhoto  || null,
                         };
 
-                        // FIX: Notify the ORIGINAL SENDER (requester) with full accepter profile
-                        // so their client can immediately populate caches without a round-trip.
                         const senderPayload = {
                             requestId:       requestId,
-                            friendId:        userId,           // the accepter's ID — new friend for the sender
+                            friendId:        userId,
                             acceptedById:    userId,
-                            user:            accepterInfo,     // FIX: full profile was missing before
-                            friend:          accepterInfo,     // alias for friend-core.js compatibility
+                            user:            accepterInfo,
+                            friend:          accepterInfo,
                             acceptedAt:      new Date().toISOString(),
                         };
 
                         io.to(`user:${originalRequesterId}`).emit('friend:accepted', senderPayload);
                         io.to(`user_${originalRequesterId}`).emit('friend:accepted', senderPayload);
 
-                        // Also notify the accepter (multi-tab / multi-device sync).
-                        // Look up the original sender's profile so the accepter's cache fills immediately.
                         let requesterInfo = { id: originalRequesterId };
                         try {
                             const db   = require('../models');
@@ -160,11 +173,11 @@ class FriendController {
                                     };
                                 }
                             }
-                        } catch (_) { /* non-fatal */ }
+                        } catch (_) {}
 
                         const accepterPayload = {
                             requestId:    requestId,
-                            friendId:     originalRequesterId,  // the sender's ID — new friend for the accepter
+                            friendId:     originalRequesterId,
                             acceptedById: userId,
                             user:         requesterInfo,
                             friend:       requesterInfo,
@@ -191,7 +204,7 @@ class FriendController {
 
     async getFriends(req, res, next) {
         try {
-            const userId = req.user.id;
+            const userId = normalizeFriendUserId(req.user.id, 'user ID');
             const { status = 'accepted' } = req.query;
             const friends = await friendService.getFriends(userId, status);
             res.json({ success: true, data: { friends, count: friends.length } });
@@ -203,7 +216,7 @@ class FriendController {
 
     async getPendingRequests(req, res, next) {
         try {
-            const userId   = req.user.id;
+            const userId = normalizeFriendUserId(req.user.id, 'user ID');
             const requests = await friendService.getPendingRequests(userId);
             res.json({ success: true, data: { requests, count: requests.length } });
         } catch (error) {
@@ -214,7 +227,7 @@ class FriendController {
 
     async getSentRequests(req, res, next) {
         try {
-            const userId   = req.user.id;
+            const userId = normalizeFriendUserId(req.user.id, 'user ID');
             const requests = await friendService.getSentRequests(userId);
             res.json({ success: true, data: { requests, count: requests.length } });
         } catch (error) {
@@ -225,7 +238,7 @@ class FriendController {
 
     async getBlockedUsers(req, res, next) {
         try {
-            const userId       = req.user.id;
+            const userId = normalizeFriendUserId(req.user.id, 'user ID');
             const blockedUsers = await friendService.getBlockedUsers(userId);
             res.json({ success: true, data: { blockedUsers, count: blockedUsers.length } });
         } catch (error) {
@@ -236,16 +249,13 @@ class FriendController {
 
     async unfriend(req, res, next) {
         try {
-            const userId   = req.user.id;
-            // FIX: Support both integer and UUID/string IDs. parseInt() returns NaN for UUIDs.
-            const rawId    = req.params.friendId;
-            const friendId = /^\d+$/.test(rawId) ? parseInt(rawId, 10) : rawId;
+            const userId = normalizeFriendUserId(req.user.id, 'user ID');
+            const friendId = normalizeFriendUserId(req.params.friendId, 'friend ID');
 
             await friendService.unfriend(userId, friendId);
 
             res.json({ success: true, message: 'Friend removed successfully' });
 
-            // FIX: Emit real-time removal event to BOTH sides so their caches update instantly.
             try {
                 const io = getIO();
                 if (io) {
@@ -269,11 +279,10 @@ class FriendController {
 
     async blockUser(req, res, next) {
         try {
-            const userId  = req.user.id;
-            const rawId   = req.params.targetId;
-            const targetId = /^\d+$/.test(rawId) ? parseInt(rawId, 10) : rawId;
+            const userId = normalizeFriendUserId(req.user.id, 'user ID');
+            const targetId = normalizeFriendUserId(req.params.targetId, 'target ID');
 
-            if (String(userId) === String(targetId)) {
+            if (userId === targetId) {
                 throw new AppError('Cannot block yourself', 400);
             }
 
@@ -287,9 +296,8 @@ class FriendController {
 
     async unblockUser(req, res, next) {
         try {
-            const userId  = req.user.id;
-            const rawId   = req.params.targetId;
-            const targetId = /^\d+$/.test(rawId) ? parseInt(rawId, 10) : rawId;
+            const userId = normalizeFriendUserId(req.user.id, 'user ID');
+            const targetId = normalizeFriendUserId(req.params.targetId, 'target ID');
 
             await friendService.unblockUser(userId, targetId);
             res.json({ success: true, message: 'User unblocked successfully' });
@@ -301,9 +309,8 @@ class FriendController {
 
     async checkFriendship(req, res, next) {
         try {
-            const userId  = req.user.id;
-            const rawId   = req.params.targetId;
-            const targetId = /^\d+$/.test(rawId) ? parseInt(rawId, 10) : rawId;
+            const userId = normalizeFriendUserId(req.user.id, 'user ID');
+            const targetId = normalizeFriendUserId(req.params.targetId, 'target ID');
 
             const [areFriends, isBlocked] = await Promise.all([
                 friendService.areFriends(userId, targetId),
@@ -319,8 +326,8 @@ class FriendController {
 
     async getFriendsCount(req, res, next) {
         try {
-            const userId = req.user.id;
-            const count  = await friendService.getFriendsCount(userId);
+            const userId = normalizeFriendUserId(req.user.id, 'user ID');
+            const count = await friendService.getFriendsCount(userId);
             res.json({ success: true, data: { count } });
         } catch (error) {
             logger.error('Get friends count controller error:', error);
@@ -330,9 +337,8 @@ class FriendController {
 
     async getMutualFriends(req, res, next) {
         try {
-            const userId      = req.user.id;
-            const rawId       = req.params.targetId;
-            const targetId    = /^\d+$/.test(rawId) ? parseInt(rawId, 10) : rawId;
+            const userId = normalizeFriendUserId(req.user.id, 'user ID');
+            const targetId = normalizeFriendUserId(req.params.targetId, 'target ID');
             const mutualFriends = await friendService.getMutualFriends(userId, targetId);
             res.json({ success: true, data: { mutualFriends, count: mutualFriends.length } });
         } catch (error) {
@@ -343,9 +349,9 @@ class FriendController {
 
     async getNearbyUsers(req, res, next) {
         try {
-            const userId               = req.user.id;
+            const userId = normalizeFriendUserId(req.user.id, 'user ID');
             const { lat, lng, radius = 5000 } = req.query;
-            const result               = await friendService.getNearbyUsers(userId, { lat, lng, radius });
+            const result = await friendService.getNearbyUsers(userId, { lat, lng, radius });
             res.json({ success: true, data: { users: result.users, count: result.count, mode: result.mode } });
         } catch (error) {
             logger.error('Get nearby users controller error:', error);
@@ -353,14 +359,11 @@ class FriendController {
         }
     }
 
-    // FIX: New endpoint — called by NearbyManager._updatePresence() to push user's
-    // current location to the DB so they appear in other users' nearby queries.
     async updatePresence(req, res, next) {
         try {
-            const userId = req.user.id;
+            const userId = normalizeFriendUserId(req.user.id, 'user ID');
             const { lat, lng, status = 'online' } = req.body;
             if (!lat || !lng) return res.json({ success: true, skipped: true });
-            // Update the user's lat/lng in the DB (best-effort, non-fatal if columns missing)
             try {
                 const db = require('../models');
                 const User = db.User || db.Users;
@@ -377,7 +380,7 @@ class FriendController {
                         }
                     }
                 }
-            } catch (_) { /* non-fatal */ }
+            } catch (_) {}
             res.json({ success: true });
         } catch (error) {
             logger.error('Update presence controller error:', error);
