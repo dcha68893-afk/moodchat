@@ -37,9 +37,26 @@ module.exports = {
       const legacyReceiver = legacyCols.includes('receiver_id') ? 'receiver_id' : 'friendId';
       const currentRequester = currentCols.includes('requester_id') ? 'requester_id' : 'requesterId';
       const currentReceiver = currentCols.includes('receiver_id') ? 'receiver_id' : 'receiverId';
+
+      // Older production databases may already have a PostgreSQL enum on the
+      // target status column. PostgreSQL does not implicitly cast varchar to an
+      // enum during INSERT, so preserve the existing enum type when copying rows.
+      const [statusTypeRows] = await qi.sequelize.query(`
+        SELECT udt_name
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'friends'
+          AND column_name = 'status'
+        LIMIT 1
+      `);
+      const targetStatusType = statusTypeRows?.[0]?.udt_name;
+      const statusExpression = targetStatusType && /^enum_[a-z0-9_]+$/i.test(String(targetStatusType))
+        ? `CAST("status" AS text)::"${targetStatusType.replace(/"/g, '""')}"`
+        : '"status"';
+
       await qi.sequelize.query(`
         INSERT INTO "friends" (${currentRequester}, ${currentReceiver}, "status", "createdAt", "updatedAt")
-        SELECT "${legacyRequester}", "${legacyReceiver}", "status", "createdAt", "updatedAt"
+        SELECT "${legacyRequester}", "${legacyReceiver}", ${statusExpression}, "createdAt", "updatedAt"
         FROM "Friends"
         WHERE "${legacyRequester}" IS NOT NULL AND "${legacyReceiver}" IS NOT NULL
           AND NOT EXISTS (
@@ -57,7 +74,11 @@ module.exports = {
         id: { type: Sequelize.INTEGER, primaryKey: true, autoIncrement: true, allowNull: false },
         requester_id: { type: Sequelize.INTEGER, allowNull: false },
         receiver_id: { type: Sequelize.INTEGER, allowNull: false },
-        status: { type: Sequelize.STRING, allowNull: false, defaultValue: 'pending' },
+        status: {
+          type: Sequelize.ENUM('pending', 'accepted', 'rejected', 'blocked', 'removed', 'cancelled', 'expired'),
+          allowNull: false,
+          defaultValue: 'pending'
+        },
         createdAt: { type: Sequelize.DATE, allowNull: false, defaultValue: Sequelize.NOW },
         updatedAt: { type: Sequelize.DATE, allowNull: false, defaultValue: Sequelize.NOW }
       });
@@ -81,7 +102,11 @@ module.exports = {
 
     await add('requester_id', { type: Sequelize.INTEGER, allowNull: false });
     await add('receiver_id', { type: Sequelize.INTEGER, allowNull: false });
-    await add('status', { type: Sequelize.STRING, allowNull: false, defaultValue: 'pending' });
+    await add('status', {
+      type: Sequelize.ENUM('pending', 'accepted', 'rejected', 'blocked', 'removed', 'cancelled', 'expired'),
+      allowNull: false,
+      defaultValue: 'pending'
+    });
     await add('createdAt', { type: Sequelize.DATE, allowNull: false, defaultValue: Sequelize.NOW });
     await add('updatedAt', { type: Sequelize.DATE, allowNull: false, defaultValue: Sequelize.NOW });
     await add('accepted_at', { type: Sequelize.DATE, allowNull: true });
