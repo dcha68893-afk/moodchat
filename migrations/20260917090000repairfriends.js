@@ -2,8 +2,7 @@
 
 /**
  * Repair the Friends schema used by the current Friend model.
- * This migration is deliberately idempotent because the previous version
- * could fail during Render startup after partially changing the table.
+ * Idempotent so a failed Render startup can safely retry the same migration.
  */
 module.exports = {
   async up(queryInterface, Sequelize) {
@@ -12,24 +11,16 @@ module.exports = {
 
     const exists = async (tableName) => {
       const [rows] = await sequelize.query(`
-        SELECT 1
-        FROM information_schema.tables
-        WHERE table_schema = current_schema()
-          AND table_name = ${sequelize.escape(tableName)}
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = current_schema() AND table_name = ${sequelize.escape(tableName)}
         LIMIT 1
       `);
       return rows.length > 0;
     };
 
-    const columns = async (tableName) => {
-      if (!(await exists(tableName))) return {};
-      return await qi.describeTable(tableName);
-    };
-
     const columnExists = async (tableName, columnName) => {
       const [rows] = await sequelize.query(`
-        SELECT 1
-        FROM information_schema.columns
+        SELECT 1 FROM information_schema.columns
         WHERE table_schema = current_schema()
           AND table_name = ${sequelize.escape(tableName)}
           AND column_name = ${sequelize.escape(columnName)}
@@ -38,63 +29,54 @@ module.exports = {
       return rows.length > 0;
     };
 
-    // If only the legacy quoted Friends table exists, normalize it in place.
+    const columns = async (tableName) => {
+      if (!(await exists(tableName))) return {};
+      return qi.describeTable(tableName);
+    };
+
+    // Normalize the legacy quoted table into the canonical lower-case table.
     if (!(await exists('friends')) && await exists('Friends')) {
       await sequelize.query('ALTER TABLE "Friends" RENAME TO "friends"');
     }
 
-    // If both tables exist, merge legacy data into the current table first.
-    // Status is explicitly converted according to the actual PostgreSQL type
-    // of the target column; this avoids the enum/varchar error that previously
-    // stopped Render from booting.
+    // If both versions exist, merge legacy records into the canonical table.
     if (await exists('friends') && await exists('Friends')) {
       const current = await columns('friends');
       const legacy = await columns('Friends');
+      const cr = current.requester_id ? 'requester_id' : (current.requesterId ? 'requesterId' : 'userId');
+      const cf = current.receiver_id ? 'receiver_id' : (current.receiverId ? 'receiverId' : 'friendId');
+      const lr = legacy.requester_id ? 'requester_id' : (legacy.requesterId ? 'requesterId' : 'userId');
+      const lf = legacy.receiver_id ? 'receiver_id' : (legacy.receiverId ? 'receiverId' : 'friendId');
 
-      const currentRequester = current.requester_id ? 'requester_id' : (current.requesterId ? 'requesterId' : 'userId');
-      const currentReceiver = current.receiver_id ? 'receiver_id' : (current.receiverId ? 'receiverId' : 'friendId');
-      const legacyRequester = legacy.requester_id ? 'requester_id' : (legacy.requesterId ? 'requesterId' : 'userId');
-      const legacyReceiver = legacy.receiver_id ? 'receiver_id' : (legacy.receiverId ? 'receiverId' : 'friendId');
-
-      if (currentRequester && currentReceiver && legacyRequester && legacyReceiver) {
-        const [statusMeta] = await sequelize.query(`
-          SELECT c.data_type, c.udt_name
-          FROM information_schema.columns c
-          WHERE c.table_schema = current_schema()
-            AND c.table_name = 'friends'
-            AND c.column_name = 'status'
+      if (cr && cf && lr && lf && current.status && legacy.status) {
+        const [targetStatus] = await sequelize.query(`
+          SELECT data_type, udt_name
+          FROM information_schema.columns
+          WHERE table_schema = current_schema()
+            AND table_name = 'friends' AND column_name = 'status'
           LIMIT 1
         `);
-
-        const target = statusMeta[0];
-        const statusExpression = target && target.data_type === 'USER-DEFINED'
+        const target = targetStatus[0];
+        const statusExpr = target?.data_type === 'USER-DEFINED'
           ? `CAST("status" AS text)::"${String(target.udt_name).replace(/"/g, '""')}"`
           : 'CAST("status" AS text)';
 
         await sequelize.query(`
-          INSERT INTO "friends" ("${currentRequester}", "${currentReceiver}", "status", "createdAt", "updatedAt")
-          SELECT "${legacyRequester}", "${legacyReceiver}", ${statusExpression},
+          INSERT INTO "friends" ("${cr}", "${cf}", "status", "createdAt", "updatedAt")
+          SELECT "${lr}", "${lf}", ${statusExpr},
                  COALESCE("createdAt", NOW()), COALESCE("updatedAt", NOW())
           FROM "Friends"
-          WHERE "${legacyRequester}" IS NOT NULL
-            AND "${legacyReceiver}" IS NOT NULL
+          WHERE "${lr}" IS NOT NULL AND "${lf}" IS NOT NULL
             AND NOT EXISTS (
-              SELECT 1
-              FROM "friends" f
-              WHERE (f."${currentRequester}" = "Friends"."${legacyRequester}"
-                 AND f."${currentReceiver}" = "Friends"."${legacyReceiver}")
-                 OR (f."${currentRequester}" = "Friends"."${legacyReceiver}"
-                 AND f."${currentReceiver}" = "Friends"."${legacyRequester}")
+              SELECT 1 FROM "friends" f
+              WHERE (f."${cr}" = "Friends"."${lr}" AND f."${cf}" = "Friends"."${lf}")
+                 OR (f."${cr}" = "Friends"."${lf}" AND f."${cf}" = "Friends"."${lr}")
             )
         `);
       }
-
-      // The legacy table has now been merged and must not remain as a second
-      // source of truth for the Friend model.
       await sequelize.query('DROP TABLE "Friends"');
     }
 
-    // Create the canonical table if neither form survived.
     if (!(await exists('friends'))) {
       await sequelize.query(`
         CREATE TABLE "friends" (
@@ -108,7 +90,7 @@ module.exports = {
       `);
     }
 
-    // Normalize the old column names before adding anything else.
+    // Normalize every known legacy column spelling.
     if (await columnExists('friends', 'userId') && !(await columnExists('friends', 'requester_id'))) {
       await sequelize.query('ALTER TABLE "friends" RENAME COLUMN "userId" TO "requester_id"');
     }
@@ -123,18 +105,14 @@ module.exports = {
     }
 
     const add = async (name, definition) => {
-      if (!(await columnExists('friends', name))) {
-        await qi.addColumn('friends', name, definition);
-      }
+      if (!(await columnExists('friends', name))) await qi.addColumn('friends', name, definition);
     };
 
     await add('requester_id', { type: Sequelize.INTEGER, allowNull: false });
     await add('receiver_id', { type: Sequelize.INTEGER, allowNull: false });
-
     if (!(await columnExists('friends', 'status'))) {
       await sequelize.query(`ALTER TABLE "friends" ADD COLUMN "status" VARCHAR(32) NOT NULL DEFAULT 'pending'`);
     }
-
     await add('createdAt', { type: Sequelize.DATE, allowNull: false, defaultValue: Sequelize.NOW });
     await add('updatedAt', { type: Sequelize.DATE, allowNull: false, defaultValue: Sequelize.NOW });
     await add('accepted_at', { type: Sequelize.DATE, allowNull: true });
@@ -150,26 +128,29 @@ module.exports = {
     await add('snoozed_until', { type: Sequelize.DATE, allowNull: true });
     await add('is_restricted', { type: Sequelize.BOOLEAN, allowNull: true, defaultValue: false });
 
-    // If an enum_friends_status type exists and the current status column is
-    // text/varchar, convert it using an explicit PostgreSQL cast. We inspect
-    // pg_catalog rather than Sequelize's formatted type string.
-    const [statusMeta] = await sequelize.query(`
-      SELECT c.data_type, c.udt_name
-      FROM information_schema.columns c
-      WHERE c.table_schema = current_schema()
-        AND c.table_name = 'friends'
-        AND c.column_name = 'status'
-      LIMIT 1
-    `);
+    // Ensure the existing PostgreSQL enum contains every status the current
+    // Friend model legitimately writes before converting/casting anything.
     const [enumRows] = await sequelize.query(`
-      SELECT 1
-      FROM pg_type t
+      SELECT 1 FROM pg_type t
       JOIN pg_namespace n ON n.oid = t.typnamespace
-      WHERE t.typname = 'enum_friends_status'
-        AND n.nspname = current_schema()
+      WHERE t.typname = 'enum_friends_status' AND n.nspname = current_schema()
       LIMIT 1
     `);
+    if (enumRows.length) {
+      for (const value of ['pending', 'accepted', 'rejected', 'blocked', 'removed', 'cancelled', 'expired']) {
+        await sequelize.query(`ALTER TYPE "enum_friends_status" ADD VALUE IF NOT EXISTS ${sequelize.escape(value)}`);
+      }
+    }
 
+    // Convert a text/varchar status column only after the enum is guaranteed to
+    // accept every value used by the model.
+    const [statusMeta] = await sequelize.query(`
+      SELECT data_type, udt_name
+      FROM information_schema.columns
+      WHERE table_schema = current_schema()
+        AND table_name = 'friends' AND column_name = 'status'
+      LIMIT 1
+    `);
     if (enumRows.length && statusMeta[0]?.data_type !== 'USER-DEFINED') {
       await sequelize.query(`
         ALTER TABLE "friends"
@@ -185,6 +166,6 @@ module.exports = {
   },
 
   async down() {
-    // Non-destructive rollback: friendships must survive deployment rollback.
+    // Non-destructive rollback: friendship data must survive rollback attempts.
   }
 };
