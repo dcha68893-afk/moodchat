@@ -1,10 +1,17 @@
+'use strict';
+
 const express = require('express');
 const { Op } = require('sequelize');
 const db = require('../models');
 
 const router = express.Router();
-const Friend = db.models.Friend;
 const Users = db.models.Users;
+const sequelize = db.sequelize;
+
+// Friends is deliberately read/written with explicit SQL against the
+// canonical production columns. This prevents Sequelize from ever emitting
+// legacy receiverId/requesterId column names for this module.
+const FRIEND_COLUMNS = '"id", "requester_id", "receiver_id", "status", "createdAt", "updatedAt", "accepted_at", "blocked_at"';
 
 const idOf = (req) => {
   const raw = req.user?.userId ?? req.user?.id;
@@ -30,24 +37,31 @@ const publicUser = (user) => {
   };
 };
 
-async function getPair(userId, otherId, transaction) {
-  return Friend.findOne({
-    where: {
-      [Op.or]: [
-        { requesterId: userId, addresseeId: otherId },
-        { requesterId: otherId, addresseeId: userId }
-      ]
-    },
-    transaction,
-    lock: transaction ? transaction.LOCK.UPDATE : undefined
-  });
+function mapFriend(row) {
+  if (!row) return null;
+  return {
+    id: Number(row.id),
+    requesterId: Number(row.requester_id),
+    addresseeId: Number(row.receiver_id),
+    status: row.status,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    acceptedAt: row.accepted_at || null,
+    blockedAt: row.blocked_at || null
+  };
 }
 
-function relationship(row, userId) {
-  if (!row) return { status: 'none', requestId: null, direction: null };
-  if (row.status === 'accepted') return { status: 'accepted', requestId: row.id, direction: null };
-  if (row.requesterId === userId) return { status: row.status === 'rejected' ? 'rejected' : 'pending', requestId: row.id, direction: 'outgoing' };
-  return { status: row.status === 'rejected' ? 'rejected' : 'pending', requestId: row.id, direction: 'incoming' };
+async function getPair(userId, otherId, transaction) {
+  const [rows] = await sequelize.query(
+    `SELECT ${FRIEND_COLUMNS}
+       FROM "friends"
+      WHERE ("requester_id" = :userId AND "receiver_id" = :otherId)
+         OR ("requester_id" = :otherId AND "receiver_id" = :userId)
+      ORDER BY "updatedAt" DESC, "id" DESC
+      LIMIT 1${transaction ? ' FOR UPDATE' : ''}`,
+    { replacements: { userId, otherId }, transaction }
+  );
+  return mapFriend(rows[0]);
 }
 
 async function usersByIds(ids) {
@@ -60,19 +74,44 @@ async function usersByIds(ids) {
   return new Map(users.map(user => [Number(user.id), user]));
 }
 
+function relationship(row, userId) {
+  if (!row) return { status: 'none', requestId: null, direction: null };
+  if (row.status === 'accepted') return { status: 'accepted', requestId: row.id, direction: null };
+  return {
+    status: row.status === 'rejected' ? 'rejected' : row.status,
+    requestId: row.id,
+    direction: Number(row.requesterId) === Number(userId) ? 'outgoing' : 'incoming'
+  };
+}
+
 router.get('/', async (req, res) => {
   try {
     const userId = idOf(req);
     if (!userId) return res.status(401).json({ success: false, message: 'Invalid authenticated user ID' });
     const limit = Math.min(Math.max(Number(req.query.limit) || 30, 1), 100);
     const offset = Math.max(Number(req.query.offset) || 0, 0);
-    const { rows, count } = await Friend.findAndCountAll({
-      where: { status: 'accepted', [Op.or]: [{ requesterId: userId }, { addresseeId: userId }] },
-      order: [['updatedAt', 'DESC']], limit, offset
-    });
-    const ids = rows.map(row => Number(row.requesterId) === userId ? row.addresseeId : row.requesterId);
+
+    const [rows] = await sequelize.query(
+      `SELECT ${FRIEND_COLUMNS}
+         FROM "friends"
+        WHERE "status" = 'accepted'
+          AND ("requester_id" = :userId OR "receiver_id" = :userId)
+        ORDER BY "updatedAt" DESC, "id" DESC
+        LIMIT :limit OFFSET :offset`,
+      { replacements: { userId, limit, offset } }
+    );
+    const [countRows] = await sequelize.query(
+      `SELECT COUNT(*)::integer AS count
+         FROM "friends"
+        WHERE "status" = 'accepted'
+          AND ("requester_id" = :userId OR "receiver_id" = :userId)`,
+      { replacements: { userId } }
+    );
+    const count = Number(countRows[0]?.count || 0);
+    const mapped = rows.map(mapFriend);
+    const ids = mapped.map(row => row.requesterId === userId ? row.addresseeId : row.requesterId);
     const byId = await usersByIds(ids);
-    const friends = rows.map(row => publicUser(byId.get(Number(row.requesterId) === userId ? Number(row.addresseeId) : Number(row.requesterId)))).filter(Boolean);
+    const friends = mapped.map(row => publicUser(byId.get(row.requesterId === userId ? row.addresseeId : row.requesterId))).filter(Boolean);
     return res.json({ success: true, friends, pagination: { total: count, limit, offset, hasMore: offset + rows.length < count } });
   } catch (error) {
     console.error('[Friends] list failed:', error.message);
@@ -84,9 +123,17 @@ router.get('/requests/incoming', async (req, res) => {
   try {
     const userId = idOf(req);
     if (!userId) return res.status(401).json({ success: false, message: 'Invalid authenticated user ID' });
-    const rows = await Friend.findAll({ where: { addresseeId: userId, status: 'pending' }, order: [['createdAt', 'DESC']], limit: 100 });
-    const byId = await usersByIds(rows.map(r => r.requesterId));
-    return res.json({ success: true, requests: rows.map(r => ({ id: r.id, createdAt: r.createdAt, user: publicUser(byId.get(Number(r.requesterId))) })).filter(r => r.user) });
+    const [rows] = await sequelize.query(
+      `SELECT ${FRIEND_COLUMNS}
+         FROM "friends"
+        WHERE "receiver_id" = :userId AND "status" = 'pending'
+        ORDER BY "createdAt" DESC, "id" DESC
+        LIMIT 100`,
+      { replacements: { userId } }
+    );
+    const mapped = rows.map(mapFriend);
+    const byId = await usersByIds(mapped.map(row => row.requesterId));
+    return res.json({ success: true, requests: mapped.map(row => ({ id: row.id, createdAt: row.createdAt, user: publicUser(byId.get(row.requesterId)) })).filter(item => item.user) });
   } catch (error) {
     console.error('[Friends] incoming failed:', error.message);
     return res.status(500).json({ success: false, message: 'Unable to load incoming requests' });
@@ -97,9 +144,17 @@ router.get('/requests/outgoing', async (req, res) => {
   try {
     const userId = idOf(req);
     if (!userId) return res.status(401).json({ success: false, message: 'Invalid authenticated user ID' });
-    const rows = await Friend.findAll({ where: { requesterId: userId, status: 'pending' }, order: [['createdAt', 'DESC']], limit: 100 });
-    const byId = await usersByIds(rows.map(r => r.addresseeId));
-    return res.json({ success: true, requests: rows.map(r => ({ id: r.id, createdAt: r.createdAt, user: publicUser(byId.get(Number(r.addresseeId))) })).filter(r => r.user) });
+    const [rows] = await sequelize.query(
+      `SELECT ${FRIEND_COLUMNS}
+         FROM "friends"
+        WHERE "requester_id" = :userId AND "status" = 'pending'
+        ORDER BY "createdAt" DESC, "id" DESC
+        LIMIT 100`,
+      { replacements: { userId } }
+    );
+    const mapped = rows.map(mapFriend);
+    const byId = await usersByIds(mapped.map(row => row.addresseeId));
+    return res.json({ success: true, requests: mapped.map(row => ({ id: row.id, createdAt: row.createdAt, user: publicUser(byId.get(row.addresseeId)) })).filter(item => item.user) });
   } catch (error) {
     console.error('[Friends] outgoing failed:', error.message);
     return res.status(500).json({ success: false, message: 'Unable to load outgoing requests' });
@@ -149,7 +204,7 @@ router.get('/status/:userId', async (req, res) => {
 });
 
 router.post('/requests', async (req, res) => {
-  const transaction = await db.sequelize.transaction();
+  const transaction = await sequelize.transaction();
   try {
     const userId = idOf(req);
     const targetId = Number(req.body?.userId);
@@ -161,50 +216,103 @@ router.post('/requests', async (req, res) => {
       await transaction.rollback();
       return res.status(400).json({ success: false, message: 'You cannot send a friend request to yourself' });
     }
-    const target = await Users.findOne({ where: { id: targetId, isActive: true }, attributes: ['id'], transaction, lock: transaction.LOCK.UPDATE });
-    if (!target) { await transaction.rollback(); return res.status(404).json({ success: false, message: 'User not found' }); }
-    let row = await getPair(userId, targetId, transaction);
-    if (row?.status === 'accepted') { await transaction.rollback(); return res.status(409).json({ success: false, message: 'You are already friends' }); }
+
+    const [targetRows] = await sequelize.query(
+      'SELECT "id" FROM "Users" WHERE "id" = :targetId AND "isActive" = true LIMIT 1 FOR UPDATE',
+      { replacements: { targetId }, transaction }
+    );
+    if (!targetRows[0]) {
+      await transaction.rollback();
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+
+    const row = await getPair(userId, targetId, transaction);
+    if (row?.status === 'accepted') {
+      await transaction.rollback();
+      return res.status(409).json({ success: false, message: 'You are already friends' });
+    }
     if (row?.status === 'pending') {
       await transaction.rollback();
       return res.status(409).json({ success: false, message: row.requesterId === userId ? 'Friend request already sent' : 'This user has already sent you a request', requestId: row.id });
     }
+
+    let saved;
     if (row) {
-      row.requesterId = userId; row.addresseeId = targetId; row.status = 'pending';
-      await row.save({ transaction });
+      const [updated] = await sequelize.query(
+        `UPDATE "friends"
+            SET "requester_id" = :userId,
+                "receiver_id" = :targetId,
+                "status" = 'pending',
+                "updatedAt" = NOW()
+          WHERE "id" = :id
+          RETURNING ${FRIEND_COLUMNS}`,
+        { replacements: { userId, targetId, id: row.id }, transaction }
+      );
+      saved = mapFriend(updated[0]);
     } else {
-      row = await Friend.create({ requesterId: userId, addresseeId: targetId, status: 'pending' }, { transaction });
+      const [created] = await sequelize.query(
+        `INSERT INTO "friends" ("requester_id", "receiver_id", "status", "createdAt", "updatedAt")
+         VALUES (:userId, :targetId, 'pending', NOW(), NOW())
+         RETURNING ${FRIEND_COLUMNS}`,
+        { replacements: { userId, targetId }, transaction }
+      );
+      saved = mapFriend(created[0]);
     }
+
     await transaction.commit();
-    return res.status(201).json({ success: true, request: { id: row.id, status: row.status, requesterId: row.requesterId, addresseeId: row.addresseeId } });
+    return res.status(201).json({ success: true, request: { id: saved.id, status: saved.status, requesterId: saved.requesterId, addresseeId: saved.addresseeId } });
   } catch (error) {
     await transaction.rollback().catch(() => {});
-    if (error.name === 'SequelizeUniqueConstraintError') return res.status(409).json({ success: false, message: 'A friendship request already exists' });
+    if (error.name === 'SequelizeUniqueConstraintError' || error.parent?.code === '23505') return res.status(409).json({ success: false, message: 'A friendship request already exists' });
     console.error('[Friends] create request failed:', error.message);
     return res.status(500).json({ success: false, message: 'Unable to send friend request' });
   }
 });
 
 async function changeRequest(req, res, action) {
-  const transaction = await db.sequelize.transaction();
+  const transaction = await sequelize.transaction();
   try {
     const userId = idOf(req);
     const requestId = Number(req.params.requestId);
-    if (!userId || !Number.isInteger(requestId) || requestId <= 0) { await transaction.rollback(); return res.status(400).json({ success: false, message: 'Invalid request ID' }); }
-    const row = await Friend.findByPk(requestId, { transaction, lock: transaction.LOCK.UPDATE });
-    if (!row) { await transaction.rollback(); return res.status(404).json({ success: false, message: 'Friend request not found' }); }
+    if (!userId || !Number.isInteger(requestId) || requestId <= 0) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'Invalid request ID' });
+    }
+    const row = await getPairById(requestId, transaction);
+    if (!row) {
+      await transaction.rollback();
+      return res.status(404).json({ success: false, message: 'Friend request not found' });
+    }
     if (action === 'accept' || action === 'reject') {
-      if (row.addresseeId !== userId || row.status !== 'pending') { await transaction.rollback(); return res.status(403).json({ success: false, message: 'Only the recipient can act on a pending request' }); }
-      row.status = action === 'accept' ? 'accepted' : 'rejected';
-    } else if (action === 'cancel') {
-      if (row.requesterId !== userId || row.status !== 'pending') { await transaction.rollback(); return res.status(403).json({ success: false, message: 'Only the sender can cancel a pending request' }); }
-      await row.destroy({ transaction });
+      if (row.addresseeId !== userId || row.status !== 'pending') {
+        await transaction.rollback();
+        return res.status(403).json({ success: false, message: 'Only the recipient can act on a pending request' });
+      }
+      const next = action === 'accept' ? 'accepted' : 'rejected';
+      const [updated] = await sequelize.query(
+        `UPDATE "friends"
+            SET "status" = :status,
+                "accepted_at" = CASE WHEN :status = 'accepted' THEN NOW() ELSE "accepted_at" END,
+                "updatedAt" = NOW()
+          WHERE "id" = :id
+          RETURNING ${FRIEND_COLUMNS}`,
+        { replacements: { status: next, id: requestId }, transaction }
+      );
+      await transaction.commit();
+      const saved = mapFriend(updated[0]);
+      return res.json({ success: true, request: { id: saved.id, status: saved.status } });
+    }
+    if (action === 'cancel') {
+      if (row.requesterId !== userId || row.status !== 'pending') {
+        await transaction.rollback();
+        return res.status(403).json({ success: false, message: 'Only the sender can cancel a pending request' });
+      }
+      await sequelize.query('DELETE FROM "friends" WHERE "id" = :id', { replacements: { id: requestId }, transaction });
       await transaction.commit();
       return res.json({ success: true, message: 'Friend request canceled' });
     }
-    await row.save({ transaction });
-    await transaction.commit();
-    return res.json({ success: true, request: { id: row.id, status: row.status } });
+    await transaction.rollback();
+    return res.status(400).json({ success: false, message: 'Unsupported friend request action' });
   } catch (error) {
     await transaction.rollback().catch(() => {});
     console.error(`[Friends] ${action} failed:`, error.message);
@@ -212,18 +320,34 @@ async function changeRequest(req, res, action) {
   }
 }
 
+async function getPairById(id, transaction) {
+  const [rows] = await sequelize.query(
+    `SELECT ${FRIEND_COLUMNS} FROM "friends" WHERE "id" = :id LIMIT 1${transaction ? ' FOR UPDATE' : ''}`,
+    { replacements: { id }, transaction }
+  );
+  return mapFriend(rows[0]);
+}
+
 router.post('/requests/:requestId/accept', (req, res) => changeRequest(req, res, 'accept'));
 router.post('/requests/:requestId/reject', (req, res) => changeRequest(req, res, 'reject'));
 router.delete('/requests/:requestId', (req, res) => changeRequest(req, res, 'cancel'));
 
 router.delete('/:userId', async (req, res) => {
-  const transaction = await db.sequelize.transaction();
+  const transaction = await sequelize.transaction();
   try {
-    const userId = idOf(req); const otherId = Number(req.params.userId);
-    if (!userId || !Number.isInteger(otherId) || otherId <= 0 || userId === otherId) { await transaction.rollback(); return res.status(400).json({ success: false, message: 'Invalid friend ID' }); }
+    const userId = idOf(req);
+    const otherId = Number(req.params.userId);
+    if (!userId || !Number.isInteger(otherId) || otherId <= 0 || userId === otherId) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'Invalid friend ID' });
+    }
     const row = await getPair(userId, otherId, transaction);
-    if (!row || row.status !== 'accepted') { await transaction.rollback(); return res.status(404).json({ success: false, message: 'Friendship not found' }); }
-    await row.destroy({ transaction }); await transaction.commit();
+    if (!row || row.status !== 'accepted') {
+      await transaction.rollback();
+      return res.status(404).json({ success: false, message: 'Friendship not found' });
+    }
+    await sequelize.query('DELETE FROM "friends" WHERE "id" = :id', { replacements: { id: row.id }, transaction });
+    await transaction.commit();
     return res.json({ success: true, message: 'Friend removed' });
   } catch (error) {
     await transaction.rollback().catch(() => {});
