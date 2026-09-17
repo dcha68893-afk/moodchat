@@ -20,10 +20,11 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: false,
         field: 'receiver_id',
       },
+      // The canonical friends table stores status as VARCHAR(32). Keep the
+      // Sequelize model identical to the live schema; using ENUM here causes
+      // PostgreSQL to reject inserts/updates and can also make model sync fail.
       status: {
-        // FIX: Added 'removed' and 'cancelled' — codebase writes these values but they
-        // were missing from the ENUM, causing Sequelize validation errors or silent DB failures.
-        type: DataTypes.ENUM('pending', 'accepted', 'rejected', 'blocked', 'removed', 'cancelled', 'expired'),
+        type: DataTypes.STRING(32),
         defaultValue: 'pending',
         allowNull: false,
       },
@@ -59,10 +60,7 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.INTEGER,
         defaultValue: 0,
         field: 'closeness_level',
-        validate: {
-          min: 0,
-          max: 10,
-        },
+        validate: { min: 0, max: 10 },
       },
       isPinned: {
         type: DataTypes.BOOLEAN,
@@ -74,31 +72,26 @@ module.exports = (sequelize, DataTypes) => {
         defaultValue: false,
         field: 'is_muted',
       },
-      // P1 FIX: server-side temporary friend expiry
       expiresAt: {
         type: DataTypes.DATE,
         allowNull: true,
         field: 'expires_at',
       },
-      // P2 FIX: isBusiness flag (was sent by frontend but silently dropped)
       isBusiness: {
         type: DataTypes.BOOLEAN,
         defaultValue: false,
         field: 'is_business',
       },
-      // P2 FIX: LinkedIn-style connection note sent with request
       requestMessage: {
         type: DataTypes.STRING(300),
         allowNull: true,
         field: 'request_message',
       },
-      // P3 FIX: snooze — hide friend from feed for N days without unfriending
       snoozedUntil: {
         type: DataTypes.DATE,
         allowNull: true,
         field: 'snoozed_until',
       },
-      // P3 FIX: restrict — friend can see public posts but not private ones
       isRestricted: {
         type: DataTypes.BOOLEAN,
         defaultValue: false,
@@ -112,24 +105,14 @@ module.exports = (sequelize, DataTypes) => {
       underscored: false,
       freezeTableName: true,
       indexes: [
-        {
-          fields: ['requester_id', 'receiver_id'],
-          unique: true,
-        },
-        {
-          fields: ['requester_id'],
-        },
-        {
-          fields: ['receiver_id'],
-        },
-        {
-          fields: ['status'],
-        },
+        { fields: ['requester_id', 'receiver_id'], unique: true },
+        { fields: ['requester_id'] },
+        { fields: ['receiver_id'] },
+        { fields: ['status'] },
       ],
     }
   );
 
-  // Instance methods
   Friend.prototype.accept = async function () {
     this.status = 'accepted';
     this.acceptedAt = new Date();
@@ -148,14 +131,10 @@ module.exports = (sequelize, DataTypes) => {
   };
 
   Friend.prototype.unblock = async function () {
-    // FIX: Setting status = 'accepted' was wrong when the two users were never friends —
-    // it would make them friends automatically on unblock. Destroy the record instead
-    // so they can send a fresh friend request if desired.
     this.blockedAt = null;
     return await this.destroy();
   };
 
-  // Static methods
   Friend.getFriendship = async function (userId1, userId2) {
     return await this.findOne({
       where: {
@@ -168,102 +147,71 @@ module.exports = (sequelize, DataTypes) => {
   };
 
   Friend.getUserFriends = async function (userId, status = 'accepted') {
-    if (!this.sequelize.models.Users) {
-      return [];
-    }
+    if (!this.sequelize.models.Users) return [];
 
     const friendsAsRequester = await this.findAll({
-      where: {
-        requesterId: userId,
-        status: status,
-      },
-      include: [
-        {
-          model: this.sequelize.models.Users,
-          as: 'friendReceiverUser',
-          attributes: ['id', 'username', 'avatar', 'status', 'lastSeen'],
-        },
-      ],
+      where: { requesterId: userId, status },
+      include: [{
+        model: this.sequelize.models.Users,
+        as: 'friendReceiverUser',
+        attributes: ['id', 'username', 'avatar', 'status', 'lastSeen'],
+      }],
     });
 
     const friendsAsReceiver = await this.findAll({
-      where: {
-        receiverId: userId,
-        status: status,
-      },
-      include: [
-        {
-          model: this.sequelize.models.Users,
-          as: 'friendRequesterUser',
-          attributes: ['id', 'username', 'avatar', 'status', 'lastSeen'],
-        },
-      ],
+      where: { receiverId: userId, status },
+      include: [{
+        model: this.sequelize.models.Users,
+        as: 'friendRequesterUser',
+        attributes: ['id', 'username', 'avatar', 'status', 'lastSeen'],
+      }],
     });
 
     return [...friendsAsRequester, ...friendsAsReceiver];
   };
 
   Friend.getPendingRequests = async function (userId) {
-    if (!this.sequelize.models.Users) {
-      return [];
-    }
-
+    if (!this.sequelize.models.Users) return [];
     return await this.findAll({
-      where: {
-        receiverId: userId,
-        status: 'pending',
-      },
-      include: [
-        {
-          model: this.sequelize.models.Users,
-          as: 'friendRequesterUser',
-          attributes: ['id', 'username', 'avatar', 'status', 'lastSeen'],
-        },
-      ],
+      where: { receiverId: userId, status: 'pending' },
+      include: [{
+        model: this.sequelize.models.Users,
+        as: 'friendRequesterUser',
+        attributes: ['id', 'username', 'avatar', 'status', 'lastSeen'],
+      }],
       order: [['createdAt', 'DESC']],
     });
   };
 
   Friend.getSentRequests = async function (userId) {
-    if (!this.sequelize.models.Users) {
-      return [];
-    }
-
+    if (!this.sequelize.models.Users) return [];
     return await this.findAll({
-      where: {
-        requesterId: userId,
-        status: 'pending',
-      },
-      include: [
-        {
-          model: this.sequelize.models.Users,
-          as: 'friendReceiverUser',
-          attributes: ['id', 'username', 'avatar', 'status', 'lastSeen'],
-        },
-      ],
+      where: { requesterId: userId, status: 'pending' },
+      include: [{
+        model: this.sequelize.models.Users,
+        as: 'friendReceiverUser',
+        attributes: ['id', 'username', 'avatar', 'status', 'lastSeen'],
+      }],
       order: [['createdAt', 'DESC']],
     });
   };
 
-  // Associations
   Friend.associate = function (models) {
-    if (models.Users) {
-      Friend.belongsTo(models.Users, {
-        foreignKey: 'requesterId',
-        as: 'friendRequesterUser',
-        constraints: true,
-        onDelete: 'CASCADE',
-        onUpdate: 'CASCADE',
-      });
-      
-      Friend.belongsTo(models.Users, {
-        foreignKey: 'receiverId',
-        as: 'friendReceiverUser',
-        constraints: true,
-        onDelete: 'CASCADE',
-        onUpdate: 'CASCADE',
-      });
-    }
+    if (!models.Users) return;
+    Friend.belongsTo(models.Users, {
+      foreignKey: 'requesterId',
+      as: 'friendRequesterUser',
+      constraints: true,
+      onDelete: 'CASCADE',
+      onUpdate: 'CASCADE',
+    });
+    Friend.belongsTo(models.Users, {
+      foreignKey: 'receiverId',
+      as: 'friendReceiverUser',
+      constraints: true,
+      onDelete: 'CASCADE',
+      onUpdate: 'CASCADE',
+    });
   };
 
   return Friend;
