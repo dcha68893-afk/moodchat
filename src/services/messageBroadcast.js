@@ -30,6 +30,8 @@ async function broadcastNewMessage(message, senderId) {
   ).catch(() => []);
   const recipientIds = participants.map(p => p.userId).filter(Boolean);
 
+  // GROUP/1:1 BOUNDARY: determine the authoritative chat type before any
+  // realtime event is emitted. Never infer group/direct from recipient count.
   const [chat] = await sequelize.query(
     `SELECT "type" FROM "chats" WHERE id = :chatId LIMIT 1`,
     { replacements: { chatId: chatIdInt }, type: sequelize.QueryTypes.SELECT }
@@ -59,13 +61,12 @@ async function broadcastNewMessage(message, senderId) {
     status: 'sent',
   };
 
-  // IMPORTANT: do NOT echo message:new back to the sender. The sender already
-  // has the optimistic bubble and the REST response reconciles it. Echoing
-  // message:new creates a second bubble and also sends the sender's own
-  // ciphertext through the decrypt path, producing V3_DECRYPT_REFUSED_OWN_MESSAGE.
-  // Sender acknowledgement remains the dedicated message:sent event emitted
-  // by the socket send handler; recipient delivery remains message:new.
-
+  // The sender is deliberately excluded from realtime message:new delivery.
+  // The sender already owns the optimistic bubble and the REST response is
+  // the canonical acknowledgement. Echoing the sender's own encrypted
+  // message through message:new causes a second bubble and sends the sender's
+  // ciphertext into their own decrypt path, where the ratchet correctly
+  // refuses to decrypt its own message.
   if (!recipientIds.length) {
     await messageDeliveryService.notifyMessageRecipients(message, [], {
       push: false,
@@ -78,6 +79,8 @@ async function broadcastNewMessage(message, senderId) {
   let offline = [];
 
   if (chatType === 'group') {
+    // Group messages use only group:message and are delivered through each
+    // member's canonical personal user room. They never enter message:new.
     const results = await Promise.allSettled(
       recipientIds.map(uid =>
         wsService.sendToUser(uid, 'group:message', {
@@ -92,6 +95,8 @@ async function broadcastNewMessage(message, senderId) {
       (ok ? delivered : offline).push(uid);
     });
   } else {
+    // Direct/private messages have exactly one realtime recipient path:
+    // message:new to the other participant.
     const results = await Promise.allSettled(
       recipientIds.map(uid => wsService.sendToUser(uid, 'message:new', payload))
     );
