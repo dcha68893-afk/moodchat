@@ -30,12 +30,6 @@ const publicUser = (user) => {
   };
 };
 
-const includeUser = (as) => ({
-  model: Users,
-  as,
-  attributes: ['id', 'username', 'firstName', 'lastName', 'avatar', 'bio', 'isVerified', 'status', 'lastSeen']
-});
-
 async function getPair(userId, otherId, transaction) {
   return Friend.findOne({
     where: {
@@ -56,6 +50,16 @@ function relationship(row, userId) {
   return { status: row.status === 'rejected' ? 'rejected' : 'pending', requestId: row.id, direction: 'incoming' };
 }
 
+async function usersByIds(ids) {
+  const unique = [...new Set(ids.map(Number).filter(Number.isInteger))];
+  if (!unique.length) return new Map();
+  const users = await Users.findAll({
+    where: { id: unique },
+    attributes: ['id', 'username', 'firstName', 'lastName', 'avatar', 'bio', 'isVerified', 'status', 'lastSeen']
+  });
+  return new Map(users.map(user => [Number(user.id), user]));
+}
+
 router.get('/', async (req, res) => {
   try {
     const userId = idOf(req);
@@ -64,10 +68,11 @@ router.get('/', async (req, res) => {
     const offset = Math.max(Number(req.query.offset) || 0, 0);
     const { rows, count } = await Friend.findAndCountAll({
       where: { status: 'accepted', [Op.or]: [{ requesterId: userId }, { addresseeId: userId }] },
-      include: [includeUser('requester'), includeUser('addressee')],
       order: [['updatedAt', 'DESC']], limit, offset
     });
-    const friends = rows.map(row => publicUser(row.requesterId === userId ? row.addressee : row.requester));
+    const ids = rows.map(row => Number(row.requesterId) === userId ? row.addresseeId : row.requesterId);
+    const byId = await usersByIds(ids);
+    const friends = rows.map(row => publicUser(byId.get(Number(row.requesterId) === userId ? Number(row.addresseeId) : Number(row.requesterId)))).filter(Boolean);
     return res.json({ success: true, friends, pagination: { total: count, limit, offset, hasMore: offset + rows.length < count } });
   } catch (error) {
     console.error('[Friends] list failed:', error.message);
@@ -79,8 +84,9 @@ router.get('/requests/incoming', async (req, res) => {
   try {
     const userId = idOf(req);
     if (!userId) return res.status(401).json({ success: false, message: 'Invalid authenticated user ID' });
-    const rows = await Friend.findAll({ where: { addresseeId: userId, status: 'pending' }, include: [includeUser('requester')], order: [['createdAt', 'DESC']], limit: 100 });
-    return res.json({ success: true, requests: rows.map(r => ({ id: r.id, createdAt: r.createdAt, user: publicUser(r.requester) })) });
+    const rows = await Friend.findAll({ where: { addresseeId: userId, status: 'pending' }, order: [['createdAt', 'DESC']], limit: 100 });
+    const byId = await usersByIds(rows.map(r => r.requesterId));
+    return res.json({ success: true, requests: rows.map(r => ({ id: r.id, createdAt: r.createdAt, user: publicUser(byId.get(Number(r.requesterId))) })).filter(r => r.user) });
   } catch (error) {
     console.error('[Friends] incoming failed:', error.message);
     return res.status(500).json({ success: false, message: 'Unable to load incoming requests' });
@@ -91,8 +97,9 @@ router.get('/requests/outgoing', async (req, res) => {
   try {
     const userId = idOf(req);
     if (!userId) return res.status(401).json({ success: false, message: 'Invalid authenticated user ID' });
-    const rows = await Friend.findAll({ where: { requesterId: userId, status: 'pending' }, include: [includeUser('addressee')], order: [['createdAt', 'DESC']], limit: 100 });
-    return res.json({ success: true, requests: rows.map(r => ({ id: r.id, createdAt: r.createdAt, user: publicUser(r.addressee) })) });
+    const rows = await Friend.findAll({ where: { requesterId: userId, status: 'pending' }, order: [['createdAt', 'DESC']], limit: 100 });
+    const byId = await usersByIds(rows.map(r => r.addresseeId));
+    return res.json({ success: true, requests: rows.map(r => ({ id: r.id, createdAt: r.createdAt, user: publicUser(byId.get(Number(r.addresseeId))) })).filter(r => r.user) });
   } catch (error) {
     console.error('[Friends] outgoing failed:', error.message);
     return res.status(500).json({ success: false, message: 'Unable to load outgoing requests' });

@@ -34,19 +34,25 @@ module.exports = (sequelize, DataTypes) => {
   Friend.getUserFriends = async function (userId,status='accepted') {
     const Users=this.sequelize.models.Users; if(!Users)return[];
     const [a,b]=await Promise.all([
-      this.findAll({where:{requesterId:userId,status},include:[{model:Users,as:'friendAddresseeUser',attributes:['id','username','avatar','status','lastSeen']}]}),
-      this.findAll({where:{addresseeId:userId,status},include:[{model:Users,as:'friendRequesterUser',attributes:['id','username','avatar','status','lastSeen']}]} )
-    ]); return [...a,...b];
+      this.findAll({where:{requesterId:userId,status}}),
+      this.findAll({where:{addresseeId:userId,status}})
+    ]);
+    const rows=[...a,...b];
+    const ids=[...new Set(rows.map(r=>r.requesterId===userId?r.addresseeId:r.requesterId))];
+    if(!ids.length)return[];
+    const users=await Users.findAll({where:{id:ids},attributes:['id','username','firstName','lastName','avatar','status','lastSeen']});
+    const byId=new Map(users.map(u=>[u.id,u]));
+    return rows.map(r=>({friend:r, user:byId.get(r.requesterId===userId?r.addresseeId:r.requesterId)||null}));
   };
   Friend.getPendingRequests=function(userId){return this.findAll({where:{addresseeId:userId,status:'pending'},order:[['createdAt','DESC']]});};
   Friend.getSentRequests=function(userId){return this.findAll({where:{requesterId:userId,status:'pending'},order:[['createdAt','DESC']]});};
 
   Friend.associate=function(models){
     if(!models.Users)return;
-    Friend.belongsTo(models.Users,{foreignKey:'requesterId',as:'requester',constraints:false});
-    Friend.belongsTo(models.Users,{foreignKey:'addresseeId',as:'addressee',constraints:false});
-    Friend.belongsTo(models.Users,{foreignKey:'requesterId',as:'friendRequesterUser',constraints:false});
-    Friend.belongsTo(models.Users,{foreignKey:'addresseeId',as:'friendAddresseeUser',constraints:false});
+    Friend.belongsTo(models.Users,{foreignKey:{name:'requesterId',field:'requester_id'},targetKey:'id',as:'requester',constraints:false});
+    Friend.belongsTo(models.Users,{foreignKey:{name:'addresseeId',field:'receiver_id'},targetKey:'id',as:'addressee',constraints:false});
+    Friend.belongsTo(models.Users,{foreignKey:{name:'requesterId',field:'requester_id'},targetKey:'id',as:'friendRequesterUser',constraints:false});
+    Friend.belongsTo(models.Users,{foreignKey:{name:'addresseeId',field:'receiver_id'},targetKey:'id',as:'friendAddresseeUser',constraints:false});
   };
   return Friend;
 };
