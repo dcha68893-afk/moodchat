@@ -686,6 +686,23 @@ class ToolsController {
             const validConditions  = ['new','used','refurbished'];
             const normalizedCond   = validConditions.includes(condition) ? condition : 'new';
 
+            // FIX (accommodation/rental listings going live with no admin
+            // approval, unlike every other listing type): this endpoint
+            // (POST /api/marketplace/listings — what the Accommodation &
+            // Rentals form actually submits to, see
+            // marketplace-accommodation-service.js/
+            // accommodation-marketplace-surface.js) used to hardcode
+            // status:'active', available:true, skipping moderation entirely.
+            // marketplace.controller.js's createProduct() (the endpoint every
+            // other listing type — Physical/Digital/Service — submits to)
+            // has always correctly defaulted new listings to pending review.
+            // Both endpoints write to the same Tool table, and the admin
+            // approval queue (adminGetPendingProducts) already queries that
+            // table generically by status/approvalStatus — it isn't scoped
+            // to which endpoint created the row — so matching those same
+            // defaults here is enough to route accommodation listings into
+            // the existing, already-working approval queue with no other
+            // changes needed.
             const listing = await db.Tool.create({
                 sellerId: req.user.id, title, description,
                 price: price !== undefined ? parseFloat(price) : 0,
@@ -694,7 +711,7 @@ class ToolsController {
                 stock: stock !== undefined ? parseInt(stock) : null,
                 currency: currency || 'KES',
                 metadata: { ...(metadata || {}), condition: normalizedCond },
-                status: 'active', available: true,
+                status: 'pending_review', available: false, approvalStatus: 'pending_review',
                 // FIX (2026-07-22): these columns already existed on the Tool
                 // model but nothing ever set them, so "Premium" listings were
                 // indistinguishable from regular ones once saved.

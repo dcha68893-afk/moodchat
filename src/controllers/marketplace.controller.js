@@ -2351,6 +2351,17 @@ function _formatProduct(row) {
         title:          r.title,
         description:    r.description || '',
         category:       r.category,
+        // FIX (category → subcategory click shows "nothing found" even
+        // though a matching listing exists): subcategory is saved into
+        // metadata.subcategory at creation time (Tool has no dedicated
+        // column for it — see createProduct), but this formatter never
+        // surfaced it back out. The frontend's subcategory drilldown
+        // (_renderProductsPage in Tool-ui.js) filters on `p.subcategory`,
+        // which was therefore always empty/undefined — every subcategory
+        // filter matched zero listings regardless of real data. Top-level
+        // category browsing (category=... with no subcategory) was
+        // unaffected, which is why the listing still showed in Home/recent.
+        subcategory:    meta.subcategory || '',
         type:           r.type,
         images:         images,
         tags:           r.tags || [],

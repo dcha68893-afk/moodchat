@@ -202,6 +202,15 @@ const emitToUsers = (io, userIds, eventName, payload) => {
     });
 };
 
+// FIX (friend statuses never appearing in "Recently Updated"): this used to
+// query/select `receiverId`, but the Friend model's second-party field is
+// actually named `addresseeId` (it maps to the real `receiver_id` DB
+// column — see models/Friend.js). `receiverId` isn't a real Sequelize
+// attribute on this model, so the query threw and was silently swallowed by
+// the .catch(() => []) below, meaning acceptedFriendIds was ALWAYS empty —
+// no friend's status could ever show up here, regardless of how many
+// friends the viewer actually has. friends.js (the real friend module) has
+// always used addresseeId correctly; this route was the one out of sync.
 const buildFriendContext = async (viewerId) => {
     const context = {
         acceptedFriendIds: new Set(),
@@ -215,14 +224,14 @@ const buildFriendContext = async (viewerId) => {
 
     const relationships = await Friend.findAll({
         where: {
-            [Op.or]: [{ requesterId: viewerId }, { receiverId: viewerId }],
+            [Op.or]: [{ requesterId: viewerId }, { addresseeId: viewerId }],
         },
-        attributes: ['requesterId', 'receiverId', 'status', 'closenessLevel', 'category'],
+        attributes: ['requesterId', 'addresseeId', 'status', 'closenessLevel', 'category'],
     }).catch(() => []);
 
     for (const relationship of relationships) {
         const otherUserId = Number(relationship.requesterId) === Number(viewerId)
-            ? Number(relationship.receiverId)
+            ? Number(relationship.addresseeId)
             : Number(relationship.requesterId);
 
         if (!otherUserId) continue;
