@@ -214,6 +214,30 @@ function isPublicRoute(mountPath, filename) {
     return true;
   }
 
+  // FIX (published accommodation listings never appear to buyers):
+  // routes/accommodation.js was never require()'d anywhere by name — it
+  // only ever got wired in through this scanner's auto-mount, which
+  // derives an unmapped file's path from its filename ('accommodation.js'
+  // -> '/accommodation', not in ROUTE_MAPPING or PUBLIC_PATHS) and, since
+  // isPublicRoute() said "no", wrapped the WHOLE router in a hard
+  // authenticateToken gate before any of its own routes ever ran. But the
+  // file was written to manage its own auth per-route, exactly like
+  // status.js/smart-groups.js above: GET /regions, /drilldown, /listings
+  // (via optionalAuthenticateToken) and /listings/:id/availability are
+  // meant to work for a logged-out visitor browsing stays, while
+  // /listings/:id/book, /bookings/mine, /bookings/:id/cancel and
+  // /seller/bookings already check req.user themselves and 401 on their
+  // own if it's missing. The blanket wrapper made every one of those
+  // "public" routes 401 for a logged-out buyer, so the Accommodation &
+  // Rentals browse screen — which calls GET /api/accommodation/listings
+  // with no login required, same as every other category — came back
+  // empty regardless of how many listings were approved. A logged-in
+  // seller checking their own fresh listing wouldn't always notice this,
+  // since their own session already carried a valid token.
+  if (filename === 'accommodation.js') {
+    return true;
+  }
+
   // FIX (contact-us-goes-nowhere): contact.js must allow anonymous visitors
   // to POST a message without a token. It applies its own
   // optionalAuthenticateToken (submit) / authenticateToken+adminOnly (admin
