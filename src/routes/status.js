@@ -242,16 +242,18 @@ async function recordView(req, res) {
   const viewerId = uid(req) || null;
   const status = await Status().findByPk(Number(req.params.statusId || req.body?.statusId));
   if (!status || !(await canView(status, viewerId))) return res.status(404).json({ success: false, message: 'Status not found' });
+  // Opening your own status is allowed, but the owner is never a viewer.
+  if (viewerId && Number(status.userId) === Number(viewerId)) return res.json({ success: true, created: false, viewCount: Number(status.viewCount || 0) });
   const View = M('StatusView');
   let created = false;
   if (View) {
     const [, wasCreated] = await View.findOrCreate({ where: { statusId: status.id, viewerId: viewerId || 0 }, defaults: { viewedAt: new Date() } });
     created = wasCreated;
   }
-  if (created) await status.increment('viewCount');
+  if (created) { await status.increment('viewCount'); await status.reload(); }
   const io = global.__socketIO;
-  if (created && io) io.to('user:' + status.userId).emit('status:viewed', { storyId: status.id, viewCount: Number(status.viewCount || 0) + 1, viewerId });
-  return res.json({ success: true, created });
+  if (created && io) io.to('user:' + status.userId).emit('status:viewed', { storyId: status.id, viewCount: Number(status.viewCount || 0), viewerId });
+  return res.json({ success: true, created, viewCount: Number(status.viewCount || 0) });
 }
 router.post('/view', authenticateToken, requireUser, recordView);
 router.post('/:statusId/view', authenticateToken, requireUser, recordView);
