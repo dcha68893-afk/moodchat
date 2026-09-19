@@ -282,8 +282,8 @@ class SharedMoodService {
       const friendship = await Friend.findOne({
         where: {
           [Op.or]: [
-            { requesterId: userId1, receiverId: userId2, status: 'accepted' },
-            { requesterId: userId2, receiverId: userId1, status: 'accepted' }
+            { requesterId: userId1, addresseeId: userId2, status: 'accepted' },
+            { requesterId: userId2, addresseeId: userId1, status: 'accepted' }
           ]
         }
       });

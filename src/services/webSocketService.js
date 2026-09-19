@@ -1835,9 +1835,9 @@ class WebSocketService {
                     const Friend = db.Friend || db.models?.Friend;
                     const FOp = require('sequelize').Op;
                     const rows = Friend ? await Friend.findAll({
-                        where: { status: 'accepted', [FOp.or]: [{ requesterId: uid }, { receiverId: uid }] }
+                        where: { status: 'accepted', [FOp.or]: [{ requesterId: uid }, { addresseeId: uid }] }
                     }) : [];
-                    friendIdSet = new Set(rows.map(r => String(String(r.requesterId) === String(uid) ? r.receiverId : r.requesterId)));
+                    friendIdSet = new Set(rows.map(r => String(String(r.requesterId) === String(uid) ? r.addresseeId : r.requesterId)));
                 } catch (_) { friendIdSet = new Set(); }
             }
 

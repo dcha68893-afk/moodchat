@@ -9,9 +9,22 @@ const { apiRateLimiter } = require('../middleware/rateLimiter');
 
 const router = express.Router();
 const db = () => require('../models');
-const Status = () => db().Status;
-const Users = () => db().Users;
-const Friend = () => db().Friend;
+// FIX-STATUS-MODELS: models/index.js only exposes getters for some models (User, Status,
+// StatusView, ...) — there is NO `Users` or `StatusReport` property, so db().Users was
+// undefined and every ownerPayload() threw "Cannot read properties of undefined (reading
+// 'findByPk')" (the /api/status/my and POST /api/status 500s). Resolve models from the
+// registry by name instead, tolerating singular/plural naming.
+const M = (...names) => {
+  const d = db();
+  for (const n of names) {
+    const m = (d.models && d.models[n]) || d[n];
+    if (m) return m;
+  }
+  return null;
+};
+const Status = () => M('Status');
+const Users = () => M('Users', 'User');
+const Friend = () => M('Friend', 'Friends');
 
 const VALID_TYPES = new Set(['text', 'image', 'video', 'poll', 'link']);
 const VALID_PRIVACY = new Set(['all_contacts', 'contacts_except', 'only_share_with', 'close_friends', 'public', 'private']);
@@ -24,7 +37,8 @@ const cleanList = (value, max = 100) => Array.isArray(value) ? value.map(String)
 const safeUrl = value => typeof value === 'string' && /^https?:\/\/\S+$/i.test(value) ? value.slice(0, 2000) : null;
 
 async function ownerPayload(status) {
-  const user = await Users().findByPk(status.userId, { attributes: ['id', 'username', 'displayName', 'avatar'] }).catch(() => null);
+  const UserModel = Users();
+  const user = UserModel ? await UserModel.findByPk(status.userId, { attributes: ['id', 'username', 'displayName', 'avatar'] }).catch(() => null) : null;
   return {
     ...status.toJSON(),
     owner: user ? user.toJSON() : { id: status.userId, username: 'User', displayName: 'User', avatar: null },
@@ -165,7 +179,7 @@ router.get('/friends', authenticateToken, requireUser, apiRateLimiter, asyncHand
   const statuses = await Status().getFriendsStatuses(userId, ids);
   const visible = [];
   for (const s of statuses) if (await canView(s, userId)) visible.push(await ownerPayload(s));
-  const View = db().StatusView;
+  const View = M('StatusView');
   const viewedIds = new Set();
   if (View && visible.length) {
     const rows = await View.findAll({ where: { statusId: visible.map(s => s.id), viewerId: userId }, attributes: ['statusId'] }).catch(() => []);
@@ -228,7 +242,7 @@ async function recordView(req, res) {
   const viewerId = uid(req) || null;
   const status = await Status().findByPk(Number(req.params.statusId || req.body?.statusId));
   if (!status || !(await canView(status, viewerId))) return res.status(404).json({ success: false, message: 'Status not found' });
-  const View = db().StatusView;
+  const View = M('StatusView');
   let created = false;
   if (View) {
     const [, wasCreated] = await View.findOrCreate({ where: { statusId: status.id, viewerId: viewerId || 0 }, defaults: { viewedAt: new Date() } });
@@ -245,14 +259,15 @@ router.post('/:statusId/view', authenticateToken, requireUser, recordView);
 router.get('/:statusId/viewers', authenticateToken, requireUser, apiRateLimiter, asyncHandler(async (req, res) => {
   const status = await Status().findByPk(Number(req.params.statusId));
   if (!status || status.userId !== uid(req)) return res.status(404).json({ success: false, message: 'Status not found' });
-  const View = db().StatusView;
+  const View = M('StatusView');
   const views = View ? await View.findAll({ where: { statusId: status.id }, order: [['viewedAt', 'DESC']], limit: 500 }) : [];
-  const users = await Promise.all(views.map(v => Users().findByPk(v.viewerId, { attributes: ['id','username','displayName','avatar'] }).catch(() => null)));
+  const UserModel = Users();
+  const users = await Promise.all(views.map(v => UserModel ? UserModel.findByPk(v.viewerId, { attributes: ['id','username','displayName','avatar'] }).catch(() => null) : null));
   return res.json({ success: true, data: views.map((v,i) => ({ ...v.toJSON(), viewer: users[i] })) });
 }));
 
 router.get('/:statusId/likes', apiRateLimiter, asyncHandler(async (req, res) => {
-  const Like = db().StatusLike;
+  const Like = M('StatusLike');
   const likes = Like ? await Like.findAll({ where: { statusId: Number(req.params.statusId) }, order: [['createdAt', 'DESC']], limit: 200 }) : [];
   return res.json({ success: true, data: likes });
 }));
@@ -260,7 +275,7 @@ router.get('/:statusId/likes', apiRateLimiter, asyncHandler(async (req, res) => 
 router.post('/:statusId/like', authenticateToken, requireUser, apiRateLimiter, asyncHandler(async (req, res) => {
   const status = await Status().findByPk(Number(req.params.statusId));
   if (!status || !(await canView(status, uid(req))) || !status.allowReactions) return res.status(404).json({ success: false, message: 'Status unavailable' });
-  const Reaction = db().StatusReaction;
+  const Reaction = M('StatusReaction');
   const emoji = String(req.body?.emoji || '❤️').slice(0, 16);
   const [reaction] = await Reaction.findOrCreate({ where: { statusId: status.id, userId: uid(req) }, defaults: { emoji } });
   if (!reaction.changed()) {
@@ -274,7 +289,7 @@ router.post('/:statusId/like', authenticateToken, requireUser, apiRateLimiter, a
 }));
 
 router.delete('/:statusId/like', authenticateToken, requireUser, apiRateLimiter, asyncHandler(async (req, res) => {
-  const Reaction = db().StatusReaction;
+  const Reaction = M('StatusReaction');
   const status = await Status().findByPk(Number(req.params.statusId));
   if (!status) return res.status(404).json({ success: false, message: 'Status not found' });
   await Reaction.destroy({ where: { statusId: status.id, userId: uid(req) } });
@@ -286,7 +301,7 @@ router.delete('/:statusId/like', authenticateToken, requireUser, apiRateLimiter,
 router.post('/:statusId/comment', authenticateToken, requireUser, apiRateLimiter, asyncHandler(async (req, res) => {
   const status = await Status().findByPk(Number(req.params.statusId));
   if (!status || !(await canView(status, uid(req))) || !status.allowReplies) return res.status(404).json({ success: false, message: 'Replies are disabled.' });
-  const Reply = db().StatusReply;
+  const Reply = M('StatusReply');
   const text = String(req.body?.text || '').trim().slice(0, 2000);
   if (!text) return res.status(400).json({ success: false, message: 'Reply cannot be empty.' });
   const reply = await Reply.create({ statusId: status.id, userId: uid(req), text });
@@ -297,13 +312,13 @@ router.post('/:statusId/comment', authenticateToken, requireUser, apiRateLimiter
 }));
 
 router.get('/:statusId/comments', apiRateLimiter, asyncHandler(async (req, res) => {
-  const Reply = db().StatusReply;
+  const Reply = M('StatusReply');
   const replies = Reply ? await Reply.findAll({ where: { statusId: Number(req.params.statusId) }, order: [['createdAt', 'ASC']], limit: 200 }) : [];
   return res.json({ success: true, data: replies });
 }));
 
 router.delete('/:statusId/comment/:commentId', authenticateToken, requireUser, apiRateLimiter, asyncHandler(async (req, res) => {
-  const Reply = db().StatusReply;
+  const Reply = M('StatusReply');
   const reply = await Reply.findByPk(Number(req.params.commentId));
   if (!reply || reply.userId !== uid(req)) return res.status(404).json({ success: false, message: 'Reply not found' });
   await reply.destroy();
@@ -343,7 +358,7 @@ router.delete('/:statusId', authenticateToken, requireUser, apiRateLimiter, asyn
 
 
 router.post('/:statusId/report', authenticateToken, requireUser, apiRateLimiter, asyncHandler(async (req, res) => {
-  const Report = db().StatusReport;
+  const Report = M('StatusReport');
   if (!Report) return res.status(503).json({ success: false, message: 'Reporting unavailable' });
   const reason = String(req.body?.reason || 'other').slice(0, 80);
   const details = String(req.body?.details || '').slice(0, 1000);

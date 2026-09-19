@@ -42,6 +42,11 @@ class ServerModuleHealthChecker {
       phase5_reliability:  !!this._modules.phase5?.reliability,
     };
 
+    // Phase 3 (calls) was intentionally removed from the build — see server.js
+    // FIX-PHASE3-REMOVED. A module that is disabled by design isn't "unhealthy",
+    // so leave it out of the tally rather than reporting a permanent false alarm.
+    if (this._modules.phase3?.disabled) delete checks.phase3_callSignaling;
+
     const healthy   = Object.values(checks).filter(Boolean).length;
     const unhealthy = Object.values(checks).filter(v => !v).length;
 

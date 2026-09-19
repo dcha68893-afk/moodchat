@@ -75,7 +75,7 @@ function start(db, io) {
         try {
             const expired = await Friend.findAll({
                 where: { expiresAt: { [Op.lt]: new Date(), [Op.ne]: null }, status: 'accepted' },
-                attributes: ['id', 'requesterId', 'receiverId'],
+                attributes: ['id', 'requesterId', ['receiver_id', 'receiverId']],
                 raw: true
             });
 
@@ -108,7 +108,7 @@ function start(db, io) {
             // Load all accepted friendships
             const friendships = await Friend.findAll({
                 where: { status: 'accepted' },
-                attributes: ['id', 'requesterId', 'receiverId'],
+                attributes: ['id', 'requesterId', ['receiver_id', 'receiverId']],
                 raw: true
             });
 
@@ -200,7 +200,7 @@ function start(db, io) {
             // Accepted friendships with an acceptedAt date
             const allFriendships = await Friend.findAll({
                 where: { status: 'accepted', acceptedAt: { [Op.ne]: null } },
-                attributes: ['id', 'requesterId', 'receiverId', 'acceptedAt'],
+                attributes: ['id', 'requesterId', ['receiver_id', 'receiverId'], 'acceptedAt'],
                 raw: true
             });
 
@@ -262,7 +262,7 @@ function start(db, io) {
             const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
             const stale = await Friend.findAll({
                 where: { status: 'pending', createdAt: { [Op.lt]: cutoff } },
-                attributes: ['id', 'requesterId', 'receiverId'],
+                attributes: ['id', 'requesterId', ['receiver_id', 'receiverId']],
                 raw: true
             });
 

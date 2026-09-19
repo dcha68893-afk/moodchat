@@ -623,18 +623,24 @@ module.exports = (sequelize, DataTypes) => {
     }
         
     if (models.Friend) {
+      // FIX-FRIEND-RECEIVERID: the Friend model's attribute is `addresseeId`
+      // (column receiver_id). Naming a key `receiverId` here made Sequelize
+      // inject a brand-new `receiverId` attribute into the Friend model, so EVERY
+      // Friend.findAll()/findOne() selected a nonexistent "receiverId" column
+      // -> Postgres 42703 "column receiverId does not exist". Use the attribute
+      // names Friend actually defines so nothing is injected.
       Users.belongsToMany(Users, {
         through: models.Friend,
         as: 'friends',
         foreignKey: 'requesterId',
-        otherKey: 'receiverId',
+        otherKey: 'addresseeId',
         constraints: false
       });
       
       Users.belongsToMany(Users, {
         through: models.Friend,
         as: 'friendRequests',
-        foreignKey: 'receiverId',
+        foreignKey: 'addresseeId',
         otherKey: 'requesterId',
         constraints: false
       });

@@ -5419,7 +5419,25 @@ class Application {
                     // retries with backoff and logs loudly (not just warn) if it never
                     // recovers, so this is actually visible instead of silently eating
                     // calls.
+                    // FIX-PHASE3-REMOVED: commit 81de81d ("Remove backend call routes,
+                    // controllers and signaling services", 2026-09-15) deliberately deleted
+                    // src/services/phase3/ (CallSignalingService + phase3.bootstrap) along
+                    // with routes/calls.js, callService.js and models/Call.js. This block
+                    // was never updated, so on every boot it retried require() of a
+                    // module that no longer exists 5 times (2s/4s/6s/8s backoff) and then
+                    // logged a scary "FAILED TO INITIALIZE" error. A missing-by-design
+                    // module is not a transient failure: detect it once, skip quietly,
+                    // and mark phase3 as intentionally disabled so Phase 6 health
+                    // reporting doesn't count it as unhealthy either.
+                    let _phase3Present = true;
+                    try { require.resolve('./services/phase3/phase3.bootstrap'); }
+                    catch (_) { _phase3Present = false; }
+                    if (!_phase3Present) {
+                        global.__phase3 = { disabled: true, reason: 'calls removed (phase3 module deleted)' };
+                        console.log('[Phase3] Skipped — call signaling module removed from this build (calls disabled).');
+                    }
                     const _initPhase3WithRetry = (attempt = 1, maxAttempts = 5) => {
+                        if (!_phase3Present) return;
                         try {
                             const { initPhase3 } = require('./services/phase3/phase3.bootstrap');
                             global.__phase3 = initPhase3(this.io, this.app, {
