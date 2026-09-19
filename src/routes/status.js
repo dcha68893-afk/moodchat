@@ -68,7 +68,15 @@ async function canView(status, viewerId) {
 }
 
 function normalizeBody(body, userId) {
-  const type = VALID_TYPES.has(body.type) ? body.type : 'text';
+  // Canonical media contract: accept the flat fields used by ProfessionalStatus
+  // and the nested Media-shaped object used by other clients, then persist one
+  // stable set of mediaUrl/mediaPublicId/mediaMime fields. This prevents a
+  // successful upload from becoming a status with an empty media URL.
+  const media = body.media && typeof body.media === 'object' ? body.media : {};
+  const suppliedMime = body.mediaMime || media.mimeType || media.mime || '';
+  const inferredType = String(suppliedMime).startsWith('video/') ? 'video'
+    : String(suppliedMime).startsWith('image/') ? 'image' : 'text';
+  const type = VALID_TYPES.has(body.type) ? body.type : inferredType;
   const privacy = VALID_PRIVACY.has(body.privacy) ? body.privacy : 'all_contacts';
   const content = typeof body.content === 'string' ? body.content.trim().slice(0, MAX_TEXT) : null;
   const topics = cleanList(body.topics, MAX_TOPICS);
@@ -79,9 +87,9 @@ function normalizeBody(body, userId) {
     userId,
     content,
     type,
-    mediaUrl: safeUrl(body.mediaUrl),
-    mediaPublicId: typeof body.mediaPublicId === 'string' ? body.mediaPublicId.slice(0, 500) : null,
-    mediaMime: typeof body.mediaMime === 'string' ? body.mediaMime.slice(0, 120) : null,
+    mediaUrl: safeUrl(body.mediaUrl || media.url || media.secure_url),
+    mediaPublicId: typeof (body.mediaPublicId || media.publicId || media.public_id) === 'string' ? String(body.mediaPublicId || media.publicId || media.public_id).slice(0, 500) : null,
+    mediaMime: typeof suppliedMime === 'string' ? suppliedMime.slice(0, 120) : null,
     thumbnailUrl: safeUrl(body.thumbnailUrl),
     caption: typeof body.caption === 'string' ? body.caption.trim().slice(0, 2000) : null,
     background: typeof body.background === 'string' ? body.background.slice(0, 120) : null,
