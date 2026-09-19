@@ -123,6 +123,11 @@ async function deleteFromCloudinary(publicId) {
   try { await cld.uploader.destroy(publicId); return true; } catch (_) { return false; }
 }
 
+function videoTrimUrl(publicId, startSeconds, durationSeconds) {
+  const cld = _load();
+  if (!cld || !publicId) return null;
+  return cld.url(publicId, { resource_type: 'video', type: 'upload', secure: true, transformation: [{ start_offset: Number(startSeconds) || 0, duration: Math.min(20, Number(durationSeconds) || 20) }] });
+}
 function isConfigured() { return !!readCredentials(); }
 
 async function validateConfig() {
@@ -150,4 +155,5 @@ module.exports = {
   deleteFromCloudinary,
   isConfigured,
   validateConfig,
+  videoTrimUrl,
 };

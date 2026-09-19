@@ -31,17 +31,24 @@ router.post('/direct-upload', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ success: false, error: 'No file uploaded' });
 
-    const result = cloudinaryService.isConfigured()
-      ? await cloudinaryService.uploadToCloudinary(req.file.buffer, {
-          folder: (req.file.mimetype || '').startsWith('video/') ? 'necpa/status/videos' : (req.file.mimetype || '').startsWith('audio/') ? 'necpa/status/audio' : 'necpa/status/images'
-        })
-      : localUpload(req, req.file);
+    const isVideo = (req.file.mimetype || '').startsWith('video/');
+    const trimStart = Math.max(0, Number(req.body?.trimStart || 0) || 0);
+    const trimEndRaw = Number(req.body?.trimEnd);
+    const sourceDuration = Number(req.body?.sourceDuration || 0) || 0;
+    if (isVideo && trimEndRaw > trimStart && trimEndRaw - trimStart > 20) return res.status(400).json({ success: false, error: 'Status videos cannot exceed 20 seconds.' });
+    if (isVideo && !cloudinaryService.isConfigured() && sourceDuration > 20) return res.status(400).json({ success: false, error: 'Video trimming requires Cloudinary when the original video is longer than 20 seconds.' });
 
+    const result = cloudinaryService.isConfigured()
+      ? await cloudinaryService.uploadToCloudinary(req.file.buffer, { folder: isVideo ? 'necpa/status/videos' : (req.file.mimetype || '').startsWith('audio/') ? 'necpa/status/audio' : 'necpa/status/images' })
+      : localUpload(req, req.file);
     if (!result) return res.status(502).json({ success: false, error: 'Media upload failed' });
+    let deliveryUrl = result.url;
+    if (isVideo && cloudinaryService.isConfigured() && result.publicId && trimEndRaw > trimStart) deliveryUrl = cloudinaryService.videoTrimUrl(result.publicId, trimStart, Math.min(20, trimEndRaw - trimStart)) || result.url;
+
     return res.status(201).json({
       success: true,
-      cloudinary: { url: result.url, public_id: result.publicId, width: result.width, height: result.height, format: result.format, bytes: result.bytes },
-      url: result.url,
+      cloudinary: { url: deliveryUrl, public_id: result.publicId, width: result.width, height: result.height, format: result.format, bytes: result.bytes },
+      url: deliveryUrl,
       publicId: result.publicId,
       storage: cloudinaryService.isConfigured() ? 'cloudinary' : 'local-fallback'
     });

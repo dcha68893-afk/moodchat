@@ -72,7 +72,7 @@ function normalizeBody(body, userId) {
   const privacy = VALID_PRIVACY.has(body.privacy) ? body.privacy : 'all_contacts';
   const content = typeof body.content === 'string' ? body.content.trim().slice(0, MAX_TEXT) : null;
   const topics = cleanList(body.topics, MAX_TOPICS);
-  const durationSeconds = Math.min(Math.max(Number(body.durationSeconds) || 7, 3), 30);
+  const durationSeconds = Math.min(Math.max(Number(body.durationSeconds) || 7, 3), 20);
   const pollOptions=Array.isArray(body.pollOptions)?body.pollOptions.map(v=>String(v).trim()).filter(Boolean).slice(0,8):[];
   const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
   return {
