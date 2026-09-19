@@ -41,13 +41,13 @@ async function canView(status, viewerId) {
     const FriendModel = Friend();
     if (!FriendModel) return false;
     const rows = await FriendModel.getUserFriends(viewerId, 'accepted').catch(() => []);
-    const ids = rows.map(f => Number(f.requesterId) === viewerId ? Number(f.receiverId) : Number(f.requesterId));
+    const ids = rows.map(f => Number(f.friend?.requesterId) === viewerId ? Number(f.friend?.addresseeId) : Number(f.friend?.requesterId)).filter(Number.isFinite);
     return ids.includes(Number(status.userId));
   }
   const FriendModel = Friend();
   if (!FriendModel) return false;
   const rows = await FriendModel.getUserFriends(viewerId, 'accepted').catch(() => []);
-  const ids = rows.map(f => Number(f.requesterId) === viewerId ? Number(f.receiverId) : Number(f.requesterId));
+  const ids = rows.map(f => Number(f.friend?.requesterId) === viewerId ? Number(f.friend?.addresseeId) : Number(f.friend?.requesterId)).filter(Number.isFinite);
   return ids.includes(Number(status.userId));
 }
 
@@ -114,25 +114,50 @@ router.post('/', authenticateToken, apiRateLimiter, asyncHandler(async (req, res
   if (io) {
     io.to('user:' + userId).emit('status:new', { story: result });
     io.to('user_' + userId).emit('status:new', { story: result });
+    const friendRows = await Friend().getUserFriends(userId, 'accepted').catch(() => []);
+    const friendIds = friendRows.map(f => Number(f.friend?.requesterId) === userId ? Number(f.friend?.addresseeId) : Number(f.friend?.requesterId)).filter(Number.isFinite);
+    for (const friendId of friendIds) {
+      io.to('user:' + friendId).emit('status:new', { story: result });
+      io.to('user_' + friendId).emit('status:new', { story: result });
+    }
   }
   return res.status(201).json({ success: true, status: result });
+}));
+
+// Compatibility/default status feed. Older shells request GET /api/status directly.
+router.get('/', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+  const userId = uid(req);
+  const friends = await Friend().getUserFriends(userId, 'accepted');
+  const ids = friends.map(f => Number(f.friend?.requesterId) === userId ? Number(f.friend?.addresseeId) : Number(f.friend?.requesterId)).filter(Number.isFinite);
+  const statuses = await Status().getFriendsStatuses(userId, ids);
+  const visible = [];
+  for (const s of statuses) if (await canView(s, userId)) visible.push(await ownerPayload(s));
+  const mine = await Status().getUserStatuses(userId, { activeOnly: true });
+  return res.json({ success: true, data: [...(await Promise.all(mine.map(ownerPayload))), ...(await Promise.all(visible.map(ownerPayload))) ] });
 }));
 
 // Current user's active statuses.
 router.get('/my', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
   const statuses = await Status().getUserStatuses(uid(req), { activeOnly: true });
-  return res.json({ success: true, data: await Promise.all(statuses.map(ownerPayload)) });
+  return res.json({ success: true, data: await Promise.all(statuses.map(async s => ({ ...(await ownerPayload(s)), viewedByMe: true }))) });
 }));
 
 // Friend statuses.
 router.get('/friends', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
   const userId = uid(req);
   const friends = await Friend().getUserFriends(userId, 'accepted');
-  const ids = friends.map(f => Number(f.requesterId) === userId ? Number(f.receiverId) : Number(f.requesterId));
+  const ids = friends.map(f => Number(f.friend?.requesterId) === userId ? Number(f.friend?.addresseeId) : Number(f.friend?.requesterId)).filter(Number.isFinite);
   const statuses = await Status().getFriendsStatuses(userId, ids);
   const visible = [];
   for (const s of statuses) if (await canView(s, userId)) visible.push(await ownerPayload(s));
-  return res.json({ success: true, data: visible });
+  const View = db().StatusView;
+  const viewedIds = new Set();
+  if (View && visible.length) {
+    const rows = await View.findAll({ where: { statusId: visible.map(s => s.id), viewerId: userId }, attributes: ['statusId'] }).catch(() => []);
+    rows.forEach(v => viewedIds.add(Number(v.statusId)));
+  }
+  const data = await Promise.all(visible.map(async s => ({ ...(await ownerPayload(s)), viewedByMe: viewedIds.has(Number(s.id)) })));
+  return res.json({ success: true, data });
 }));
 
 // Public feed / trending.
