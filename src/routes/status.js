@@ -133,7 +133,8 @@ router.get('/', authenticateToken, apiRateLimiter, asyncHandler(async (req, res)
   const visible = [];
   for (const s of statuses) if (await canView(s, userId)) visible.push(await ownerPayload(s));
   const mine = await Status().getUserStatuses(userId, { activeOnly: true });
-  return res.json({ success: true, data: [...(await Promise.all(mine.map(ownerPayload))), ...visible] });
+  res.set('Cache-Control','no-store');
+  return res.json({ success: true, featureVersion: 'status-5.1', data: [...(await Promise.all(mine.map(ownerPayload))), ...visible] });
 }));
 
 // Current user's active statuses.
