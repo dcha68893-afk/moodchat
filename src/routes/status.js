@@ -93,7 +93,14 @@ function normalizeBody(body, userId) {
   };
 }
 
-router.use(asyncHandler(async(req,res,next)=>{await ensureStatusSchema(db());next();}));
+// Schema repair runs once per process (see services/statusSchema.js). If it fails, log the
+// real database error and carry on: the tables normally already exist, and the actual query
+// will surface the true failure. A failed run is not cached, so the next request retries.
+router.use(async (req, res, next) => {
+  try { await ensureStatusSchema(db()); }
+  catch (err) { console.error('[status] ensureStatusSchema failed:', err && (err.parent?.message || err.message), err?.parent?.code || ''); }
+  next();
+});
 
 // Health is public.
 router.get('/health', asyncHandler(async (req, res) => {
@@ -343,5 +350,13 @@ router.post('/:statusId/report', authenticateToken, requireUser, apiRateLimiter,
   await Report.create({ statusId: Number(req.params.statusId), reporterId: uid(req), reason, details });
   return res.status(201).json({ success: true });
 }));
+
+// Log the real cause server-side and give the client a JSON body (it used to get an empty
+// 500). Only the Postgres error code is exposed, never the SQL/message.
+router.use((err, req, res, next) => {
+  console.error('[status] ' + req.method + ' ' + req.originalUrl + ' failed:', err && (err.parent?.message || err.message), err?.parent?.code || '');
+  if (res.headersSent) return next(err);
+  return res.status(Number(err?.status) || 500).json({ success: false, message: 'Status service error (' + (err?.parent?.code || err?.name || 'ERROR') + ')', code: err?.parent?.code || err?.name || 'ERROR' });
+});
 
 module.exports = router;

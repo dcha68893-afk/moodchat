@@ -1,11 +1,42 @@
 'use strict';
 
+// ROOT CAUSE OF "status fails with 500" (see README): this used to run on EVERY
+// /api/status request, all of it idempotent DDL. When several requests arrive at
+// once (the app fires GET /api/status, /my, /friends and view/POST together), the
+// parallel `CREATE TABLE IF NOT EXISTS` / `CREATE UNIQUE INDEX IF NOT EXISTS`
+// statements race inside Postgres and all but one fail with
+// `duplicate key value violates unique constraint "pg_type_typname_nsp_index"`
+// (SequelizeUniqueConstraintError), which the route turned into a 500 for every
+// status request in that burst — including POST (publish). Every request also took
+// ACCESS EXCLUSIVE locks on "Status" ~15 times, needlessly stalling other queries.
+//
+// Now: the DDL runs once per process, concurrent callers share that one run, it is
+// serialized across processes/instances with a Postgres advisory lock inside a
+// transaction, and a failure is not cached (next call retries).
+const SCHEMA_LOCK_KEY = 74180919;
+const runs = new WeakMap(); // sequelize instance -> { done, promise }
+
 async function ensureStatusSchema(db) {
   const sequelize = db.sequelize;
+  let run = runs.get(sequelize);
+  if (run && run.done) return;
+  if (run && run.promise) return run.promise;
+  run = { done: false, promise: null };
+  runs.set(sequelize, run);
+  run.promise = sequelize.transaction(async (t) => {
+    await sequelize.query('SELECT pg_advisory_xact_lock(' + SCHEMA_LOCK_KEY + ')', { transaction: t });
+    await applyStatusSchema(sequelize, t);
+  }).then(() => { run.done = true; run.promise = null; })
+    .catch((err) => { run.promise = null; throw err; });
+  return run.promise;
+}
+
+async function applyStatusSchema(sequelize, transaction) {
+  const q = (sql) => sequelize.query(sql, { transaction });
   // The legacy database may already contain a six-column Status table.
   // Use idempotent PostgreSQL SQL here instead of QueryInterface.addColumn so
   // existing rows and JSONB/default expressions are repaired safely.
-  await sequelize.query(`
+  await q(`
     CREATE TABLE IF NOT EXISTS "Status" (
       "id" SERIAL PRIMARY KEY,
       "userId" INTEGER NOT NULL,
@@ -33,17 +64,17 @@ async function ensureStatusSchema(db) {
      `"highlight" BOOLEAN NOT NULL DEFAULT FALSE`, `"pollOptions" JSONB NOT NULL DEFAULT '[]'::jsonb`]
   ];
   for (const group of columns) {
-    await sequelize.query(`ALTER TABLE "Status" ${group.map(c => `ADD COLUMN IF NOT EXISTS ${c}`).join(', ')}`);
+    await q(`ALTER TABLE "Status" ${group.map(c => `ADD COLUMN IF NOT EXISTS ${c}`).join(', ')}`);
   }
 
-  await sequelize.query(`
+  await q(`
     UPDATE "Status"
     SET "expiresAt" = COALESCE("expiresAt", "createdAt" + INTERVAL '24 hours'),
         "updatedAt" = COALESCE("updatedAt", "createdAt")
     WHERE "expiresAt" IS NULL OR "updatedAt" IS NULL
   `);
 
-  await sequelize.query(`
+  await q(`
     CREATE TABLE IF NOT EXISTS "StatusViews" (
       "id" SERIAL PRIMARY KEY,
       "statusId" INTEGER NOT NULL,
@@ -56,7 +87,7 @@ async function ensureStatusSchema(db) {
     CREATE INDEX IF NOT EXISTS "StatusViews_status_idx" ON "StatusViews" ("statusId");
   `);
 
-  await sequelize.query(`
+  await q(`
     CREATE TABLE IF NOT EXISTS "StatusReactions" (
       "id" SERIAL PRIMARY KEY,
       "statusId" INTEGER NOT NULL,
@@ -69,7 +100,7 @@ async function ensureStatusSchema(db) {
     CREATE INDEX IF NOT EXISTS "StatusReactions_status_idx" ON "StatusReactions" ("statusId");
   `);
 
-  await sequelize.query(`
+  await q(`
     CREATE TABLE IF NOT EXISTS "StatusReplies" (
       "id" SERIAL PRIMARY KEY,
       "statusId" INTEGER NOT NULL,
@@ -81,7 +112,7 @@ async function ensureStatusSchema(db) {
     CREATE INDEX IF NOT EXISTS "StatusReplies_status_created_idx" ON "StatusReplies" ("statusId","createdAt");
   `);
 
-  await sequelize.query(`
+  await q(`
     CREATE TABLE IF NOT EXISTS "StatusReports" (
       "id" SERIAL PRIMARY KEY,
       "statusId" INTEGER NOT NULL,
