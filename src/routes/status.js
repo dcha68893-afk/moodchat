@@ -3,7 +3,8 @@
 const express = require('express');
 const asyncHandler = require('express-async-handler');
 const { Op } = require('sequelize');
-const { authenticateToken } = require('../middleware/auth');
+const { authenticateToken, optionalAuthenticateToken } = require('../middleware/auth');
+const { ensureStatusSchema } = require('../services/statusSchema');
 const { apiRateLimiter } = require('../middleware/rateLimiter');
 
 const router = express.Router();
@@ -16,6 +17,7 @@ const VALID_TYPES = new Set(['text', 'image', 'video', 'poll', 'link']);
 const VALID_PRIVACY = new Set(['all_contacts', 'contacts_except', 'only_share_with', 'close_friends', 'public', 'private']);
 const MAX_TEXT = 4000;
 const MAX_TOPICS = 10;
+const requireUser=(req,res,next)=>{const id=Number(req.user?.userId||req.user?.id);if(!Number.isFinite(id)||id<=0)return res.status(401).json({success:false,message:'Authorization required'});next();};
 
 const uid = req => Number(req.user?.userId || req.user?.id);
 const cleanList = (value, max = 100) => Array.isArray(value) ? value.map(String).filter(Boolean).slice(0, max) : [];
@@ -57,6 +59,7 @@ function normalizeBody(body, userId) {
   const content = typeof body.content === 'string' ? body.content.trim().slice(0, MAX_TEXT) : null;
   const topics = cleanList(body.topics, MAX_TOPICS);
   const durationSeconds = Math.min(Math.max(Number(body.durationSeconds) || 7, 3), 30);
+  const pollOptions=Array.isArray(body.pollOptions)?body.pollOptions.map(v=>String(v).trim()).filter(Boolean).slice(0,8):[];
   const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
   return {
     userId,
@@ -74,6 +77,7 @@ function normalizeBody(body, userId) {
     mentions: cleanList(body.mentions, 50),
     stickers: Array.isArray(body.stickers) ? body.stickers.slice(0, 30) : [],
     topics,
+    pollOptions,
     moodType: typeof body.moodType === 'string' ? body.moodType.slice(0, 60) : null,
     category: typeof body.category === 'string' ? body.category.slice(0, 60) : null,
     intent: typeof body.intent === 'string' ? body.intent.slice(0, 60) : null,
@@ -89,6 +93,8 @@ function normalizeBody(body, userId) {
   };
 }
 
+router.use(asyncHandler(async(req,res,next)=>{await ensureStatusSchema(db());next();}));
+
 // Health is public.
 router.get('/health', asyncHandler(async (req, res) => {
   const S = Status();
@@ -96,7 +102,7 @@ router.get('/health', asyncHandler(async (req, res) => {
 }));
 
 // Create status.
-router.post('/', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+router.post('/', authenticateToken, requireUser, apiRateLimiter, asyncHandler(async (req, res) => {
   const userId = uid(req);
   const data = normalizeBody(req.body || {}, userId);
   if (!data.content && !data.mediaUrl && data.type !== 'poll') {
@@ -125,8 +131,9 @@ router.post('/', authenticateToken, apiRateLimiter, asyncHandler(async (req, res
 }));
 
 // Compatibility/default status feed. Older shells request GET /api/status directly.
-router.get('/', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+router.get('/', optionalAuthenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
   const userId = uid(req);
+  if (!Number.isFinite(userId)||userId<=0) return res.json({success:true,featureVersion:'status-5.2',data:[]});
   const friends = await Friend().getUserFriends(userId, 'accepted');
   const ids = friends.map(f => Number(f.friend?.requesterId) === userId ? Number(f.friend?.addresseeId) : Number(f.friend?.requesterId)).filter(Number.isFinite);
   const statuses = await Status().getFriendsStatuses(userId, ids);
@@ -138,13 +145,13 @@ router.get('/', authenticateToken, apiRateLimiter, asyncHandler(async (req, res)
 }));
 
 // Current user's active statuses.
-router.get('/my', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+router.get('/my', authenticateToken, requireUser, apiRateLimiter, asyncHandler(async (req, res) => {
   const statuses = await Status().getUserStatuses(uid(req), { activeOnly: true });
   return res.json({ success: true, data: await Promise.all(statuses.map(async s => ({ ...(await ownerPayload(s)), viewedByMe: true }))) });
 }));
 
 // Friend statuses.
-router.get('/friends', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+router.get('/friends', authenticateToken, requireUser, apiRateLimiter, asyncHandler(async (req, res) => {
   const userId = uid(req);
   const friends = await Friend().getUserFriends(userId, 'accepted');
   const ids = friends.map(f => Number(f.friend?.requesterId) === userId ? Number(f.friend?.addresseeId) : Number(f.friend?.requesterId)).filter(Number.isFinite);
@@ -187,7 +194,7 @@ router.get('/mood/:moodType', apiRateLimiter, asyncHandler(async (req, res) => {
   return res.json({ success: true, data: await Promise.all(statuses.map(ownerPayload)) });
 }));
 
-router.get('/user/:userId', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+router.get('/user/:userId', authenticateToken, requireUser, apiRateLimiter, asyncHandler(async (req, res) => {
   const target = Number(req.params.userId);
   const statuses = await Status().findAll({ where: { userId: target, isActive: true, expiresAt: { [Op.gt]: new Date() } }, order: [['createdAt', 'ASC']] });
   const visible = [];
@@ -195,7 +202,7 @@ router.get('/user/:userId', authenticateToken, apiRateLimiter, asyncHandler(asyn
   return res.json({ success: true, data: visible });
 }));
 
-router.get('/stats', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+router.get('/stats', authenticateToken, requireUser, apiRateLimiter, asyncHandler(async (req, res) => {
   return res.json({ success: true, data: await Status().getStatusStats(uid(req)) });
 }));
 
@@ -225,10 +232,10 @@ async function recordView(req, res) {
   if (created && io) io.to('user:' + status.userId).emit('status:viewed', { storyId: status.id, viewCount: Number(status.viewCount || 0) + 1, viewerId });
   return res.json({ success: true, created });
 }
-router.post('/view', recordView);
-router.post('/:statusId/view', recordView);
+router.post('/view', authenticateToken, requireUser, recordView);
+router.post('/:statusId/view', authenticateToken, requireUser, recordView);
 
-router.get('/:statusId/viewers', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+router.get('/:statusId/viewers', authenticateToken, requireUser, apiRateLimiter, asyncHandler(async (req, res) => {
   const status = await Status().findByPk(Number(req.params.statusId));
   if (!status || status.userId !== uid(req)) return res.status(404).json({ success: false, message: 'Status not found' });
   const View = db().StatusView;
@@ -243,7 +250,7 @@ router.get('/:statusId/likes', apiRateLimiter, asyncHandler(async (req, res) => 
   return res.json({ success: true, data: likes });
 }));
 
-router.post('/:statusId/like', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+router.post('/:statusId/like', authenticateToken, requireUser, apiRateLimiter, asyncHandler(async (req, res) => {
   const status = await Status().findByPk(Number(req.params.statusId));
   if (!status || !(await canView(status, uid(req))) || !status.allowReactions) return res.status(404).json({ success: false, message: 'Status unavailable' });
   const Reaction = db().StatusReaction;
@@ -259,7 +266,7 @@ router.post('/:statusId/like', authenticateToken, apiRateLimiter, asyncHandler(a
   return res.json({ success: true, reaction: reaction.toJSON(), count });
 }));
 
-router.delete('/:statusId/like', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+router.delete('/:statusId/like', authenticateToken, requireUser, apiRateLimiter, asyncHandler(async (req, res) => {
   const Reaction = db().StatusReaction;
   const status = await Status().findByPk(Number(req.params.statusId));
   if (!status) return res.status(404).json({ success: false, message: 'Status not found' });
@@ -269,7 +276,7 @@ router.delete('/:statusId/like', authenticateToken, apiRateLimiter, asyncHandler
   return res.json({ success: true, count });
 }));
 
-router.post('/:statusId/comment', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+router.post('/:statusId/comment', authenticateToken, requireUser, apiRateLimiter, asyncHandler(async (req, res) => {
   const status = await Status().findByPk(Number(req.params.statusId));
   if (!status || !(await canView(status, uid(req))) || !status.allowReplies) return res.status(404).json({ success: false, message: 'Replies are disabled.' });
   const Reply = db().StatusReply;
@@ -288,7 +295,7 @@ router.get('/:statusId/comments', apiRateLimiter, asyncHandler(async (req, res) 
   return res.json({ success: true, data: replies });
 }));
 
-router.delete('/:statusId/comment/:commentId', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+router.delete('/:statusId/comment/:commentId', authenticateToken, requireUser, apiRateLimiter, asyncHandler(async (req, res) => {
   const Reply = db().StatusReply;
   const reply = await Reply.findByPk(Number(req.params.commentId));
   if (!reply || reply.userId !== uid(req)) return res.status(404).json({ success: false, message: 'Reply not found' });
@@ -296,14 +303,14 @@ router.delete('/:statusId/comment/:commentId', authenticateToken, apiRateLimiter
   return res.json({ success: true });
 }));
 
-router.post('/:statusId/share', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+router.post('/:statusId/share', authenticateToken, requireUser, apiRateLimiter, asyncHandler(async (req, res) => {
   const status = await Status().findByPk(Number(req.params.statusId));
   if (!status || !(await canView(status, uid(req))) || !status.allowSharing) return res.status(404).json({ success: false, message: 'Sharing is disabled.' });
   await status.increment('shareCount');
   return res.json({ success: true });
 }));
 
-router.put('/:statusId', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+router.put('/:statusId', authenticateToken, requireUser, apiRateLimiter, asyncHandler(async (req, res) => {
   const status = await Status().findByPk(Number(req.params.statusId));
   if (!status || status.userId !== uid(req)) return res.status(404).json({ success: false, message: 'Status not found' });
   const allowed = ['caption', 'content', 'background', 'font', 'musicUrl', 'linkUrl', 'mentions', 'stickers', 'topics', 'moodType', 'category', 'intent', 'privacy', 'privacyList', 'allowReplies', 'allowReactions', 'allowSharing', 'highlight'];
@@ -314,7 +321,7 @@ router.put('/:statusId', authenticateToken, apiRateLimiter, asyncHandler(async (
   return res.json({ success: true, status: await ownerPayload(status) });
 }));
 
-router.delete('/:statusId', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+router.delete('/:statusId', authenticateToken, requireUser, apiRateLimiter, asyncHandler(async (req, res) => {
   const status = await Status().findByPk(Number(req.params.statusId));
   if (!status || status.userId !== uid(req)) return res.status(404).json({ success: false, message: 'Status not found' });
   await status.update({ isActive: false, expiresAt: new Date() });
@@ -328,7 +335,7 @@ router.delete('/:statusId', authenticateToken, apiRateLimiter, asyncHandler(asyn
 }));
 
 
-router.post('/:statusId/report', authenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+router.post('/:statusId/report', authenticateToken, requireUser, apiRateLimiter, asyncHandler(async (req, res) => {
   const Report = db().StatusReport;
   if (!Report) return res.status(503).json({ success: false, message: 'Reporting unavailable' });
   const reason = String(req.body?.reason || 'other').slice(0, 80);

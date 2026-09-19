@@ -41,7 +41,6 @@ const isPublicPath = (req) => {
         /^\/api\/status\/(?!my$|friends$|stats$|user(?:\/|$)|health$|public$|trending$|search$|mood(?:\/|$)|view$)[^/]+$/.test(fullPath) ||
         /^\/api\/status\/(?!my$|friends$|stats$|user(?:\/|$)|health$|public$|trending$|search$|mood(?:\/|$)|view$)[^/]+\/comments$/.test(fullPath) ||
         /^\/api\/status\/(?!my$|friends$|stats$|user(?:\/|$)|health$|public$|trending$|search$|mood(?:\/|$)|view$)[^/]+\/likes$/.test(fullPath) ||
-        fullPath === '/api/status/view' ||
         /^\/api\/status\/(?!my$|friends$|stats$|user(?:\/|$)|health$|public$|trending$|search$|mood(?:\/|$)|view$)[^/]+\/view$/.test(fullPath)
     ) {
         return true;
