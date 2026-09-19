@@ -1,16 +1,99 @@
 'use strict';
-async function ensureStatusSchema(db){
- const qi=db.sequelize.getQueryInterface(), S=db.sequelize.Sequelize||require('sequelize');
- const exists=async n=>(await qi.showAllTables()).some(t=>String(t).toLowerCase()===n.toLowerCase());
- const add=async(c,d)=>{const x=await qi.describeTable('Status');if(!x[c])await qi.addColumn('Status',c,d);};
- if(!(await exists('Status')))await qi.createTable('Status',{id:{type:S.INTEGER,primaryKey:true,autoIncrement:true},userId:{type:S.INTEGER,allowNull:false},content:{type:S.TEXT},type:{type:S.STRING(24),allowNull:false,defaultValue:'text'},createdAt:{type:S.DATE,allowNull:false,defaultValue:S.NOW},updatedAt:{type:S.DATE,allowNull:false,defaultValue:S.NOW}});
- const c={mediaUrl:{type:S.TEXT},mediaPublicId:{type:S.STRING(500)},mediaMime:{type:S.STRING(120)},thumbnailUrl:{type:S.TEXT},caption:{type:S.TEXT},background:{type:S.STRING(120)},font:{type:S.STRING(80)},musicUrl:{type:S.TEXT},linkUrl:{type:S.TEXT},mentions:{type:S.JSONB,allowNull:false,defaultValue:[]},stickers:{type:S.JSONB,allowNull:false,defaultValue:[]},topics:{type:S.JSONB,allowNull:false,defaultValue:[]},moodType:{type:S.STRING(60)},category:{type:S.STRING(60)},intent:{type:S.STRING(60)},privacy:{type:S.STRING(40),allowNull:false,defaultValue:'all_contacts'},privacyList:{type:S.JSONB,allowNull:false,defaultValue:[]},durationSeconds:{type:S.INTEGER,allowNull:false,defaultValue:7},allowReplies:{type:S.BOOLEAN,allowNull:false,defaultValue:true},allowReactions:{type:S.BOOLEAN,allowNull:false,defaultValue:true},allowSharing:{type:S.BOOLEAN,allowNull:false,defaultValue:true},isPublic:{type:S.BOOLEAN,allowNull:false,defaultValue:false},isActive:{type:S.BOOLEAN,allowNull:false,defaultValue:true},expiresAt:{type:S.DATE,allowNull:false,defaultValue:S.literal("CURRENT_TIMESTAMP + INTERVAL '24 hours'")},viewCount:{type:S.INTEGER,allowNull:false,defaultValue:0},reactionCount:{type:S.INTEGER,allowNull:false,defaultValue:0},replyCount:{type:S.INTEGER,allowNull:false,defaultValue:0},shareCount:{type:S.INTEGER,allowNull:false,defaultValue:0},highlight:{type:S.BOOLEAN,allowNull:false,defaultValue:false},pollOptions:{type:S.JSONB,allowNull:false,defaultValue:[]}};
- for(const[k,v]of Object.entries(c))await add(k,v);
- const t=[
- ['StatusViews',{id:{type:S.INTEGER,primaryKey:true,autoIncrement:true},statusId:{type:S.INTEGER,allowNull:false},viewerId:{type:S.INTEGER,allowNull:false},viewedAt:{type:S.DATE,allowNull:false,defaultValue:S.NOW},createdAt:{type:S.DATE,allowNull:false,defaultValue:S.NOW},updatedAt:{type:S.DATE,allowNull:false,defaultValue:S.NOW}}],
- ['StatusReactions',{id:{type:S.INTEGER,primaryKey:true,autoIncrement:true},statusId:{type:S.INTEGER,allowNull:false},userId:{type:S.INTEGER,allowNull:false},emoji:{type:S.STRING(16),allowNull:false,defaultValue:'❤️'},createdAt:{type:S.DATE,allowNull:false,defaultValue:S.NOW},updatedAt:{type:S.DATE,allowNull:false,defaultValue:S.NOW}}],
- ['StatusReplies',{id:{type:S.INTEGER,primaryKey:true,autoIncrement:true},statusId:{type:S.INTEGER,allowNull:false},userId:{type:S.INTEGER,allowNull:false},text:{type:S.TEXT,allowNull:false},createdAt:{type:S.DATE,allowNull:false,defaultValue:S.NOW},updatedAt:{type:S.DATE,allowNull:false,defaultValue:S.NOW}}],
- ['StatusReports',{id:{type:S.INTEGER,primaryKey:true,autoIncrement:true},statusId:{type:S.INTEGER,allowNull:false},reporterId:{type:S.INTEGER,allowNull:false},reason:{type:S.STRING(80),allowNull:false},details:{type:S.TEXT},createdAt:{type:S.DATE,allowNull:false,defaultValue:S.NOW},updatedAt:{type:S.DATE,allowNull:false,defaultValue:S.NOW}}]];
- for(const[n,cols]of t)if(!(await exists(n)))await qi.createTable(n,cols);
+
+async function ensureStatusSchema(db) {
+  const sequelize = db.sequelize;
+  // The legacy database may already contain a six-column Status table.
+  // Use idempotent PostgreSQL SQL here instead of QueryInterface.addColumn so
+  // existing rows and JSONB/default expressions are repaired safely.
+  await sequelize.query(`
+    CREATE TABLE IF NOT EXISTS "Status" (
+      "id" SERIAL PRIMARY KEY,
+      "userId" INTEGER NOT NULL,
+      "content" TEXT,
+      "type" VARCHAR(24) NOT NULL DEFAULT 'text',
+      "createdAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  const columns = [
+    [`"mediaUrl" TEXT`, `"mediaPublicId" VARCHAR(500)`, `"mediaMime" VARCHAR(120)`,
+     `"thumbnailUrl" TEXT`, `"caption" TEXT`, `"background" VARCHAR(120)`,
+     `"font" VARCHAR(80)`, `"musicUrl" TEXT`, `"linkUrl" TEXT`],
+    [`"mentions" JSONB NOT NULL DEFAULT '[]'::jsonb`, `"stickers" JSONB NOT NULL DEFAULT '[]'::jsonb`,
+     `"topics" JSONB NOT NULL DEFAULT '[]'::jsonb`, `"moodType" VARCHAR(60)`,
+     `"category" VARCHAR(60)`, `"intent" VARCHAR(60)`, `"privacy" VARCHAR(40) NOT NULL DEFAULT 'all_contacts'`,
+     `"privacyList" JSONB NOT NULL DEFAULT '[]'::jsonb`],
+    [`"durationSeconds" INTEGER NOT NULL DEFAULT 7`, `"allowReplies" BOOLEAN NOT NULL DEFAULT TRUE`,
+     `"allowReactions" BOOLEAN NOT NULL DEFAULT TRUE`, `"allowSharing" BOOLEAN NOT NULL DEFAULT TRUE`,
+     `"isPublic" BOOLEAN NOT NULL DEFAULT FALSE`, `"isActive" BOOLEAN NOT NULL DEFAULT TRUE`],
+    [`"expiresAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT (CURRENT_TIMESTAMP + INTERVAL '24 hours')`,
+     `"viewCount" INTEGER NOT NULL DEFAULT 0`, `"reactionCount" INTEGER NOT NULL DEFAULT 0`,
+     `"replyCount" INTEGER NOT NULL DEFAULT 0`, `"shareCount" INTEGER NOT NULL DEFAULT 0`,
+     `"highlight" BOOLEAN NOT NULL DEFAULT FALSE`, `"pollOptions" JSONB NOT NULL DEFAULT '[]'::jsonb`]
+  ];
+  for (const group of columns) {
+    await sequelize.query(`ALTER TABLE "Status" ${group.map(c => `ADD COLUMN IF NOT EXISTS ${c}`).join(', ')}`);
+  }
+
+  await sequelize.query(`
+    UPDATE "Status"
+    SET "expiresAt" = COALESCE("expiresAt", "createdAt" + INTERVAL '24 hours'),
+        "updatedAt" = COALESCE("updatedAt", "createdAt")
+    WHERE "expiresAt" IS NULL OR "updatedAt" IS NULL
+  `);
+
+  await sequelize.query(`
+    CREATE TABLE IF NOT EXISTS "StatusViews" (
+      "id" SERIAL PRIMARY KEY,
+      "statusId" INTEGER NOT NULL,
+      "viewerId" INTEGER NOT NULL,
+      "viewedAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "createdAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS "StatusViews_status_user_unique" ON "StatusViews" ("statusId","viewerId");
+    CREATE INDEX IF NOT EXISTS "StatusViews_status_idx" ON "StatusViews" ("statusId");
+  `);
+
+  await sequelize.query(`
+    CREATE TABLE IF NOT EXISTS "StatusReactions" (
+      "id" SERIAL PRIMARY KEY,
+      "statusId" INTEGER NOT NULL,
+      "userId" INTEGER NOT NULL,
+      "emoji" VARCHAR(16) NOT NULL DEFAULT '❤️',
+      "createdAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS "StatusReactions_status_user_unique" ON "StatusReactions" ("statusId","userId");
+    CREATE INDEX IF NOT EXISTS "StatusReactions_status_idx" ON "StatusReactions" ("statusId");
+  `);
+
+  await sequelize.query(`
+    CREATE TABLE IF NOT EXISTS "StatusReplies" (
+      "id" SERIAL PRIMARY KEY,
+      "statusId" INTEGER NOT NULL,
+      "userId" INTEGER NOT NULL,
+      "text" TEXT NOT NULL,
+      "createdAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS "StatusReplies_status_created_idx" ON "StatusReplies" ("statusId","createdAt");
+  `);
+
+  await sequelize.query(`
+    CREATE TABLE IF NOT EXISTS "StatusReports" (
+      "id" SERIAL PRIMARY KEY,
+      "statusId" INTEGER NOT NULL,
+      "reporterId" INTEGER NOT NULL,
+      "reason" VARCHAR(80) NOT NULL,
+      "details" TEXT,
+      "createdAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS "StatusReports_status_idx" ON "StatusReports" ("statusId");
+    CREATE INDEX IF NOT EXISTS "StatusReports_reporter_idx" ON "StatusReports" ("reporterId");
+  `);
 }
-module.exports={ensureStatusSchema};
+
+module.exports = { ensureStatusSchema };
