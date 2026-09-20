@@ -538,6 +538,36 @@ router.post('/google', asyncHandler(async (req, res) => {
     });
 }));
 
+// GET /auth/e2e-secret — re-issue the E2E wrap secret to a signed-in GOOGLE account.
+// ROOT-CAUSE FIX (returning Google users could never unlock secure messaging):
+// /auth/google returns `e2eWrapSecret` exactly once, at sign-in, and the frontend
+// keeps it only in sessionStorage. When the app/tab is reopened the access token
+// is restored from localStorage but sessionStorage is empty, so a Google user has
+// NO secret to unlock their locally stored identity key -- and, unlike a password
+// user, no password to type into the unlock prompt. Group sending then reported
+// "Secure messaging is still unlocking" forever. This endpoint lets the client
+// silently re-fetch the same stable secret for the lifetime of a valid session.
+// Deliberately limited to Google-provisioned accounts: password accounts keep the
+// existing "type your password to unlock" behaviour (no change in their security).
+router.get('/e2e-secret', authenticateToken, asyncHandler(async (req, res) => {
+    const userId = req.user.userId || req.user.id;
+    const user = await _getUsers().findByPk(userId);
+    if (!user) {
+        return res.status(404).json({ success: false, message: 'User not found' });
+    }
+    const isGoogleAccount = !!(user.googleId || String(user.authProvider || '').toLowerCase() === 'google');
+    if (!isGoogleAccount) {
+        return res.status(403).json({
+            success: false,
+            code: 'E2E_SECRET_PASSWORD_ACCOUNT',
+            message: 'Secure messaging is unlocked with your password for this account'
+        });
+    }
+    const e2eWrapSecret = await ensureE2EWrapSecret(user);
+    res.set('Cache-Control', 'no-store');
+    return res.json({ success: true, e2eWrapSecret });
+}));
+
 // GET /me - Get current user info
 router.get('/me', authenticateToken, asyncHandler(async (req, res) => {
     try {
