@@ -40,8 +40,8 @@ module.exports = (sequelize, DataTypes) => {
             if (!Chat) return;
             const chat = await Chat.findByPk(participant.chatId);
             if (!chat || chat.type !== 'group') return;
-            const service = require('../services/groupEncryptionService');
-            await service.markMembershipChange(chat, ChatParticipant, 'member_added', null, participant.userId);
+            const service = require('../services/groupMessagingService');
+            await service.invalidateMembership(chat, ChatParticipant, 'member_added', participant.userId);
           } catch (error) {
             console.warn('[ChatParticipant] group security afterCreate failed:', error.message);
           }
@@ -52,8 +52,8 @@ module.exports = (sequelize, DataTypes) => {
             if (!Chat) return;
             const chat = await Chat.findByPk(participant.chatId);
             if (!chat || chat.type !== 'group') return;
-            const service = require('../services/groupEncryptionService');
-            await service.markMembershipChange(chat, ChatParticipant, 'member_removed', null, participant.userId);
+            const service = require('../services/groupMessagingService');
+            await service.invalidateMembership(chat, ChatParticipant, 'member_removed', participant.userId);
           } catch (error) {
             console.warn('[ChatParticipant] group security afterDestroy failed:', error.message);
           }
@@ -65,8 +65,8 @@ module.exports = (sequelize, DataTypes) => {
             if (!Chat) return;
             const chat = await Chat.findByPk(participant.chatId);
             if (!chat || chat.type !== 'group') return;
-            const service = require('../services/groupEncryptionService');
-            await service.markMembershipChange(chat, ChatParticipant, 'member_role_changed', null, participant.userId);
+            const service = require('../services/groupMessagingService');
+            await service.invalidateMembership(chat, ChatParticipant, 'member_role_changed', participant.userId);
           } catch (error) {
             console.warn('[ChatParticipant] group security afterUpdate failed:', error.message);
           }
