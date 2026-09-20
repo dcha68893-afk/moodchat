@@ -39,7 +39,7 @@ function memberFingerprint(members) {
   return crypto.createHash('sha256').update(entries.join(',')).digest('hex');
 }
 
-function cleanDistribution(item) {
+function cleanDistribution(item, fallbackDistributorId) {
   if (!item || item.userId == null || !item.deviceId || !item.ciphertext) return null;
   if (typeof item.deviceId !== 'string' || item.deviceId.length > 128) return null;
   if (typeof item.ciphertext !== 'string' || item.ciphertext.length > MAX_CIPHERTEXT) return null;
@@ -50,7 +50,24 @@ function cleanDistribution(item) {
     nonce: typeof item.nonce === 'string' ? item.nonce.slice(0, 512) : null,
     ephemeralPublicKey: typeof item.ephemeralPublicKey === 'string' ? item.ephemeralPublicKey.slice(0, 2048) : null,
     algorithm: typeof item.algorithm === 'string' ? item.algorithm.slice(0, 64) : 'ECDH-P256-AES256GCM',
+    // FIX (group messages not going through): records who wrapped this
+    // member's copy of the key. A rotation no longer requires every member
+    // to be reachable up front — whoever generated the key (or, later, any
+    // member who already holds it) can distribute it to stragglers via
+    // /distribute. Late members need to know whose distribution they're
+    // unwrapping, since it may not be the original rotation's actor.
+    distributorId: Number(item.distributorId) || Number(fallbackDistributorId) || null,
   };
+}
+
+// Members who are part of the group but have no encrypted copy of the
+// current key version yet. Exposed on /state so any client already holding
+// the key can proactively fill the gap via /distribute, and so the UI can
+// show a small "some members can't read this yet" notice.
+function computeMissingMemberIds(state, members) {
+  if (!state?.version) return members.map(m => Number(m.userId));
+  const have = new Set((state.distributions || []).map(d => String(d.userId)));
+  return members.map(m => Number(m.userId)).filter(id => !have.has(String(id)));
 }
 
 function normalizeState(metadata) {
@@ -184,7 +201,7 @@ async function saveRotation(chat, ChatParticipant, actorId, input) {
 
   const allowedUsers = new Set(members.map(m => String(m.userId)));
   const distributions = Array.isArray(input.distributions) ? input.distributions.slice(0, MAX_DISTRIBUTIONS) : [];
-  const cleaned = distributions.map(cleanDistribution).filter(Boolean);
+  const cleaned = distributions.map(d => cleanDistribution(d, actorId)).filter(Boolean);
   const invalid = cleaned.find(d => !allowedUsers.has(String(d.userId)));
   if (invalid) {
     const err = new Error('Key distribution contains a non-member');
@@ -203,25 +220,23 @@ async function saveRotation(chat, ChatParticipant, actorId, input) {
     eventSequence: state.eventSequence + 1,
   };
 
+  const previousVersion = Number(state.version) || 0;
+  const previousAlgorithm = state.algorithm;
+  const previousDistributions = Array.isArray(state.distributions) ? state.distributions : [];
+  const history = Array.isArray(state.history) ? state.history.slice() : [];
+  if (previousVersion > 0 && previousDistributions.length &&
+      !history.some(h => Number(h?.version) === previousVersion)) {
+    history.push({
+      version: previousVersion,
+      actorId: Number(state.lastEvent?.actorId) || null,
+      algorithm: previousAlgorithm,
+      distributions: previousDistributions,
+      timestamp: state.lastRotationAt || state.updatedAt || event.timestamp,
+    });
+  }
   state.version = requestedVersion;
   state.algorithm = String(input.algorithm || state.algorithm || 'ECDH-P256-AES256GCM').slice(0, 64);
   state.memberFingerprint = fingerprint;
-  const history = Array.isArray(state.history) ? state.history.slice() : [];
-  // Backfill the currently active epoch before replacing it. This matters for
-  // groups created before key-history support was deployed: their first
-  // membership rotation must not make already-stored messages undecryptable.
-  if (Number(state.version) > 0 && Array.isArray(state.distributions) && state.distributions.length) {
-    const alreadyRecorded = history.some(h => Number(h?.version) === Number(state.version));
-    if (!alreadyRecorded) {
-      history.push({
-        version: Number(state.version),
-        actorId: Number(state.lastEvent?.actorId) || null,
-        algorithm: state.algorithm,
-        distributions: state.distributions,
-        timestamp: state.lastRotationAt || state.updatedAt || event.timestamp,
-      });
-    }
-  }
   history.push({ version: requestedVersion, actorId: Number(actorId), algorithm: state.algorithm, distributions: cleaned, timestamp: event.timestamp });
   state.history = history.filter((h,i,a)=>a.findIndex(x=>Number(x?.version)===Number(h?.version))===i).sort((a,b)=>Number(a.version)-Number(b.version)).slice(-50);
   state.distributions = cleaned;
@@ -246,4 +261,6 @@ module.exports = {
   markMembershipChange,
   signEvent,
   verifyEvent,
+  computeMissingMemberIds,
+  cleanDistribution,
 };
