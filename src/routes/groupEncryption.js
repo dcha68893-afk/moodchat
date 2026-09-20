@@ -62,7 +62,10 @@ router.get('/:chatId/state', async (req, res) => {
         eventSequence: state.eventSequence,
         memberCount: members.length,
         distributions: mine,
+<<<<<<< HEAD
         missingMemberIds,
+=======
+>>>>>>> origin/main
         history: (Array.isArray(state.history) ? state.history : [])
           .map(h => ({
             version:Number(h.version),
