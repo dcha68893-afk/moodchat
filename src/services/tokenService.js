@@ -36,7 +36,13 @@ class TokenService {
     if (!this.accessSecret) throw new Error('JWT_SECRET or JWT_ACCESS_SECRET must be set');
     this.accessExpiry = process.env.JWT_ACCESS_EXPIRES_IN || '24h';
     this.refreshExpiry = process.env.JWT_REFRESH_EXPIRES_IN || '7d';
-    this.defaultSessionTimeout = '8h';
+    // FIX (LOGGED-OUT-AFTER-INACTIVITY): the client UI defaults Security > Session
+    // Timeout to "Off" (js/AppSettings.js) but never sends that choice to the server,
+    // so every user without an explicit server-side value was silently issued an 8h
+    // access token and a ~16h refresh token, and got kicked to login after that long
+    // away. The default now matches the UI ("off" = tokens never expire). Set
+    // SESSION_TIMEOUT_DEFAULT (e.g. '30d') in the environment to enforce a limit instead.
+    this.defaultSessionTimeout = process.env.SESSION_TIMEOUT_DEFAULT || 'off';
     console.log('[TokenService] Initialized');
   }
 
@@ -218,6 +224,16 @@ class TokenService {
         if (!tokenRow) {
           const revokedRow = await TokenModel.findOne({ where: { token, tokenType: 'refresh', isRevoked: true } }).catch(() => null);
           if (revokedRow) {
+            // FIX (FALSE-REUSE-LOGOUT): refresh tokens rotate on every use. Two callers
+            // refreshing at once (auth.session.manager.js + api.core.js TokenManager, or
+            // two tabs), or a retry after a lost response on a slow/cold backend, present
+            // a token that was rotated a moment ago. That is not theft, so accept it inside
+            // a short grace window instead of revoking every session the user has.
+            const graceMs = Number(process.env.REFRESH_REUSE_GRACE_MS) || 60 * 1000;
+            const rotatedAt = new Date(revokedRow.updatedAt || 0).getTime();
+            if (rotatedAt && Date.now() - rotatedAt <= graceMs) {
+              return { valid: true, userId: revokedRow.userId, source: 'db', rotatedGrace: true };
+            }
             const affected = await TokenModel.update(
               { isRevoked: true },
               { where: { userId: revokedRow.userId, tokenType: 'refresh', isRevoked: false } }
