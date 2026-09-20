@@ -203,25 +203,23 @@ async function saveRotation(chat, ChatParticipant, actorId, input) {
     eventSequence: state.eventSequence + 1,
   };
 
+  const previousVersion = Number(state.version) || 0;
+  const previousAlgorithm = state.algorithm;
+  const previousDistributions = Array.isArray(state.distributions) ? state.distributions : [];
+  const history = Array.isArray(state.history) ? state.history.slice() : [];
+  if (previousVersion > 0 && previousDistributions.length &&
+      !history.some(h => Number(h?.version) === previousVersion)) {
+    history.push({
+      version: previousVersion,
+      actorId: Number(state.lastEvent?.actorId) || null,
+      algorithm: previousAlgorithm,
+      distributions: previousDistributions,
+      timestamp: state.lastRotationAt || state.updatedAt || event.timestamp,
+    });
+  }
   state.version = requestedVersion;
   state.algorithm = String(input.algorithm || state.algorithm || 'ECDH-P256-AES256GCM').slice(0, 64);
   state.memberFingerprint = fingerprint;
-  const history = Array.isArray(state.history) ? state.history.slice() : [];
-  // Backfill the currently active epoch before replacing it. This matters for
-  // groups created before key-history support was deployed: their first
-  // membership rotation must not make already-stored messages undecryptable.
-  if (Number(state.version) > 0 && Array.isArray(state.distributions) && state.distributions.length) {
-    const alreadyRecorded = history.some(h => Number(h?.version) === Number(state.version));
-    if (!alreadyRecorded) {
-      history.push({
-        version: Number(state.version),
-        actorId: Number(state.lastEvent?.actorId) || null,
-        algorithm: state.algorithm,
-        distributions: state.distributions,
-        timestamp: state.lastRotationAt || state.updatedAt || event.timestamp,
-      });
-    }
-  }
   history.push({ version: requestedVersion, actorId: Number(actorId), algorithm: state.algorithm, distributions: cleaned, timestamp: event.timestamp });
   state.history = history.filter((h,i,a)=>a.findIndex(x=>Number(x?.version)===Number(h?.version))===i).sort((a,b)=>Number(a.version)-Number(b.version)).slice(-50);
   state.distributions = cleaned;

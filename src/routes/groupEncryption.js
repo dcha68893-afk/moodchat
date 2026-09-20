@@ -55,6 +55,15 @@ router.get('/:chatId/state', async (req, res) => {
         eventSequence: state.eventSequence,
         memberCount: members.length,
         distributions: mine,
+        history: (Array.isArray(state.history) ? state.history : [])
+          .map(h => ({
+            version:Number(h.version),
+            actorId:Number(h.actorId)||null,
+            algorithm:h.algorithm||state.algorithm,
+            distributions:Array.isArray(h.distributions) ? h.distributions.filter(d => String(d?.userId) === myUserId) : [],
+            timestamp:h.timestamp||null,
+          }))
+          .filter(h => h.distributions.length > 0),
         lastEvent: state.lastEvent || null,
         updatedAt: state.updatedAt,
         lastRotationAt: state.lastRotationAt,
