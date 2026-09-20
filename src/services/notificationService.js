@@ -384,22 +384,6 @@ class NotificationService {
         priority: 'high',
         actionUrl: `/chats/${data.chatId}?message=${data.messageId}`,
       },
-      call_incoming: {
-        type: 'call_incoming',
-        title: 'Incoming Call',
-        body: `${data.callerName} is calling you`,
-        data: data,
-        priority: 'urgent',
-        actionUrl: `/calls/${data.callId}`,
-      },
-      call_missed: {
-        type: 'call_missed',
-        title: 'Missed Call',
-        body: `You missed a call from ${data.callerName}`,
-        data: data,
-        priority: 'medium',
-        actionUrl: `/calls/${data.callId}`,
-      },
       mood_shared: {
         type: 'mood_shared',
         title: 'Mood Shared',

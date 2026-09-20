@@ -330,7 +330,6 @@ module.exports = (sequelize, DataTypes) => {
             messages: true,
             friendRequests: true,
             mentions: true,
-            calls: true,
           },
           privacy: {
             showOnline: true,

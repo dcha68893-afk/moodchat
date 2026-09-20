@@ -88,19 +88,6 @@ function _buildPayload(type, data) {
       data:    { type: 'mention', chatId: data.chatId, messageId: data.messageId, url: `/chat.html?chatId=${data.chatId}` },
       requireInteraction: true, // stays until dismissed
     },
-    'call:incoming': {
-      title:   `📞 ${data.callerName || 'Incoming call'}`,
-      body:    data.isVideo ? 'Video call' : 'Voice call',
-      icon:    data.callerAvatar || '/icons/icon-192.png',
-      badge:   '/icons/badge-72.png',
-      tag:     `call-${data.callId}`,
-      requireInteraction: true,
-      data:    { type: 'call:incoming', callId: data.callId, callerId: data.callerId, url: `/chat.html?callId=${data.callId}` },
-      actions: [
-        { action: 'accept', title: '✅ Accept' },
-        { action: 'reject', title: '❌ Decline' },
-      ],
-    },
     'friend:request': {
       title:   `${data.fromName || 'Someone'} sent you a friend request`,
       body:    data.message || 'Wants to connect with you on Kynecta',
@@ -167,7 +154,6 @@ async function sendToSubscription(subscription, payload) {
 const NOTIFICATION_SETTING_KEY = {
   'message:new':    'messageNotifications',
   'mention':        'mentionNotifications',
-  'call:incoming':  'callNotifications',
 };
 
 async function _getRecipientNotificationPrefs(userId, type, sequelize) {
@@ -233,11 +219,6 @@ async function notifyMention(mentionedUserId, messageData, sequelize) {
   return sendToUser(mentionedUserId, 'mention', messageData, sequelize);
 }
 
-// ── Call notification ─────────────────────────────────────────────────────────
-async function notifyIncomingCall(recipientId, callData, sequelize) {
-  return sendToUser(recipientId, 'call:incoming', callData, sequelize);
-}
-
 // ── Get VAPID public key (for service worker registration) ────────────────────
 function getPublicKey() {
   const keys = getVapidKeys();
@@ -251,5 +232,4 @@ module.exports = {
   sendToSubscription,
   notifyNewMessage,
   notifyMention,
-  notifyIncomingCall,
 };

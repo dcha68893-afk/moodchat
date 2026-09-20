@@ -653,11 +653,6 @@ router.get(
           price: 0,
           currency: 'USD',
           features: [
-            { name: 'Audio Calls', enabled: true, limit: 'Unlimited 1:1' },
-            { name: 'Video Calls', enabled: true, limit: '30 min per call' },
-            { name: 'Group Calls', enabled: false },
-            { name: 'Screen Sharing', enabled: false },
-            { name: 'Call Recording', enabled: false },
             { name: 'Custom Themes', enabled: false },
             { name: 'Advanced Analytics', enabled: false },
             { name: 'Priority Support', enabled: false },
@@ -670,11 +665,6 @@ router.get(
           price: 9.99,
           currency: 'USD',
           features: [
-            { name: 'Audio Calls', enabled: true, limit: 'Unlimited' },
-            { name: 'Video Calls', enabled: true, limit: 'Unlimited' },
-            { name: 'Group Calls', enabled: true, limit: 'Up to 10 participants' },
-            { name: 'Screen Sharing', enabled: true },
-            { name: 'Call Recording', enabled: true, limit: '100 hours/month' },
             { name: 'Custom Themes', enabled: true },
             { name: 'Advanced Analytics', enabled: true },
             { name: 'Priority Support', enabled: true },
@@ -687,11 +677,6 @@ router.get(
           price: 29.99,
           currency: 'USD',
           features: [
-            { name: 'Audio Calls', enabled: true, limit: 'Unlimited' },
-            { name: 'Video Calls', enabled: true, limit: 'Unlimited' },
-            { name: 'Group Calls', enabled: true, limit: 'Up to 100 participants' },
-            { name: 'Screen Sharing', enabled: true },
-            { name: 'Call Recording', enabled: true, limit: 'Unlimited' },
             { name: 'Custom Themes', enabled: true },
             { name: 'Advanced Analytics', enabled: true },
             { name: 'Priority Support', enabled: true, priority: '24/7' },
@@ -772,26 +757,6 @@ router.get(
           isActive: true,
           defaultEnabled: false
         },
-        {
-          id: 'background-blur',
-          name: 'Background Blur',
-          description: 'Blur your background during video calls',
-          category: 'video',
-          status: 'beta',
-          requiresPermission: false,
-          isActive: true,
-          defaultEnabled: true
-        },
-        {
-          id: 'virtual-background',
-          name: 'Virtual Background',
-          description: 'Use virtual backgrounds during video calls',
-          category: 'video',
-          status: 'beta',
-          requiresPermission: false,
-          isActive: true,
-          defaultEnabled: false
-        }
       ];
 
       // Filter features based on user's beta tester status
