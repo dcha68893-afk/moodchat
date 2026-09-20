@@ -238,6 +238,24 @@ class WebSocketService {
 
             // Register new socket
             this.registerUser(userId, socket);
+
+            // FIX (HEADER-SHOWS-OFFLINE-WHILE-USER-IS-ACTIVE): the presence sweep flips a user
+            // to 'offline' when no `presence:heartbeat` arrived for ~75s. A backgrounded /
+            // throttled mobile tab stops sending heartbeats even while the person is actively
+            // sending and receiving messages, so contacts saw them as offline. Any inbound
+            // socket event is proof of life — count it as activity and, if the user had been
+            // marked stale, restore 'user:online' immediately instead of waiting for the sweep.
+            socket.use((_packet, next) => {
+                try {
+                    this._lastHeartbeatAt = this._lastHeartbeatAt || new Map();
+                    this._lastHeartbeatAt.set(userId, Date.now());
+                    if (this._staleUsers && this._staleUsers.has(userId)) {
+                        this._staleUsers.delete(userId);
+                        this._broadcastPresenceToContacts(userId, 'user:online', { userId, timestamp: Date.now() }).catch(() => {});
+                    }
+                } catch (_) { /* presence bookkeeping must never block an event */ }
+                next();
+            });
                  _flog(`[WSService] ✅ socket connected uid=${userId} sid=${socket.id}`);
 
             // Tell client auth succeeded
