@@ -545,6 +545,7 @@ class MessageDeliveryService {
     const conditions = [`m."chatId" = :chatId`, `m."isDeleted" = false`, `NOT (m.metadata -> 'deletedFor' ? :userIdStr)`];
     const replacements = { chatId: chatIdInt, limit: Math.min(limit, 200), userIdStr: String(userIdInt) };
 
+    const isIncrementalCatchup = !!(sinceId || sinceTimestamp);
     if (sinceId) {
       conditions.push(`m.id > :sinceId`);
       replacements.sinceId = parseInt(sinceId, 10);
@@ -553,17 +554,35 @@ class MessageDeliveryService {
       replacements.sinceTimestamp = new Date(sinceTimestamp);
     }
 
+    // FIX (GROUP MESSAGES APPEAR THEN DISAPPEAR / NEW MESSAGES NEVER SHOW
+    // AFTER REOPEN): this is the query behind the group history endpoint
+    // (GET /api/groups/:groupId/messages, called with no sinceId — just a
+    // limit). With no since-cursor it always ran `ORDER BY id ASC LIMIT
+    // :limit`, i.e. "the OLDEST N messages in the group" — for a group
+    // that has ever exceeded `limit` (100, capped 200) total messages, any
+    // message sent after that point — including the sender's own — could
+    // never come back from this endpoint again: it showed once via the
+    // optimistic/live-socket path, then vanished the moment the group was
+    // reopened or the page reloaded and this became the source of truth.
+    // The equivalent 1:1 route (routes/messages.js GET /:chatId) already
+    // gets this right: DESC LIMIT (the most recent N), then reversed back
+    // to chronological order. Do the same here for a genuine "give me the
+    // history" call (no since-cursor). An incremental catch-up call
+    // (sinceId/sinceTimestamp present — reconnect sync) is intentionally
+    // left as ASC: there we want the oldest of the NEW messages first, and
+    // "new since X" is inherently bounded, not the whole group history.
+    const order = isIncrementalCatchup ? 'ASC' : 'DESC';
     const messages = await sequelize.query(
       `SELECT m.*, u.username AS "senderUsername", u.avatar AS "senderAvatar"
        FROM "Messages" m
        LEFT JOIN "Users" u ON u.id = m."senderId"
        WHERE ${conditions.join(' AND ')}
-       ORDER BY m.id ASC
+       ORDER BY m.id ${order}
        LIMIT :limit`,
       { replacements, type: sequelize.QueryTypes.SELECT }
     ).catch(() => []);
 
-    return messages || [];
+    return isIncrementalCatchup ? (messages || []) : (messages || []).reverse();
   }
 }
 
