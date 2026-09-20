@@ -93,6 +93,8 @@ const ROUTE_MAPPING = {
   'users.js': '/users',
   'profiles.js': '/profile',
   'group.js': '/groups',
+  // GROUP-V2: explicit mount so the dedicated group delivery pipeline cannot be skipped by route discovery.
+  'group-messages.js': '/group-messages',
   'sealed-groups.routes.js': '/groups', // Phase 4
   'groupMembers.js': '/group-members',
   'friends.js': '/friends',
