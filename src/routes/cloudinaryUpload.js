@@ -18,13 +18,23 @@ const upload = multer({
 function localUpload(req, file) {
   const mime = file.mimetype || '';
   const kind = mime.startsWith('video/') ? 'video' : mime.startsWith('audio/') ? 'audio' : 'image';
-  const dir = path.join(process.cwd(), 'uploads', kind === 'image' ? 'images' : kind);
+  const subdir = kind === 'image' ? 'images' : kind;
+  const dir = path.join(process.cwd(), 'uploads', subdir);
   fs.mkdirSync(dir, { recursive: true });
   const ext = path.extname(file.originalname || '').toLowerCase() || (mime.startsWith('video/') ? '.mp4' : mime.startsWith('audio/') ? '.bin' : '.jpg');
   const filename = `${Date.now()}-${crypto.randomBytes(8).toString('hex')}${ext}`;
   fs.writeFileSync(path.join(dir, filename), file.buffer);
   const base = (process.env.RENDER_EXTERNAL_URL || process.env.BACKEND_URL || `${req.protocol}://${req.get('host')}`).replace(/\/+$/, '');
-  return { url: `${base}/api/files/${encodeURIComponent(filename)}`, publicId: null, width: null, height: null, format: ext.slice(1), bytes: file.size };
+  // ROOT-CAUSE FIX (status media 401s): this used to return
+  // `${base}/api/files/${filename}` — that router is mounted with a
+  // blanket authenticateToken (it's not in server.js's publicRoutes
+  // whitelist), so a plain <video src="..."> / <img src="..."> tag hitting
+  // it always 401s (browsers never attach the app's Bearer token to a
+  // media-element resource fetch). The file above is written straight into
+  // uploads/<subdir>, which app.js already serves with NO auth via
+  // express.static('/uploads', ...) — so point callers at that already-public
+  // path instead of the protected API route serving the same bytes.
+  return { url: `${base}/uploads/${subdir}/${encodeURIComponent(filename)}`, publicId: null, width: null, height: null, format: ext.slice(1), bytes: file.size };
 }
 
 router.post('/direct-upload', upload.single('file'), async (req, res) => {
