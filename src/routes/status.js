@@ -251,7 +251,34 @@ router.get('/vibes', authenticateToken, requireUser, apiRateLimiter, asyncHandle
   const rows=await Status().findAll({where:{...base,userId:{[Op.in]:[...ids,userId]}},order:[['createdAt','DESC']],limit:200});
   const pubs=includePublic?await Status().findAll({where:{...base,isPublic:true},order:[['createdAt','DESC']],limit:200}):[];
   const byId=new Map(); for(const s of [...rows,...pubs]) if(await canView(s,userId)) byId.set(String(s.id),await ownerPayload(s));
-  return res.json({success:true,data:[...byId.values()]});
+  // likedByMe lets the client draw the heart as filled after a reload and toggle correctly.
+  const Reaction=M('StatusReaction'); const likedIds=new Set();
+  if(Reaction&&byId.size){
+    const mine=await Reaction.findAll({where:{statusId:{[Op.in]:[...byId.values()].map(v=>v.id)},userId},attributes:['statusId']}).catch(()=>[]);
+    mine.forEach(r=>likedIds.add(Number(r.statusId)));
+  }
+  const data=[...byId.values()].map(v=>({...v,likedByMe:likedIds.has(Number(v.id))}));
+  res.set('Cache-Control','no-store');
+  return res.json({success:true,data});
+}));
+
+// Vibes "love" button: one tap toggles the caller's heart and answers with the real total.
+// (The client used to POST here but only /:statusId/like existed, so the count never changed.)
+router.post('/vibes/:statusId/love', authenticateToken, requireUser, apiRateLimiter, asyncHandler(async (req,res)=>{
+  const userId=uid(req);
+  const status=await Status().findByPk(Number(req.params.statusId));
+  if(!status||!(await canView(status,userId))||status.allowReactions===false) return res.status(404).json({success:false,message:'This vibe is unavailable.'});
+  const Reaction=M('StatusReaction');
+  if(!Reaction) return res.status(503).json({success:false,message:'Reactions are unavailable.'});
+  const existing=await Reaction.findOne({where:{statusId:status.id,userId}});
+  let liked;
+  if(existing){await existing.destroy();liked=false;}
+  else{await Reaction.findOrCreate({where:{statusId:status.id,userId},defaults:{emoji:'❤️'}});liked=true;}
+  const count=await Reaction.count({where:{statusId:status.id}});
+  await status.update({reactionCount:count});
+  const io=global.__socketIO;
+  if(io&&liked&&Number(status.userId)!==userId) io.to('user:'+status.userId).emit('status:reaction',{storyId:status.id,userId,emoji:'❤️',count});
+  return res.json({success:true,liked,count});
 }));
 
 router.get('/:statusId', apiRateLimiter, asyncHandler(async (req, res) => {
@@ -270,7 +297,7 @@ async function recordView(req, res) {
   const status = await Status().findByPk(Number(req.params.statusId || req.body?.statusId));
   if (!status || !(await canView(status, viewerId))) return res.status(404).json({ success: false, message: 'Status not found' });
   // Opening your own status is allowed, but the owner is never a viewer.
-  if (viewerId && Number(status.userId) === Number(viewerId)) return res.json({ success: true, created: false, viewCount: Number(status.viewCount || 0) });
+  if (viewerId && Number(status.userId) === Number(viewerId)) return res.json({ success: true, created: false, viewCount: Number(status.viewCount || 0), data: { created: false, viewCount: Number(status.viewCount || 0) } });
   const View = M('StatusView');
   let created = false;
   if (View) {
@@ -280,24 +307,34 @@ async function recordView(req, res) {
   if (created) { await status.increment('viewCount'); await status.reload(); }
   const io = global.__socketIO;
   if (created && io) io.to('user:' + status.userId).emit('status:viewed', { storyId: status.id, viewCount: Number(status.viewCount || 0), viewerId });
-  return res.json({ success: true, created, viewCount: Number(status.viewCount || 0) });
+  return res.json({ success: true, created, viewCount: Number(status.viewCount || 0), data: { created, viewCount: Number(status.viewCount || 0) } });
 }
 router.post('/view', authenticateToken, requireUser, recordView);
 router.post('/:statusId/view', authenticateToken, requireUser, recordView);
 
 router.get('/:statusId/viewers', authenticateToken, requireUser, apiRateLimiter, asyncHandler(async (req, res) => {
   const status = await Status().findByPk(Number(req.params.statusId));
-  if (!status || status.userId !== uid(req)) return res.status(404).json({ success: false, message: 'Status not found' });
+  if (!status) return res.status(404).json({ success: false, message: 'Status not found' });
+  // Everyone can see the view COUNT (it is part of the status payload); only the creator sees WHO viewed.
+  if (status.userId !== uid(req)) return res.status(403).json({ success: false, message: 'Only the creator can see who viewed this status.', viewCount: Number(status.viewCount || 0) });
   const View = M('StatusView');
   const views = View ? await View.findAll({ where: { statusId: status.id }, order: [['viewedAt', 'DESC']], limit: 500 }) : [];
   const UserModel = Users();
   const users = await Promise.all(views.map(v => UserModel ? UserModel.findByPk(v.viewerId, { attributes: ['id','username','displayName','avatar'] }).catch(() => null) : null));
-  return res.json({ success: true, data: views.map((v,i) => ({ ...v.toJSON(), viewer: users[i] })) });
+  const rows = views.map((v,i) => ({ ...v.toJSON(), viewer: users[i] ? users[i].toJSON() : null }));
+  return res.json({ success: true, data: rows, viewers: rows, viewCount: Number(status.viewCount || 0) });
 }));
 
-router.get('/:statusId/likes', apiRateLimiter, asyncHandler(async (req, res) => {
+router.get('/:statusId/likes', optionalAuthenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+  const status = await Status().findByPk(Number(req.params.statusId));
+  // SECURITY HARDENING: reactions on a private/contact-restricted status must
+  // not become a public side-channel. Anonymous viewers may still inspect
+  // reactions on genuinely public statuses.
+  if (!status || !(await canView(status, uid(req) || 0))) {
+    return res.status(404).json({ success: false, message: 'Status not found' });
+  }
   const Like = M('StatusLike');
-  const likes = Like ? await Like.findAll({ where: { statusId: Number(req.params.statusId) }, order: [['createdAt', 'DESC']], limit: 200 }) : [];
+  const likes = Like ? await Like.findAll({ where: { statusId: status.id }, order: [['createdAt', 'DESC']], limit: 200 }) : [];
   return res.json({ success: true, data: likes });
 }));
 
@@ -314,7 +351,7 @@ router.post('/:statusId/like', authenticateToken, requireUser, apiRateLimiter, a
   await status.update({ reactionCount: count });
   const io = global.__socketIO;
   if (io) io.to('user:' + status.userId).emit('status:reaction', { storyId: status.id, userId: uid(req), emoji, count });
-  return res.json({ success: true, reaction: reaction.toJSON(), count });
+  return res.json({ success: true, liked: true, reaction: reaction.toJSON(), count });
 }));
 
 router.delete('/:statusId/like', authenticateToken, requireUser, apiRateLimiter, asyncHandler(async (req, res) => {
@@ -334,16 +371,33 @@ router.post('/:statusId/comment', authenticateToken, requireUser, apiRateLimiter
   const text = String(req.body?.text || '').trim().slice(0, 2000);
   if (!text) return res.status(400).json({ success: false, message: 'Reply cannot be empty.' });
   const reply = await Reply.create({ statusId: status.id, userId: uid(req), text });
-  await status.increment('replyCount');
+  // Recount from the table instead of increment(): the client shows this number, so it must be the real total.
+  const count = await Reply.count({ where: { statusId: status.id } });
+  await status.update({ replyCount: count });
   const io = global.__socketIO;
-  if (io) io.to('user:' + status.userId).emit('status:reply', { storyId: status.id, userId: uid(req), text, replyId: reply.id });
-  return res.status(201).json({ success: true, reply: reply.toJSON() });
+  if (io) io.to('user:' + status.userId).emit('status:reply', { storyId: status.id, userId: uid(req), text, replyId: reply.id, count });
+  const UserModel = Users();
+  const author = UserModel ? await UserModel.findByPk(uid(req), { attributes: ['id', 'username', 'displayName', 'avatar'] }).catch(() => null) : null;
+  return res.status(201).json({ success: true, count, reply: { ...reply.toJSON(), user: author ? author.toJSON() : null } });
 }));
 
-router.get('/:statusId/comments', apiRateLimiter, asyncHandler(async (req, res) => {
+router.get('/:statusId/comments', optionalAuthenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+  const status = await Status().findByPk(Number(req.params.statusId));
+  // SECURITY HARDENING: comments are protected by the same audience check as
+  // the status itself. This prevents unauthenticated enumeration of replies
+  // attached to private/contact-only stories.
+  if (!status || !(await canView(status, uid(req) || 0))) {
+    return res.status(404).json({ success: false, message: 'Status not found' });
+  }
   const Reply = M('StatusReply');
-  const replies = Reply ? await Reply.findAll({ where: { statusId: Number(req.params.statusId) }, order: [['createdAt', 'ASC']], limit: 200 }) : [];
-  return res.json({ success: true, data: replies });
+  const replies = Reply ? await Reply.findAll({ where: { statusId: status.id }, order: [['createdAt', 'ASC']], limit: 200 }) : [];
+  // Show who wrote each comment (the client used to display "User <id>") and return the real total.
+  const UserModel = Users();
+  const ids = [...new Set(replies.map(r => Number(r.userId)).filter(Number.isFinite))];
+  const people = UserModel && ids.length ? await UserModel.findAll({ where: { id: { [Op.in]: ids } }, attributes: ['id', 'username', 'displayName', 'avatar'] }).catch(() => []) : [];
+  const byId = new Map(people.map(u => [Number(u.id), u.toJSON()]));
+  res.set('Cache-Control', 'no-store');
+  return res.json({ success: true, count: replies.length, data: replies.map(r => ({ ...r.toJSON(), user: byId.get(Number(r.userId)) || null })) });
 }));
 
 router.delete('/:statusId/comment/:commentId', authenticateToken, requireUser, apiRateLimiter, asyncHandler(async (req, res) => {

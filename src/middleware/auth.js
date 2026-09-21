@@ -63,7 +63,13 @@ const extractToken = (req) => {
 // ── HTTP Auth middleware ──────────────────────────────────────────────────────
 const authenticateToken = async (req, res, next) => {
     if (isPublicPath(req)) {
-        return next();
+        // FIX (STATUS/VIBES 401s): the public-path patterns above are not method-aware and also
+        // match routes that DO need a user (GET /api/status/vibes, PUT/DELETE /api/status/:id).
+        // Returning next() without identifying the caller left req.user empty, so the route's own
+        // requireUser() answered 401 "Authorization required" even for a valid, logged-in user.
+        // Public paths must stay reachable without a token, but when a valid token IS sent we
+        // still attach the user (soft authentication) so those routes work.
+        return optionalAuthenticateToken(req, res, next);
     }
 
     try {
