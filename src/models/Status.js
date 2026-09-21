@@ -26,6 +26,8 @@ module.exports = (sequelize, DataTypes) => {
     privacy: { type: DataTypes.STRING(40), allowNull: false, defaultValue: 'all_contacts' },
     privacyList: { type: DataTypes.JSONB, allowNull: false, defaultValue: [] },
     durationSeconds: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 7 },
+    publicationTarget: { type: DataTypes.STRING(16), allowNull: false, defaultValue: 'status' },
+    vibeExpiresAt: { type: DataTypes.DATE, allowNull: true },
     allowReplies: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
     allowReactions: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
     allowSharing: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
@@ -44,6 +46,7 @@ module.exports = (sequelize, DataTypes) => {
     timestamps: true,
     freezeTableName: true,
     indexes: [
+      { fields: ['publicationTarget', 'isActive', 'vibeExpiresAt'] },
       { fields: ['userId', 'isActive', 'expiresAt'] },
       { fields: ['isPublic', 'isActive', 'createdAt'] },
       { fields: ['expiresAt'] },
@@ -107,10 +110,8 @@ module.exports = (sequelize, DataTypes) => {
   };
 
   Status.cleanupExpiredStatuses = async function() {
-    return this.update(
-      { isActive: false, expiresAt: new Date() },
-      { where: { isActive: true, expiresAt: { [Op.lte]: new Date() } } }
-    );
+    const now = new Date();
+    return this.destroy({ where: { isActive: true, expiresAt: { [Op.lte]: now }, [Op.or]: [{ publicationTarget: { [Op.notIn]: ['vibe','both'] } }, { vibeExpiresAt: { [Op.is]: null } }, { vibeExpiresAt: { [Op.lte]: now } }] } });
   };
 
   return Status;

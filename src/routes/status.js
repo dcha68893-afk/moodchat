@@ -27,6 +27,8 @@ const Users = () => M('Users', 'User');
 const Friend = () => M('Friend', 'Friends');
 
 const VALID_TYPES = new Set(['text', 'image', 'video', 'poll', 'link']);
+const VALID_PUBLICATION_TARGETS = new Set(['status','vibe','both']);
+const VIBE_EXPIRY_HOURS = new Set([1,6,12,24,48,72,168]);
 const VALID_PRIVACY = new Set(['all_contacts', 'contacts_except', 'only_share_with', 'close_friends', 'public', 'private']);
 const MAX_TEXT = 4000;
 const MAX_TOPICS = 10;
@@ -47,6 +49,7 @@ async function ownerPayload(status) {
 
 async function canView(status, viewerId) {
   if (!status || !status.isActive || new Date(status.expiresAt).getTime() <= Date.now()) return false;
+  if ((status.publicationTarget === 'vibe' || status.publicationTarget === 'both') && status.vibeExpiresAt && new Date(status.vibeExpiresAt).getTime() <= Date.now()) return false;
   if (status.userId === viewerId) return true;
   if (status.isPublic || status.privacy === 'public') return true;
   if (status.privacy === 'private') return false;
@@ -81,6 +84,9 @@ function normalizeBody(body, userId) {
   const content = typeof body.content === 'string' ? body.content.trim().slice(0, MAX_TEXT) : null;
   const topics = cleanList(body.topics, MAX_TOPICS);
   const durationSeconds = Math.min(Math.max(Number(body.durationSeconds) || 7, 3), 20);
+  const publicationTarget = type === 'video' && VALID_PUBLICATION_TARGETS.has(body.publicationTarget) ? body.publicationTarget : 'status';
+  const vibeDurationHours = VIBE_EXPIRY_HOURS.has(Number(body.vibeDurationHours)) ? Number(body.vibeDurationHours) : 24;
+  const vibeExpiresAt = publicationTarget === 'vibe' || publicationTarget === 'both' ? new Date(Date.now()+vibeDurationHours*60*60*1000) : null;
   const pollOptions=Array.isArray(body.pollOptions)?body.pollOptions.map(v=>String(v).trim()).filter(Boolean).slice(0,8):[];
   const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
   return {
@@ -106,6 +112,8 @@ function normalizeBody(body, userId) {
     privacy,
     privacyList: cleanList(body.privacyList, 200),
     durationSeconds,
+    publicationTarget,
+    vibeExpiresAt,
     allowReplies: body.allowReplies !== false,
     allowReactions: body.allowReactions !== false,
     allowSharing: body.allowSharing !== false,
@@ -167,8 +175,8 @@ router.get('/', optionalAuthenticateToken, apiRateLimiter, asyncHandler(async (r
   const ids = friends.map(f => Number(f.friend?.requesterId) === userId ? Number(f.friend?.addresseeId) : Number(f.friend?.requesterId)).filter(Number.isFinite);
   const statuses = await Status().getFriendsStatuses(userId, ids);
   const visible = [];
-  for (const s of statuses) if (await canView(s, userId)) visible.push(await ownerPayload(s));
-  const mine = await Status().getUserStatuses(userId, { activeOnly: true });
+  for (const s of statuses) if (s.publicationTarget !== 'vibe' && await canView(s, userId)) visible.push(await ownerPayload(s));
+  const mine = (await Status().getUserStatuses(userId, { activeOnly: true })).filter(s => s.publicationTarget !== 'vibe');
   res.set('Cache-Control','no-store');
   return res.json({ success: true, featureVersion: 'status-5.1', data: [...(await Promise.all(mine.map(ownerPayload))), ...visible] });
 }));
@@ -186,7 +194,7 @@ router.get('/friends', authenticateToken, requireUser, apiRateLimiter, asyncHand
   const ids = friends.map(f => Number(f.friend?.requesterId) === userId ? Number(f.friend?.addresseeId) : Number(f.friend?.requesterId)).filter(Number.isFinite);
   const statuses = await Status().getFriendsStatuses(userId, ids);
   const visible = [];
-  for (const s of statuses) if (await canView(s, userId)) visible.push(await ownerPayload(s));
+  for (const s of statuses) if (s.publicationTarget !== 'vibe' && await canView(s, userId)) visible.push(await ownerPayload(s));
   const View = M('StatusView');
   const viewedIds = new Set();
   if (View && visible.length) {
@@ -199,7 +207,7 @@ router.get('/friends', authenticateToken, requireUser, apiRateLimiter, asyncHand
 
 // Public feed / trending.
 router.get('/public', apiRateLimiter, asyncHandler(async (req, res) => {
-  const statuses = await Status().findAll({ where: { isActive: true, isPublic: true, expiresAt: { [Op.gt]: new Date() } }, order: [['createdAt', 'DESC']], limit: 100 });
+  const statuses = await Status().findAll({ where: { isActive: true, publicationTarget: { [Op.ne]: 'vibe' }, isPublic: true, expiresAt: { [Op.gt]: new Date() } }, order: [['createdAt', 'DESC']], limit: 100 });
   return res.json({ success: true, data: await Promise.all(statuses.map(ownerPayload)) });
 }));
 
@@ -212,27 +220,38 @@ router.get('/search', apiRateLimiter, asyncHandler(async (req, res) => {
   const q = String(req.query.q || '').trim().slice(0, 80);
   if (!q) return res.json({ success: true, data: [] });
   const statuses = await Status().findAll({
-    where: { isActive: true, expiresAt: { [Op.gt]: new Date() }, isPublic: true, [Op.or]: [{ content: { [Op.iLike]: '%' + q + '%' } }, { caption: { [Op.iLike]: '%' + q + '%' } }] },
+    where: { isActive: true, publicationTarget: { [Op.ne]: 'vibe' }, expiresAt: { [Op.gt]: new Date() }, isPublic: true, [Op.or]: [{ content: { [Op.iLike]: '%' + q + '%' } }, { caption: { [Op.iLike]: '%' + q + '%' } }] },
     order: [['createdAt', 'DESC']], limit: 50,
   });
   return res.json({ success: true, data: await Promise.all(statuses.map(ownerPayload)) });
 }));
 
 router.get('/mood/:moodType', apiRateLimiter, asyncHandler(async (req, res) => {
-  const statuses = await Status().findAll({ where: { moodType: req.params.moodType, isActive: true, expiresAt: { [Op.gt]: new Date() }, isPublic: true }, order: [['createdAt', 'DESC']], limit: 50 });
+  const statuses = await Status().findAll({ where: { moodType: req.params.moodType, isActive: true, publicationTarget: { [Op.ne]: 'vibe' }, expiresAt: { [Op.gt]: new Date() }, isPublic: true }, order: [['createdAt', 'DESC']], limit: 50 });
   return res.json({ success: true, data: await Promise.all(statuses.map(ownerPayload)) });
 }));
 
 router.get('/user/:userId', authenticateToken, requireUser, apiRateLimiter, asyncHandler(async (req, res) => {
   const target = Number(req.params.userId);
-  const statuses = await Status().findAll({ where: { userId: target, isActive: true, expiresAt: { [Op.gt]: new Date() } }, order: [['createdAt', 'ASC']] });
+  const statuses = await Status().findAll({ where: { userId: target, isActive: true, publicationTarget: { [Op.ne]: 'vibe' }, expiresAt: { [Op.gt]: new Date() } }, order: [['createdAt', 'ASC']] });
   const visible = [];
-  for (const s of statuses) if (await canView(s, uid(req))) visible.push(await ownerPayload(s));
+  for (const s of statuses) if (s.publicationTarget !== 'vibe' && await canView(s, uid(req))) visible.push(await ownerPayload(s));
   return res.json({ success: true, data: visible });
 }));
 
 router.get('/stats', authenticateToken, requireUser, apiRateLimiter, asyncHandler(async (req, res) => {
   return res.json({ success: true, data: await Status().getStatusStats(uid(req)) });
+}));
+
+router.get('/vibes', authenticateToken, requireUser, apiRateLimiter, asyncHandler(async (req,res)=>{
+  const userId=uid(req); const includePublic=String(req.query.includePublic||'true')!=='false';
+  const friends=await Friend().getUserFriends(userId,'accepted');
+  const ids=friends.map(f=>Number(f.friend?.requesterId)===userId?Number(f.friend?.addresseeId):Number(f.friend?.requesterId)).filter(Number.isFinite);
+  const base={type:'video',publicationTarget:{[Op.in]:['vibe','both']},isActive:true,expiresAt:{[Op.gt]:new Date()},vibeExpiresAt:{[Op.gt]:new Date()}};
+  const rows=await Status().findAll({where:{...base,userId:{[Op.in]:[...ids,userId]}},order:[['createdAt','DESC']],limit:200});
+  const pubs=includePublic?await Status().findAll({where:{...base,isPublic:true},order:[['createdAt','DESC']],limit:200}):[];
+  const byId=new Map(); for(const s of [...rows,...pubs]) if(await canView(s,userId)) byId.set(String(s.id),await ownerPayload(s));
+  return res.json({success:true,data:[...byId.values()]});
 }));
 
 router.get('/:statusId', apiRateLimiter, asyncHandler(async (req, res) => {

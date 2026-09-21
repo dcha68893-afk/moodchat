@@ -55,7 +55,7 @@ async function applyStatusSchema(sequelize, transaction) {
      `"topics" JSONB NOT NULL DEFAULT '[]'::jsonb`, `"moodType" VARCHAR(60)`,
      `"category" VARCHAR(60)`, `"intent" VARCHAR(60)`, `"privacy" VARCHAR(40) NOT NULL DEFAULT 'all_contacts'`,
      `"privacyList" JSONB NOT NULL DEFAULT '[]'::jsonb`],
-    [`"durationSeconds" INTEGER NOT NULL DEFAULT 7`, `"allowReplies" BOOLEAN NOT NULL DEFAULT TRUE`,
+    [`"durationSeconds" INTEGER NOT NULL DEFAULT 7`, `"publicationTarget" VARCHAR(16) NOT NULL DEFAULT 'status'`, `"vibeExpiresAt" TIMESTAMP WITH TIME ZONE`, `"allowReplies" BOOLEAN NOT NULL DEFAULT TRUE`,
      `"allowReactions" BOOLEAN NOT NULL DEFAULT TRUE`, `"allowSharing" BOOLEAN NOT NULL DEFAULT TRUE`,
      `"isPublic" BOOLEAN NOT NULL DEFAULT FALSE`, `"isActive" BOOLEAN NOT NULL DEFAULT TRUE`],
     [`"expiresAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT (CURRENT_TIMESTAMP + INTERVAL '24 hours')`,
@@ -72,6 +72,11 @@ async function applyStatusSchema(sequelize, transaction) {
     SET "expiresAt" = COALESCE("expiresAt", "createdAt" + INTERVAL '24 hours'),
         "updatedAt" = COALESCE("updatedAt", "createdAt")
     WHERE "expiresAt" IS NULL OR "updatedAt" IS NULL
+  `);
+
+  await q(`
+    UPDATE "Status" SET "publicationTarget" = 'status' WHERE "publicationTarget" IS NULL OR "publicationTarget" NOT IN ('status','vibe','both');
+    CREATE INDEX IF NOT EXISTS "Status_publication_target_idx" ON "Status" ("publicationTarget","isActive","vibeExpiresAt");
   `);
 
   await q(`

@@ -41,6 +41,8 @@ module.exports = {
       privacy: { type: Sequelize.STRING(40), allowNull: false, defaultValue: 'all_contacts' },
       privacyList: { type: Sequelize.JSONB, allowNull: false, defaultValue: [] },
       durationSeconds: { type: Sequelize.INTEGER, allowNull: false, defaultValue: 7 },
+      publicationTarget: { type: Sequelize.STRING(16), allowNull: false, defaultValue: 'status' },
+      vibeExpiresAt: { type: Sequelize.DATE, allowNull: true },
       allowReplies: { type: Sequelize.BOOLEAN, allowNull: false, defaultValue: true },
       allowReactions: { type: Sequelize.BOOLEAN, allowNull: false, defaultValue: true },
       allowSharing: { type: Sequelize.BOOLEAN, allowNull: false, defaultValue: true },
