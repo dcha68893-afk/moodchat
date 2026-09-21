@@ -21,6 +21,7 @@ const path    = require('path');
 const fs      = require('fs');
 const crypto  = require('crypto');
 const cloudinaryService = require('../services/cloudinaryService');
+const persistentUploads = require('../services/persistentUploads');
 
 // FIX (UPLOAD-EPHEMERAL-DISK): this route used to always write to local disk.
 // Render's filesystem is ephemeral — files vanish on every restart/redeploy
@@ -58,6 +59,14 @@ const MIME_TYPE_MAP = {
     'application/msword': 'document',
     'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'document',
     'text/plain': 'document',
+    // FIX: other everyday attachments were rejected with "File type ... not allowed" (or worse, silently not sendable)
+    'application/vnd.ms-excel': 'document',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'document',
+    'application/vnd.ms-powerpoint': 'document',
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'document',
+    'text/csv': 'document', 'application/rtf': 'document',
+    'audio/mp3': 'audio', 'audio/x-m4a': 'audio', 'audio/3gpp': 'audio', 'video/3gpp': 'video',
+    'image/jpg': 'image',
 };
 
 const ALLOWED_MIMES = new Set(Object.keys(MIME_TYPE_MAP));
@@ -91,9 +100,11 @@ const upload = multer({
 function absUrl(req, relPath) {
     const base = process.env.RENDER_EXTERNAL_URL ||
                  process.env.BACKEND_URL ||
-                 `${req.protocol}://${req.get('host')}`;
+                 `${(req.get('x-forwarded-proto') || req.protocol || 'http').split(',')[0].trim()}://${req.get('host')}`;
     return `${base.replace(/\/+$/, '')}${relPath}`;
 }
+// (see below) behind Render's proxy req.protocol is 'http' unless trust-proxy is set, which produced http:// upload URLs that an
+// https page then blocks as mixed content. Honour X-Forwarded-Proto when building the fallback base.
 
 // ── POST /api/files/upload ────────────────────────────────────────────────────
 // Called by: js/api.messages.js uploadFile(), js/services.message.js uploadFile()
@@ -135,6 +146,8 @@ router.post('/upload', upload.single('file'), async (req, res) => {
                         : DIRS[type] === DIRS.document ? 'documents' : 'files';
         const relPath   = `/uploads/${subDir}/${req.file.filename}`;
         const url       = absUrl(req, relPath);
+        // FIX: keep a persistent copy (see services/persistentUploads.js) so the file is still there after a restart/redeploy
+        await persistentUploads.saveFile(`/${subDir}/${req.file.filename}`, req.file.path, req.file.mimetype);
 
         return res.status(201).json({
             success   : true,
@@ -183,6 +196,11 @@ router.post('/upload-multiple', upload.array('files', 10), async (req, res) => {
             return res.status(201).json({ success: true, message: 'Files uploaded', data: { files: okFiles }, files: okFiles });
         }
 
+        await Promise.all(req.files.map(f => {
+            const sd = (MIME_TYPE_MAP[f.mimetype] || 'file');
+            const dir = sd === 'image' ? 'images' : sd === 'audio' ? 'audio' : sd === 'video' ? 'video' : sd === 'document' ? 'documents' : 'files';
+            return persistentUploads.saveFile(`/${dir}/${f.filename}`, f.path, f.mimetype);
+        }));
         const files = req.files.map(f => {
             const type    = MIME_TYPE_MAP[f.mimetype] || 'file';
             const subDir  = type === 'image' ? 'images' : type === 'audio' ? 'audio'

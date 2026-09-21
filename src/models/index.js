@@ -2094,6 +2094,12 @@ module.exports = {
   get Order()         { return db.models.Order         || null; },
   get Review()        { return db.models.Review        || null; },
   get Wishlist()      { return db.models.Wishlist      || null; },
+  // FIX: these three were loaded as models but never exposed here, so `require('../models').Cart` (and
+  // .Wallet / .WalletTransaction) was always undefined. marketplace.controller.js reads them off this export and
+  // therefore answered every cart call with "503 Cart service not available" and could never reach wallet/payout data.
+  get Cart()              { return db.models.Cart              || null; },
+  get Wallet()            { return db.models.Wallet            || null; },
+  get WalletTransaction() { return db.models.WalletTransaction || null; },
   get Coupon()        { return db.models.Coupon        || null; },
   get Refund()        { return db.models.Refund        || null; },
   get SellerProfile() { return db.models.SellerProfile || null; },

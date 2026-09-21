@@ -58,10 +58,27 @@ const err = (next, e, label) => { logger.error(`[Marketplace] ${label}:`, e.mess
 // ─── Model loader (works whether db is passed by ref or require) ──────────────
 let _db = null;
 function getDb() {
-    if (_db) return _db;
-    try { _db = require('../models'); } catch (_) {}
-    if (!_db) try { _db = require('../models'); } catch (_) {}
-    return _db || {};
+    // FIX ("503 Cart service not available" that never goes away): the first successful require used to be cached
+    // forever. If that first call happened while ../models was still loading (circular require during startup),
+    // Node hands back the module's PLACEHOLDER exports ({}), which is truthy, so it was cached and every later
+    // call -- cart, wallet, coupons -- saw `undefined` models until the next restart. Only cache the real export.
+    if (_db && (_db.sequelize || _db.models)) return _db;
+    let m = null;
+    try { m = require('../models'); } catch (_) {}
+    if (m && (m.sequelize || m.models)) _db = m;
+    return m || _db || {};
+}
+// Resolve the Cart model through every place Sequelize registers it, and say WHY when it is really missing
+// (the old code just answered 503 with no trace, which is why this was so hard to diagnose from the logs).
+function getCartModel() {
+    const db = getDb();
+    const m = db.Cart || (db.models && db.models.Cart) || (db.sequelize && db.sequelize.models && db.sequelize.models.Cart) || null;
+    if (!m) {
+        const failed = db.failedModels && db.failedModels.Cart;
+        console.error('[Marketplace] Cart model unavailable:', failed ? `${failed.detection || ''} ${failed.error || ''}`.trim() : 'not registered',
+            '| models loaded:', Object.keys(db.models || {}).length);
+    }
+    return m;
 }
 const Model = {
     get Tool()   { return getDb().Tool   || getDb().Listing   || null; },
@@ -399,7 +416,7 @@ class MarketplaceController {
         try {
             const userId = req.user?.id;
             if (!userId) return next(new AppError('Authentication required', 401));
-            const CartModel = getDb().Cart;
+            const CartModel = getCartModel();
             if (!CartModel) {
                 // Graceful degradation if migration not yet run
                 return ok(res, { cart: { items: [], subtotal: 0, item_count: 0 } }, 'OK');
@@ -425,7 +442,7 @@ class MarketplaceController {
             const userId = req.user?.id;
             if (!userId) return next(new AppError('Authentication required', 401));
 
-            const CartModel = getDb().Cart;
+            const CartModel = getCartModel();
             if (!CartModel) return next(new AppError('Cart service not available', 503));
 
             const cart = await CartModel.getOrCreate(userId);
@@ -479,7 +496,7 @@ class MarketplaceController {
             const { product_id, variant } = req.body;
             if (!product_id) return next(new AppError('product_id required', 400));
 
-            const CartModel = getDb().Cart;
+            const CartModel = getCartModel();
             if (!CartModel) return next(new AppError('Cart service not available', 503));
 
             const cart = await CartModel.getOrCreate(userId);
@@ -504,7 +521,7 @@ class MarketplaceController {
             const { product_id, quantity, variant } = req.body;
             if (!product_id || !quantity) return next(new AppError('product_id and quantity required', 400));
 
-            const CartModel = getDb().Cart;
+            const CartModel = getCartModel();
             if (!CartModel) return next(new AppError('Cart service not available', 503));
 
             const cart = await CartModel.getOrCreate(userId);
@@ -526,7 +543,7 @@ class MarketplaceController {
         try {
             const userId = req.user?.id;
             if (!userId) return next(new AppError('Authentication required', 401));
-            const CartModel = getDb().Cart;
+            const CartModel = getCartModel();
             if (!CartModel) return next(new AppError('Cart service not available', 503));
             const cart = await CartModel.getOrCreate(userId);
             await cart.clear();

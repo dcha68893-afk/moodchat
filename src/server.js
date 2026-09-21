@@ -4705,6 +4705,23 @@ class Application {
             });
         }
         
+        // 9. ROOT-CAUSE FIX (uploaded documents/images/videos could never be opened):
+        // POST /api/files/upload saves the file and returns a URL like /uploads/documents/<name>.pdf, but nothing in THIS
+        // server ever served /uploads (the express.static that exists lives in src/app/app.js, which is not the app that runs).
+        // Every fetch therefore fell through to the 404 handler -> {"message":"Route not found: GET /uploads/documents/..."} for
+        // documents and broken images/videos (which the UI then replaced with the app fallback image).
+        // Serve the folder, and when a file's disk copy is gone (Render's disk is ephemeral) serve it from its database copy.
+        try {
+            const persistentUploads = require('./services/persistentUploads');
+            this.app.use('/uploads', persistentUploads.serveMissingFromDb);
+            this.app.use('/uploads', express.static(require('path').join(process.cwd(), 'uploads'), {
+                maxAge: config.get('NODE_ENV') === 'production' ? '7d' : 0,
+                index: false, dotfiles: 'deny', fallthrough: true,
+                setHeaders: (res) => { res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin'); res.setHeader('X-Content-Type-Options', 'nosniff'); }
+            }));
+            persistentUploads.startSweeper();
+        } catch (e) { console.warn('[Server] /uploads static setup failed:', e.message); }
+
         _slog('✅ Middleware setup complete with correct order and optimizations');
     }
     
