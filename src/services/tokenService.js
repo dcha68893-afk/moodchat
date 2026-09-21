@@ -42,7 +42,7 @@ class TokenService {
     // access token and a ~16h refresh token, and got kicked to login after that long
     // away. The default now matches the UI ("off" = tokens never expire). Set
     // SESSION_TIMEOUT_DEFAULT (e.g. '30d') in the environment to enforce a limit instead.
-    this.defaultSessionTimeout = process.env.SESSION_TIMEOUT_DEFAULT || 'off';
+    this.defaultSessionTimeout = process.env.SESSION_TIMEOUT_DEFAULT || '24h';
     console.log('[TokenService] Initialized');
   }
 

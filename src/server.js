@@ -2082,6 +2082,7 @@ if (!normalizedOrigins.includes(frontendUrl)) {
 const config = new ConfigurationManager();
 
 const tokenService = require('./services/tokenService');
+                    const { isAccessTokenBlacklisted } = require('./services/tokenBlacklistService');
 const websocketDeliveryService = require('./services/webSocketService');
 
 // ========== DATABASE SERVICE WITH OPTIMIZED POOL ==========
@@ -4556,66 +4557,26 @@ class Application {
         // 1. CORS middleware - FIRST (CRITICAL)
         this.app.use(cors(corsOptions));
         
-        // 1.5 Force CORS headers for all responses (especially important for login)
-        this.app.use((req, res, next) => {
-            // Store original end function
-            const originalEnd = res.end;
-            const originalJson = res.json;
-            const originalSend = res.send;
-            
-            // Override end to ensure CORS headers are always set
-            res.end = function(...args) {
-                const origin = req.headers.origin;
-                if (origin && (origin === 'https://nexipa.onrender.com' ||
-                               origin.includes('localhost:5500') ||
-                               origin.includes('127.0.0.1:5500'))) {
-                    res.setHeader('Access-Control-Allow-Origin', origin);
-                    res.setHeader('Access-Control-Allow-Credentials', 'true');
-                }
-                originalEnd.apply(this, args);
-            };
-            
-            // Override json to ensure CORS headers
-            res.json = function(data) {
-                const origin = req.headers.origin;
-                if (origin && (origin === 'https://nexipa.onrender.com' ||
-                               origin.includes('localhost:5500') ||
-                               origin.includes('127.0.0.1:5500'))) {
-                    res.setHeader('Access-Control-Allow-Origin', origin);
-                    res.setHeader('Access-Control-Allow-Credentials', 'true');
-                }
-                return originalJson.call(this, data);
-            };
-            
-            // Override send to ensure CORS headers
-            res.send = function(data) {
-                const origin = req.headers.origin;
-                if (origin && (origin === 'https://nexipa.onrender.com' ||
-                               origin.includes('localhost:5500') ||
-                               origin.includes('127.0.0.1:5500'))) {
-                    res.setHeader('Access-Control-Allow-Origin', origin);
-                    res.setHeader('Access-Control-Allow-Credentials', 'true');
-                }
-                return originalSend.call(this, data);
-            };
-            
-            next();
-        });
+        // 1.5 CORS is enforced by the configured corsManager above.
+        // SECURITY HARDENING: do not mirror arbitrary Origin headers here.
+        // The old compatibility shim used substring checks such as
+        // origin.includes('localhost:5500'), which could trust an attacker-controlled
+        // origin containing that text and combine it with credentials=true.
+        // Keeping one canonical CORS implementation prevents policy drift.
         
-        // 2. Handle preflight requests - CRITICAL FIX: Properly handle Authorization header
+        // 2. Handle preflight requests with the same allowlist. Never emit a
+        // fallback Access-Control-Allow-Origin for an untrusted origin.
         this.app.options('*', (req, res) => {
-            // CRITICAL FIX: Set ALL required CORS headers for preflight
             const origin = req.headers.origin;
             if (origin && corsManager.isOriginAllowed(origin)) {
                 res.header('Access-Control-Allow-Origin', origin);
-            } else {
-                res.header('Access-Control-Allow-Origin', 'http://127.0.0.1:5500');
+                res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
+                res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+                res.header('Access-Control-Allow-Credentials', 'true');
+                res.header('Access-Control-Max-Age', '86400');
+                return res.sendStatus(204);
             }
-            res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
-            res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
-            res.header('Access-Control-Allow-Credentials', 'true');
-            res.header('Access-Control-Max-Age', '86400');
-            res.sendStatus(204);
+            return res.status(403).json({ success: false, message: 'CORS origin not allowed' });
         });
         
         // 3. Security headers
@@ -5220,7 +5181,7 @@ class Application {
                     // socket connection failed with "invalid signature".
                     const tokenService = require('./services/tokenService');
 
-                    const socketAuthenticate = (socket, next) => {
+                    const socketAuthenticate = async (socket, next) => {
                         try {
                             const token = (socket.handshake.auth && socket.handshake.auth.token)
                                 || socket.handshake.query.token
@@ -5236,6 +5197,11 @@ class Application {
                             }
 
                             // FIX: Delegate to tokenService — uses JWT_ACCESS_SECRET (the correct secret).
+                            if (await isAccessTokenBlacklisted(token)) {
+                                console.warn('[Socket.IO] Auth rejected: token revoked');
+                                return next(new Error('auth/token-revoked'));
+                            }
+
                             const verification = tokenService.verifyAccessToken(token);
 
                             if (!verification.valid) {

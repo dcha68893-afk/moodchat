@@ -295,9 +295,16 @@ router.get('/:statusId/viewers', authenticateToken, requireUser, apiRateLimiter,
   return res.json({ success: true, data: views.map((v,i) => ({ ...v.toJSON(), viewer: users[i] })) });
 }));
 
-router.get('/:statusId/likes', apiRateLimiter, asyncHandler(async (req, res) => {
+router.get('/:statusId/likes', optionalAuthenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+  const status = await Status().findByPk(Number(req.params.statusId));
+  // SECURITY HARDENING: reactions on a private/contact-restricted status must
+  // not become a public side-channel. Anonymous viewers may still inspect
+  // reactions on genuinely public statuses.
+  if (!status || !(await canView(status, uid(req) || 0))) {
+    return res.status(404).json({ success: false, message: 'Status not found' });
+  }
   const Like = M('StatusLike');
-  const likes = Like ? await Like.findAll({ where: { statusId: Number(req.params.statusId) }, order: [['createdAt', 'DESC']], limit: 200 }) : [];
+  const likes = Like ? await Like.findAll({ where: { statusId: status.id }, order: [['createdAt', 'DESC']], limit: 200 }) : [];
   return res.json({ success: true, data: likes });
 }));
 
@@ -340,9 +347,16 @@ router.post('/:statusId/comment', authenticateToken, requireUser, apiRateLimiter
   return res.status(201).json({ success: true, reply: reply.toJSON() });
 }));
 
-router.get('/:statusId/comments', apiRateLimiter, asyncHandler(async (req, res) => {
+router.get('/:statusId/comments', optionalAuthenticateToken, apiRateLimiter, asyncHandler(async (req, res) => {
+  const status = await Status().findByPk(Number(req.params.statusId));
+  // SECURITY HARDENING: comments are protected by the same audience check as
+  // the status itself. This prevents unauthenticated enumeration of replies
+  // attached to private/contact-only stories.
+  if (!status || !(await canView(status, uid(req) || 0))) {
+    return res.status(404).json({ success: false, message: 'Status not found' });
+  }
   const Reply = M('StatusReply');
-  const replies = Reply ? await Reply.findAll({ where: { statusId: Number(req.params.statusId) }, order: [['createdAt', 'ASC']], limit: 200 }) : [];
+  const replies = Reply ? await Reply.findAll({ where: { statusId: status.id }, order: [['createdAt', 'ASC']], limit: 200 }) : [];
   return res.json({ success: true, data: replies });
 }));
 
