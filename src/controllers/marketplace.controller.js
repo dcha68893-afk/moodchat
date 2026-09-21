@@ -3286,7 +3286,26 @@ class MarketplaceExtensions {
         try {
             const T = Model.Tool;
             if (!T) return ok(res, { products: [] });
-            const { status, page=1, limit=50 } = req.query;
+            // FIX (DELETE/APPROVE/SUSPEND ON A PRODUCT NEVER ACTUALLY LEAVES THE
+            // ADMIN LIST): marketplace-admin.js's Product Management tabs call
+            // this endpoint as `?approval_status=<tab>` (pending/approved/
+            // rejected/suspended), but this handler only ever read
+            // `req.query.status`. `approval_status` was silently ignored, so
+            // `where` fell through to `{}` — an unfiltered query — on every
+            // single tab. That means every tab showed literally every product
+            // regardless of its real status, INCLUDING ones adminRemoveProduct()
+            // had just set to status:'deleted' (see that method: it doesn't
+            // hard-delete the row, it flips status to 'deleted'). Net effect:
+            // delete/approve/suspend all "worked" against the database, but the
+            // list you were looking at never actually reflected it, because it
+            // was never truly filtered in the first place. Reading
+            // approval_status (what the frontend actually sends) fixes the
+            // filtering itself; once a tab is a real filter again, a deleted
+            // product naturally stops matching status:'pending_review' /
+            // 'active' / 'inactive' / 'rejected' and disappears from every tab
+            // without needing a separate exclusion rule.
+            const { status, approval_status, page=1, limit=50 } = req.query;
+            const requestedFilter = approval_status || status;
             // FIX (admin Products tabs always empty for Pending/Approved/
             // Suspended — root cause of "no option to see items that are
             // already approved or still pending"): marketplace-admin.js's
@@ -3311,7 +3330,7 @@ class MarketplaceExtensions {
                 suspended: 'inactive',
                 rejected:  'rejected',
             };
-            const where = status ? { status: STATUS_FILTER_MAP[status] || status } : {};
+            const where = requestedFilter ? { status: STATUS_FILTER_MAP[requestedFilter] || requestedFilter } : {};
             // FIX (item 12 — admin Products showing "Unknown seller"/"0
             // seller"): this query never included the seller association,
             // so _formatProduct()'s r.seller was always undefined and fell
