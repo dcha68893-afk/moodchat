@@ -410,14 +410,22 @@ class MessageDeliveryService {
     const notificationService = require('./notificationService');
 
     const [senderRow] = await sequelize.query(
-      `SELECT username, avatar FROM "Users" WHERE id = :id LIMIT 1`,
+      `SELECT username, "firstName", "lastName", avatar FROM "Users" WHERE id = :id LIMIT 1`,
       { replacements: { id: parseInt(message.senderId, 10) }, type: sequelize.QueryTypes.SELECT }
     ).catch(() => [null]);
-    const senderName = senderRow?.username || 'Someone';
+    // FIX (notification header shows raw username / "Sent a status_reply" / cut-off ciphertext): same display-name rule /chats uses
+    // (first + last name, else username), and previews that never expose raw type names or a truncated E2E envelope.
+    const _fullName = [senderRow?.firstName, senderRow?.lastName].filter(Boolean).join(' ').trim();
+    const senderName = _fullName || senderRow?.username || 'Someone';
     const senderAvatar = senderRow?.avatar || null;
-    const preview = (message.type === 'text' || !message.type)
-      ? String(message.content || '').slice(0, 100)
-      : `Sent a ${message.type}`;
+    const _type = String(message.type || 'text').toLowerCase();
+    const _raw = String(message.content || '');
+    const _looksEncrypted = /^\s*\{\s*"(v|kid|ct|iv|eph|sid|n)"\s*:/.test(_raw);
+    const _labels = { image: 'a photo', video: 'a video', audio: 'a voice message', file: 'a file', sticker: 'a sticker', location: 'a location', contact: 'a contact', poll: 'a poll' };
+    let preview;
+    if (_type.includes('status')) preview = (/react|like/.test(_type) || (message.metadata && message.metadata.reaction)) ? 'reacted to your status' : 'replied to your status';
+    else if (_type === 'text') preview = (!_raw || _looksEncrypted) ? 'New message' : _raw.slice(0, 100);
+    else preview = 'Sent ' + (_labels[_type] || 'a message');
 
     const offlineSet = (push && offlineRecipientIds)
       ? new Set(offlineRecipientIds.map(id => parseInt(id, 10)))
