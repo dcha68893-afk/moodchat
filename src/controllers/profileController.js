@@ -660,15 +660,57 @@ class ProfileController {
         throw new AppError('Invalid pagination parameters', 400);
       }
 
+      // FIX (getMutualConnections was a stub): this used to always return an empty
+      // list regardless of who was asked about — never actually queried the Friend
+      // table. Real implementation: pull each side's accepted-friend id set and
+      // intersect them, same Friend.getUserFriends() helper used by /vibes and the
+      // friends list elsewhere.
+      const Friend = db.models && db.models.Friend;
+      const Users = getUsersModel();
+      if (!Friend || !Users) {
+        return res.status(200).json({
+          success: true,
+          message: 'Mutual connections retrieved successfully',
+          data: { connections: [], total: 0, page: options.page, limit: options.limit, totalPages: 0 }
+        });
+      }
+      const targetUserId = parseInt(userId, 10);
+      const target = await Users.findByPk(targetUserId, { attributes: ['id'] });
+      if (!target) throw new AppError('User not found', 404);
+
+      const [mine, theirs] = await Promise.all([
+        Friend.getUserFriends(currentUserId, 'accepted'),
+        Friend.getUserFriends(targetUserId, 'accepted')
+      ]);
+      const myFriendIds = new Set(mine.map(r => r.user && r.user.id).filter(Boolean));
+      const mutualIds = [...new Set(theirs.map(r => r.user && r.user.id).filter(Boolean))]
+        .filter(id => myFriendIds.has(id));
+
+      const total = mutualIds.length;
+      const totalPages = Math.ceil(total / options.limit) || 0;
+      // sortBy is accepted for API compatibility, but with a flat mutual-friends
+      // list (not a per-row shared-group count) the only meaningful field to sort
+      // on is the person's name.
+      const users = mutualIds.length
+        ? await Users.findAll({ where: { id: mutualIds }, attributes: ['id', 'username', 'firstName', 'lastName', 'avatar', 'status', 'lastSeen'] })
+        : [];
+      const byId = new Map(users.map(u => [u.id, u.toJSON()]));
+      const ordered = mutualIds
+        .map(id => byId.get(id))
+        .filter(Boolean)
+        .sort((a, b) => options.sortOrder * String(a.username || '').localeCompare(String(b.username || '')));
+      const start = (options.page - 1) * options.limit;
+      const connections = ordered.slice(start, start + options.limit);
+
       res.status(200).json({
         success: true,
         message: 'Mutual connections retrieved successfully',
         data: {
-          connections: [],
-          total: 0,
+          connections,
+          total,
           page: options.page,
           limit: options.limit,
-          totalPages: 0
+          totalPages
         }
       });
     } catch (error) {

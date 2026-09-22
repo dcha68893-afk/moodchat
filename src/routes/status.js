@@ -272,17 +272,27 @@ router.get('/vibes', authenticateToken, requireUser, apiRateLimiter, asyncHandle
   const followingIds=FollowModel?await FollowModel.getFollowingIds(userId).catch(()=>[]):[];
   const base={type:'video',publicationTarget:{[Op.in]:['vibe','both']},isActive:true,expiresAt:{[Op.gt]:new Date()},vibeExpiresAt:{[Op.gt]:new Date()},...(textFilter?{[Op.and]:[textFilter]}:{})};
   const byId=new Map();
+  // FIX (FOR-YOU HAD NO REAL RANKING): this used to just DESC-sort each of the three source
+  // queries independently, then dump them into byId in whatever order the three `if` blocks
+  // happened to run — friends' vibes always landed before following's, which always landed
+  // before public's, regardless of actual recency or engagement. That's worse than "newest
+  // first": a week-old friend's vibe could sit ahead of a public vibe posted a minute ago.
+  // closeness tracks the strongest relationship each vibe reached this viewer through, so a
+  // real For You score (closeness + recency decay + engagement) can be computed once every
+  // source has been merged, instead of concatenating three separately-sorted blocks.
+  const closeness=new Map();
+  const bump=(id,w)=>{if(!closeness.has(id)||closeness.get(id)<w)closeness.set(id,w);};
   if(mode==='forYou'||mode==='friends'){
     const rows=await Status().findAll({where:{...base,userId:{[Op.in]:[...friendIds,userId]}},order:[['createdAt','DESC']],limit:200});
-    for(const s of rows) if(await canView(s,userId)) byId.set(String(s.id),await ownerPayload(s));
+    for(const s of rows) if(await canView(s,userId)){byId.set(String(s.id),await ownerPayload(s));bump(String(s.id),3);}
   }
   if((mode==='forYou'||mode==='following')&&followingIds.length){
     const rows=await Status().findAll({where:{...base,userId:{[Op.in]:followingIds}},order:[['createdAt','DESC']],limit:200});
-    for(const s of rows) if(await canView(s,userId)) byId.set(String(s.id),await ownerPayload(s));
+    for(const s of rows) if(await canView(s,userId)){byId.set(String(s.id),await ownerPayload(s));bump(String(s.id),2);}
   }
   if(mode==='forYou'||mode==='public'){
     const pubs=await Status().findAll({where:{...base,isPublic:true},order:[['createdAt','DESC']],limit:200});
-    for(const s of pubs) if(await canView(s,userId)) byId.set(String(s.id),await ownerPayload(s));
+    for(const s of pubs) if(await canView(s,userId)){byId.set(String(s.id),await ownerPayload(s));bump(String(s.id),1);}
   }
   const Reaction=M('StatusReaction'); const likedIds=new Set();
   if(Reaction&&byId.size){
@@ -301,10 +311,26 @@ router.get('/vibes', authenticateToken, requireUser, apiRateLimiter, asyncHandle
     }
   }
   const followingSet=new Set(followingIds.map(String));
-  const data=[...byId.values()].map(v=>{
+  let data=[...byId.values()].map(v=>{
     const ownerId=Number(v.owner?.id??v.userId);
     return {...v,likedByMe:likedIds.has(Number(v.id)),isFollowedByMe:followingSet.has(String(ownerId)),owner:v.owner?{...v.owner,followerCount:followerCounts.get(ownerId)||0}:v.owner};
   });
+  if(mode==='forYou'){
+    // Real ranking, not just newest-first: relationship closeness (friend > following >
+    // public) dominates, recency decays over 3 days so today's public vibe can still beat a
+    // week-old friend post, and engagement (reactions + views, log-scaled so one viral vibe
+    // can't bury everything else) gives a final nudge. Weights are conservative on purpose —
+    // this is a first real ranking pass, not a tuned model.
+    const now=Date.now(),HALF_LIFE_MS=3*24*60*60*1000;
+    const score=v=>{
+      const c=closeness.get(String(v.id))||1;
+      const ageMs=Math.max(0,now-new Date(v.createdAt).getTime());
+      const recency=Math.pow(0.5,ageMs/HALF_LIFE_MS);
+      const engagement=Math.log10(1+Number(v.reactionCount||0)*3+Number(v.viewCount||0));
+      return c*(1+recency)+engagement;
+    };
+    data=data.map(v=>({v,s:score(v)})).sort((a,b)=>b.s-a.s).map(x=>x.v);
+  }
   res.set('Cache-Control','no-store');
   return res.json({success:true,mode,data});
 }));
