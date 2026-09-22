@@ -244,14 +244,23 @@ router.get('/stats', authenticateToken, requireUser, apiRateLimiter, asyncHandle
 }));
 
 router.get('/vibes', authenticateToken, requireUser, apiRateLimiter, asyncHandler(async (req,res)=>{
-  const userId=uid(req); const includePublic=String(req.query.includePublic||'true')!=='false';
+  const userId=uid(req);
+  const mode=['forYou','friends','public','following'].includes(String(req.query.mode))?String(req.query.mode):'forYou';
   const friends=await Friend().getUserFriends(userId,'accepted');
   const ids=friends.map(f=>Number(f.friend?.requesterId)===userId?Number(f.friend?.addresseeId):Number(f.friend?.requesterId)).filter(Number.isFinite);
   const base={type:'video',publicationTarget:{[Op.in]:['vibe','both']},isActive:true,expiresAt:{[Op.gt]:new Date()},vibeExpiresAt:{[Op.gt]:new Date()}};
-  const rows=await Status().findAll({where:{...base,userId:{[Op.in]:[...ids,userId]}},order:[['createdAt','DESC']],limit:200});
-  const pubs=includePublic?await Status().findAll({where:{...base,isPublic:true},order:[['createdAt','DESC']],limit:200}):[];
-  const byId=new Map(); for(const s of [...rows,...pubs]) if(await canView(s,userId)) byId.set(String(s.id),await ownerPayload(s));
-  // likedByMe lets the client draw the heart as filled after a reload and toggle correctly.
+  // The app currently has a friends graph rather than a separate Follow table. Therefore
+  // "Following" is backed by the same accepted-connection set until a first-class follow
+  // relationship exists; it is not fabricated from arbitrary public users.
+  const byId=new Map();
+  if(mode==='forYou'||mode==='friends'||mode==='following'){
+    const rows=await Status().findAll({where:{...base,userId:{[Op.in]:[...ids,userId]}},order:[['createdAt','DESC']],limit:200});
+    for(const s of rows) if(await canView(s,userId)) byId.set(String(s.id),await ownerPayload(s));
+  }
+  if(mode==='forYou'||mode==='public'){
+    const pubs=await Status().findAll({where:{...base,isPublic:true},order:[['createdAt','DESC']],limit:200});
+    for(const s of pubs) if(await canView(s,userId)) byId.set(String(s.id),await ownerPayload(s));
+  }
   const Reaction=M('StatusReaction'); const likedIds=new Set();
   if(Reaction&&byId.size){
     const mine=await Reaction.findAll({where:{statusId:{[Op.in]:[...byId.values()].map(v=>v.id)},userId},attributes:['statusId']}).catch(()=>[]);
@@ -259,7 +268,7 @@ router.get('/vibes', authenticateToken, requireUser, apiRateLimiter, asyncHandle
   }
   const data=[...byId.values()].map(v=>({...v,likedByMe:likedIds.has(Number(v.id))}));
   res.set('Cache-Control','no-store');
-  return res.json({success:true,data});
+  return res.json({success:true,mode,data});
 }));
 
 // Vibes "love" button: one tap toggles the caller's heart and answers with the real total.
