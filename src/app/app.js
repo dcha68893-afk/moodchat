@@ -8,6 +8,8 @@ const config = require('./config');
 const routes = require('./routes');
 const errorHandler = require('./middleware/errorHandler');
 const logger = require('./utils/logger');
+const fs = require('fs');
+const path = require('path');
 // NOTE: DB is PostgreSQL via Sequelize — initialized in server.js, not app.js
 
 const app = express();
@@ -110,11 +112,43 @@ app.use(express.urlencoded({
   parameterLimit: 100 // Limit number of parameters
 }));
 
-// Static files with caching headers
+// Media delivery: keep normal byte-range playback, but gracefully recover from stale or
+// impossible Range headers. Browsers/WebViews can retain a previous byte range after a file is
+// replaced or re-uploaded; Express static otherwise answers 416 and the video becomes a black
+// screen. A valid single range is preserved; an invalid/multi-range request is served from byte 0.
+const uploadsRoot=path.resolve(process.cwd(),'uploads');
+app.get(/^\\/uploads\\/(.+)$/, (req,res,next)=>{
+  let relative;
+  try{relative=decodeURIComponent(req.params[0]);}catch(_){return res.status(400).end();}
+  const filePath=path.resolve(uploadsRoot,relative);
+  if(!filePath.startsWith(uploadsRoot+path.sep))return res.status(403).end();
+  fs.stat(filePath,(statErr,st)=>{
+    if(statErr||!st.isFile())return next();
+    const range=req.headers.range;
+    if(range){
+      const m=/^bytes=(\\d*)-(\\d*)$/.exec(String(range).trim());
+      let valid=false;
+      if(m){
+        const start=m[1]===''?Math.max(0,st.size-Number(m[2]||0)):Number(m[1]);
+        const end=m[2]===''?st.size-1:Number(m[2]);
+        valid=Number.isInteger(start)&&Number.isInteger(end)&&start>=0&&start<st.size&&end>=start&&end<st.size;
+      }
+      if(!valid)delete req.headers.range;
+    }
+    const send=()=>res.sendFile(filePath,{root:'/',acceptRanges:true,maxAge:config.nodeEnv==='production'?'7d':0},err=>{
+      if(err&&err.status===416&&!res.headersSent){delete req.headers.range;send();}
+      else if(err&&!res.headersSent)next(err);
+    });
+    send();
+  });
+});
+
+// Static files with caching headers for everything not handled by the range-safe media route.
 app.use('/uploads', express.static('uploads', {
   maxAge: config.nodeEnv === 'production' ? '7d' : '0',
-  setHeaders: (res, path) => {
-    if (path.endsWith('.json')) {
+  acceptRanges: true,
+  setHeaders: (res, filePath) => {
+    if (filePath.endsWith('.json')) {
       res.setHeader('Content-Type', 'application/json');
     }
   }
