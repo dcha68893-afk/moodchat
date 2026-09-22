@@ -2,7 +2,7 @@
 
 const express = require('express');
 const asyncHandler = require('express-async-handler');
-const { Op } = require('sequelize');
+const { Op, fn, col } = require('sequelize');
 const { authenticateToken, optionalAuthenticateToken } = require('../middleware/auth');
 const { ensureStatusSchema } = require('../services/statusSchema');
 const { apiRateLimiter } = require('../middleware/rateLimiter');
@@ -25,6 +25,8 @@ const M = (...names) => {
 const Status = () => M('Status');
 const Users = () => M('Users', 'User');
 const Friend = () => M('Friend', 'Friends');
+const Follow = () => M('Follow');
+const UserBlock = () => M('UserBlock');
 
 const VALID_TYPES = new Set(['text', 'image', 'video', 'poll', 'link']);
 const VALID_PUBLICATION_TARGETS = new Set(['status','vibe','both']);
@@ -51,6 +53,12 @@ async function canView(status, viewerId) {
   if (!status || !status.isActive || new Date(status.expiresAt).getTime() <= Date.now()) return false;
   if ((status.publicationTarget === 'vibe' || status.publicationTarget === 'both') && status.vibeExpiresAt && new Date(status.vibeExpiresAt).getTime() <= Date.now()) return false;
   if (status.userId === viewerId) return true;
+  // FIX (BLOCKING DID NOTHING): blockUser() used to be a no-op stub — nothing ever actually
+  // stopped a blocked user from seeing your posts. Now that blocks persist (UserBlock model),
+  // enforce it here so it's a single check every status/vibe view already goes through, in
+  // both directions (you blocked them, or they blocked you).
+  const BlockModel = UserBlock();
+  if (BlockModel && await BlockModel.isBlockedEitherWay(viewerId, status.userId).catch(() => false)) return false;
   if (status.isPublic || status.privacy === 'public') return true;
   if (status.privacy === 'private') return false;
   const list = Array.isArray(status.privacyList) ? status.privacyList.map(Number) : [];
@@ -246,15 +254,30 @@ router.get('/stats', authenticateToken, requireUser, apiRateLimiter, asyncHandle
 router.get('/vibes', authenticateToken, requireUser, apiRateLimiter, asyncHandler(async (req,res)=>{
   const userId=uid(req);
   const mode=['forYou','friends','public','following'].includes(String(req.query.mode))?String(req.query.mode):'forYou';
+  // FIX (SEARCH ONLY SEARCHED WHAT WAS ALREADY LOADED): the client used to filter only the
+  // in-memory items already fetched for the current tab (window.prompt-based, no network call),
+  // so a vibe you hadn't scrolled to yet was simply unfindable. q now filters at the DB level,
+  // within whichever tab's normal visibility rules already apply — searching within For You
+  // still respects For You's own audience, same for Friends/Following/Public.
+  const q=String(req.query.q||'').trim().slice(0,80);
+  const textFilter=q?{[Op.or]:[{content:{[Op.iLike]:'%'+q+'%'}},{caption:{[Op.iLike]:'%'+q+'%'}}]}:null;
   const friends=await Friend().getUserFriends(userId,'accepted');
-  const ids=friends.map(f=>Number(f.friend?.requesterId)===userId?Number(f.friend?.addresseeId):Number(f.friend?.requesterId)).filter(Number.isFinite);
-  const base={type:'video',publicationTarget:{[Op.in]:['vibe','both']},isActive:true,expiresAt:{[Op.gt]:new Date()},vibeExpiresAt:{[Op.gt]:new Date()}};
-  // The app currently has a friends graph rather than a separate Follow table. Therefore
-  // "Following" is backed by the same accepted-connection set until a first-class follow
-  // relationship exists; it is not fabricated from arbitrary public users.
+  const friendIds=friends.map(f=>Number(f.friend?.requesterId)===userId?Number(f.friend?.addresseeId):Number(f.friend?.requesterId)).filter(Number.isFinite);
+  // FIX (FOLLOWING WAS IDENTICAL TO FRIENDS): this used to fold "following" into the same
+  // friend-connection query as "friends" because no Follow table existed. There is now a
+  // real, one-way Follow model (src/models/Follow.js, wired via /api/profiles/:userId/follow) —
+  // "Following" is the set of creators this user chose to follow, independent of whether
+  // they're also mutual friends.
+  const FollowModel=Follow();
+  const followingIds=FollowModel?await FollowModel.getFollowingIds(userId).catch(()=>[]):[];
+  const base={type:'video',publicationTarget:{[Op.in]:['vibe','both']},isActive:true,expiresAt:{[Op.gt]:new Date()},vibeExpiresAt:{[Op.gt]:new Date()},...(textFilter?{[Op.and]:[textFilter]}:{})};
   const byId=new Map();
-  if(mode==='forYou'||mode==='friends'||mode==='following'){
-    const rows=await Status().findAll({where:{...base,userId:{[Op.in]:[...ids,userId]}},order:[['createdAt','DESC']],limit:200});
+  if(mode==='forYou'||mode==='friends'){
+    const rows=await Status().findAll({where:{...base,userId:{[Op.in]:[...friendIds,userId]}},order:[['createdAt','DESC']],limit:200});
+    for(const s of rows) if(await canView(s,userId)) byId.set(String(s.id),await ownerPayload(s));
+  }
+  if((mode==='forYou'||mode==='following')&&followingIds.length){
+    const rows=await Status().findAll({where:{...base,userId:{[Op.in]:followingIds}},order:[['createdAt','DESC']],limit:200});
     for(const s of rows) if(await canView(s,userId)) byId.set(String(s.id),await ownerPayload(s));
   }
   if(mode==='forYou'||mode==='public'){
@@ -266,7 +289,22 @@ router.get('/vibes', authenticateToken, requireUser, apiRateLimiter, asyncHandle
     const mine=await Reaction.findAll({where:{statusId:{[Op.in]:[...byId.values()].map(v=>v.id)},userId},attributes:['statusId']}).catch(()=>[]);
     mine.forEach(r=>likedIds.add(Number(r.statusId)));
   }
-  const data=[...byId.values()].map(v=>({...v,likedByMe:likedIds.has(Number(v.id))}));
+  // FIX (NO FOLLOWER COUNT ANYWHERE): the Follow model now exists, but nothing surfaced a
+  // follower count anywhere in the UI. Batch one grouped count for every distinct creator in
+  // this response instead of a per-item query.
+  const followerCounts=new Map();
+  if(FollowModel&&byId.size){
+    const ownerIds=[...new Set([...byId.values()].map(v=>Number(v.owner?.id??v.userId)).filter(Number.isFinite))];
+    if(ownerIds.length){
+      const rows=await FollowModel.findAll({where:{followingId:{[Op.in]:ownerIds}},attributes:['followingId',[fn('COUNT',col('id')),'cnt']],group:['followingId']}).catch(()=>[]);
+      rows.forEach(r=>followerCounts.set(Number(r.get('followingId')),Number(r.get('cnt'))||0));
+    }
+  }
+  const followingSet=new Set(followingIds.map(String));
+  const data=[...byId.values()].map(v=>{
+    const ownerId=Number(v.owner?.id??v.userId);
+    return {...v,likedByMe:likedIds.has(Number(v.id)),isFollowedByMe:followingSet.has(String(ownerId)),owner:v.owner?{...v.owner,followerCount:followerCounts.get(ownerId)||0}:v.owner};
+  });
   res.set('Cache-Control','no-store');
   return res.json({success:true,mode,data});
 }));

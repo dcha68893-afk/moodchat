@@ -1,6 +1,15 @@
 const profileService = require('../services/profileService');
 const { AppError } = require('../middleware/errorHandler');
 const logger = require('../utils/logger');
+// FIX (FOLLOW/UNFOLLOW/FOLLOWERS/FOLLOWING WERE STUBS): followUser/unfollowUser always
+// returned success without writing anything, and getFollowers/getFollowing always returned
+// an empty list — there was no Follow model at all. This is the real, persisted version,
+// backed by the new Follow model (src/models/Follow.js). Also used by the Vibes "Following"
+// tab (src/routes/status.js) so it shows genuinely different content from "Friends".
+const db = require('../models');
+const getFollowModel = () => (db.models && db.models.Follow) || db.Follow || null;
+const getUsersModel = () => (db.models && db.models.Users) || db.Users || db.User || null;
+const getBlockModel = () => (db.models && db.models.UserBlock) || db.UserBlock || null;
 
 class ProfileController {
   async getProfile(req, res, next) {
@@ -411,11 +420,26 @@ class ProfileController {
         throw new AppError('Cannot follow yourself', 400);
       }
 
+      const Follow = getFollowModel();
+      if (!Follow) throw new AppError('Follow is unavailable', 503);
+      const Users = getUsersModel();
+      if (Users) {
+        const target = await Users.findByPk(Number(userId), { attributes: ['id'] });
+        if (!target) throw new AppError('User not found', 404);
+      }
+      const Block = getBlockModel();
+      if (Block && await Block.isBlockedEitherWay(followerId, userId)) {
+        throw new AppError('Unable to follow this user', 403);
+      }
+      await Follow.findOrCreate({ where: { followerId: Number(followerId), followingId: Number(userId) } });
+      const followerCount = await Follow.count({ where: { followingId: Number(userId) } });
+
       res.status(200).json({
         success: true,
         message: 'User followed successfully',
         data: {
-          following: true
+          following: true,
+          followerCount
         }
       });
     } catch (error) {
@@ -444,11 +468,17 @@ class ProfileController {
         throw new AppError('User ID is required', 400);
       }
 
+      const Follow = getFollowModel();
+      if (!Follow) throw new AppError('Follow is unavailable', 503);
+      await Follow.destroy({ where: { followerId: Number(followerId), followingId: Number(userId) } });
+      const followerCount = await Follow.count({ where: { followingId: Number(userId) } });
+
       res.status(200).json({
         success: true,
         message: 'User unfollowed successfully',
         data: {
-          following: false
+          following: false,
+          followerCount
         }
       });
     } catch (error) {
@@ -494,15 +524,31 @@ class ProfileController {
         throw new AppError('Invalid pagination parameters', 400);
       }
 
+      const Follow = getFollowModel();
+      const Users = getUsersModel();
+      if (!Follow || !Users) throw new AppError('Follow is unavailable', 503);
+      const target = Number(userId);
+      const total = await Follow.count({ where: { followingId: target } });
+      const rows = await Follow.findAll({
+        where: { followingId: target },
+        order: [['createdAt', options.sortOrder === 1 ? 'ASC' : 'DESC']],
+        offset: (options.page - 1) * options.limit,
+        limit: options.limit
+      });
+      const ids = rows.map(r => r.followerId);
+      const users = ids.length ? await Users.findAll({ where: { id: ids }, attributes: ['id', 'username', 'displayName', 'avatar'] }) : [];
+      const byId = new Map(users.map(u => [u.id, u.toJSON()]));
+      const followers = rows.map(r => ({ ...(byId.get(r.followerId) || { id: r.followerId }), followedAt: r.createdAt }));
+
       res.status(200).json({
         success: true,
         message: 'Followers retrieved successfully',
         data: {
-          followers: [],
-          total: 0,
+          followers,
+          total,
           page: options.page,
           limit: options.limit,
-          totalPages: 0
+          totalPages: Math.ceil(total / options.limit)
         }
       });
     } catch (error) {
@@ -544,15 +590,31 @@ class ProfileController {
         throw new AppError('Invalid pagination parameters', 400);
       }
 
+      const Follow = getFollowModel();
+      const Users = getUsersModel();
+      if (!Follow || !Users) throw new AppError('Follow is unavailable', 503);
+      const source = Number(userId);
+      const total = await Follow.count({ where: { followerId: source } });
+      const rows = await Follow.findAll({
+        where: { followerId: source },
+        order: [['createdAt', options.sortOrder === 1 ? 'ASC' : 'DESC']],
+        offset: (options.page - 1) * options.limit,
+        limit: options.limit
+      });
+      const ids = rows.map(r => r.followingId);
+      const users = ids.length ? await Users.findAll({ where: { id: ids }, attributes: ['id', 'username', 'displayName', 'avatar'] }) : [];
+      const byId = new Map(users.map(u => [u.id, u.toJSON()]));
+      const following = rows.map(r => ({ ...(byId.get(r.followingId) || { id: r.followingId }), followedAt: r.createdAt }));
+
       res.status(200).json({
         success: true,
         message: 'Following retrieved successfully',
         data: {
-          following: [],
-          total: 0,
+          following,
+          total,
           page: options.page,
           limit: options.limit,
-          totalPages: 0
+          totalPages: Math.ceil(total / options.limit)
         }
       });
     } catch (error) {
@@ -636,6 +698,18 @@ class ProfileController {
         throw new AppError('Cannot block yourself', 400);
       }
 
+      const Block = getBlockModel();
+      if (!Block) throw new AppError('Blocking is unavailable', 503);
+      const Follow = getFollowModel();
+      await Block.findOrCreate({ where: { blockerId: Number(blockerId), blockedId: Number(userId) }, defaults: { reason: reason ? String(reason).slice(0, 300) : null } });
+      // A block should also break any existing follow relationship in
+      // either direction — otherwise a blocked user could still show up
+      // in your Following feed (or you in theirs).
+      if (Follow) {
+        await Follow.destroy({ where: { followerId: Number(blockerId), followingId: Number(userId) } });
+        await Follow.destroy({ where: { followerId: Number(userId), followingId: Number(blockerId) } });
+      }
+
       res.status(200).json({
         success: true,
         message: 'User blocked successfully',
@@ -666,6 +740,10 @@ class ProfileController {
       if (!userId) {
         throw new AppError('User ID is required', 400);
       }
+
+      const Block = getBlockModel();
+      if (!Block) throw new AppError('Blocking is unavailable', 503);
+      await Block.destroy({ where: { blockerId: Number(blockerId), blockedId: Number(userId) } });
 
       res.status(200).json({
         success: true,
@@ -710,15 +788,30 @@ class ProfileController {
         throw new AppError('Invalid pagination parameters', 400);
       }
 
+      const Block = getBlockModel();
+      const Users = getUsersModel();
+      if (!Block || !Users) throw new AppError('Blocking is unavailable', 503);
+      const total = await Block.count({ where: { blockerId: Number(userId) } });
+      const rows = await Block.findAll({
+        where: { blockerId: Number(userId) },
+        order: [['createdAt', options.sortOrder === 1 ? 'ASC' : 'DESC']],
+        offset: (options.page - 1) * options.limit,
+        limit: options.limit
+      });
+      const ids = rows.map(r => r.blockedId);
+      const users = ids.length ? await Users.findAll({ where: { id: ids }, attributes: ['id', 'username', 'displayName', 'avatar'] }) : [];
+      const byId = new Map(users.map(u => [u.id, u.toJSON()]));
+      const blockedUsers = rows.map(r => ({ ...(byId.get(r.blockedId) || { id: r.blockedId }), reason: r.reason || null, blockedAt: r.createdAt }));
+
       res.status(200).json({
         success: true,
         message: 'Blocked users retrieved successfully',
         data: {
-          blockedUsers: [],
-          total: 0,
+          blockedUsers,
+          total,
           page: options.page,
           limit: options.limit,
-          totalPages: 0
+          totalPages: Math.ceil(total / options.limit)
         }
       });
     } catch (error) {
