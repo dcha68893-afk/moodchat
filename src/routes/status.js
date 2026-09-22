@@ -337,6 +337,40 @@ router.get('/vibes', authenticateToken, requireUser, apiRateLimiter, asyncHandle
 
 // Vibes "love" button: one tap toggles the caller's heart and answers with the real total.
 // (The client used to POST here but only /:statusId/like existed, so the count never changed.)
+router.post('/vibes/:statusId/watch', authenticateToken, requireUser, apiRateLimiter, asyncHandler(async (req,res)=>{
+  const userId=uid(req);
+  const status=await Status().findByPk(Number(req.params.statusId));
+  if(!status||status.type!=='video'||!['vibe','both'].includes(status.publicationTarget)||!(await canView(status,userId))){
+    return res.status(404).json({success:false,message:'This vibe is unavailable.'});
+  }
+  const Watch=M('VibeWatchStats');
+  if(!Watch)return res.status(503).json({success:false,message:'Vibe analytics are unavailable.'});
+  const seconds=Math.min(Math.max(Number(req.body?.secondsWatched)||0,0),3600);
+  const playCount=Math.min(Math.max(Number(req.body?.playCount)||0,0),100);
+  const completionCount=Math.min(Math.max(Number(req.body?.completionCount)||0,0),100);
+  const rewatchCount=Math.min(Math.max(Number(req.body?.rewatchCount)||0,0),100);
+  const [row,created]=await Watch.findOrCreate({where:{statusId:status.id,viewerId:userId},defaults:{secondsWatched:seconds,playCount,completionCount,rewatchCount}});
+  if(!created){
+    await row.update({
+      secondsWatched:Math.max(Number(row.secondsWatched)||0,seconds),
+      playCount:Math.max(Number(row.playCount)||0,playCount),
+      completionCount:Math.max(Number(row.completionCount)||0,completionCount),
+      rewatchCount:Math.max(Number(row.rewatchCount)||0,rewatchCount)
+    });
+  }
+  return res.json({success:true,data:row.toJSON()});
+}));
+
+router.get('/vibes/analytics/mine', authenticateToken, requireUser, apiRateLimiter, asyncHandler(async (req,res)=>{
+  const Watch=M('VibeWatchStats');
+  if(!Watch)return res.status(503).json({success:false,message:'Vibe analytics are unavailable.'});
+  const owned=await Status().findAll({where:{userId:uid(req),type:'video',publicationTarget:{[Op.in]:['vibe','both']}},attributes:['id','caption','createdAt','viewCount','reactionCount','replyCount','shareCount'],order:[['createdAt','DESC']],limit:500});
+  const ids=owned.map(s=>Number(s.id));
+  const rows=ids.length?await Watch.findAll({where:{statusId:{[Op.in]:ids}},order:[['updatedAt','DESC']],limit:2000}).catch(()=>[]):[];
+  const byId=new Map(owned.map(s=>[Number(s.id),s.toJSON()]));
+  return res.json({success:true,data:rows.map(r=>({...r.toJSON(),status:byId.get(Number(r.statusId))||null}))});
+}));
+
 router.post('/vibes/:statusId/love', authenticateToken, requireUser, apiRateLimiter, asyncHandler(async (req,res)=>{
   const userId=uid(req);
   const status=await Status().findByPk(Number(req.params.statusId));

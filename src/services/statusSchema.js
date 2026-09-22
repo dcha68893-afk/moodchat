@@ -118,6 +118,23 @@ async function applyStatusSchema(sequelize, transaction) {
   `);
 
   await q(`
+    CREATE TABLE IF NOT EXISTS "VibeWatchStats" (
+      "id" SERIAL PRIMARY KEY,
+      "statusId" INTEGER NOT NULL,
+      "viewerId" INTEGER NOT NULL,
+      "secondsWatched" DOUBLE PRECISION NOT NULL DEFAULT 0,
+      "playCount" INTEGER NOT NULL DEFAULT 0,
+      "completionCount" INTEGER NOT NULL DEFAULT 0,
+      "rewatchCount" INTEGER NOT NULL DEFAULT 0,
+      "createdAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS "VibeWatchStats_status_viewer_unique" ON "VibeWatchStats" ("statusId","viewerId");
+    CREATE INDEX IF NOT EXISTS "VibeWatchStats_status_idx" ON "VibeWatchStats" ("statusId");
+    CREATE INDEX IF NOT EXISTS "VibeWatchStats_viewer_idx" ON "VibeWatchStats" ("viewerId");
+  `);
+
+  await q(`
     CREATE TABLE IF NOT EXISTS "StatusReports" (
       "id" SERIAL PRIMARY KEY,
       "statusId" INTEGER NOT NULL,

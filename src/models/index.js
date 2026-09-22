@@ -194,6 +194,7 @@ const MODEL_WHITELIST = [
   'Media', 'Mood', 'Notes', 'File', 'Features', 'Category', 'Template',
   // ── Status / Story ──────────────────────────────────────────────────────────
   'Status', 'StatusView', 'StatusReaction', 'StatusReply', 'StatusComment', 'StatusLike',
+  'VibeWatchStats',
   // ── Push notifications ───────────────────────────────────────────────────────
   'PushSubscription',
   // ── Games ───────────────────────────────────────────────────────────────────
@@ -2080,6 +2081,7 @@ module.exports = {
   get StatusView() { return db.models.StatusView || null; },
   get StatusReaction() { return db.models.StatusReaction || null; },
   get StatusReply() { return db.models.StatusReply || null; },
+  get VibeWatchStats() { return db.models.VibeWatchStats || null; },
   get Call() { return db.models.Call || db.models.Calls || null; },
   get Category() { return db.models.Category || null; },
   get Template() { return db.models.Template || null; },
