@@ -117,7 +117,7 @@ app.use(express.urlencoded({
 // replaced or re-uploaded; Express static otherwise answers 416 and the video becomes a black
 // screen. A valid single range is preserved; an invalid/multi-range request is served from byte 0.
 const uploadsRoot=path.resolve(process.cwd(),'uploads');
-app.get(/^\\/uploads\\/(.+)$/, (req,res,next)=>{
+app.get(/^\/uploads\/(.+)$/, (req,res,next)=>{
   let relative;
   try{relative=decodeURIComponent(req.params[0]);}catch(_){return res.status(400).end();}
   const filePath=path.resolve(uploadsRoot,relative);
@@ -126,7 +126,7 @@ app.get(/^\\/uploads\\/(.+)$/, (req,res,next)=>{
     if(statErr||!st.isFile())return next();
     const range=req.headers.range;
     if(range){
-      const m=/^bytes=(\\d*)-(\\d*)$/.exec(String(range).trim());
+      const m=/^bytes=(\d*)-(\d*)$/.exec(String(range).trim());
       let valid=false;
       if(m){
         const start=m[1]===''?Math.max(0,st.size-Number(m[2]||0)):Number(m[1]);
