@@ -282,16 +282,35 @@ router.get('/vibes', authenticateToken, requireUser, apiRateLimiter, asyncHandle
   // source has been merged, instead of concatenating three separately-sorted blocks.
   const closeness=new Map();
   const bump=(id,w)=>{if(!closeness.has(id)||closeness.get(id)<w)closeness.set(id,w);};
-  if(mode==='forYou'||mode==='friends'){
+  // FIX (own vibe leaking into Friends/Public/Following tabs): this used to
+  // run ONE shared query for both 'forYou' and 'friends' with the viewer's
+  // own userId folded into the friend-id list, so clicking the Friends tab
+  // showed your own vibe alongside your friends' — and because the id list
+  // was shared, there was no way for forYou-only vs friends-only behavior to
+  // diverge. forYou and friends are now two separate queries: forYou still
+  // includes your own vibes (that's the one place they're meant to surface,
+  // per your own request), friends never does. Public/Following are also
+  // explicitly excluded of your own id now, so a vibe you posted only shows
+  // up when you're looking at "For You" — never when browsing Friends,
+  // Public, or Following, even if you set it to Public.
+  if(mode==='forYou'){
     const rows=await Status().findAll({where:{...base,userId:{[Op.in]:[...friendIds,userId]}},order:[['createdAt','DESC']],limit:200});
     for(const s of rows) if(await canView(s,userId)){byId.set(String(s.id),await ownerPayload(s));bump(String(s.id),3);}
   }
+  if(mode==='friends'&&friendIds.length){
+    const rows=await Status().findAll({where:{...base,userId:{[Op.in]:friendIds}},order:[['createdAt','DESC']],limit:200});
+    for(const s of rows) if(await canView(s,userId)){byId.set(String(s.id),await ownerPayload(s));bump(String(s.id),3);}
+  }
   if((mode==='forYou'||mode==='following')&&followingIds.length){
-    const rows=await Status().findAll({where:{...base,userId:{[Op.in]:followingIds}},order:[['createdAt','DESC']],limit:200});
-    for(const s of rows) if(await canView(s,userId)){byId.set(String(s.id),await ownerPayload(s));bump(String(s.id),2);}
+    const followIdsNotSelf=followingIds.filter(id=>id!==userId);
+    if(followIdsNotSelf.length){
+      const rows=await Status().findAll({where:{...base,userId:{[Op.in]:followIdsNotSelf}},order:[['createdAt','DESC']],limit:200});
+      for(const s of rows) if(await canView(s,userId)){byId.set(String(s.id),await ownerPayload(s));bump(String(s.id),2);}
+    }
   }
   if(mode==='forYou'||mode==='public'){
-    const pubs=await Status().findAll({where:{...base,isPublic:true},order:[['createdAt','DESC']],limit:200});
+    const pubWhere=mode==='public'?{...base,isPublic:true,userId:{[Op.ne]:userId}}:{...base,isPublic:true};
+    const pubs=await Status().findAll({where:pubWhere,order:[['createdAt','DESC']],limit:200});
     for(const s of pubs) if(await canView(s,userId)){byId.set(String(s.id),await ownerPayload(s));bump(String(s.id),1);}
   }
   const Reaction=M('StatusReaction'); const likedIds=new Set();

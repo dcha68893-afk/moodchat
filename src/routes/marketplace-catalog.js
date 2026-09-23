@@ -60,12 +60,36 @@ function sellerInclude(){
     : [];
 }
 
+// FIX (category → subcategory drilldown always "No products found", even
+// though the seller's listing is right there): the Tool model has no
+// dedicated subcategory/original_price/delivery_fee/location/weight/
+// short_description columns — Create Listing (marketplace-seller.js) saves
+// all of them inside the single JSONB `metadata` column instead (see
+// createProduct in marketplace.controller.js). This endpoint used to hand
+// back the raw row as-is, so those fields only ever existed nested under
+// `metadata.*`. The frontend's subcategory filter (_renderProductsPage in
+// Tool-ui.js) and its product normalizer (_normalizeProduct in
+// marketplace-ecommerce.js) both read `p.subcategory` at the TOP level with
+// no metadata fallback for it — so it was always empty/undefined and every
+// subcategory click filtered every listing out, category browsing was
+// otherwise unaffected (no subcategory filter), which is why the listing
+// still showed on Home/recent but never under its actual subcategory. Lift
+// the same fields marketplace.controller.js's _formatProduct() already
+// surfaces, so both response shapes agree and a listing is findable
+// wherever its category/subcategory says it should be.
 function normalizeRows(rows){
   return rows.map(row=>{
     const r=row.toJSON?row.toJSON():{...row};
+    const meta=r.metadata||{};
     r.userId=r.sellerId;
     if(!r.user&&r.seller)r.user={id:r.seller.id,displayName:r.seller.displayName||r.seller.username||'User',photoURL:r.seller.avatar||''};
     else if(!r.user)r.user={id:r.sellerId,displayName:'User',photoURL:''};
+    if(r.subcategory==null||r.subcategory==='')r.subcategory=meta.subcategory||'';
+    if(r.original_price==null)r.original_price=meta.original_price!=null?parseFloat(meta.original_price)||0:0;
+    if(r.delivery_fee==null)r.delivery_fee=meta.delivery_fee!=null?parseFloat(meta.delivery_fee)||0:0;
+    if(r.location==null||r.location==='')r.location=meta.location||'';
+    if(r.weight==null)r.weight=meta.weight!=null?parseFloat(meta.weight)||0:0;
+    if(r.short_description==null||r.short_description==='')r.short_description=meta.short_description||'';
     return r;
   });
 }
