@@ -133,6 +133,25 @@ router.post('/', asyncHandler(async (req, res) => {
   }
 }));
 
+// ── GET /delivery-status/:messageId — durable sender-side lifecycle check
+router.get('/delivery-status/:messageId', asyncHandler(async (req, res) => {
+  const userId = getUserId(req);
+  if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
+  const messageId = safeInt(req.params.messageId);
+  if (!messageId) return res.status(400).json({ success: false, message: 'Invalid messageId' });
+  const sequelize = getSequelize();
+  const [row] = await sequelize.query(
+    `SELECT id, "chatId", "senderId", "receiverId", status, "sentAt", "deliveredAt"
+       FROM "Messages" WHERE id = :messageId LIMIT 1`,
+    { replacements: { messageId }, type: sequelize.QueryTypes.SELECT }
+  ).catch(() => [null]);
+  if (!row) return res.status(404).json({ success: false, message: 'Message not found' });
+  if (Number(row.senderId) !== Number(userId) && Number(row.receiverId) !== Number(userId)) {
+    return res.status(403).json({ success: false, message: 'Not a participant of this message' });
+  }
+  return res.json({ success: true, data: row });
+}));
+
 // ── GET /:chatId — load conversation history (cursor-paginated) ─────────────
 // Query: ?before=<messageId>&limit=50 — returns messages older than `before`,
 // oldest-first, so the client can prepend without re-fetching what it has.

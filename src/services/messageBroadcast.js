@@ -98,21 +98,9 @@ async function broadcastNewMessage(message, senderId) {
     });
   }
 
-  // STATUS-ONLY SENDER ACK:
-  // This is deliberately a separate lifecycle acknowledgement, not a message
-  // delivery path. It contains no message body, so the sender's optimistic
-  // bubble is never re-rendered and E2E decrypt is never invoked on its own
-  // ciphertext. The existing frontend already understands message:delivered
-  // and updates the existing bubble by messageId.
-  if (delivered.length > 0 && Number.isInteger(senderIdInt) && senderIdInt > 0) {
-    await wsService.sendToUser(senderIdInt, 'message:delivered', {
-      chatId: chatIdInt,
-      messageId: message.id,
-      clientMessageId: message.clientMessageId || null,
-      status: 'delivered',
-      deliveredAt: new Date().toISOString(),
-    }).catch(() => {});
-  }
+  // Do not mark a message DELIVERED merely because Socket.IO accepted an emit.
+  // The receiver's explicit message:delivery_ack is the authoritative lifecycle
+  // transition; this avoids false two-tick states during background/reconnect races.
 
   await messageDeliveryService.notifyMessageRecipients(message, recipientIds, {
     push: true,

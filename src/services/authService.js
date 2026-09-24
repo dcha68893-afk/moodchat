@@ -327,6 +327,9 @@ class AuthService {
         const updates = { lastSeen: new Date(), status: 'online' };
         if (!user.googleId) updates.googleId = googleId;
         if (!user.isVerified) updates.isVerified = true;
+        const currentAvatar = String(user.avatar || '');
+        const hasRealAvatar = currentAvatar && !/ui-avatars\.com\/api\/\?name=(User|user)(?:&|$)/i.test(currentAvatar);
+        if (!hasRealAvatar && payload.picture) updates.avatar = payload.picture;
         // ROOT-CAUSE FIX (same as above): also backfill firstName/lastName
         // on an EXISTING account if they're still empty from a previous
         // sign-in that hit this gap — otherwise a user created before this

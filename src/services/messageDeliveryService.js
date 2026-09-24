@@ -503,17 +503,32 @@ class MessageDeliveryService {
   /** Recipient's client confirms it actually stored the message locally. */
   async markDelivered(messageId, userId) {
     const sequelize = getSequelize();
+    const mid = parseInt(messageId, 10), uid = parseInt(userId, 10);
+    if (!mid || !uid) throw new ValidationError('Invalid delivery acknowledgement');
+    const [msg] = await sequelize.query(
+      `SELECT id, "chatId", "senderId" FROM "Messages"
+       WHERE id = :messageId AND "isDeleted" = false LIMIT 1`,
+      { replacements: { messageId: mid }, type: sequelize.QueryTypes.SELECT }
+    );
+    if (!msg || Number(msg.senderId) === uid) return false;
+    const [recipient] = await sequelize.query(
+      `SELECT 1 FROM chat_participants WHERE "chatId" = :chatId AND "userId" = :userId LIMIT 1`,
+      { replacements: { chatId: msg.chatId, userId: uid }, type: sequelize.QueryTypes.SELECT }
+    );
+    if (!recipient) return false;
     await sequelize.query(
-      `UPDATE "Messages" SET "deliveredAt" = NOW(), status = CASE WHEN status = 'sent' THEN 'delivered' ELSE status END
+      `UPDATE "Messages" SET "deliveredAt" = NOW(),
+          status = CASE WHEN status IN ('sent','sending') THEN 'delivered' ELSE status END
        WHERE id = :messageId AND "deliveredAt" IS NULL`,
-      { replacements: { messageId } }
+      { replacements: { messageId: mid } }
     );
     await sequelize.query(
       `INSERT INTO message_delivery_logs ("messageId","userId","chatId","event","createdAt")
-       SELECT :messageId, :userId, "chatId", 'delivered', NOW() FROM "Messages" WHERE id = :messageId
+       VALUES (:messageId,:userId,:chatId,'delivered',NOW())
        ON CONFLICT ("messageId","userId","event") DO NOTHING`,
-      { replacements: { messageId, userId } }
+      { replacements: { messageId: mid, userId: uid, chatId: msg.chatId } }
     ).catch(() => {});
+    return true;
   }
 
   /** Recipient opened the chat / read the message. */
