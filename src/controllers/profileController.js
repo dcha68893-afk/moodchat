@@ -10,6 +10,7 @@ const db = require('../models');
 const getFollowModel = () => (db.models && db.models.Follow) || db.Follow || null;
 const getUsersModel = () => (db.models && db.models.Users) || db.Users || db.User || null;
 const getBlockModel = () => (db.models && db.models.UserBlock) || db.UserBlock || null;
+const notificationService = require('../services/notificationService');
 
 class ProfileController {
   async getProfile(req, res, next) {
@@ -431,7 +432,17 @@ class ProfileController {
       if (Block && await Block.isBlockedEitherWay(followerId, userId)) {
         throw new AppError('Unable to follow this user', 403);
       }
-      await Follow.findOrCreate({ where: { followerId: Number(followerId), followingId: Number(userId) } });
+      const [followRow, created] = await Follow.findOrCreate({ where: { followerId: Number(followerId), followingId: Number(userId) } });
+      if (created) {
+        const follower = Users ? await Users.findByPk(Number(followerId), { attributes: ['id','username','displayName','avatar'] }).catch(() => null) : null;
+        await notificationService.createFromTemplate(Number(userId), 'follow_received', {
+          followerId: Number(followerId),
+          followerName: follower?.displayName || follower?.username || 'Someone',
+          followerAvatar: follower?.avatar || null,
+          followId: followRow?.id || null,
+          actions: ['follow_back', 'dismiss']
+        }).catch(error => logger.warn('Follow notification failed:', error.message));
+      }
       const followerCount = await Follow.count({ where: { followingId: Number(userId) } });
 
       res.status(200).json({
