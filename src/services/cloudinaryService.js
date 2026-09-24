@@ -54,6 +54,7 @@ async function uploadToCloudinary(fileData, options = {}) {
     height = null,
     crop = 'fill',
     gravity = 'face:auto',
+    timeoutMs = 15000,
   } = options;
 
   const uploadOpts = {
@@ -67,7 +68,7 @@ async function uploadToCloudinary(fileData, options = {}) {
   return new Promise((resolve, reject) => {
     const uploadTimeout = setTimeout(() => {
       reject(new Error('Cloudinary upload timed out; check the server media configuration.'));
-    }, 15000);
+    }, timeoutMs);
 
     let uploadStream;
     try {
@@ -81,6 +82,7 @@ async function uploadToCloudinary(fileData, options = {}) {
           height: result.height,
           format: result.format,
           bytes: result.bytes,
+          duration: result.duration,
         });
       });
     } catch (error) {

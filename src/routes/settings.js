@@ -1,5 +1,7 @@
 ﻿const path = require('path');
 const asyncHandler = require('express-async-handler');
+// Per-request settings logs are debug-only (free-tier log volume). Enable with DEBUG_SETTINGS=1.
+const debugLog = process.env.DEBUG_SETTINGS === '1' ? console.log.bind(console) : () => {};
 const express = require('express');
 const router = express.Router();
 // ── CRITICAL: Inject global.__socketIO into req.io so all handlers can emit ──
@@ -624,7 +626,7 @@ const getSettingsHandler = asyncHandler(async (req, res) => {
     const { user, settingsRow } = await _getUserAndSettings(userId);
     const settingsPayload = _buildSettingsResponse(user, settingsRow);
 
-    console.log('[Settings] Loaded settings for user:', userId);
+    debugLog('[Settings] Loaded settings for user:', userId);
     return res.status(200).json({
         success: true,
         status: 'success',
@@ -833,7 +835,7 @@ const updateProfileHandler = asyncHandler(async (req, res) => {
     });
 
     _emitSettingsUpdated(req, settingsPayload);
-    console.log('[Settings] Saved profile settings for user:', userId);
+    debugLog('[Settings] Saved profile settings for user:', userId);
 
     const uploadWarnings = {};
     if (avatarUploadError) uploadWarnings.avatar = avatarUploadError;
@@ -858,7 +860,7 @@ const updateNotificationsHandler = asyncHandler(async (req, res) => {
     const settingsPayload = await _persistSettingsSnapshot(userId, { notifications: payload });
 
     _emitSettingsUpdated(req, settingsPayload);
-    console.log('[Settings] Saved notification settings for user:', userId);
+    debugLog('[Settings] Saved notification settings for user:', userId);
 
     return res.status(200).json({
         success: true,
@@ -881,7 +883,7 @@ const updateThemeHandler = asyncHandler(async (req, res) => {
 
     const settingsPayload = await _persistSettingsSnapshot(userId, { appearance: { theme } });
     _emitSettingsUpdated(req, settingsPayload);
-    console.log('[Settings] Saved theme for user:', userId, theme);
+    debugLog('[Settings] Saved theme for user:', userId, theme);
 
     return res.status(200).json({
         success: true,
@@ -900,7 +902,7 @@ const updateLanguageHandler = asyncHandler(async (req, res) => {
     const language = _normalizeLanguage(req.body && req.body.language);
     const settingsPayload = await _persistSettingsSnapshot(userId, { appearance: { language } });
     _emitSettingsUpdated(req, settingsPayload);
-    console.log('[Settings] Saved language for user:', userId, language);
+    debugLog('[Settings] Saved language for user:', userId, language);
 
     return res.status(200).json({
         success: true,
@@ -929,7 +931,7 @@ const updatePrivacyHandler = asyncHandler(async (req, res) => {
         const user = await User.findByPk(userId, { attributes: ['id', 'username', 'avatar', 'coverPhoto', 'bio', 'firstName', 'lastName', 'isVerified', 'status', 'lastSeen'] });
         if (user) broadcastIdentityUpdate(userId, user, ['privacy']).catch(() => {});
     }
-    console.log('[Settings] Saved privacy settings for user:', userId);
+    debugLog('[Settings] Saved privacy settings for user:', userId);
 
     return res.status(200).json({
         success: true,
@@ -947,7 +949,7 @@ const updateAllSettingsHandler = asyncHandler(async (req, res) => {
 
     const settingsPayload = await _persistSettingsSnapshot(userId, req.body || {});
     _emitSettingsUpdated(req, settingsPayload);
-    console.log('[Settings] Saved full settings snapshot for user:', userId);
+    debugLog('[Settings] Saved full settings snapshot for user:', userId);
 
     return res.status(200).json({
         success: true,
@@ -965,7 +967,7 @@ const resetSettingsHandler = asyncHandler(async (req, res) => {
 
     const settingsPayload = await _persistSettingsSnapshot(userId, _clone(DEFAULT_SETTINGS));
     _emitSettingsUpdated(req, settingsPayload);
-    console.log('[Settings] Reset settings for user:', userId);
+    debugLog('[Settings] Reset settings for user:', userId);
 
     return res.status(200).json({
         success: true,

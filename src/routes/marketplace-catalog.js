@@ -77,9 +77,27 @@ function sellerInclude(){
 // the same fields marketplace.controller.js's _formatProduct() already
 // surfaces, so both response shapes agree and a listing is findable
 // wherever its category/subcategory says it should be.
+// Listing photos are stored exactly as uploaded: often "/uploads/..." paths, sometimes a JSON
+// string. A relative path is a 404 for the app (it resolves against the app's own origin), which
+// the UI then replaces with stock category art. Always return absolute image URLs.
+function absoluteImages(r){
+  let imgs=r.images;
+  if(typeof imgs==='string'){try{imgs=JSON.parse(imgs)}catch(_){imgs=imgs?[imgs]:[]}}
+  if(!Array.isArray(imgs))imgs=[];
+  const base=(process.env.RENDER_EXTERNAL_URL||process.env.BACKEND_URL||require('../utils/requestContext').getRequestBaseUrl()||'').replace(/\/+$/,'');
+  return imgs.map(u=>{
+    if(u&&typeof u==='object')u=u.url||u.src||'';
+    if(!u||typeof u!=='string')return '';
+    if(/^(https?:|data:)/i.test(u))return u;
+    return base?base+(u.startsWith('/')?'':'/')+u:u;
+  }).filter(Boolean);
+}
+
 function normalizeRows(rows){
   return rows.map(row=>{
     const r=row.toJSON?row.toJSON():{...row};
+    r.images=absoluteImages(r);
+    if(!r.image&&r.images.length)r.image=r.images[0];
     const meta=r.metadata||{};
     r.userId=r.sellerId;
     if(!r.user&&r.seller)r.user={id:r.seller.id,displayName:r.seller.displayName||r.seller.username||'User',photoURL:r.seller.avatar||''};
@@ -121,7 +139,7 @@ async function listingsOnce(req,res,next){try{const result=await searchListings(
 router.get('/listings',listingsOnce);
 router.get('/search',listingsOnce);
 router.get('/products',listingsOnce);
-router.get('/products/:id',async(req,res,next)=>{try{const row=await Tool.findByPk(req.params.id);if(!row)return res.status(404).json({success:false,message:'Listing not found'});return res.json({success:true,data:row});}catch(e){next(e)}});
+router.get('/products/:id',async(req,res,next)=>{try{const row=await Tool.findByPk(req.params.id);if(!row)return res.status(404).json({success:false,message:'Listing not found'});return res.json({success:true,data:normalizeRows([row])[0]});}catch(e){next(e)}});
 
 router.post('/listings',async(req,res,next)=>{try{const row=await Tool.create({...req.body,sellerId:req.user?.userId||req.user?.id});return res.status(201).json({success:true,data:row});}catch(e){next(e)}});
 router.patch('/listings/:id',async(req,res,next)=>{try{const row=await Tool.findByPk(req.params.id);if(!row)return res.status(404).json({success:false,message:'Listing not found'});if(Number(row.sellerId)!==Number(req.user?.userId||req.user?.id))return res.status(403).json({success:false,message:'Seller access required'});await row.update(req.body);return res.json({success:true,data:row});}catch(e){next(e)}});

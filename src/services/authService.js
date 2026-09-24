@@ -250,10 +250,13 @@ class AuthService {
         throw new Error('Google sign-in is not configured on the server');
       }
       const client = new OAuth2Client(googleClientId);
+      // Web sign-in and the native Android app both issue tokens whose audience is the
+      // WEB client ID. GOOGLE_CLIENT_ID may hold a comma-separated list if more are needed.
+      const allowedAudiences = googleClientId.split(',').map(v => v.trim()).filter(Boolean);
 
       let payload;
       try {
-        const ticket = await client.verifyIdToken({ idToken, audience: googleClientId });
+        const ticket = await client.verifyIdToken({ idToken, audience: allowedAudiences });
         payload = ticket.getPayload();
       } catch (verifyErr) {
         console.error('❌ [AuthService] Google token verification failed:', verifyErr.message);

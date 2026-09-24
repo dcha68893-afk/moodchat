@@ -134,6 +134,10 @@ module.exports = (sequelize, DataTypes) => {
         {
           fields: ['user_id', 'is_read'],
         },
+        {
+          name: 'idx_notifications_user_created',
+          fields: ['user_id', 'created_at'],
+        },
       ],
     }
   );

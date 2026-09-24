@@ -8,6 +8,19 @@ const { ensureStatusSchema } = require('../services/statusSchema');
 const { apiRateLimiter } = require('../middleware/rateLimiter');
 
 const router = express.Router();
+const { AsyncLocalStorage } = require('async_hooks');
+// Request-scoped memo for canView()/ownerPayload(). A feed of N statuses used to cost
+// ~1 user lookup + 1-2 block/friend lookups PER STATUS (hundreds of queries for one
+// /vibes call). Now each distinct owner / block pair / viewer-friend list is loaded once
+// per request. It lives only for the request, so blocks and friendships are never stale.
+const requestMemo = new AsyncLocalStorage();
+router.use((req, _res, next) => requestMemo.run({ owners: new Map(), blocks: new Map(), friends: new Map() }, next));
+function memo(kind, key, load) {
+  const store = requestMemo.getStore();
+  if (!store) return load();
+  if (!store[kind].has(key)) store[kind].set(key, load());
+  return store[kind].get(key);
+}
 const db = () => require('../models');
 // FIX-STATUS-MODELS: models/index.js only exposes getters for some models (User, Status,
 // StatusView, ...) — there is NO `Users` or `StatusReport` property, so db().Users was
@@ -42,7 +55,7 @@ const safeUrl = value => typeof value === 'string' && /^https?:\/\/\S+$/i.test(v
 
 async function ownerPayload(status) {
   const UserModel = Users();
-  const user = UserModel ? await UserModel.findByPk(status.userId, { attributes: ['id', 'username', 'displayName', 'avatar'] }).catch(() => null) : null;
+  const user = UserModel ? await memo('owners', String(status.userId), () => UserModel.findByPk(status.userId, { attributes: ['id', 'username', 'displayName', 'avatar'] }).catch(() => null)) : null;
   return {
     ...status.toJSON(),
     owner: user ? user.toJSON() : { id: status.userId, username: 'User', displayName: 'User', avatar: null },
@@ -58,7 +71,7 @@ async function canView(status, viewerId) {
   // enforce it here so it's a single check every status/vibe view already goes through, in
   // both directions (you blocked them, or they blocked you).
   const BlockModel = UserBlock();
-  if (BlockModel && await BlockModel.isBlockedEitherWay(viewerId, status.userId).catch(() => false)) return false;
+  if (BlockModel && await memo('blocks', viewerId + ':' + status.userId, () => BlockModel.isBlockedEitherWay(viewerId, status.userId).catch(() => false))) return false;
   if (status.isPublic || status.privacy === 'public') return true;
   if (status.privacy === 'private') return false;
   const list = Array.isArray(status.privacyList) ? status.privacyList.map(Number) : [];
@@ -67,13 +80,13 @@ async function canView(status, viewerId) {
   if (status.privacy === 'close_friends') {
     const FriendModel = Friend();
     if (!FriendModel) return false;
-    const rows = await FriendModel.getUserFriends(viewerId, 'accepted').catch(() => []);
+    const rows = await memo('friends', String(viewerId), () => FriendModel.getUserFriends(viewerId, 'accepted').catch(() => []));
     const ids = rows.map(f => Number(f.friend?.requesterId) === viewerId ? Number(f.friend?.addresseeId) : Number(f.friend?.requesterId));
     return ids.includes(Number(status.userId));
   }
   const FriendModel = Friend();
   if (!FriendModel) return false;
-  const rows = await FriendModel.getUserFriends(viewerId, 'accepted').catch(() => []);
+  const rows = await memo('friends', String(viewerId), () => FriendModel.getUserFriends(viewerId, 'accepted').catch(() => []));
   const ids = rows.map(f => Number(f.friend?.requesterId) === viewerId ? Number(f.friend?.addresseeId) : Number(f.friend?.requesterId));
   return ids.includes(Number(status.userId));
 }
@@ -351,6 +364,13 @@ router.get('/vibes', authenticateToken, requireUser, apiRateLimiter, asyncHandle
     data=data.map(v=>({v,s:score(v)})).sort((a,b)=>b.s-a.s).map(x=>x.v);
   }
   res.set('Cache-Control','no-store');
+  // Optional paging over the ranked list (?limit=&offset=). Without ?limit the full list is
+  // returned exactly as before, so existing clients keep working while the app opts in.
+  const pageLimit=Math.min(Math.max(parseInt(req.query.limit,10)||0,0),100);
+  if(pageLimit){
+    const offset=Math.max(parseInt(req.query.offset,10)||0,0);
+    return res.json({success:true,mode,data:data.slice(offset,offset+pageLimit),hasMore:data.length>offset+pageLimit,nextOffset:offset+pageLimit});
+  }
   return res.json({success:true,mode,data});
 }));
 

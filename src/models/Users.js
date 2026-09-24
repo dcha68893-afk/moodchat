@@ -1,6 +1,14 @@
 // --- MODEL: Users.js ---
 // SINGLE SOURCE OF TRUTH FOR USER MODEL
 const bcrypt = require('bcryptjs');
+
+function absoluteMediaUrl(u) {
+  if (!u || typeof u !== 'string' || /^(https?:|data:|blob:)/i.test(u)) return u;
+  if (!u.startsWith('/')) return u;
+  let base = process.env.RENDER_EXTERNAL_URL || process.env.BACKEND_URL || '';
+  if (!base) { try { base = require('../utils/requestContext').getRequestBaseUrl() || ''; } catch (_) {} }
+  return base ? base.replace(/\/+$/, '') + u : u;
+}
 // P1 FIX (Forensic Audit): consistent SHA-256 pre-hash + bcrypt compare
 const { comparePassword } = require('../utils/passwordUtils');
 
@@ -76,11 +84,18 @@ module.exports = (sequelize, DataTypes) => {
       avatar: {
         type: DataTypes.STRING,
         allowNull: true,
-        defaultValue: 'https://ui-avatars.com/api/?name=User&background=random&color=fff'
+        defaultValue: 'https://ui-avatars.com/api/?name=User&background=random&color=fff',
+        // Uploaded avatars are stored as "/uploads/..." paths. Every endpoint serialises this
+        // field, and a relative path resolves against the CLIENT's origin (https://localhost in the
+        // Play Store app, the static site in the browser) and 404s, so other people's profile
+        // pictures never loaded. Reading it always yields an absolute URL; the stored value is
+        // unchanged (getDataValue still returns the raw path).
+        get() { return absoluteMediaUrl(this.getDataValue('avatar')); }
       },
       coverPhoto: {
         type: DataTypes.TEXT,
         allowNull: true,
+        get() { return absoluteMediaUrl(this.getDataValue('coverPhoto')); }
       },
       firstName: {
         type: DataTypes.STRING(50),
