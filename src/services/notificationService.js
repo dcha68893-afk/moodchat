@@ -314,6 +314,7 @@ class NotificationService {
       status_like: 'reactions',
       status_comment: 'mentions',
       status_question_answer: 'mentions',
+      follow_received: 'mentions',
       on_this_day: 'mentions',
     };
 
@@ -429,6 +430,14 @@ class NotificationService {
         actionUrl: `/status?view=${data.statusId}`,
       },
       // P3 FIX: On This Day memory notification
+      follow_received: {
+        type: 'follow_received',
+        title: 'New follower',
+        body: `${data.followerName || 'Someone'} followed you`,
+        data: { ...data, actions: Array.isArray(data.actions) ? data.actions : ['follow_back','dismiss'] },
+        priority: 'medium',
+        actionUrl: `/profile/${data.followerId}`,
+      },
       on_this_day: {
         type: 'on_this_day',
         title: 'Memory from ${data.yearsAgo} year${data.yearsAgo > 1 ? "s" : ""} ago',
