@@ -43,8 +43,10 @@ const safeInt = (val) => {
 // Private helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
+const { fixUserRow } = require('../utils/absoluteMediaUrl');
+
 async function _getParticipants(sequelize, chatId) {
-    return sequelize.query(
+    const rows = await sequelize.query(
         `SELECT u.id, u.username, u.avatar, u."firstName", u."lastName",
                 u.status, u."lastSeen", u.email
          FROM chat_participants cp
@@ -52,6 +54,8 @@ async function _getParticipants(sequelize, chatId) {
          WHERE cp."chatId" = :chatId`,
         { replacements: { chatId }, type: sequelize.QueryTypes.SELECT }
     );
+    // FIX: raw SQL skips the Users.avatar getter -> make /uploads/... photos absolute for every viewer
+    return rows.map(fixUserRow);
 }
 
 async function _getUnreadCount(sequelize, chatId, userId) {

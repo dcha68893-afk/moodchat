@@ -403,13 +403,6 @@ module.exports = (sequelize, DataTypes) => {
           }
         },
         beforeUpdate: async (user) => {
-          // Repair legacy/manual accounts that were stored without a real avatar.
-          // Normal login updates pass through this hook, so old accounts self-heal
-          // without overwriting an uploaded or Google-provided photo.
-          if (!user.avatar || /^https?:\/\/ui-avatars\.com\/api\/\?name=User(?:&|$)/i.test(String(user.avatar))) {
-            const avatarName = [user.firstName, user.lastName].filter(Boolean).join(' ').trim() || user.username || 'User';
-            user.avatar = `https://ui-avatars.com/api/?name=${encodeURIComponent(avatarName)}&background=random&color=fff`;
-          }
           // Only hash if password changed and not already hashed
           if (user.changed('password')) {
             if (user.password && user.password.length > 0 && !user.password.startsWith('$2b$')) {
