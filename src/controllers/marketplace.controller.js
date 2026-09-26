@@ -104,7 +104,7 @@ class MarketplaceController {
     // ── GET /api/marketplace/products ─────────────────────────────────────────
     async getProducts(req, res, next) {
         try {
-            const { page=1, limit=40, category, type, search, sort='newest',
+            const { page=1, limit=40, category, subcategory, type, search, sort='newest',
                     seller_id, min_price, max_price, featured, available='true' } = req.query;
 
             const T = Model.Tool;
@@ -138,6 +138,18 @@ class MarketplaceController {
                 delete where.available;
             }
             if (category)  where.category  = category;
+            // ROOT-CAUSE FIX ("No products found" on every leaf category):
+            // this endpoint is a second, independent listing-search
+            // implementation (reached via marketplace.routes.js -> here),
+            // separate from marketplace-catalog.js's searchListings(). It
+            // had the exact same gap: Tool.category only ever holds the
+            // broad top-level value ('appliances'), never the leaf value a
+            // buyer actually clicks ('fridges', 'cookers', 'irons'...),
+            // which lives only in metadata.subcategory. No subcategory
+            // filter existed here at all, so every leaf-category click on
+            // this path also matched zero rows, in every vertical, exactly
+            // as on the other path.
+            if (subcategory) where['metadata.subcategory'] = subcategory;
             if (type)      where.type      = type;
             if (seller_id) where.sellerId  = seller_id;
             if (featured === 'true') where.isFeatured = true;

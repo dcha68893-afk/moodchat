@@ -117,6 +117,18 @@ async function searchListings(req){
   const page=Math.max(Number(req.query.page)||1,1),limit=Math.min(Number(req.query.limit)||24,100);
   const where={status:'active',available:true};
   if(req.query.category)where.category=req.query.category;
+  // ROOT-CAUSE FIX ("No products found" on every leaf category, e.g. Fridges,
+  // Cookers, Irons -- even though the seller's listing is approved and right
+  // there): the category tree shown to buyers (Physical > Appliances >
+  // Cooling & Heating > Fridges) is 3-4 levels deep, but Tool.category only
+  // ever holds the broad top-level value ('appliances') -- it's validated
+  // against MARKETPLACE_CATEGORIES, a flat one-level vocabulary with no
+  // 'fridges', 'cookers', 'irons', etc. at all. The leaf value a seller
+  // actually picks lives only in metadata.subcategory (lifted to the
+  // top-level `subcategory` field on the way OUT, in normalizeRows() below)
+  // but was never accepted as a filter on the way IN here -- so every
+  // leaf-category click silently matched zero rows, in every vertical.
+  if(req.query.subcategory)where['metadata.subcategory']=req.query.subcategory;
   if(req.query.type)where.type=req.query.type;
   if(req.query.minPrice!==undefined||req.query.maxPrice!==undefined){where.price={};if(req.query.minPrice!==undefined)where.price[Op.gte]=req.query.minPrice;if(req.query.maxPrice!==undefined)where.price[Op.lte]=req.query.maxPrice;}
   if(q){
