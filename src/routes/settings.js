@@ -341,6 +341,7 @@ function _buildSettingsResponse(user, settingsRow) {
             lastSeen,
             readReceipts: priv.readReceipts !== false && snapshot.privacy.readReceipts !== false,
             typingIndicators: priv.typingIndicators !== false && snapshot.privacy.typingIndicators !== false,
+            canMessageMe: priv.canMessageMe || snapshot.privacy.canMessageMe || 'everyone',
             whoCanAddMe: priv.whoCanAddMe || snapshot.privacy.whoCanAddMe || 'everyone',
             contactDiscovery: priv.contactDiscovery !== false && snapshot.privacy.contactDiscovery !== false,
             statusVisibility
@@ -551,6 +552,7 @@ async function _persistSettingsSnapshot(userId, partialPayload) {
                 profileVisibility: snapshot.privacy && (snapshot.privacy.profileVisibility || snapshot.privacy.photoVisibility),
                 readReceipts: snapshot.privacy && snapshot.privacy.readReceipts !== false,
                 typingIndicators: snapshot.privacy && snapshot.privacy.typingIndicators !== false,
+                canMessageMe: snapshot.privacy && snapshot.privacy.canMessageMe || 'everyone',
                 onlineStatus: snapshot.privacy && snapshot.privacy.onlineStatus !== false,
                 lastSeen: snapshot.privacy && snapshot.privacy.lastSeen,
                 whoCanAddMe: snapshot.privacy && snapshot.privacy.whoCanAddMe,
@@ -595,6 +597,7 @@ async function _persistSettingsSnapshot(userId, partialPayload) {
                 profileVisibility: normalized.privacy.profileVisibility,
                 readReceipts: normalized.privacy.readReceipts !== false,
                 typingIndicators: normalized.privacy.typingIndicators !== false,
+                canMessageMe: normalized.privacy.canMessageMe || 'everyone',
                 onlineStatus: normalized.privacy.onlineStatus !== false,
                 lastSeen: normalized.privacy.lastSeen,
                 whoCanAddMe: normalized.privacy.whoCanAddMe,
