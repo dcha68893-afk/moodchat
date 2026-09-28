@@ -528,6 +528,15 @@ class MessageDeliveryService {
     );
     if (!recipient) return { delivered: false };
 
+    // A direct-message delivery ACK is authoritative only from the actual
+    // receiver. Being a participant is not enough: otherwise another
+    // participant could acknowledge someone else's message and cause the
+    // temporary server mailbox copy to be deleted before the real recipient
+    // receives it.
+    if (msg.receiverId != null && Number(msg.receiverId) !== uid) {
+      return { delivered: false };
+    }
+
     // The frontend sends this ACK only after the message has been written to
     // its local encrypted IndexedDB. Marking delivery and deleting the server
     // mailbox copy are therefore one lifecycle step. This is the same mailbox
