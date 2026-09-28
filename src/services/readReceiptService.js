@@ -41,6 +41,22 @@ class ReadReceiptService {
         throw new ForbiddenError('You are not a participant in this conversation');
       }
 
+      // FIX (Privacy architecture audit, item #7 continued): Settings >
+      // Privacy > "Read Receipts" saved correctly but nothing on the
+      // backend ever consulted it — a message got marked (and broadcast
+      // to the sender) as read for every user regardless of what they'd
+      // chosen. Checked here, against the READER's own setting (whether
+      // *they* want others to see they've read a message), not the
+      // sender's — same "the account whose data it is controls it" pattern
+      // as the messaging/group-add privacy fixes.
+      const Users = db.Users || db.models?.Users;
+      if (Users) {
+        const reader = await Users.findByPk(userId, { attributes: ['settings'] });
+        if (reader?.settings?.privacy?.readReceipts === false) {
+          return { messageId, userId, readAt: null, suppressed: true };
+        }
+      }
+
       // Upsert read receipt
       const [receipt] = await ReadReceipt.findOrCreate({
         where: { messageId, userId },
@@ -73,6 +89,16 @@ class ReadReceiptService {
 
       const isParticipant = chat.userId1 === userId || chat.userId2 === userId || chat.groupId != null;
       if (!isParticipant) throw new ForbiddenError('You are not a participant in this conversation');
+
+      // FIX (Privacy architecture audit, item #7 continued): same gap and
+      // same fix as markAsRead() above — see that function's comment.
+      const Users = db.Users || db.models?.Users;
+      if (Users) {
+        const reader = await Users.findByPk(userId, { attributes: ['settings'] });
+        if (reader?.settings?.privacy?.readReceipts === false) {
+          return { message: 'Read receipts are disabled for this account', messagesMarked: 0, timestamp: new Date(), suppressed: true };
+        }
+      }
 
       // Find message IDs already read by this user in this chat
       const alreadyRead = await ReadReceipt.findAll({

@@ -51,6 +51,24 @@ const REQUIRED_COLUMNS = [
     table: 'Users', column: 'deletionRequestedAt',
     sql: `ALTER TABLE "Users" ADD COLUMN IF NOT EXISTS "deletionRequestedAt" TIMESTAMP WITH TIME ZONE`,
   },
+  // FIX (Play Store audit follow-up): Users.hasLocalPassword was added to the
+  // model (Google-only accounts can't supply a "current password" for Change
+  // Password / Delete Account) but production never runs migrations and
+  // sequelize.sync({alter:false}) never adds columns to an existing table —
+  // without this entry every SELECT through the Users model would fail with
+  // "column hasLocalPassword does not exist". DEFAULT true keeps every
+  // existing account on the normal password-required behavior.
+  {
+    table: 'Users', column: 'hasLocalPassword',
+    sql: `ALTER TABLE "Users" ADD COLUMN IF NOT EXISTS "hasLocalPassword" BOOLEAN NOT NULL DEFAULT true`,
+  },
+  // FIX (Play Store audit #8): GroupReports had no column recording WHICH
+  // member was reported — only the reporter, reason and details — so a
+  // group report could never say who it was about.
+  {
+    table: 'GroupReports', column: 'reportedUserId',
+    sql: `ALTER TABLE IF EXISTS "GroupReports" ADD COLUMN IF NOT EXISTS "reportedUserId" INTEGER`,
+  },
   // P3 FIX (Forensic Audit): privacy policy acceptance on registration
   {
     table: 'Users', column: 'acceptedPrivacyPolicyAt',
@@ -635,6 +653,49 @@ const REQUIRED_TABLES = [
       "reviewedAt"  TIMESTAMP WITH TIME ZONE,
       "createdAt"   TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
       "updatedAt"   TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+    )`,
+  },
+
+  // FIX (Play Store audit follow-up): message_backups is only ever touched by
+  // raw SQL in routes/devices.js (no Sequelize model), so nothing —
+  // not sync(), and not migrations, which production never runs — was
+  // creating it. Every /api/devices/backup call would have failed with
+  // "relation message_backups does not exist". Mirrors migration
+  // 20260918090000-create-message-backups.js.
+  {
+    name: 'message_backups',
+    sql: `CREATE TABLE IF NOT EXISTS "message_backups" (
+      "id"            SERIAL PRIMARY KEY,
+      "userId"        INTEGER NOT NULL,
+      "backupKey"     VARCHAR(64) NOT NULL,
+      "encryptedData" TEXT NOT NULL,
+      "messageCount"  INTEGER NOT NULL DEFAULT 0,
+      "sizeBytes"     INTEGER NOT NULL DEFAULT 0,
+      "status"        VARCHAR(20) NOT NULL DEFAULT 'completed',
+      "completedAt"   TIMESTAMP WITH TIME ZONE,
+      "createdAt"     TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      "updatedAt"     TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      CONSTRAINT "message_backups_user_unique" UNIQUE ("userId")
+    )`,
+  },
+
+  // FIX (Play Store audit #4): backing table for the new UserReport model
+  // (POST /api/privacy/report). VARCHAR in place of native ENUM, matching
+  // every other entry in this list.
+  {
+    name: 'user_reports',
+    sql: `CREATE TABLE IF NOT EXISTS "user_reports" (
+      "id"             SERIAL PRIMARY KEY,
+      "reporterId"     INTEGER NOT NULL,
+      "reportedUserId" INTEGER NOT NULL,
+      "reason"         VARCHAR(30) NOT NULL,
+      "details"        TEXT,
+      "messageIds"     JSONB,
+      "status"         VARCHAR(20) NOT NULL DEFAULT 'pending',
+      "reviewedBy"     INTEGER,
+      "reviewedAt"     TIMESTAMP WITH TIME ZONE,
+      "createdAt"      TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      "updatedAt"      TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
     )`,
   },
 

@@ -1011,10 +1011,10 @@ router.post(
             
             const { currentPassword, newPassword, confirmPassword } = req.body;
 
-            if (!currentPassword || !newPassword || !confirmPassword) {
+            if (!newPassword || !confirmPassword) {
                 return res.status(400).json({
                     status: 'error',
-                    message: 'All password fields are required'
+                    message: 'New password and confirmation are required'
                 });
             }
 
@@ -1041,21 +1041,46 @@ router.post(
                 });
             }
 
-            const isPasswordValid = await bcrypt.compare(currentPassword, user.password);
+            // FIX (Google-only accounts locked out of Change Password): a
+            // Google sign-in account's stored password is a random string
+            // the account owner never saw (see authService.loginWithGoogle),
+            // so there is no "current password" they could ever correctly
+            // type. hasLocalPassword tracks whether a real, user-chosen
+            // password exists yet — only require and verify one when it
+            // does. This is "Set app password" for a Google-only account
+            // that hasn't set one, and unchanged "Change Password" (still
+            // requires + verifies the current password) for everyone else.
+            const isSettingFirstPassword = user.hasLocalPassword === false;
 
-            if (!isPasswordValid) {
-                return res.status(400).json({
-                    status: 'error',
-                    message: 'Current password is incorrect'
-                });
+            if (!isSettingFirstPassword) {
+                if (!currentPassword) {
+                    return res.status(400).json({
+                        status: 'error',
+                        message: 'Current password is required'
+                    });
+                }
+
+                const isPasswordValid = await bcrypt.compare(currentPassword, user.password);
+
+                if (!isPasswordValid) {
+                    return res.status(400).json({
+                        status: 'error',
+                        message: 'Current password is incorrect'
+                    });
+                }
             }
 
             const hashedPassword = await bcrypt.hash(newPassword, 12);
-            await user.update({ password: hashedPassword });
+            await user.update({
+                password: hashedPassword,
+                hasLocalPassword: true
+            });
 
             res.status(200).json({
                 status: 'success',
-                message: 'Password changed successfully'
+                message: isSettingFirstPassword
+                    ? 'Password set successfully — you can now also log in with your email and this password.'
+                    : 'Password changed successfully'
             });
         } catch (error) {
             console.error('Error changing password:', error);
@@ -1261,14 +1286,14 @@ router.delete(
     asyncHandler(async (req, res) => {
         try {
             const userId = getUserId(req);
-            
+
             if (!userId) {
                 return res.status(401).json({
                     status: 'error',
                     message: 'Authentication required'
                 });
             }
-            
+
             const { confirmation, password } = req.body;
 
             if (!confirmation || confirmation.toLowerCase() !== 'delete my account') {
@@ -1278,66 +1303,22 @@ router.delete(
                 });
             }
 
-            const user = await User.findByPk(userId);
-
-            if (!user) {
-                return res.status(404).json({
-                    status: 'error',
-                    message: 'User not found'
-                });
-            }
-
-            // P1 AUDIT FIX: password is now MANDATORY
-            if (!password) {
-                return res.status(400).json({
-                    status: 'error',
-                    message: 'Password is required to delete your account'
-                });
-            }
-
-            const isPasswordValid = await bcrypt.compare(password, user.password);
-            if (!isPasswordValid) {
-                return res.status(400).json({
-                    status: 'error',
-                    message: 'Incorrect password'
-                });
-            }
-
-            // P1 AUDIT FIX: revoke ALL tokens — deleted user cannot re-authenticate
-            const Token = models.Token;
-            if (Token) {
-                try {
-                    await Token.update({ isRevoked: true }, { where: { userId } });
-                } catch (te) {
-                    console.warn('[DeleteAccount] Token revocation warning:', te.message);
-                }
-            }
-
-            // Overwrite password hash — no future login possible even if token found
-            const deadHash = await bcrypt.hash(
-                `DELETED_${userId}_${Date.now()}_${Math.random()}`, 12
-            );
-
-            // Soft delete — anonymise all PII
-            await user.update({
-                email:     `deleted_${user.id}@deleted.invalid`,
-                username:  `deleted_user_${user.id}`,
-                firstName: null,
-                lastName:  null,
-                avatar:    null,
-                bio:       null,
-                password:  deadHash,
-                isActive:  false,
-                deletedAt: new Date()
-            });
-
-            if (Settings) {
-                await Settings.destroy({ where: { userId } });
-            }
-
-            res.status(200).json({
-                status: 'success',
-                message: 'Account deleted successfully'
+            // FIX (Play Store compliance audit #1/#20): this handler used to
+            // duplicate account.js's deletion logic with its own, DIFFERENT
+            // bugs — most seriously `const Token = models.Token`, referencing
+            // a `models` variable that is never defined anywhere in this
+            // file, throwing a ReferenceError on every single call. Because
+            // that error was swallowed by the catch block below and returned
+            // as a generic 500, and because this is the endpoint the actual
+            // frontend "Delete Account" button calls, account deletion was
+            // completely non-functional. Both this route and DELETE
+            // /api/account now call the same canonical service — see
+            // src/services/accountDeletionService.js.
+            const { requestDeletion } = require('../services/accountDeletionService');
+            const result = await requestDeletion(userId, { password, confirmation, req });
+            return res.status(result.status).json({
+                status: result.success ? 'success' : 'error',
+                message: result.message
             });
         } catch (error) {
             console.error('Error deleting account:', error);

@@ -1,4 +1,12 @@
 const _slog = (...a) => { if (process.env.DEBUG_SERVER) console.log(...a); };
+// FIX (Play Store compliance audit #13): three call sites below used to log
+// the actual verification/reset token value (e.g. `[VERIFY TOKEN] For
+// x@y.com: <the real token>`) gated only behind DEBUG_SERVER. A token is a
+// credential — anyone with log access while that flag is set (including by
+// accident in production, a common real-world misconfiguration) could take
+// over the account it belongs to. The debug log itself still fires (useful
+// to confirm a token was generated for the right address); only the token
+// value has been removed from every log line, in every environment.
 ﻿// src/routes/auth.js - CORRECTED VERSION
 require('dotenv').config();
 const express = require('express');
@@ -210,7 +218,7 @@ router.post('/register', asyncHandler(async (req, res) => {
                 resetToken: verificationToken,
                 resetTokenExpiry: new Date(Date.now() + 24 * 60 * 60 * 1000)
             });
-            _slog(`📧 [VERIFY TOKEN] For ${newUser.email}: ${verificationToken}`);
+            _slog(`📧 [VERIFY TOKEN] Generated for ${newUser.email} (value withheld from logs — see fix comment above this block)`);
             emailService.verificationEmail(newUser.email, { verificationToken })
                 .catch(e => console.warn('[Auth] Failed to send verification email:', e.message));
         } catch (verifyErr) {
@@ -492,6 +500,36 @@ router.post('/google', asyncHandler(async (req, res) => {
     if (!result.success) {
         const status = result.code === 'GOOGLE_AUTH_ERROR' ? 401 : 500;
         return res.status(status).json({ success: false, message: result.message || 'Google sign-in failed' });
+    }
+
+    // FIX (Security settings audit, Google sign-in path): the /login route
+    // (above) already sends a new-device email alert gated on Settings >
+    // Security > "Login Notifications", but that logic lived only in the
+    // manual-login branch — signing in via Google never checked the
+    // setting or sent the alert at all, so a Google-only account got no
+    // notification no matter what the toggle said. Same gate, same email,
+    // now on this path too. authService.loginWithGoogle()'s returned
+    // `result.user` doesn't carry the settings JSON column, so it's fetched
+    // here the same way /login already has it in memory.
+    try {
+        const userAgent = req.headers['user-agent'] || null;
+        if (result.user.email && userAgent) {
+            const clientIp = req.ip || req.headers['x-forwarded-for'] || req.connection?.remoteAddress || 'unknown';
+            const settingsRow = await _getUsers().findByPk(result.user.id, { attributes: ['settings'] });
+            const loginNotificationsEnabled = settingsRow?.settings?.security?.loginNotifications !== false;
+            if (loginNotificationsEnabled) {
+                const known = await tokenService.hasKnownDevice(result.user.id, userAgent);
+                if (!known) {
+                    emailService.newDeviceLoginAlert(result.user.email, {
+                        device: userAgent,
+                        ip: clientIp,
+                        time: new Date().toISOString()
+                    }).catch(e => console.warn('[Auth] Failed to send new-device alert (Google):', e.message));
+                }
+            }
+        }
+    } catch (alertErr) {
+        console.warn('[Auth] Google login-notification check failed:', alertErr.message);
     }
 
     res.json({
@@ -862,7 +900,7 @@ router.post('/forgot-password', asyncHandler(async (req, res) => {
 
         // P1 FIX (Forensic Audit): actually send the password reset email.
         // Falls back to console logging if SMTP is not configured (dev mode).
-        _slog(`📧 [RESET TOKEN] For ${email}: ${resetToken}`);
+        _slog(`📧 [RESET TOKEN] Generated for ${email} (value withheld from logs — see fix comment above this block)`);
         emailService.passwordResetEmail(user.email, { resetToken })
             .catch(e => console.warn('[Auth] Failed to send password reset email:', e.message));
 
@@ -963,7 +1001,7 @@ router.post('/resend-verification', asyncHandler(async (req, res) => {
             resetTokenExpiry: new Date(Date.now() + 24 * 60 * 60 * 1000)
         });
 
-        _slog(`📧 [VERIFY TOKEN] For ${email}: ${verificationToken}`);
+        _slog(`📧 [VERIFY TOKEN] Generated for ${email} (value withheld from logs — see fix comment above this block)`);
         emailService.verificationEmail(user.email, { verificationToken })
             .catch(e => console.warn('[Auth] Failed to send verification email:', e.message));
 

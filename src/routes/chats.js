@@ -558,6 +558,16 @@ router.post(
                 data: { chat: payload }
             });
         } catch (error) {
+            // FIX (Privacy architecture audit, item #7): this used to hard-code
+            // a 500 "Failed to start direct chat" for every failure, including
+            // the block check and (now) the "Who can message me" privacy
+            // checks in resolveOrCreateDirectChat — masking a legitimate 403
+            // as a generic server error and hiding the real reason from the
+            // frontend. Surface those specific, expected cases as 403s with
+            // their real message; anything else keeps the original 500.
+            if (error.code === 'USER_BLOCKED' || error.code === 'MESSAGING_DISABLED' || error.code === 'MESSAGING_FRIENDS_ONLY') {
+                return res.status(403).json({ status: 'error', message: error.message, code: error.code });
+            }
             console.error('[Chats] Error starting direct chat:', error.message);
             console.error('[Chats] Stack:', error.stack);
             res.status(500).json({

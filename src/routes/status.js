@@ -91,7 +91,7 @@ async function canView(status, viewerId) {
   return ids.includes(Number(status.userId));
 }
 
-function normalizeBody(body, userId) {
+async function normalizeBody(body, userId) {
   // Canonical media contract: accept the flat fields used by ProfessionalStatus
   // and the nested Media-shaped object used by other clients, then persist one
   // stable set of mediaUrl/mediaPublicId/mediaMime fields. This prevents a
@@ -101,7 +101,35 @@ function normalizeBody(body, userId) {
   const inferredType = String(suppliedMime).startsWith('video/') ? 'video'
     : String(suppliedMime).startsWith('image/') ? 'image' : 'text';
   const type = VALID_TYPES.has(body.type) ? body.type : inferredType;
-  const privacy = VALID_PRIVACY.has(body.privacy) ? body.privacy : 'all_contacts';
+
+  // FIX (Status architecture audit, item #7): Settings has a `status` section
+  // (whoCanViewMyStatus, allowStatusReplies) with a defined schema, but no UI
+  // ever exposed it and nothing ever read it — every status silently used
+  // this route's own hardcoded defaults ('all_contacts', replies always on)
+  // regardless of what a person might set. Only applied when the CLIENT
+  // didn't already specify a value for this particular post (an explicit
+  // per-post choice, e.g. "share this one publicly," still wins over the
+  // account-wide default, same as every "default vs. override" pattern
+  // elsewhere in this app).
+  let settingsPrivacy = null, settingsAllowReplies = null;
+  if (body.privacy === undefined || body.allowReplies === undefined) {
+    try {
+      const UsersModel = Users();
+      const user = await UsersModel.findByPk(userId, { attributes: ['settings'] });
+      const s = user?.settings?.status;
+      if (s) {
+        // whoCanViewMyStatus: 'everyone' | 'friendsOnly' | 'nobody' (Settings UI
+        // language) maps onto this route's own privacy enum.
+        settingsPrivacy = s.whoCanViewMyStatus === 'everyone' ? 'public'
+          : s.whoCanViewMyStatus === 'nobody' ? 'private'
+          : s.whoCanViewMyStatus === 'friendsOnly' ? 'all_contacts'
+          : null;
+        if (typeof s.allowStatusReplies === 'boolean') settingsAllowReplies = s.allowStatusReplies;
+      }
+    } catch (_) { /* fall through to this route's existing hardcoded defaults */ }
+  }
+
+  const privacy = VALID_PRIVACY.has(body.privacy) ? body.privacy : (settingsPrivacy || 'all_contacts');
   const content = typeof body.content === 'string' ? body.content.trim().slice(0, MAX_TEXT) : null;
   const topics = cleanList(body.topics, MAX_TOPICS);
   const durationSeconds = Math.min(Math.max(Number(body.durationSeconds) || 7, 3), 20);
@@ -135,7 +163,7 @@ function normalizeBody(body, userId) {
     durationSeconds,
     publicationTarget,
     vibeExpiresAt,
-    allowReplies: body.allowReplies !== false,
+    allowReplies: typeof body.allowReplies === 'boolean' ? body.allowReplies : (settingsAllowReplies !== null ? settingsAllowReplies : true),
     allowReactions: body.allowReactions !== false,
     allowSharing: body.allowSharing !== false,
     isPublic: privacy === 'public',
@@ -162,7 +190,7 @@ router.get('/health', asyncHandler(async (req, res) => {
 // Create status.
 router.post('/', authenticateToken, requireUser, apiRateLimiter, asyncHandler(async (req, res) => {
   const userId = uid(req);
-  const data = normalizeBody(req.body || {}, userId);
+  const data = await normalizeBody(req.body || {}, userId);
   if (!data.content && !data.mediaUrl && data.type !== 'poll') {
     return res.status(400).json({ success: false, message: 'Status needs text, media, or a poll.' });
   }

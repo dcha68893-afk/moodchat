@@ -243,6 +243,25 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: true,
         defaultValue: null,
       },
+      // FIX (Google-only accounts can never change/set a password): Google
+      // sign-in creates the user with a random password the person never
+      // sees (see authService.loginWithGoogle's randomPassword) — so the
+      // old "Change Password" flow asked for a "current password" that
+      // cannot ever be known or typed, permanently failing with "Current
+      // password is incorrect" for every Google-only account. This column
+      // tracks whether a REAL, user-chosen password exists, independent of
+      // authProvider (a Google user can add one later without switching
+      // provider; a local user always has one from registration). Defaults
+      // to true so every pre-existing row — which by definition already has
+      // a real password from registration — keeps requiring current-password
+      // verification with zero behavior change; only new Google-only
+      // accounts (see Users.create in authService.loginWithGoogle) are
+      // created with this explicitly set to false.
+      hasLocalPassword: {
+        type: DataTypes.BOOLEAN,
+        allowNull: false,
+        defaultValue: true,
+      },
       // P2 FIX (Forensic Audit): Two-Factor Authentication (TOTP) support
       mfaSecret: {
         type: DataTypes.STRING,

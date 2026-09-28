@@ -452,15 +452,115 @@ router.delete('/:chatId/block/:userId', async (req, res) => {
   return res.json({ success: true, data: { userId: targetId, blocked: false } });
 });
 
+const GROUP_REPORT_REASONS = ['spam', 'harassment', 'hate_speech', 'violence', 'sexual_content', 'misinformation', 'other'];
+
+async function managerIds(chatId) {
+  const rows = await ChatParticipant.findAll({ where: { chatId, role: { [Op.in]: ['admin', 'owner'] } }, attributes: ['userId'] });
+  return rows.map(x => Number(x.userId));
+}
+
+// FIX (Play Store audit #8): this route used to (a) accept any targetId,
+// including 0 or someone who isn't in the group, (b) store nothing except a
+// capped entry in the chat's JSON "moderation" audit list — the GroupReports
+// table existed but was never written to — and (c) broadcast the report,
+// including who was reported and why, to EVERY member of the group via
+// emitChat(), meaning the reported person was told they'd been reported and
+// by-inference who had reported them. Now: validated, persisted, and only
+// group admins/owners are notified.
 router.post('/:chatId/report', async (req, res) => {
   const userId = uid(req);
   const access = await groupAccess(req.params.chatId, userId);
   if (!access) return res.status(403).json({ success: false, message: 'Group access denied' });
+
   const targetId = Number(req.body?.userId || 0);
-  const reason = cleanText(req.body?.reason, 500);
-  await audit(access.chat, userId, 'member_reported', { targetId, reason });
-  await emitChat(access.chat.id, 'group:moderation:report', { chatId: access.chat.id, targetId, reason });
-  return res.status(201).json({ success: true, data: { reported: true } });
+  if (!targetId || targetId === userId) {
+    return res.status(400).json({ success: false, message: 'A valid member to report is required' });
+  }
+  if (!(await participant(access.chat.id, targetId))) {
+    return res.status(404).json({ success: false, message: 'That user is not a member of this group' });
+  }
+
+  const rawReason = cleanText(req.body?.reason, 500);
+  const reason = GROUP_REPORT_REASONS.includes(rawReason) ? rawReason : 'other';
+  const details = cleanText(req.body?.details || (GROUP_REPORT_REASONS.includes(rawReason) ? '' : rawReason), 500) || null;
+
+  let reportId = null;
+  try {
+    const [rows] = await db.sequelize.query(
+      `INSERT INTO "GroupReports" ("groupId","reporterId","reportedUserId","reason","details","status","createdAt","updatedAt")
+       VALUES (:groupId,:reporterId,:targetId,:reason,:details,'pending',NOW(),NOW()) RETURNING "id"`,
+      { replacements: { groupId: access.chat.id, reporterId: userId, targetId, reason, details } }
+    );
+    reportId = rows?.[0]?.id ?? null;
+  } catch (e) {
+    console.error('[groupPlatform] Failed to persist GroupReport:', e.message);
+    return res.status(500).json({ success: false, message: 'Could not submit your report — please try again.' });
+  }
+
+  await audit(access.chat, userId, 'member_reported', { targetId, reason, reportId });
+
+  // Notify ONLY admins/owners — never the reported user or other members.
+  try {
+    const socket = io(req);
+    if (socket) {
+      const payload = { chatId: access.chat.id, reportId, targetId, reason };
+      for (const id of await managerIds(access.chat.id)) {
+        if (id === userId) continue;
+        socket.to(`user:${id}`).emit('group:moderation:report', payload);
+        socket.to(`user_${id}`).emit('group:moderation:report', payload);
+      }
+    }
+  } catch (_) { /* realtime nudge only; the report is already stored */ }
+
+  return res.status(201).json({ success: true, data: { reported: true, reportId } });
+});
+
+// Admins/owners review reports for their own group.
+router.get('/:chatId/reports', async (req, res) => {
+  const userId = uid(req);
+  const access = await groupAccess(req.params.chatId, userId);
+  if (!access || !manager(access)) return res.status(403).json({ success: false, message: 'Group admin permission required' });
+  const status = ['pending', 'reviewed', 'actioned', 'dismissed'].includes(req.query.status) ? req.query.status : 'pending';
+  const [rows] = await db.sequelize.query(
+    `SELECT "id","reporterId","reportedUserId","reason","details","status","reviewedBy","reviewedAt","createdAt"
+       FROM "GroupReports" WHERE "groupId" = :groupId AND "status" = :status ORDER BY "createdAt" DESC LIMIT 100`,
+    { replacements: { groupId: access.chat.id, status } }
+  );
+  return res.json({ success: true, data: { reports: rows } });
+});
+
+// Record the admin's decision. 'actioned' can optionally remove the member.
+router.post('/:chatId/reports/:reportId/resolve', async (req, res) => {
+  const userId = uid(req);
+  const access = await groupAccess(req.params.chatId, userId);
+  if (!access || !manager(access)) return res.status(403).json({ success: false, message: 'Group admin permission required' });
+  const reportId = Number(req.params.reportId);
+  const decision = ['reviewed', 'actioned', 'dismissed'].includes(req.body?.decision) ? req.body.decision : null;
+  if (!reportId || !decision) return res.status(400).json({ success: false, message: 'reportId and a valid decision are required' });
+
+  const [found] = await db.sequelize.query(
+    `SELECT "id","reportedUserId" FROM "GroupReports" WHERE "id" = :reportId AND "groupId" = :groupId LIMIT 1`,
+    { replacements: { reportId, groupId: access.chat.id }, type: db.sequelize.QueryTypes.SELECT }
+  );
+  if (!found) return res.status(404).json({ success: false, message: 'Report not found in this group' });
+
+  await db.sequelize.query(
+    `UPDATE "GroupReports" SET "status" = :decision, "reviewedBy" = :userId, "reviewedAt" = NOW(), "updatedAt" = NOW() WHERE "id" = :reportId`,
+    { replacements: { decision, userId, reportId } }
+  );
+
+  let removed = false;
+  if (decision === 'actioned' && req.body?.removeMember === true && found.reportedUserId) {
+    const target = await participant(access.chat.id, Number(found.reportedUserId));
+    // Admins can't remove the owner or another admin through this shortcut.
+    if (target && !['owner', 'admin'].includes(target.role)) {
+      await target.destroy();
+      removed = true;
+    }
+  }
+
+  await audit(access.chat, userId, `report_${decision}`, { reportId, targetId: found.reportedUserId, removed });
+  return res.json({ success: true, data: { reportId, decision, removed } });
 });
 
 router.get('/:chatId/moderation', async (req, res) => {

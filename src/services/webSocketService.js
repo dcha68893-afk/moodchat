@@ -464,8 +464,29 @@ class WebSocketService {
             // a private flag so this and Presence's typing tracking both run.
             if (!socket.__wsTypingBound) {
             socket.__wsTypingBound = true;
-            socket.on('typing:start', ({ chatId } = {}) => {
+
+            // FIX (Privacy architecture audit, item #7 continued): Settings >
+            // Privacy > "Typing Indicators" has a working toggle but this,
+            // the actual live relay chat.html uses (not the separate REST
+            // /api/typing-indicators/* routes, which are a different,
+            // previously-broken code path fixed separately), never checked
+            // it — everyone's typing state broadcast regardless of what
+            // they'd chosen. Fetched once per connection and cached on the
+            // socket rather than re-queried on every keystroke-driven event;
+            // a change takes effect on the next reconnect, same tradeoff
+            // this file already makes for other per-connection state.
+            socket.on('typing:start', async ({ chatId } = {}) => {
                 if (!chatId) return;
+                if (socket.__typingIndicatorsEnabled === undefined) {
+                    try {
+                        const UsersModel = require('../models').Users;
+                        const u = await UsersModel.findByPk(userId, { attributes: ['settings'] });
+                        socket.__typingIndicatorsEnabled = u?.settings?.privacy?.typingIndicators !== false;
+                    } catch (_) {
+                        socket.__typingIndicatorsEnabled = true; // fail open
+                    }
+                }
+                if (!socket.__typingIndicatorsEnabled) return;
                 socket.to(`chat:${chatId}`).emit('typing:start', {
                     chatId,
                     userId: String(userId),

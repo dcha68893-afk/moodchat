@@ -636,4 +636,57 @@ router.delete('/:messageId/react', asyncHandler(async (req, res) => {
   return res.json({ success: true, data: { reactions } });
 }));
 
+// ── POST /:messageId/report — report a message for abuse/spam ───────────────
+// FIX (Play Store compliance audit #6): the MessageReport model existed
+// (built for exactly this) but had no route anywhere calling it, and the
+// message action menu had no "Report" option at all — so there was no
+// user-facing way to report a message despite the backend piece existing.
+router.post('/:messageId/report', asyncHandler(async (req, res) => {
+  const userId = getUserId(req);
+  if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
+
+  const messageId = safeInt(req.params.messageId);
+  if (!messageId) return res.status(400).json({ success: false, message: 'Invalid messageId' });
+
+  const VALID_REASONS = ['spam', 'harassment', 'hate_speech', 'violence', 'sexual_content', 'misinformation', 'other'];
+  const { reason, details } = req.body || {};
+  if (!VALID_REASONS.includes(reason)) {
+    return res.status(400).json({ success: false, message: `reason must be one of: ${VALID_REASONS.join(', ')}` });
+  }
+
+  const sequelize = getSequelize();
+  // Same participant check as star/react above — only report a message you
+  // can actually see, and derive chatId server-side rather than trust it
+  // from the client.
+  const [msg] = await sequelize.query(
+    `SELECT m.id, m."chatId", m."senderId" FROM "Messages" m
+     JOIN chat_participants cp ON cp."chatId" = m."chatId" AND cp."userId" = :userId
+     WHERE m.id = :messageId AND m."isDeleted" = false LIMIT 1`,
+    { replacements: { userId, messageId }, type: sequelize.QueryTypes.SELECT }
+  );
+  if (!msg) return res.status(404).json({ success: false, message: 'Message not found or access denied' });
+  if (Number(msg.senderId) === Number(userId)) {
+    return res.status(400).json({ success: false, message: 'You cannot report your own message' });
+  }
+
+  const db = require('../models');
+  try {
+    const [report] = await db.MessageReport.findOrCreate({
+      where: { reporterId: userId, messageId },
+      defaults: {
+        reporterId: userId,
+        messageId,
+        chatId: msg.chatId,
+        reason,
+        details: details ? String(details).slice(0, 500) : null,
+        status: 'pending',
+      },
+    });
+    return res.json({ success: true, message: 'Message reported. Thank you for helping keep Necpa safe.', data: { reportId: report.id } });
+  } catch (e) {
+    console.error('[messages] Failed to persist MessageReport:', e.message);
+    return res.status(500).json({ success: false, message: 'Could not submit your report — please try again.' });
+  }
+}));
+
 module.exports = router;

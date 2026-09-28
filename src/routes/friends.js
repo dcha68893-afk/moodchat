@@ -236,25 +236,48 @@ router.post('/requests', async (req, res) => {
       return res.status(409).json({ success: false, message: row.requesterId === userId ? 'Friend request already sent' : 'This user has already sent you a request', requestId: row.id });
     }
 
+    // FIX (Friends architecture audit, item #9): Settings > Friends >
+    // "Auto-accept friend requests" saved correctly (friends.autoAcceptFriends
+    // via window.__updateSetting) but nothing on the backend ever read it —
+    // turning it on had no effect, every request still landed as 'pending'
+    // no matter what the recipient had chosen. Checked here, server-side,
+    // rather than trusted from the client, since accepting a friendship is
+    // a privacy-relevant action the target account controls.
+    let initialStatus = 'pending';
+    let acceptedAtSql = 'NULL';
+    try {
+      const [targetSettingsRows] = await sequelize.query(
+        'SELECT "settings" FROM "Users" WHERE "id" = :targetId LIMIT 1',
+        { replacements: { targetId }, transaction }
+      );
+      if (targetSettingsRows[0]?.settings?.friends?.autoAcceptFriends === true) {
+        initialStatus = 'accepted';
+        acceptedAtSql = 'NOW()';
+      }
+    } catch (settingsErr) {
+      console.warn('[Friends] Could not check autoAcceptFriends, defaulting to pending:', settingsErr.message);
+    }
+
     let saved;
     if (row) {
       const [updated] = await sequelize.query(
         `UPDATE "friends"
             SET "requester_id" = :userId,
                 "receiver_id" = :targetId,
-                "status" = 'pending',
+                "status" = :status,
+                "accepted_at" = ${acceptedAtSql},
                 "updatedAt" = NOW()
           WHERE "id" = :id
           RETURNING ${FRIEND_COLUMNS}`,
-        { replacements: { userId, targetId, id: row.id }, transaction }
+        { replacements: { userId, targetId, id: row.id, status: initialStatus }, transaction }
       );
       saved = mapFriend(updated[0]);
     } else {
       const [created] = await sequelize.query(
-        `INSERT INTO "friends" ("requester_id", "receiver_id", "status", "createdAt", "updatedAt")
-         VALUES (:userId, :targetId, 'pending', NOW(), NOW())
+        `INSERT INTO "friends" ("requester_id", "receiver_id", "status", "accepted_at", "createdAt", "updatedAt")
+         VALUES (:userId, :targetId, :status, ${acceptedAtSql}, NOW(), NOW())
          RETURNING ${FRIEND_COLUMNS}`,
-        { replacements: { userId, targetId }, transaction }
+        { replacements: { userId, targetId, status: initialStatus }, transaction }
       );
       saved = mapFriend(created[0]);
     }

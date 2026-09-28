@@ -53,11 +53,34 @@ async function resolveOrCreateDirectChat({ userId, otherUserId, otherUser = null
   // the routes/chats.js consolidation below, POST /start and POST
   // /bootstrap) go through, so the check belongs here rather than
   // duplicated per caller.
-  const { isBlocked } = require('./friendService');
+  const { isBlocked, areFriends } = require('./friendService');
   if (await isBlocked(_uidNum, _otherNum)) {
     const blockedErr = new Error('Messaging is not available between these users');
     blockedErr.code = 'USER_BLOCKED';
     throw blockedErr;
+  }
+
+  // FIX (Privacy architecture audit, item #7): same gap as the block check
+  // above — "Who can message me" was never enforced anywhere, and this is
+  // the actual chokepoint for STARTING a new conversation (assertDirectChat-
+  // NotBlocked below only re-checks once a chatId already exists, so without
+  // this, the very first message to someone with canMessageMe set to
+  // 'nobody' or 'friendsOnly' would sail through). See that function's
+  // comment for the matching check on existing chats.
+  const [recipientRow] = await sequelize.query(
+    `SELECT "settings" FROM "Users" WHERE "id" = :recipientId LIMIT 1`,
+    { replacements: { recipientId: _otherNum }, type: sequelize.QueryTypes.SELECT }
+  ).catch(() => [null]);
+  const canMessageMe = recipientRow?.settings?.privacy?.canMessageMe || 'everyone';
+  if (canMessageMe === 'nobody') {
+    const err = new Error('This user is not accepting messages right now');
+    err.code = 'MESSAGING_DISABLED';
+    throw err;
+  }
+  if (canMessageMe === 'friendsOnly' && !(await areFriends(_uidNum, _otherNum))) {
+    const err = new Error('Only this user\'s friends can message them');
+    err.code = 'MESSAGING_FRIENDS_ONLY';
+    throw err;
   }
 
   // Some callers (messageDeliveryService.js) only ever had a bare
@@ -154,7 +177,7 @@ async function resolveOrCreateDirectChat({ userId, otherUserId, otherUser = null
 async function assertDirectChatNotBlocked(senderId, chatId) {
   const db = require('../models');
   const sequelize = db.sequelize;
-  const { isBlocked } = require('./friendService');
+  const { isBlocked, areFriends } = require('./friendService');
 
   const senderIdInt = parseInt(senderId, 10);
   const chatIdInt = parseInt(chatId, 10);
@@ -175,6 +198,33 @@ async function assertDirectChatNotBlocked(senderId, chatId) {
     const blockedErr = new Error('Messaging is not available between these users');
     blockedErr.code = 'USER_BLOCKED';
     throw blockedErr;
+  }
+
+  // FIX (Privacy architecture audit, item #7): Settings > Privacy >
+  // "Who can message me" (privacy.canMessageMe: everyone/friendsOnly/nobody)
+  // saved correctly and was reflected in the Settings UI, but — like every
+  // other privacy toggle the audit found — nothing on the backend ever
+  // enforced it. A DOM attribute or frontend check alone can't stop this;
+  // the recipient's account is the only party that can actually be trusted
+  // to enforce their own "who can message me" choice, so it's checked here,
+  // in the one place both real message-write paths already call for the
+  // block check above (see the comment on this function).
+  const recipientId = otherParticipant.userId;
+  const [recipientRow] = await sequelize.query(
+    `SELECT "settings" FROM "Users" WHERE "id" = :recipientId LIMIT 1`,
+    { replacements: { recipientId }, type: sequelize.QueryTypes.SELECT }
+  ).catch(() => [null]);
+  const canMessageMe = recipientRow?.settings?.privacy?.canMessageMe || 'everyone';
+
+  if (canMessageMe === 'nobody') {
+    const err = new Error('This user is not accepting messages right now');
+    err.code = 'MESSAGING_DISABLED';
+    throw err;
+  }
+  if (canMessageMe === 'friendsOnly' && !(await areFriends(senderIdInt, recipientId))) {
+    const err = new Error('Only this user\'s friends can message them');
+    err.code = 'MESSAGING_FRIENDS_ONLY';
+    throw err;
   }
 }
 

@@ -6216,6 +6216,17 @@ setTimeout(() => {
   }
 }, 8000);
 
+// FIX (Play Store compliance audit #1): the 30-day account-deletion purge
+// job promised in the deletion confirmation email never existed. See
+// src/jobs/accountPurgeJob.js and src/services/accountDeletionService.js.
+setTimeout(() => {
+  try {
+    require('./jobs/accountPurgeJob').start();
+  } catch (e) {
+    console.error('⚠️ accountPurgeJob failed to start (non-fatal):', e.message);
+  }
+}, 9000);
+
 // Export for testing and programmatic use
 module.exports = {
     Application,

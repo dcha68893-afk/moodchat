@@ -94,7 +94,42 @@ router.get('/search', async (req,res) => {
     const users=await Users.findAll({where:{id:{[Op.ne]:userId},isActive:true,[Op.or]:[
       {username:{[Op.iLike]:`%${q}%`}},{firstName:{[Op.iLike]:`%${q}%`}},{lastName:{[Op.iLike]:`%${q}%`}}
     ]},attributes:attrs,order:[['username','ASC']],limit});
-    return res.json({success:true,data:{users:await decorate(userId,users),total:users.length}});
+
+    // FIX (Friends architecture audit, item #9: phone/email discovery): the
+    // settings schema has had friends.discoverByPhone / discoverByEmail
+    // since the start, with a working toggle in Settings UI, but there was
+    // no phone/email discovery feature anywhere for those toggles to
+    // actually govern — someone's phone number or email was never a way to
+    // find them at all, toggle on or off. This adds that lookup, gated
+    // per-target-user by their own setting (never the searcher's) since
+    // discoverability is the account owner's choice to make, not the
+    // searcher's — an exact match only (never partial, unlike name/username
+    // above), since partially matching real contact info would leak it.
+    let contactUser = null;
+    const looksLikeEmail = q.includes('@') && q.includes('.');
+    const digitsOnly = q.replace(/[^\d+]/g, '');
+    const looksLikePhone = digitsOnly.length >= 7 && digitsOnly.length === q.replace(/[\s-]/g, '').length;
+    if (looksLikeEmail || looksLikePhone) {
+      const orClauses = [];
+      if (looksLikeEmail) orClauses.push({ email: { [Op.iLike]: q } });
+      if (looksLikePhone) orClauses.push({ phone: digitsOnly });
+      const candidate = await Users.findOne({
+        where: { id: { [Op.ne]: userId }, isActive: true, [Op.or]: orClauses },
+        attributes: attrs.concat(['email', 'phone', 'settings']),
+      });
+      if (candidate) {
+        const s = candidate.settings || {};
+        const allowed = looksLikeEmail
+          ? s.friends?.discoverByEmail !== false
+          : s.friends?.discoverByPhone !== false;
+        if (allowed && !users.some(u => Number(u.id) === Number(candidate.id))) {
+          contactUser = candidate;
+        }
+      }
+    }
+
+    const allUsers = contactUser ? [contactUser, ...users] : users;
+    return res.json({success:true,data:{users:await decorate(userId,allUsers),total:allUsers.length}});
   } catch(error){console.error('[FriendDiscovery] search',error);return res.status(500).json({success:false,message:'Unable to search users'});}
 });
 

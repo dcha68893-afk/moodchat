@@ -210,125 +210,17 @@ router.put('/password', asyncHandler(async (req, res) => {
 // run as a scheduled job 30 days after `deletionRequestedAt`.
 router.delete('/', asyncHandler(async (req, res) => {
     const userId = getUserId(req);
-    const { password } = req.body;
-    const db = _getDb();
+    const { password, confirmation } = req.body;
 
-    if (!password) {
-        return res.status(400).json({ success: false, message: 'Password is required to delete your account' });
-    }
-
-    const user = await _getUsers().findByPk(userId);
-    if (!user) {
-        return res.status(404).json({ success: false, message: 'User not found' });
-    }
-
-    const valid = await comparePassword(password, user.password);
-    if (!valid) {
-        return res.status(401).json({ success: false, message: 'Incorrect password' });
-    }
-
-    const originalEmail = user.email;
-    const anonymizedEmail = `deleted_${user.id}@deleted.necpa.local`;
-
-    // Anonymise PII and deactivate the account
-    try {
-        await user.update({
-            isActive: false,
-            email: anonymizedEmail,
-            username: `deleted_${user.id}`,
-            firstName: null,
-            lastName: null,
-            avatar: null,
-            fcmToken: null,
-            mfaSecret: null,
-            mfaEnabled: false,
-            resetToken: null,
-            resetTokenExpiry: null,
-            deletionRequestedAt: new Date(),
-        });
-    } catch (e) {
-        // If optional columns don't exist in this schema yet, retry with
-        // only the guaranteed columns.
-        console.warn('[Account Delete] Full update failed, retrying with core fields only:', e.message);
-        await user.update({
-            isActive: false,
-            email: anonymizedEmail,
-            username: `deleted_${user.id}`,
-            avatar: null,
-            fcmToken: null,
-            mfaSecret: null,
-            mfaEnabled: false,
-            resetToken: null,
-            resetTokenExpiry: null,
-        });
-    }
-
-    // Revoke all refresh tokens / sessions for this user
-    try {
-        if (typeof tokenService.revokeAllUserTokens === 'function') {
-            await tokenService.revokeAllUserTokens(userId);
-        } else {
-            const TokenModel = db.Token;
-            if (TokenModel) {
-                await TokenModel.destroy({ where: { userId } });
-            }
-        }
-    } catch (e) {
-        console.warn('[Account Delete] Failed to revoke tokens:', e.message);
-    }
-
-    // Blacklist the access token used for this request
-    try {
-        const accessToken = tokenService.extractTokenFromRequest
-            ? tokenService.extractTokenFromRequest(req)
-            : null;
-        if (accessToken) {
-            await blacklistAccessToken(accessToken);
-        }
-    } catch (e) {
-        console.warn('[Account Delete] Failed to blacklist access token:', e.message);
-    }
-
-    // Soft-delete the user's messages (preserve thread integrity for other
-    // participants) — actual content removal happens in the 30-day purge job
-    try {
-        const Messages = db.Messages;
-        if (Messages) {
-            await Messages.update(
-                { isDeleted: true },
-                { where: { senderId: userId } }
-            );
-        }
-    } catch (e) {
-        console.warn('[Account Delete] Failed to mark messages deleted:', e.message);
-    }
-
-    // Remove from groups
-    try {
-        const GroupMembers = db.GroupMembers;
-        if (GroupMembers) {
-            await GroupMembers.destroy({ where: { userId } });
-        }
-    } catch (e) {
-        console.warn('[Account Delete] Failed to remove group memberships:', e.message);
-    }
-
-    await writeAuditLog(userId, 'account_deletion_requested', {}, req);
-
-    // Send confirmation email to the ORIGINAL address (before anonymisation)
-    if (originalEmail) {
-        emailService.send(
-            originalEmail,
-            'Your Necpa Account Has Been Deleted',
-            `<p>Your Necpa account and personal data have been deactivated and anonymised as requested.</p>
-             <p>Remaining data will be permanently purged within 30 days. If you did not request this, contact support immediately.</p>`
-        ).catch(e => console.warn('[Account Delete] Failed to send confirmation email:', e.message));
-    }
-
-    return res.status(200).json({
-        success: true,
-        message: 'Your account has been deactivated and your personal data anonymised. Remaining data will be permanently deleted within 30 days.'
-    });
+    // FIX (Play Store compliance audit #1/#20): this handler used to
+    // duplicate its own deletion logic, separately from the (differently
+    // broken) one in routes/settings.js. Both now call the same canonical
+    // service — see src/services/accountDeletionService.js for the full
+    // explanation and what actually happens on both the immediate
+    // (anonymise + revoke) and 30-day-later (hard purge) sides of this.
+    const { requestDeletion } = require('../services/accountDeletionService');
+    const result = await requestDeletion(userId, { password, confirmation, req });
+    return res.status(result.status).json({ success: result.success, message: result.message });
 }));
 
 module.exports = router;

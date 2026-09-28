@@ -296,10 +296,26 @@ router.post('/backup', asyncHandler(async (req, res) => {
   const sequelize = getSequelize();
   const backupKey = crypto.randomBytes(16).toString('hex');
 
+  // FIX (Backup & Restore, item #13): backupKey is a fresh random value on
+  // every call, so the previous `ON CONFLICT DO NOTHING` (with no conflict
+  // target — nothing here could ever conflict on backupKey) never actually
+  // matched anything: every "Create Cloud Backup" just kept inserting a new
+  // row instead of replacing the previous one, and the table just grew
+  // unbounded (GET/download happened to keep "working" only because they
+  // both explicitly ORDER BY "createdAt" DESC LIMIT 1). Real upsert on the
+  // userId unique constraint (added in the matching migration) so each user
+  // has exactly one backup row that gets replaced in place.
   await sequelize.query(
-    `INSERT INTO message_backups ("userId","backupKey","encryptedData","messageCount","sizeBytes","status","completedAt","createdAt")
-     VALUES (:userId,:backupKey,:encryptedData,:messageCount,:sizeBytes,'completed',NOW(),NOW())
-     ON CONFLICT DO NOTHING`,
+    `INSERT INTO message_backups ("userId","backupKey","encryptedData","messageCount","sizeBytes","status","completedAt","createdAt","updatedAt")
+     VALUES (:userId,:backupKey,:encryptedData,:messageCount,:sizeBytes,'completed',NOW(),NOW(),NOW())
+     ON CONFLICT ("userId") DO UPDATE SET
+       "backupKey" = EXCLUDED."backupKey",
+       "encryptedData" = EXCLUDED."encryptedData",
+       "messageCount" = EXCLUDED."messageCount",
+       "sizeBytes" = EXCLUDED."sizeBytes",
+       "status" = 'completed',
+       "completedAt" = NOW(),
+       "updatedAt" = NOW()`,
     { replacements: {
       userId, backupKey, encryptedData,
       messageCount: parseInt(messageCount) || 0,

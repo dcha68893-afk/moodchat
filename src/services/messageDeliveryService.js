@@ -82,10 +82,13 @@ class MessageDeliveryService {
       // ValidationError/500, so callers (REST route, msg:send socket
       // handler) can distinguish "you can't message this person" from a
       // plain bad-request.
-      if (err.code === 'USER_BLOCKED') {
+      // FIX (Privacy architecture audit, item #7): same 403 treatment for
+      // the "Who can message me" privacy checks added to
+      // resolveOrCreateDirectChat (see that function's comment).
+      if (err.code === 'USER_BLOCKED' || err.code === 'MESSAGING_DISABLED' || err.code === 'MESSAGING_FRIENDS_ONLY') {
         const blockedErr = new ValidationError(err.message);
         blockedErr.status = 403;
-        blockedErr.code = 'USER_BLOCKED';
+        blockedErr.code = err.code;
         throw blockedErr;
       }
       throw err;
@@ -191,9 +194,15 @@ class MessageDeliveryService {
     try {
       await require('./directChatResolver').assertDirectChatNotBlocked(senderIdInt, chatIdInt);
     } catch (blockErr) {
-      if (blockErr.code === 'USER_BLOCKED') {
+      // FIX (Privacy architecture audit, item #7): assertDirectChatNotBlocked
+      // now also throws MESSAGING_DISABLED / MESSAGING_FRIENDS_ONLY for the
+      // "Who can message me" privacy setting — same conversion to a proper
+      // 403 ForbiddenError as the existing USER_BLOCKED case, instead of
+      // falling through to `throw blockErr` and surfacing as an
+      // unhandled 500.
+      if (blockErr.code === 'USER_BLOCKED' || blockErr.code === 'MESSAGING_DISABLED' || blockErr.code === 'MESSAGING_FRIENDS_ONLY') {
         const forbidden = new ForbiddenError(blockErr.message);
-        forbidden.code = 'USER_BLOCKED';
+        forbidden.code = blockErr.code;
         throw forbidden;
       }
       throw blockErr;

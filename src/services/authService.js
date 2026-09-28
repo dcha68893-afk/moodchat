@@ -364,7 +364,12 @@ class AuthService {
           isVerified: true,
           status: 'online',
           googleId,
-          authProvider: 'google'
+          authProvider: 'google',
+          // See the hasLocalPassword column comment on the model: this
+          // account's "password" is a random string the user never saw and
+          // can never type, so it must not be treated as a real password
+          // for change-password's current-password check.
+          hasLocalPassword: false
         });
 
         console.log('✅ [AuthService] New user created via Google sign-in:', user.id);

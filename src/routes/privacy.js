@@ -211,7 +211,7 @@ router.get('/users/:userId/key-verified', authenticate, apiRateLimiter, asyncHan
 
 // POST /api/privacy/report — report a user for spam/abuse
 router.post('/report', authenticate, apiRateLimiter, asyncHandler(async (req, res) => {
-  const { reportedUserId, reason, details, messageIds } = req.body;
+  const { reportedUserId, reason, details, messageIds, blockUser } = req.body;
   const VALID_REASONS = ['spam', 'harassment', 'fake_account', 'inappropriate_content', 'other'];
 
   if (!reportedUserId) return res.status(400).json({ status: 'error', message: 'reportedUserId required' });
@@ -222,40 +222,53 @@ router.post('/report', authenticate, apiRateLimiter, asyncHandler(async (req, re
     return res.status(400).json({ status: 'error', message: 'Cannot report yourself' });
   }
 
-  const sequelize = require('../config/database');
+  // FIX (Play Store compliance audit #4): this used to try persisting into
+  // ModerationLog (a group-moderation-only model — NOT-NULL groupId, an
+  // `action` enum with no 'user_report' value) and then, on failure, a raw
+  // INSERT into the wrong table with the wrong columns. Both attempts
+  // always failed and were silently swallowed, so "Report submitted" was
+  // shown even though nothing was ever stored. Now uses the dedicated
+  // UserReport model (see src/models/UserReport.js) built for exactly this.
+  const db = require('../models');
+  let reportRow = null;
   try {
-    // Try ModerationLog model first (it exists per previous audit)
-    const ModerationLog = require('../models/ModerationLog');
-    await ModerationLog.create({
-      type: 'user_report',
+    reportRow = await db.UserReport.create({
       reporterId: req.user.id,
-      targetId: reportedUserId,
-      targetType: 'user',
+      reportedUserId,
       reason,
       details: details ? String(details).slice(0, 500) : null,
-      metadata: messageIds ? JSON.stringify({ messageIds }) : null,
+      messageIds: Array.isArray(messageIds) ? messageIds : null,
       status: 'pending',
     });
-  } catch (_) {
-    // Fallback: raw insert into moderation_logs
+  } catch (e) {
+    console.error('[privacy] Failed to persist UserReport:', e.message);
+    return res.status(500).json({ status: 'error', message: 'Could not submit your report — please try again.' });
+  }
+
+  // FIX (Play Store compliance audit #5): "Auto-block the reported user"
+  // previously only sent a 'user:blocked' WebSocket event telling the
+  // CLIENT to pretend the block happened locally — no UserBlock row was
+  // ever created, so nothing was actually enforced anywhere server-side
+  // (the reported user could still message/add/view exactly as before).
+  // Opt-out via blockUser:false, since some report flows (e.g. "report but
+  // don't block yet") may want to separate the two actions.
+  if (blockUser !== false) {
     try {
-      await sequelize.query(
-        `INSERT INTO moderation_logs ("type","reporterId","targetId","targetType","reason","details","status","createdAt","updatedAt")
-         VALUES ('user_report',:reporterId,:targetId,'user',:reason,:details,'pending',NOW(),NOW())`,
-        { replacements: { reporterId: req.user.id, targetId: reportedUserId, reason, details: details || null } }
-      );
-    } catch (_2) {
-      console.warn('[privacy] Could not write ModerationLog:', _2.message);
+      await db.UserBlock.findOrCreate({
+        where: { blockerId: req.user.id, blockedId: reportedUserId },
+        defaults: { blockerId: req.user.id, blockedId: reportedUserId, reason: `Auto-blocked via report (${reason})` },
+      });
+    } catch (e) {
+      console.warn('[privacy] Failed to create block from report:', e.message);
     }
   }
 
-  // Auto-block the reported user locally (client handles the WS event)
   try {
     const wsService = require('../services/webSocketService');
     await wsService.sendToUser(req.user.id, 'user:blocked', { userId: reportedUserId });
   } catch (_) {}
 
-  res.json({ status: 'success', message: 'Report submitted. Thank you for helping keep Necpa safe.' });
+  res.json({ status: 'success', message: 'Report submitted. Thank you for helping keep Necpa safe.', data: { reportId: reportRow.id } });
 }));
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
