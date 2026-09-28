@@ -1333,6 +1333,34 @@ router.delete(
 
 // ─── 2FA TOTP routes (P1 audit fix) ─────────────────────────────────────────
 
+// FIX (2FA "Invalid TOTP token" even with a correct code): authenticator apps
+// display codes as "123 456" and users paste/type them that way; otplib's
+// verify() compares the raw string, so any space/dash made a correct code
+// fail. Also otplib's default window is 0 (exact 30s step), so a phone or
+// server clock a few seconds off rejected valid codes. Normalize to digits
+// only and accept +/-1 step (30s) of drift.
+function verifyTotp(token, secret) {
+    const { authenticator } = require('otplib');
+    const clean = String(token == null ? '' : token).replace(/\D/g, '');
+    if (clean.length !== 6 || !secret) return false;
+    authenticator.options = { ...authenticator.options, window: 1 };
+    try { return authenticator.verify({ token: clean, secret }); } catch (_) { return false; }
+}
+
+// Returns how many 30s steps the submitted code is away from "now" (e.g. -3 means
+// the phone clock is ~90s behind), or null if it matches nothing within +/-10
+// steps (=> the code was generated from a DIFFERENT secret than the one stored).
+function diagnoseTotp(token, secret) {
+    try {
+        const { authenticator } = require('otplib');
+        const clean = String(token == null ? '' : token).replace(/\D/g, '');
+        if (clean.length !== 6 || !secret) return null;
+        const wide = authenticator.clone({ window: [10, 10] });
+        const delta = wide.checkDelta(clean, secret);
+        return typeof delta === 'number' ? delta : null;
+    } catch (_) { return null; }
+}
+
 router.get('/2fa/status', apiRateLimiter, asyncHandler(async (req, res) => {
     try {
         const userId = getUserId(req);
@@ -1355,15 +1383,31 @@ router.post('/2fa/setup', apiRateLimiter, asyncHandler(async (req, res) => {
         const QRCode = require('qrcode');
         const crypto = require('crypto');
 
-        const secret = authenticator.generateSecret();
+        // FIX (2FA "Invalid TOTP token" with a correctly copied key): every call
+        // used to generate a NEW secret and overwrite the previous one. Retried or
+        // duplicated setup requests (slow Render cold start, double taps, request
+        // retries) left the server holding a different secret than the one the UI
+        // displayed / the user scanned. While 2FA is not yet enabled, setup is now
+        // idempotent: it returns the same pending secret until it is verified.
+        // Send { regenerate: true } to deliberately start over.
+        const wantNew = !!(req.body && req.body.regenerate === true);
+        const existingCodes = Array.isArray(user.mfaBackupCodes)
+            ? user.mfaBackupCodes.map(c => c && c.code).filter(Boolean) : [];
+        const reuse = !wantNew && !!user.mfaSecret && existingCodes.length > 0;
+
+        const secret = reuse ? user.mfaSecret : authenticator.generateSecret();
         const otpUrl = authenticator.keyuri(user.email || user.username, 'Necpa', secret);
         const qrCode = await QRCode.toDataURL(otpUrl);
-        const backupCodes = Array.from({ length: 8 }, () => crypto.randomBytes(4).toString('hex').toUpperCase());
+        const backupCodes = reuse
+            ? existingCodes
+            : Array.from({ length: 8 }, () => crypto.randomBytes(4).toString('hex').toUpperCase());
 
-        await user.update({
-            mfaSecret: secret,
-            mfaBackupCodes: backupCodes.map(code => ({ code, used: false }))
-        });
+        if (!reuse) {
+            await user.update({
+                mfaSecret: secret,
+                mfaBackupCodes: backupCodes.map(code => ({ code, used: false }))
+            });
+        }
 
         res.json({ status: 'success', data: { qrCode, secret, backupCodes } });
     } catch (e) { console.error('2FA setup error:', e); res.status(500).json({ status: 'error', message: 'Failed to set up 2FA' }); }
@@ -1378,9 +1422,14 @@ router.post('/2fa/verify', apiRateLimiter, asyncHandler(async (req, res) => {
         const user = await User.findByPk(userId);
         if (!user || !user.mfaSecret) return res.status(400).json({ status: 'error', message: 'Run /2fa/setup first' });
 
-        const { authenticator } = require('otplib');
-        if (!authenticator.verify({ token, secret: user.mfaSecret }))
-            return res.status(400).json({ status: 'error', message: 'Invalid TOTP token — check your authenticator app' });
+        if (!verifyTotp(token, user.mfaSecret)) {
+            const delta = diagnoseTotp(token, user.mfaSecret);
+            console.warn('[2FA verify] failed userId=' + userId + ' clockDeltaSteps=' + delta);
+            const msg = delta !== null
+                ? 'Your code is correct but your phone clock is about ' + Math.abs(delta * 30) + ' seconds ' + (delta < 0 ? 'behind' : 'ahead') + '. Set your phone date/time to automatic and try a fresh code.'
+                : 'Invalid TOTP token — this code was not generated from the key currently saved on the server. Delete the old entry in your authenticator app and add the key shown on this screen (tap Set Up 2FA only once).';
+            return res.status(400).json({ status: 'error', message: msg, reason: delta !== null ? 'clock_drift' : 'secret_mismatch' });
+        }
 
         await user.update({ mfaEnabled: true });
         res.json({ status: 'success', message: '2FA enabled on your account' });
@@ -1401,8 +1450,7 @@ router.post('/2fa/disable', apiRateLimiter, asyncHandler(async (req, res) => {
         if (!await bcrypt.compare(password, user.password))
             return res.status(400).json({ status: 'error', message: 'Incorrect password' });
 
-        const { authenticator } = require('otplib');
-        if (!authenticator.verify({ token, secret: user.mfaSecret }))
+        if (!verifyTotp(token, user.mfaSecret))
             return res.status(400).json({ status: 'error', message: 'Invalid TOTP token' });
 
         await user.update({ mfaEnabled: false, mfaSecret: null, mfaBackupCodes: null });
