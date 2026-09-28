@@ -514,30 +514,49 @@ class MessageDeliveryService {
     const sequelize = getSequelize();
     const mid = parseInt(messageId, 10), uid = parseInt(userId, 10);
     if (!mid || !uid) throw new ValidationError('Invalid delivery acknowledgement');
+
     const [msg] = await sequelize.query(
-      `SELECT id, "chatId", "senderId" FROM "Messages"
+      `SELECT id, "chatId", "senderId", "receiverId" FROM "Messages"
        WHERE id = :messageId AND "isDeleted" = false LIMIT 1`,
       { replacements: { messageId: mid }, type: sequelize.QueryTypes.SELECT }
     );
-    if (!msg || Number(msg.senderId) === uid) return false;
+    if (!msg || Number(msg.senderId) === uid) return { delivered: false };
+
     const [recipient] = await sequelize.query(
       `SELECT 1 FROM chat_participants WHERE "chatId" = :chatId AND "userId" = :userId LIMIT 1`,
       { replacements: { chatId: msg.chatId, userId: uid }, type: sequelize.QueryTypes.SELECT }
     );
-    if (!recipient) return false;
+    if (!recipient) return { delivered: false };
+
+    // The frontend sends this ACK only after the message has been written to
+    // its local encrypted IndexedDB. Marking delivery and deleting the server
+    // mailbox copy are therefore one lifecycle step. This is the same mailbox
+    // principle used by Signal: the server retains ciphertext until the device
+    // fetches/accepts it, then the server copy can be removed.
     await sequelize.query(
       `UPDATE "Messages" SET "deliveredAt" = NOW(),
           status = CASE WHEN status IN ('sent','sending') THEN 'delivered' ELSE status END
        WHERE id = :messageId AND "deliveredAt" IS NULL`,
       { replacements: { messageId: mid } }
     );
+
     await sequelize.query(
       `INSERT INTO message_delivery_logs ("messageId","userId","chatId","event","createdAt")
        VALUES (:messageId,:userId,:chatId,'delivered',NOW())
        ON CONFLICT ("messageId","userId","event") DO NOTHING`,
       { replacements: { messageId: mid, userId: uid, chatId: msg.chatId } }
     ).catch(() => {});
-    return true;
+
+    const retention = require('./ephemeralRetentionService');
+    const result = await retention.deleteMessageFromServer({ sequelize }, mid, 'delivered');
+    return {
+      delivered: true,
+      deleted: !!result.deleted,
+      messageId: mid,
+      chatId: msg.chatId,
+      senderId: Number(msg.senderId),
+      deliveredTo: uid,
+    };
   }
 
   /** Recipient opened the chat / read the message. */

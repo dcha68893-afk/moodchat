@@ -37,6 +37,25 @@ async function acknowledgeSenderKey(db,g,uid,owner,epoch){const {chat,ChatPartic
   state.pendingMemberIds=[...pendingSet];
   state.pending=state.pendingMemberIds.length>0;
   state.reason=state.pending?'delivery_pending':null;state.updatedAt=now();const metadata={...(chat.metadata&&typeof chat.metadata==='object'?chat.metadata:{})};metadata.groupMessaging=state;await chat.update({metadata,updatedAt:new Date()});return{groupId:Number(g),ownerId,epoch:ep,installedBy:Number(uid),pendingMemberIds:state.pendingMemberIds,pending:state.pending}}
+async function acknowledgeMessageDelivery(db,g,uid,messageId){
+  const q=db.sequelize;
+  const {chat,ChatParticipant:CP}=await loadGroup(db,g,uid);
+  const [m]=await q.query(`SELECT id,"chatId","senderId","createdAt" FROM "Messages" WHERE id=:id AND "chatId"=:g AND "isDeleted"=false AND (metadata->>'groupPipeline')=:p LIMIT 1`,{replacements:{id:Number(messageId),g:Number(g),p:PIPELINE},type:q.QueryTypes.SELECT});
+  if(!m)return{delivered:false,deleted:false};
+  if(Number(m.senderId)===Number(uid))return{delivered:false,deleted:false};
+  const [member]=await q.query('SELECT 1 FROM chat_participants WHERE "chatId"=:g AND "userId"=:u LIMIT 1',{replacements:{g:Number(g),u:Number(uid)},type:q.QueryTypes.SELECT});
+  if(!member){const e=new Error('Not a member of this group');e.status=403;throw e}
+  await q.query(`INSERT INTO message_delivery_logs ("messageId","userId","chatId","event","createdAt") VALUES (:id,:u,:g,'group_delivered',NOW()) ON CONFLICT ("messageId","userId","event") DO NOTHING`,{replacements:{id:Number(messageId),u:Number(uid),g:Number(g)},type:q.QueryTypes.INSERT});
+  const [{expected=0}={}]=await q.query(`SELECT COUNT(*)::int AS expected FROM chat_participants WHERE "chatId"=:g AND "userId"<>:sender AND "joinedAt"<=:createdAt`,{replacements:{g:Number(g),sender:Number(m.senderId),createdAt:m.createdAt},type:q.QueryTypes.SELECT});
+  const [{received=0}={}]=await q.query(`SELECT COUNT(DISTINCT "userId")::int AS received FROM message_delivery_logs WHERE "messageId"=:id AND event='group_delivered'`,{replacements:{id:Number(messageId)},type:q.QueryTypes.SELECT});
+  if(Number(received)>=Number(expected)){
+    const retention=require('./ephemeralRetentionService');
+    await retention.deleteMessageFromServer({sequelize:q},Number(messageId),'group_delivered');
+    return{delivered:true,deleted:true,complete:true,expected:Number(expected),received:Number(received),messageId:Number(messageId),groupId:Number(g),senderId:Number(m.senderId),deliveredTo:Number(uid)};
+  }
+  return{delivered:true,deleted:false,complete:false,expected:Number(expected),received:Number(received),messageId:Number(messageId),groupId:Number(g),senderId:Number(m.senderId),deliveredTo:Number(uid)};
+}
+
 async function updateMessage(db,id,userId,content){const q=db.sequelize,[m]=await q.query(`SELECT * FROM "Messages" WHERE id=:id AND "senderId"=:u AND "isDeleted"=false AND (metadata->>'groupPipeline')=:p LIMIT 1`,{replacements:{id,u:userId,p:PIPELINE},type:q.QueryTypes.SELECT});if(!m){const e=new Error('Group message not found or not owned by you');e.status=404;throw e}const e=envelope(content);if(!e||Number(e.owner)!==Number(userId)){const x=new Error('Invalid group edit envelope');x.status=400;throw x}await q.query('UPDATE "Messages" SET content=:content,"isEdited"=true,"editedAt"=NOW(),"updatedAt"=NOW() WHERE id=:id',{replacements:{id,content}});return{...m,content,isEdited:true}}
 async function deleteMessage(db,id,userId,forEveryone){const q=db.sequelize,[m]=await q.query(`SELECT id,"chatId","senderId",metadata,"createdAt" FROM "Messages" WHERE id=:id AND "isDeleted"=false AND (metadata->>'groupPipeline')=:p LIMIT 1`,{replacements:{id,p:PIPELINE},type:q.QueryTypes.SELECT});if(!m){const e=new Error('Group message not found');e.status=404;throw e}const [member]=await q.query('SELECT 1 FROM chat_participants WHERE "chatId"=:g AND "userId"=:u LIMIT 1',{replacements:{g:m.chatId,u:userId},type:q.QueryTypes.SELECT});if(!member){const e=new Error('Not a member of this group');e.status=403;throw e}if(forEveryone){if(Number(m.senderId)!==Number(userId)){const e=new Error('Only the sender can delete for everyone');e.status=403;throw e}await q.query('UPDATE "Messages" SET "isDeleted"=true,"deletedAt"=NOW(),"deletedBy"=:u,"updatedAt"=NOW() WHERE id=:id',{replacements:{id,u:userId}})}else{let md={};try{md=typeof m.metadata==='string'?JSON.parse(m.metadata):m.metadata||{}}catch(_){}const a=Array.isArray(md.deletedFor)?md.deletedFor:[];if(!a.includes(userId))a.push(userId);md.deletedFor=a;await q.query('UPDATE "Messages" SET metadata=:metadata::jsonb,"updatedAt"=NOW() WHERE id=:id',{replacements:{id,metadata:JSON.stringify(md)}})}return m}
-module.exports={PIPELINE,ALGORITHM,normalize,members,loadGroup,reconcile,rotateSenderKey,stateFor,insertMessage,parseEnvelope:envelope,emit,invalidateMembership,acknowledgeSenderKey,updateMessage,deleteMessage};
+module.exports={PIPELINE,ALGORITHM,normalize,members,loadGroup,reconcile,rotateSenderKey,stateFor,insertMessage,parseEnvelope:envelope,emit,invalidateMembership,acknowledgeSenderKey,acknowledgeMessageDelivery,updateMessage,deleteMessage};
