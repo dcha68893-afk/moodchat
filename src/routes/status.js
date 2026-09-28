@@ -78,11 +78,19 @@ async function canView(status, viewerId) {
   if (status.privacy === 'only_share_with') return list.includes(viewerId);
   if (status.privacy === 'contacts_except') return !list.includes(viewerId);
   if (status.privacy === 'close_friends') {
+    const listIds = Array.isArray(status.privacyList) ? status.privacyList.map(Number).filter(Number.isFinite) : [];
+    if (listIds.length && !listIds.includes(Number(viewerId))) return false;
     const FriendModel = Friend();
     if (!FriendModel) return false;
     const rows = await memo('friends', String(viewerId), () => FriendModel.getUserFriends(viewerId, 'accepted').catch(() => []));
-    const ids = rows.map(f => Number(f.friend?.requesterId) === viewerId ? Number(f.friend?.addresseeId) : Number(f.friend?.requesterId));
-    return ids.includes(Number(status.userId));
+    const row = rows.find(f => {
+      const otherId = Number(f.friend?.requesterId) === viewerId ? Number(f.friend?.addresseeId) : Number(f.friend?.requesterId);
+      return otherId === Number(status.userId);
+    });
+    if (!row) return false;
+    const level = Number(row.friend?.closenessLevel || 0);
+    const category = String(row.friend?.category || '').toLowerCase();
+    return level > 0 || category === 'close_friend' || category === 'close friends' || category === 'closefriend';
   }
   const FriendModel = Friend();
   if (!FriendModel) return false;

@@ -11,7 +11,7 @@ const sequelize = db.sequelize;
 // Friends is deliberately read/written with explicit SQL against the
 // canonical production columns. This prevents Sequelize from ever emitting
 // legacy receiverId/requesterId column names for this module.
-const FRIEND_COLUMNS = '"id", "requester_id", "receiver_id", "status", "createdAt", "updatedAt", "accepted_at", "blocked_at"';
+const FRIEND_COLUMNS = '"id", "requester_id", "receiver_id", "status", "createdAt", "updatedAt", "accepted_at", "blocked_at", "category", "closeness_level"';
 
 const idOf = (req) => {
   const raw = req.user?.userId ?? req.user?.id;
@@ -47,7 +47,9 @@ function mapFriend(row) {
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     acceptedAt: row.accepted_at || null,
-    blockedAt: row.blocked_at || null
+    blockedAt: row.blocked_at || null,
+    category: row.category || null,
+    closenessLevel: Number(row.closeness_level || 0)
   };
 }
 
@@ -111,7 +113,13 @@ router.get('/', async (req, res) => {
     const mapped = rows.map(mapFriend);
     const ids = mapped.map(row => row.requesterId === userId ? row.addresseeId : row.requesterId);
     const byId = await usersByIds(ids);
-    const friends = mapped.map(row => publicUser(byId.get(row.requesterId === userId ? row.addresseeId : row.requesterId))).filter(Boolean);
+    const friends = mapped.map(row => {
+      const person = publicUser(byId.get(row.requesterId === userId ? row.addresseeId : row.requesterId));
+      if (!person) return null;
+      const category = String(row.category || '').toLowerCase();
+      const closenessLevel = Number(row.closenessLevel || 0);
+      return {...person, friendship:{id:row.id,category:row.category||null,closenessLevel}, isCloseFriend:closenessLevel>0||category==='close_friend'||category==='close friends'||category==='closefriend'};
+    }).filter(Boolean);
     return res.json({ success: true, friends, pagination: { total: count, limit, offset, hasMore: offset + rows.length < count } });
   } catch (error) {
     console.error('[Friends] list failed:', error.message);
