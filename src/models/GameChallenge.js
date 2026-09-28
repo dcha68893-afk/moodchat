@@ -17,7 +17,7 @@ module.exports = (sequelize, DataTypes) => {
       },
       targetId: {
         type: DataTypes.INTEGER,
-        allowNull: false,
+        allowNull: true,
         references: { model: 'Users', key: 'id' },
         onDelete: 'CASCADE',
       },
@@ -46,6 +46,42 @@ module.exports = (sequelize, DataTypes) => {
       expiresAt: {
         type: DataTypes.DATE,
         allowNull: false,
+      },
+      inviteCode: {
+        type: DataTypes.STRING(12),
+        allowNull: true,
+      },
+      inviteTargetId: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+      },
+      roomSeed: {
+        type: DataTypes.STRING(64),
+        allowNull: true,
+      },
+      gameLevel: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+      },
+      player2Id: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+      },
+      player1Score: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+      },
+      player2Score: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+      },
+      joinedAt: {
+        type: DataTypes.DATE,
+        allowNull: true,
+      },
+      completedAt: {
+        type: DataTypes.DATE,
+        allowNull: true,
       },
     },
     {
