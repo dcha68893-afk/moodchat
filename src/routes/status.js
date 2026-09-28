@@ -631,6 +631,41 @@ router.post('/:statusId/report', authenticateToken, requireUser, apiRateLimiter,
   return res.status(201).json({ success: true });
 }));
 
+
+// ── Poll voting ─────────────────────────────────────────────────────────────
+// Polls are real one-choice votes, not creator-only metadata. Votes are kept
+// separately from the Status row so changing a vote never mutates the poll
+// definition. The unique (statusId,userId) key guarantees one active choice
+// per person, while the UPSERT lets a voter change their choice safely.
+router.get('/:statusId/poll', optionalAuthenticateToken, apiRateLimiter, asyncHandler(async (req,res)=>{
+  const viewerId=uid(req)||0;
+  const status=await Status().findByPk(Number(req.params.statusId));
+  if(!status||status.type!=='poll'||!(await canView(status,viewerId))) return res.status(404).json({success:false,message:'Poll not found'});
+  const options=Array.isArray(status.pollOptions)?status.pollOptions.map(String).filter(Boolean):[];
+  const q=db().sequelize;
+  const rows=await q.query('SELECT "optionIndex" FROM "StatusPollVotes" WHERE "statusId"=:statusId',{replacements:{statusId:status.id},type:q.QueryTypes.SELECT}).catch(()=>[]);
+  const counts=Array(options.length).fill(0);
+  for(const row of rows){const i=Number(row.optionIndex);if(Number.isInteger(i)&&i>=0&&i<counts.length)counts[i]++;}
+  const [mine]=viewerId?await q.query('SELECT "optionIndex" FROM "StatusPollVotes" WHERE "statusId"=:statusId AND "userId"=:userId LIMIT 1',{replacements:{statusId:status.id,userId:viewerId},type:q.QueryTypes.SELECT}).catch(()=>[null]):[null];
+  return res.json({success:true,data:{statusId:status.id,question:status.content||'',options:options.map((label,i)=>({label,votes:counts[i]})),totalVotes:counts.reduce((a,b)=>a+b,0),myVote:mine?Number(mine.optionIndex):null}});
+}));
+
+router.post('/:statusId/poll/vote', authenticateToken, requireUser, apiRateLimiter, asyncHandler(async(req,res)=>{
+  const viewerId=uid(req),status=await Status().findByPk(Number(req.params.statusId));
+  if(!status||status.type!=='poll'||!(await canView(status,viewerId))) return res.status(404).json({success:false,message:'Poll not found'});
+  const options=Array.isArray(status.pollOptions)?status.pollOptions.map(String).filter(Boolean):[];
+  const optionIndex=Number(req.body?.optionIndex);
+  if(!Number.isInteger(optionIndex)||optionIndex<0||optionIndex>=options.length) return res.status(400).json({success:false,message:'Choose one valid poll option'});
+  const q=db().sequelize;
+  await q.query('INSERT INTO "StatusPollVotes" ("statusId","userId","optionIndex","createdAt","updatedAt") VALUES (:statusId,:userId,:optionIndex,NOW(),NOW()) ON CONFLICT ("statusId","userId") DO UPDATE SET "optionIndex"=EXCLUDED."optionIndex","updatedAt"=NOW()',{replacements:{statusId:status.id,userId:viewerId,optionIndex}});
+  const rows=await q.query('SELECT "optionIndex" FROM "StatusPollVotes" WHERE "statusId"=:statusId',{replacements:{statusId:status.id},type:q.QueryTypes.SELECT}).then(x=>x).catch(()=>[]);
+  const counts=Array(options.length).fill(0);
+  for(const row of rows){const i=Number(row.optionIndex);if(Number.isInteger(i)&&i>=0&&i<counts.length)counts[i]++;}
+  const io=global.__socketIO;
+  if(io)io.to('user:'+status.userId).emit('status:poll:voted',{statusId:status.id,userId:viewerId});
+  return res.json({success:true,data:{statusId:status.id,question:status.content||'',options:options.map((label,i)=>({label,votes:counts[i]})),totalVotes:counts.reduce((a,b)=>a+b,0),myVote:optionIndex}});
+}));
+
 // Log the real cause server-side and give the client a JSON body (it used to get an empty
 // 500). Only the Postgres error code is exposed, never the SQL/message.
 router.use((err, req, res, next) => {

@@ -135,6 +135,19 @@ async function applyStatusSchema(sequelize, transaction) {
   `);
 
   await q(`
+    CREATE TABLE IF NOT EXISTS "StatusPollVotes" (
+      "id" SERIAL PRIMARY KEY,
+      "statusId" INTEGER NOT NULL,
+      "userId" INTEGER NOT NULL,
+      "optionIndex" INTEGER NOT NULL,
+      "createdAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS "StatusPollVotes_status_user_unique" ON "StatusPollVotes" ("statusId","userId");
+    CREATE INDEX IF NOT EXISTS "StatusPollVotes_status_option_idx" ON "StatusPollVotes" ("statusId","optionIndex");
+  `);
+
+  await q(`
     CREATE TABLE IF NOT EXISTS "StatusReports" (
       "id" SERIAL PRIMARY KEY,
       "statusId" INTEGER NOT NULL,

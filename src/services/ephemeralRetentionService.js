@@ -180,7 +180,7 @@ async function cleanupExpiredStatuses(db, limit = 100) {
   for (const row of rows) {
     const deletedRow = await q.transaction(async (transaction) => {
       const qi = { replacements: { id: row.id }, transaction };
-      for (const table of ['StatusViews','StatusReactions','StatusReplies','VibeWatchStats']) {
+      for (const table of ['StatusViews','StatusReactions','StatusReplies','VibeWatchStats','StatusPollVotes']) {
         await q.query(`DELETE FROM "${table}" WHERE "statusId"=:id`, qi).catch(async (err) => {
           if (!/does not exist|relation .* does not exist/i.test(String(err.message || ''))) throw err;
         });
