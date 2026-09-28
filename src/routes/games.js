@@ -578,4 +578,189 @@ router.get('/push/vapid-public-key', (req, res) => {
   return res.json({ key });
 });
 
+const crypto = require('crypto');
+const GameRoom = db?.models?.GameRoom || db?.GameRoom;
+const ROOM_TTL_MS = 2 * 60 * 60 * 1000;
+const ROOM_GAMES = new Set(['water','block','trivia','crossword']);
+
+function roomCode(){
+  return crypto.randomBytes(5).toString('base64').replace(/[^A-Z0-9]/gi,'').toUpperCase().slice(0,8);
+}
+async function uniqueRoomCode(){
+  for(let i=0;i<8;i++){
+    const code=roomCode();
+    if(GameRoom && !(await GameRoom.findOne({where:{code}}))) return code;
+  }
+  throw new Error('Could not allocate room code');
+}
+function roomPlayer(room,userId){
+  if(room.hostId===userId)return 'host';
+  if(room.guestId===userId)return 'guest';
+  return null;
+}
+function roomPayload(room){
+  return {
+    id:room.id,code:room.code,gameType:room.gameType,level:room.level,seed:room.seed,
+    hostId:room.hostId,guestId:room.guestId,targetUserId:room.targetUserId,
+    status:room.status,hostScore:room.hostScore,guestScore:room.guestScore,
+    winnerId:room.winnerId,state:room.state,expiresAt:room.expiresAt
+  };
+}
+function emitRoom(req,room,event='game:room:update'){
+  const io=req.io||(req.app&&req.app.get('io'));
+  if(!io)return;
+  const payload=roomPayload(room);
+  [room.hostId,room.guestId].filter(Boolean).forEach(id=>{
+    io.to(`user:${id}`).emit(event,payload);
+    io.to(`user_${id}`).emit(event,payload);
+  });
+}
+
+// POST /api/games/rooms — create a private two-player game room.
+// targetUserId is optional; when supplied, only that exact account can join.
+router.post('/rooms',async(req,res)=>{
+  try{
+    if(!GameRoom)return res.status(503).json({error:'Game rooms unavailable'});
+    const userId=req.user?.id||req.userId;
+    if(!userId)return res.status(401).json({error:'Unauthorized'});
+    const {gameType,level=1,targetUserId=null}=req.body||{};
+    if(!ROOM_GAMES.has(String(gameType)))return res.status(400).json({error:'Unsupported game'});
+    if(targetUserId&&Number(targetUserId)===Number(userId))return res.status(400).json({error:'You cannot invite yourself'});
+    if(targetUserId&&Friend){
+      const {Op}=db.Sequelize||require('sequelize');
+      const friend=await Friend.findOne({where:{
+        status:'accepted',
+        [Op.or]:[
+          {requesterId:userId,receiverId:Number(targetUserId)},
+          {requesterId:Number(targetUserId),receiverId:userId}
+        ]
+      }});
+      if(!friend)return res.status(403).json({error:'You can only invite an accepted friend'});
+    }
+    const code=await uniqueRoomCode();
+    const seed=crypto.randomBytes(12).toString('hex');
+    const room=await GameRoom.create({
+      code,gameType:String(gameType),level:Math.max(1,Math.min(100000,Number(level)||1)),
+      hostId:userId,targetUserId:targetUserId?Number(targetUserId):null,seed,
+      expiresAt:new Date(Date.now()+ROOM_TTL_MS),state:{}
+    });
+    return res.status(201).json({ok:true,room:roomPayload(room),role:'host'});
+  }catch(err){
+    console.error('[games] POST /rooms:',err.message);
+    return res.status(500).json({error:'Server error'});
+  }
+});
+
+// GET /api/games/rooms/:code — requires the secret code and authentication.
+// It never exposes room data through a public listing.
+router.get('/rooms/:code',async(req,res)=>{
+  try{
+    if(!GameRoom)return res.status(503).json({error:'Game rooms unavailable'});
+    const userId=req.user?.id||req.userId;
+    if(!userId)return res.status(401).json({error:'Unauthorized'});
+    const room=await GameRoom.findOne({where:{code:String(req.params.code).toUpperCase()}});
+    if(!room)return res.status(404).json({error:'Room not found'});
+    if(new Date()>room.expiresAt&&room.status!=='finished'){
+      await room.update({status:'closed'});
+      return res.status(410).json({error:'Room expired'});
+    }
+    const role=roomPlayer(room,userId);
+    if(!role&&room.targetUserId&&room.targetUserId!==userId)return res.status(403).json({error:'This invitation is for another player'});
+    if(!role)return res.status(403).json({error:'Join this room with its invitation code'});
+    return res.json({ok:true,room:roomPayload(room),role});
+  }catch(err){
+    console.error('[games] GET /rooms/:code:',err.message);
+    return res.status(500).json({error:'Server error'});
+  }
+});
+
+// POST /api/games/rooms/:code/join — exact-code join, with optional target-account lock.
+router.post('/rooms/:code/join',async(req,res)=>{
+  try{
+    if(!GameRoom)return res.status(503).json({error:'Game rooms unavailable'});
+    const userId=req.user?.id||req.userId;
+    if(!userId)return res.status(401).json({error:'Unauthorized'});
+    const room=await GameRoom.findOne({where:{code:String(req.params.code).toUpperCase()}});
+    if(!room)return res.status(404).json({error:'Invalid game code'});
+    if(new Date()>room.expiresAt||room.status==='closed')return res.status(410).json({error:'This game invitation has expired'});
+    if(room.hostId===userId)return res.json({ok:true,room:roomPayload(room),role:'host'});
+    if(room.guestId&&room.guestId!==userId)return res.status(409).json({error:'This game already has another guest'});
+    if(room.targetUserId&&room.targetUserId!==userId)return res.status(403).json({error:'This invitation was not sent to your account'});
+    await room.update({guestId:userId,status:'ready'});
+    emitRoom(req,room);
+    return res.json({ok:true,room:roomPayload(room),role:'guest'});
+  }catch(err){
+    console.error('[games] POST /rooms/:code/join:',err.message);
+    return res.status(500).json({error:'Server error'});
+  }
+});
+
+// POST /api/games/rooms/:code/state — only room members can publish game state.
+router.post('/rooms/:code/state',async(req,res)=>{
+  try{
+    if(!GameRoom)return res.status(503).json({error:'Game rooms unavailable'});
+    const userId=req.user?.id||req.userId;
+    if(!userId)return res.status(401).json({error:'Unauthorized'});
+    const room=await GameRoom.findOne({where:{code:String(req.params.code).toUpperCase()}});
+    if(!room)return res.status(404).json({error:'Room not found'});
+    const role=roomPlayer(room,userId);
+    if(!role)return res.status(403).json({error:'You are not a player in this room'});
+    if(new Date()>room.expiresAt)return res.status(410).json({error:'Room expired'});
+    const state=(req.body&&req.body.state&&typeof req.body.state==='object')?req.body.state:{};
+    const patch={state,status:room.guestId?'playing':'waiting'};
+    if(req.body&&req.body.score!=null)patch[role==='host'?'hostScore':'guestScore']=Math.max(0,Math.floor(Number(req.body.score)||0));
+    await room.update(patch);
+    emitRoom(req,room);
+    return res.json({ok:true,room:roomPayload(room)});
+  }catch(err){
+    console.error('[games] POST /rooms/:code/state:',err.message);
+    return res.status(500).json({error:'Server error'});
+  }
+});
+
+// POST /api/games/rooms/:code/result — members submit their completion; server decides winner.
+router.post('/rooms/:code/result',async(req,res)=>{
+  try{
+    if(!GameRoom)return res.status(503).json({error:'Game rooms unavailable'});
+    const userId=req.user?.id||req.userId;
+    if(!userId)return res.status(401).json({error:'Unauthorized'});
+    const room=await GameRoom.findOne({where:{code:String(req.params.code).toUpperCase()}});
+    if(!room)return res.status(404).json({error:'Room not found'});
+    const role=roomPlayer(room,userId);
+    if(!role)return res.status(403).json({error:'You are not a player in this room'});
+    const score=Math.max(0,Math.floor(Number(req.body?.score)||0));
+    const key=role==='host'?'hostScore':'guestScore';
+    await room.update({[key]:score});
+    const fresh=await GameRoom.findByPk(room.id);
+    if(fresh.hostScore!=null&&fresh.guestScore!=null){
+      const winnerId=fresh.hostScore===fresh.guestScore?null:(fresh.hostScore>fresh.guestScore?fresh.hostId:fresh.guestId);
+      await fresh.update({winnerId,status:'finished'});
+      emitRoom(req,fresh,'game:room:finished');
+      return res.json({ok:true,room:roomPayload(fresh),result:winnerId?'completed':'draw'});
+    }
+    emitRoom(req,fresh);
+    return res.json({ok:true,room:roomPayload(fresh),result:'waiting_for_opponent'});
+  }catch(err){
+    console.error('[games] POST /rooms/:code/result:',err.message);
+    return res.status(500).json({error:'Server error'});
+  }
+});
+
+// POST /api/games/rooms/:code/close — only host can close the invitation.
+router.post('/rooms/:code/close',async(req,res)=>{
+  try{
+    if(!GameRoom)return res.status(503).json({error:'Game rooms unavailable'});
+    const userId=req.user?.id||req.userId;
+    const room=await GameRoom.findOne({where:{code:String(req.params.code).toUpperCase()}});
+    if(!room)return res.status(404).json({error:'Room not found'});
+    if(room.hostId!==userId)return res.status(403).json({error:'Only the host can close this room'});
+    await room.update({status:'closed'});
+    emitRoom(req,room);
+    return res.json({ok:true});
+  }catch(err){
+    console.error('[games] POST /rooms/:code/close:',err.message);
+    return res.status(500).json({error:'Server error'});
+  }
+});
+
 module.exports = router;
