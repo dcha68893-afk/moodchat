@@ -3,9 +3,9 @@
 This zip contains ONLY the files that changed. Copy each file over the
 matching path in your existing project (same relative paths as your repo).
 
-## 1. Branding: "Nexopa" → "Necpa"
+## 1. Branding: "Nexopa" → "Necpra"
 
-Replaced every case variant (NEXOPA/Nexopa/nexopa → NECPA/Necpa/necpa)
+Replaced every case variant (NEXOPA/Nexopa/nexopa → NECPRA/Necpra/necpa)
 across the backend — README, .env.example, config, email templates,
 Cloudinary folder paths (e.g. `necpa/group-avatars`), package.json name,
 Docker/deploy scripts, etc. All 34 changed files are included here.

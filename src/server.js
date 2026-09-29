@@ -5382,7 +5382,7 @@ class Application {
                     logger.success('Socket.IO initialized with middleware auth ✅', 'WEBSOCKET');
 
                     // ═══════════════════════════════════════════════════════════════════════
-                    // NECPA INFRASTRUCTURE PHASES 1-6 — AUTO-INITIALIZES AFTER SOCKET INIT
+                    // NECPRA INFRASTRUCTURE PHASES 1-6 — AUTO-INITIALIZES AFTER SOCKET INIT
                     // Non-destructive: each phase wraps existing services, never replaces them.
                     // ═══════════════════════════════════════════════════════════════════════
 
