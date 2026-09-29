@@ -584,7 +584,7 @@ router.get('/health', (req, res) => {
 router.get('/info', (req, res) => {
   res.status(200).json({
     success: true,
-    name: 'Necpa API',
+    name: 'Necpra API',
     version: '1.0.0',
     environment: process.env.NODE_ENV || 'development',
     timestamp: new Date().toISOString(),

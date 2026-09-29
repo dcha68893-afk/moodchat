@@ -1,6 +1,6 @@
-# Necpa Backend
+# Necpra Backend
 
-A production-ready backend service for Necpa application, providing RESTful APIs for real-time mood tracking and social interaction features.
+A production-ready backend service for Necpra application, providing RESTful APIs for real-time mood tracking and social interaction features.
 
 ## Features
 
@@ -38,4 +38,4 @@ A production-ready backend service for Necpa application, providing RESTful APIs
 1. **Clone the repository**
    ```bash
    git clone <repository-url>
-   cd necpa-backend
+   cd necpra-backend

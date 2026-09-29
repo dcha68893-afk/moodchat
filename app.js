@@ -147,7 +147,7 @@ app.get('/health', async (req, res) => {
     const healthCheck = {
       status: 'healthy',
       timestamp: new Date().toISOString(),
-      service: 'Necpa API',
+      service: 'Necpra API',
       nodeEnv: config.nodeEnv,
       uptime: process.uptime(),
     };
@@ -169,7 +169,7 @@ app.get('/health', async (req, res) => {
     res.status(503).json({
       status: 'unhealthy',
       timestamp: new Date().toISOString(),
-      service: 'Necpa API',
+      service: 'Necpra API',
       error: error.message
     });
   }
