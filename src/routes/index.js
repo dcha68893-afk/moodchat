@@ -131,6 +131,8 @@ const ROUTE_MAPPING = {
   'offline.js': '/offline',
   'account.js': '/account',
   'tokens.js': '/tokens',
+  // GAMES: keep the multiplayer room API on an explicit, stable mount instead of relying on filename auto-discovery.
+  'games.js': '/games',
   // FIX B-01: marketplace.routes.js was missing — all marketplace endpoints returned 404
   'marketplace.routes.js': '/marketplace',
   // PHASE14 FIX: payments.js — frontend calls /api/payments/* (mpesa, card, wallet)
