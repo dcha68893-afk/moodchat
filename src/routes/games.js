@@ -8,7 +8,7 @@ const router = express.Router();
 router.use((req, _, next) => { if (!req.io) req.io = global.__socketIO || null; next(); });
 
 // ─── Model references ──────────────────────────────────────────────────────
-let db, User, GameProgress, GameChallenge, Message, Notification, Friend;
+let db, User, GameProgress, GameChallenge, Message, Notification, Friend, Wallet, WalletTransaction;
 try {
   db = require('../models');
   User          = db.models?.Users          || db.models?.User          || db.Users          || db.User;
@@ -17,6 +17,8 @@ try {
   Message       = db.models?.Messages       || db.models?.Message       || db.Messages       || db.Message;
   Notification  = db.models?.Notifications  || db.models?.Notification  || db.Notifications  || db.Notification;
   Friend        = db.models?.Friends        || db.models?.Friend        || db.Friends        || db.Friend;
+  Wallet        = db.models?.Wallet         || db.Wallet;
+  WalletTransaction = db.models?.WalletTransaction || db.WalletTransaction;
 } catch (e) {
   console.error('[games] Model load error:', e.message);
 }
@@ -587,6 +589,74 @@ const ROOM_MAX_PLAYERS = 50;
 const roomTtlMsFor = gameType => MULTI_GAMES.has(String(gameType)) || String(gameType)==='chess' ? ROOM_TTL_MS : 30*60*1000;
 function roomPlayers(room){const raw=room.state&&Array.isArray(room.state.players)?room.state.players:null;if(raw&&raw.length)return raw;const p=[{userId:room.hostId,role:'host',score:room.hostScore,timeMs:null,answered:0,correct:0,progress:0,currentLevel:room.level,completed:false}];if(room.guestId)p.push({userId:room.guestId,role:'guest',score:room.guestScore,timeMs:null,answered:0,correct:0,progress:0,currentLevel:room.level,completed:false});return p;}
 
+// POST /api/games/progress/coins/spend — server-authoritative coin spending for game hints/continues.
+router.post('/progress/coins/spend',async(req,res)=>{
+  try{
+    const userId=req.user?.id||req.userId;if(!userId)return res.status(401).json({error:'Unauthorized'});
+    const amount=Math.max(1,Math.min(10000,Math.floor(Number(req.body?.amount)||0)));
+    const reason=String(req.body?.reason||'game-item').slice(0,80);
+    const rec=await getOrCreate(userId);
+    if(Number(rec.coins||0)<amount)return res.status(409).json({error:'Not enough coins',coins:Number(rec.coins||0)});
+    await rec.update({coins:Number(rec.coins||0)-amount,lastSessionAt:new Date()});
+    return res.json({ok:true,coins:Number(rec.coins||0),reason});
+  }catch(err){console.error('[games] POST /progress/coins/spend:',err.message);return res.status(500).json({error:'Server error'});}
+});
+
+function mpesaBase(){return String(process.env.MPESA_ENV||'sandbox').toLowerCase()==='production'?'https://api.safaricom.co.ke':'https://sandbox.safaricom.co.ke'}
+function normalizeMsisdn(v){let s=String(v||'').replace(/\\D/g,'');if(s.startsWith('0'))s='254'+s.slice(1);if(s.startsWith('+'))s=s.slice(1);return /^2547\\d{8}$/.test(s)?s:null}
+function mpesaTimestamp(){const d=new Date();const p=n=>String(n).padStart(2,'0');return d.getFullYear()+p(d.getMonth()+1)+p(d.getDate())+p(d.getHours())+p(d.getMinutes())+p(d.getSeconds())}
+async function mpesaToken(){
+  const key=process.env.MPESA_CONSUMER_KEY,secret=process.env.MPESA_CONSUMER_SECRET;if(!key||!secret)throw new Error('M-Pesa credentials are not configured');
+  const auth=Buffer.from(key+':'+secret).toString('base64');
+  const r=await fetch(mpesaBase()+'/oauth/v1/generate?grant_type=client_credentials',{headers:{Authorization:'Basic '+auth}});
+  const j=await r.json();if(!r.ok||!j.access_token)throw new Error(j.errorMessage||'Could not authenticate with Daraja');return j.access_token;
+}
+router.post('/coins/mpesa/stk',async(req,res)=>{
+  try{
+    const userId=req.user?.id||req.userId;if(!userId)return res.status(401).json({error:'Unauthorized'});
+    if(!Wallet||!WalletTransaction)return res.status(503).json({error:'Payment wallet is unavailable'});
+    const amount=Math.max(1,Math.min(150000,Math.floor(Number(req.body?.amount)||0))),phone=normalizeMsisdn(req.body?.phone);
+    if(!phone)return res.status(400).json({error:'Valid Kenyan M-Pesa number required'});
+    const shortCode=process.env.MPESA_SHORTCODE,passkey=process.env.MPESA_PASSKEY,callback=process.env.MPESA_GAME_CALLBACK_URL;
+    if(!shortCode||!passkey||!callback)return res.status(503).json({error:'M-Pesa payment is not configured on the server'});
+    const [wallet]=await Wallet.findOrCreate({where:{userId},defaults:{userId,currency:'KES',balance:0}});
+    const reference='GC'+Date.now().toString(36).toUpperCase()+crypto.randomBytes(5).toString('hex').toUpperCase();
+    const coins=amount*2;
+    await WalletTransaction.create({walletId:wallet.id,userId,type:'credit',amount,currency:'KES',balanceAfter:Number(wallet.balance||0),reference,description:'Pending Necpra game coin purchase',metadata:{status:'pending',gameCoins:coins}});
+    const ts=mpesaTimestamp(),password=Buffer.from(String(shortCode)+String(passkey)+ts).toString('base64'),token=await mpesaToken();
+    const payload={BusinessShortCode:String(shortCode),Password:password,Timestamp:ts,TransactionType:process.env.MPESA_TRANSACTION_TYPE||'CustomerPayBillOnline',Amount:amount,PartyA:phone,PartyB:String(shortCode),PhoneNumber:phone,CallBackURL:callback,AccountReference:reference.slice(0,20),TransactionDesc:'Necpra game coins'};
+    const r=await fetch(mpesaBase()+'/mpesa/stkpush/v1/processrequest',{method:'POST',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    const j=await r.json().catch(()=>({}));if(!r.ok||j.ResponseCode!=='0'&&j.ResponseCode!==0){await WalletTransaction.update({metadata:{status:'failed',gameCoins:coins,providerResponse:j}},{where:{reference}});return res.status(502).json({error:j.errorMessage||j.ResponseDescription||'M-Pesa request failed'});}
+    await WalletTransaction.update({metadata:{status:'pending',gameCoins:coins,checkoutRequestId:j.CheckoutRequestID||null,merchantRequestId:j.MerchantRequestID||null}},{where:{reference}});
+    return res.status(202).json({ok:true,reference,checkoutRequestId:j.CheckoutRequestID||null,coins,amount});
+  }catch(err){console.error('[games] POST /coins/mpesa/stk:',err.stack||err.message);return res.status(500).json({error:err.message||'Payment request failed'});}
+});
+
+// POST /api/games/coins/payment-callback — public Daraja callback; URL intentionally avoids provider keywords.
+router.post('/coins/payment-callback',async(req,res)=>{
+  try{
+    const body=req.body||{},cb=body.Body?.stkCallback||body.Result?.Result||body.Result||{};
+    const code=Number(cb.ResultCode??cb.resultCode??-1),items=cb.CallbackMetadata?.Item||cb.ResultParameters?.ResultParameter||[];
+    const get=(...keys)=>{const x=items.find(i=>keys.includes(String(i.Name??i.Key)));return x?.Value};
+    const reference=String(get('AccountReference','BillRefNumber')||'');
+    if(!reference.startsWith('GC'))return res.json({ResultCode:0,ResultDesc:'Accepted'});
+    if(!WalletTransaction)return res.json({ResultCode:0,ResultDesc:'Accepted'});
+    const tx=await WalletTransaction.findOne({where:{reference}});if(!tx)return res.json({ResultCode:0,ResultDesc:'Accepted'});
+    if(String(tx.metadata?.status||'')!=='pending')return res.json({ResultCode:0,ResultDesc:'Already processed'});
+    if(code!==0){
+      await tx.update({metadata:{...(tx.metadata||{}),status:'failed',resultCode:code,resultDesc:String(cb.ResultDesc||'Payment failed').slice(0,500)}});return res.json({ResultCode:0,ResultDesc:'Accepted'});
+    }
+    const wallet=Wallet?await Wallet.findByPk(tx.walletId):null;if(!wallet)return res.json({ResultCode:0,ResultDesc:'Accepted'});
+    const coins=Math.max(0,Number(tx.metadata?.gameCoins)||Math.floor(Number(tx.amount)*2));
+    const nextBalance=Number(wallet.balance||0)+Number(tx.amount||0);
+    await wallet.update({balance:nextBalance});
+    await tx.update({balanceAfter:nextBalance,metadata:{...(tx.metadata||{}),status:'completed',receipt:get('MpesaReceiptNumber','TransactionReceipt')||null,completedAt:new Date().toISOString()}});
+    const rec=await getOrCreate(tx.userId);await rec.update({coins:Number(rec.coins||0)+coins,lastSessionAt:new Date()});
+    emitTo(req,tx.userId,'games:coins:credited',{coins,totalCoins:Number(rec.coins||0),reference});
+    return res.json({ResultCode:0,ResultDesc:'Accepted'});
+  }catch(err){console.error('[games] payment callback:',err.stack||err.message);return res.json({ResultCode:0,ResultDesc:'Accepted'});}
+});
+
 function roomCode(){
   return crypto.randomBytes(5).toString('base64').replace(/[^A-Z0-9]/gi,'').toUpperCase().slice(0,8);
 }
@@ -598,11 +668,12 @@ async function uniqueRoomCode(){
   throw new Error('Could not allocate room code');
 }
 function freshScoreAlready(room,role){return role==='host'?room.hostScore!=null:room.guestScore!=null}
+function sameUser(a,b){return a!=null&&b!=null&&String(a)===String(b)}
 function roomPlayer(room,userId){
-  const found=roomPlayers(room).find(p=>Number(p.userId)===Number(userId));
+  const found=roomPlayers(room).find(p=>sameUser(p.userId,userId));
   if(found)return found.role;
-  if(room.hostId===userId)return 'host';
-  if(room.guestId===userId)return 'guest';
+  if(sameUser(room.hostId,userId))return 'host';
+  if(sameUser(room.guestId,userId))return 'guest';
   return null;
 }
 function roomPayload(room){
@@ -610,7 +681,7 @@ function roomPayload(room){
     id:room.id,code:room.code,gameType:room.gameType,level:room.level,seed:room.seed,
     hostId:room.hostId,guestId:room.guestId,targetUserId:room.targetUserId,
     status:room.status,hostScore:room.hostScore,guestScore:room.guestScore,
-    winnerId:room.winnerId,state:room.state,rewardCoins:Number(room.state?.rewardCoins||0),rewardedUserId:room.state?.rewardedUserId||null,rewardedUserIds:room.state?.rewardedUserIds||[],expiresAt:room.expiresAt,maxPlayers:MULTI_GAMES.has(room.gameType)?ROOM_MAX_PLAYERS:2,players:roomPlayers(room).map(p=>({userId:p.userId,role:p.role,score:p.score??null,timeMs:p.timeMs??null,answered:p.answered||0,correct:p.correct||0,progress:p.progress||0,currentLevel:p.currentLevel||room.level,completed:!!p.completed,joinedAt:p.joinedAt||null}))
+    winnerId:room.winnerId,state:room.state,rewardCoins:Number(room.state?.rewardCoins||0),rewardedUserId:room.state?.rewardedUserId||null,rewardedUserIds:room.state?.rewardedUserIds||[],expiresAt:room.expiresAt,maxPlayers:MULTI_GAMES.has(room.gameType)?ROOM_MAX_PLAYERS:2,players:roomPlayers(room).map(p=>({userId:p.userId,role:p.role,score:p.score??null,timeMs:p.timeMs??null,answered:p.answered||0,correct:p.correct||0,progress:p.progress||0,currentLevel:p.currentLevel||room.level,completed:!!p.completed,joinedAt:p.joinedAt||null,snapshot:p.snapshot||null}))
   };
 }
 function emitRoom(req,room,event='game:room:update'){
@@ -709,6 +780,32 @@ router.post('/rooms/:code/join',async(req,res)=>{
   }
 });
 
+// POST /api/games/rooms/:code/change-game — same two players can reuse their private code for a different game.
+router.post('/rooms/:code/change-game',async(req,res)=>{
+  try{
+    if(!GameRoom)return res.status(503).json({error:'Game rooms unavailable'});
+    const userId=req.user?.id||req.userId;if(!userId)return res.status(401).json({error:'Unauthorized'});
+    const room=await GameRoom.findOne({where:{code:String(req.params.code).toUpperCase()}});
+    if(!room)return res.status(404).json({error:'Room not found'});
+    const role=roomPlayer(room,userId);if(!role)return res.status(403).json({error:'Only the existing players can reuse this code'});
+    if(room.status==='closed')return res.status(409).json({error:'This game code is closed'});
+    if(new Date()>room.expiresAt)return res.status(410).json({error:'This game code has expired'});
+    const gameType=String(req.body?.gameType||'');
+    if(!ROOM_GAMES.has(gameType))return res.status(400).json({error:'Unsupported game'});
+    const players=roomPlayers(room);
+    if(players.length<2)return res.status(409).json({error:'Wait for the other player before changing games'});
+    const nextLevel=Math.max(1,Math.min(100000,Number(req.body?.level)||1));
+    const nextSeed=crypto.randomBytes(12).toString('hex');
+    const nextPlayers=players.map((p,i)=>({...p,score:null,timeMs:null,answered:0,correct:0,progress:0,currentLevel:nextLevel,completed:false,joinedAt:p.joinedAt||new Date().toISOString(),rank:null,rewardCoins:0}));
+    await room.update({
+      gameType,level:nextLevel,seed:nextSeed,status:'playing',hostScore:null,guestScore:null,winnerId:null,
+      expiresAt:new Date(Date.now()+roomTtlMsFor(gameType)),
+      state:{subject:req.body?.subject?String(req.body.subject).slice(0,30):null,players:nextPlayers,matchStartedAt:new Date().toISOString(),results:[]}
+    });
+    emitRoom(req,room);return res.json({ok:true,room:roomPayload(room),role});
+  }catch(err){console.error('[games] POST /rooms/:code/change-game:',err.stack||err.message);return res.status(500).json({error:'Server error'});}
+});
+
 // POST /api/games/rooms/:code/state — only room members can publish game state.
 router.post('/rooms/:code/state',async(req,res)=>{
   try{
@@ -728,6 +825,7 @@ router.post('/rooms/:code/state',async(req,res)=>{
     numeric.forEach(f=>{if(incoming[f]!==undefined){const n=Number(incoming[f]);if(Number.isFinite(n))me[f]=Math.max(0,Math.floor(n));}});
     ['position','turn','lastMove','result'].forEach(f=>{if(typeof incoming[f]==='string')me[f]=incoming[f].slice(0,f==='position'?20000:500);});
     me.progress=Math.min(100,Number(me.progress)||0);
+    if(incoming.snapshot&&typeof incoming.snapshot==='object'){try{const raw=JSON.stringify(incoming.snapshot);if(raw.length<=20000)me.snapshot=JSON.parse(raw)}catch(_){}}
     const mergedState={...(room.state||{}),players};
     if(role==='host'&&incoming.subject)mergedState.subject=String(incoming.subject).slice(0,30);
     if(room.gameType==='chess'){
