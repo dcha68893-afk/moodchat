@@ -23,6 +23,16 @@ try {
   console.error('[games] Model load error:', e.message);
 }
 
+// Wallet models are registered after this module is first required, so resolve them per request
+// (covers both /coins/mpesa/stk and /coins/payment-callback, which credits the coins).
+router.use((req, _res, next) => {
+  if (db) {
+    if (!Wallet) Wallet = db.models?.Wallet || db.Wallet || null;
+    if (!WalletTransaction) WalletTransaction = db.models?.WalletTransaction || db.WalletTransaction || null;
+  }
+  next();
+});
+
 // ─── Anti-cheat limits (per session = per hour) ────────────────────────────
 const MAX_XP_PER_HOUR    = 5000;
 const MAX_COINS_PER_HOUR = 3000;
@@ -614,20 +624,24 @@ async function mpesaToken(){
 router.post('/coins/mpesa/stk',async(req,res)=>{
   try{
     const userId=req.user?.id||req.userId;if(!userId)return res.status(401).json({error:'Unauthorized'});
-    if(!Wallet||!WalletTransaction)return res.status(503).json({error:'Payment wallet is unavailable'});
+    // Resolve lazily: at require() time the Wallet models are not registered yet, so the
+    // module-level Wallet/WalletTransaction stay undefined forever and this route 503s.
+    const WalletM=Wallet||db?.models?.Wallet||db?.Wallet, WalletTxM=WalletTransaction||db?.models?.WalletTransaction||db?.WalletTransaction;
+    if(!WalletM||!WalletTxM)return res.status(503).json({error:'Payment wallet is unavailable'});
     const amount=Math.max(1,Math.min(150000,Math.floor(Number(req.body?.amount)||0))),phone=normalizeMsisdn(req.body?.phone);
     if(!phone)return res.status(400).json({error:'Valid Kenyan M-Pesa number required'});
     const shortCode=process.env.MPESA_SHORTCODE,passkey=process.env.MPESA_PASSKEY,callback=process.env.MPESA_GAME_CALLBACK_URL;
-    if(!shortCode||!passkey||!callback)return res.status(503).json({error:'M-Pesa payment is not configured on the server'});
-    const [wallet]=await Wallet.findOrCreate({where:{userId},defaults:{userId,currency:'KES',balance:0}});
+    const missing=[!shortCode&&'MPESA_SHORTCODE',!passkey&&'MPESA_PASSKEY',!callback&&'MPESA_GAME_CALLBACK_URL',!process.env.MPESA_CONSUMER_KEY&&'MPESA_CONSUMER_KEY',!process.env.MPESA_CONSUMER_SECRET&&'MPESA_CONSUMER_SECRET'].filter(Boolean);
+    if(missing.length){console.error('[games] M-Pesa not configured, missing env:',missing.join(', '));return res.status(503).json({error:'Coin purchase is temporarily unavailable. Please try again later.'});}
+    const [wallet]=await WalletM.findOrCreate({where:{userId},defaults:{userId,currency:'KES',balance:0}});
     const reference='GC'+Date.now().toString(36).toUpperCase()+crypto.randomBytes(5).toString('hex').toUpperCase();
     const coins=amount*2;
-    await WalletTransaction.create({walletId:wallet.id,userId,type:'credit',amount,currency:'KES',balanceAfter:Number(wallet.balance||0),reference,description:'Pending Necpra game coin purchase',metadata:{status:'pending',gameCoins:coins}});
+    await WalletTxM.create({walletId:wallet.id,userId,type:'credit',amount,currency:'KES',balanceAfter:Number(wallet.balance||0),reference,description:'Pending Necpra game coin purchase',metadata:{status:'pending',gameCoins:coins}});
     const ts=mpesaTimestamp(),password=Buffer.from(String(shortCode)+String(passkey)+ts).toString('base64'),token=await mpesaToken();
     const payload={BusinessShortCode:String(shortCode),Password:password,Timestamp:ts,TransactionType:process.env.MPESA_TRANSACTION_TYPE||'CustomerPayBillOnline',Amount:amount,PartyA:phone,PartyB:String(shortCode),PhoneNumber:phone,CallBackURL:callback,AccountReference:reference.slice(0,20),TransactionDesc:'Necpra game coins'};
     const r=await fetch(mpesaBase()+'/mpesa/stkpush/v1/processrequest',{method:'POST',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},body:JSON.stringify(payload)});
-    const j=await r.json().catch(()=>({}));if(!r.ok||j.ResponseCode!=='0'&&j.ResponseCode!==0){await WalletTransaction.update({metadata:{status:'failed',gameCoins:coins,providerResponse:j}},{where:{reference}});return res.status(502).json({error:j.errorMessage||j.ResponseDescription||'M-Pesa request failed'});}
-    await WalletTransaction.update({metadata:{status:'pending',gameCoins:coins,checkoutRequestId:j.CheckoutRequestID||null,merchantRequestId:j.MerchantRequestID||null}},{where:{reference}});
+    const j=await r.json().catch(()=>({}));if(!r.ok||j.ResponseCode!=='0'&&j.ResponseCode!==0){await WalletTxM.update({metadata:{status:'failed',gameCoins:coins,providerResponse:j}},{where:{reference}});return res.status(502).json({error:j.errorMessage||j.ResponseDescription||'M-Pesa request failed'});}
+    await WalletTxM.update({metadata:{status:'pending',gameCoins:coins,checkoutRequestId:j.CheckoutRequestID||null,merchantRequestId:j.MerchantRequestID||null}},{where:{reference}});
     return res.status(202).json({ok:true,reference,checkoutRequestId:j.CheckoutRequestID||null,coins,amount});
   }catch(err){console.error('[games] POST /coins/mpesa/stk:',err.stack||err.message);return res.status(500).json({error:err.message||'Payment request failed'});}
 });
