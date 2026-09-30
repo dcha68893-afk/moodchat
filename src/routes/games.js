@@ -593,6 +593,7 @@ async function uniqueRoomCode(){
   }
   throw new Error('Could not allocate room code');
 }
+function freshScoreAlready(room,role){return role==='host'?room.hostScore!=null:room.guestScore!=null}
 function roomPlayer(room,userId){
   if(room.hostId===userId)return 'host';
   if(room.guestId===userId)return 'guest';
@@ -603,7 +604,7 @@ function roomPayload(room){
     id:room.id,code:room.code,gameType:room.gameType,level:room.level,seed:room.seed,
     hostId:room.hostId,guestId:room.guestId,targetUserId:room.targetUserId,
     status:room.status,hostScore:room.hostScore,guestScore:room.guestScore,
-    winnerId:room.winnerId,state:room.state,expiresAt:room.expiresAt
+    winnerId:room.winnerId,state:room.state,rewardCoins:Number(room.state?.rewardCoins||0),rewardedUserId:room.state?.rewardedUserId||null,expiresAt:room.expiresAt
   };
 }
 function emitRoom(req,room,event='game:room:update'){
@@ -686,7 +687,7 @@ router.post('/rooms/:code/join',async(req,res)=>{
     if(room.hostId===userId)return res.json({ok:true,room:roomPayload(room),role:'host'});
     if(room.guestId&&room.guestId!==userId)return res.status(409).json({error:'This game already has another guest'});
     if(room.targetUserId&&room.targetUserId!==userId)return res.status(403).json({error:'This invitation was not sent to your account'});
-    await room.update({guestId:userId,status:'ready'});
+    await room.update({guestId:userId,status:'playing',state:{...(room.state||{}),matchStartedAt:new Date().toISOString()}});
     emitRoom(req,room);
     return res.json({ok:true,room:roomPayload(room),role:'guest'});
   }catch(err){
@@ -730,11 +731,15 @@ router.post('/rooms/:code/result',async(req,res)=>{
     if(!role)return res.status(403).json({error:'You are not a player in this room'});
     const score=Math.max(0,Math.floor(Number(req.body?.score)||0));
     const key=role==='host'?'hostScore':'guestScore';
-    await room.update({[key]:score});
+    if(freshScoreAlready(room,role))return res.status(409).json({error:'Your match attempt is already submitted'});
+    await room.update({[key]:score,status:'playing'});
     const fresh=await GameRoom.findByPk(room.id);
     if(fresh.hostScore!=null&&fresh.guestScore!=null){
       const winnerId=fresh.hostScore===fresh.guestScore?null:(fresh.hostScore>fresh.guestScore?fresh.hostId:fresh.guestId);
-      await fresh.update({winnerId,status:'finished'});
+      const rewardCoins=winnerId?100:25;
+      const nextState={...(fresh.state||{}),rewardCoins,rewardedUserId:winnerId||null,rewardedAt:new Date().toISOString()};
+      await fresh.update({winnerId,status:'finished',state:nextState});
+      if(winnerId&&GameProgress){const winner=await getOrCreate(winnerId);await winner.update({coins:(Number(winner.coins)||0)+rewardCoins,totalGames:(Number(winner.totalGames)||0)+1,lastSessionAt:new Date()});}
       emitRoom(req,fresh,'game:room:finished');
       return res.json({ok:true,room:roomPayload(fresh),result:winnerId?'completed':'draw'});
     }
