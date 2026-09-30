@@ -603,7 +603,7 @@ router.post('/progress/coins/spend',async(req,res)=>{
 });
 
 function mpesaBase(){return String(process.env.MPESA_ENV||'sandbox').toLowerCase()==='production'?'https://api.safaricom.co.ke':'https://sandbox.safaricom.co.ke'}
-function normalizeMsisdn(v){let s=String(v||'').replace(/\\D/g,'');if(s.startsWith('0'))s='254'+s.slice(1);if(s.startsWith('+'))s=s.slice(1);return /^2547\\d{8}$/.test(s)?s:null}
+function normalizeMsisdn(v){let s=String(v||'').replace(/\D/g,'');if(s.startsWith('254'))s=s;else if(s.startsWith('0'))s='254'+s.slice(1);else if(/^[71]\d{8}$/.test(s))s='254'+s;return /^254[71]\d{8}$/.test(s)?s:null}
 function mpesaTimestamp(){const d=new Date();const p=n=>String(n).padStart(2,'0');return d.getFullYear()+p(d.getMonth()+1)+p(d.getDate())+p(d.getHours())+p(d.getMinutes())+p(d.getSeconds())}
 async function mpesaToken(){
   const key=process.env.MPESA_CONSUMER_KEY,secret=process.env.MPESA_CONSUMER_SECRET;if(!key||!secret)throw new Error('M-Pesa credentials are not configured');
@@ -829,10 +829,20 @@ router.post('/rooms/:code/state',async(req,res)=>{
     const mergedState={...(room.state||{}),players};
     if(role==='host'&&incoming.subject)mergedState.subject=String(incoming.subject).slice(0,30);
     if(room.gameType==='chess'){
-      if(typeof incoming.position==='string')mergedState.position=incoming.position.slice(0,20000);
-      if(typeof incoming.turn==='string')mergedState.turn=incoming.turn.slice(0,1);
-      if(typeof incoming.lastMove==='string')mergedState.lastMove=incoming.lastMove.slice(0,500);
-      if(typeof incoming.result==='string')mergedState.result=incoming.result.slice(0,30);
+      // position = board|turn|ep|rights|ply. Host plays white (odd plies), guest plays black (even plies).
+      const isWhite=role==='host';
+      if(typeof incoming.position==='string'){
+        const inPly=Number(incoming.position.split('|')[4])||0;
+        const curPly=Number(String(mergedState.position||'').split('|')[4])||0;
+        const noPos=!mergedState.position;
+        const validMove=inPly===curPly+1&&((inPly%2===1)===isWhite);
+        if(validMove||(noPos&&inPly===0)){
+          mergedState.position=incoming.position.slice(0,20000);
+          if(typeof incoming.turn==='string')mergedState.turn=incoming.turn.slice(0,1);
+          if(typeof incoming.lastMove==='string')mergedState.lastMove=incoming.lastMove.slice(0,500);
+        }
+      }
+      if(typeof incoming.result==='string'&&incoming.result.startsWith('resign:')&&incoming.result.slice(7)===(isWhite?'w':'b'))mergedState.result=incoming.result.slice(0,30);
     }
     const patch={state:mergedState,status:(room.guestId||MULTI_GAMES.has(room.gameType))?'playing':'waiting'};
     if(req.body&&req.body.score!=null)patch[role==='host'?'hostScore':'guestScore']=Math.max(0,Math.floor(Number(req.body.score)||0));
