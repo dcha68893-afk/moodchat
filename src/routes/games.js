@@ -581,7 +581,11 @@ router.get('/push/vapid-public-key', (req, res) => {
 const crypto = require('crypto');
 const GameRoom = db?.models?.GameRoom || db?.GameRoom || (typeof db?.getModel === 'function' ? db.getModel('GameRoom') : null);
 const ROOM_TTL_MS = 2 * 60 * 60 * 1000;
-const ROOM_GAMES = new Set(['water','block','trivia','crossword']);
+const ROOM_GAMES = new Set(['water','block','trivia','crossword','chess']);
+const MULTI_GAMES = new Set(['trivia','crossword']);
+const ROOM_MAX_PLAYERS = 50;
+const roomTtlMsFor = gameType => MULTI_GAMES.has(String(gameType)) || String(gameType)==='chess' ? ROOM_TTL_MS : 30*60*1000;
+function roomPlayers(room){const raw=room.state&&Array.isArray(room.state.players)?room.state.players:null;if(raw&&raw.length)return raw;const p=[{userId:room.hostId,role:'host',score:room.hostScore,timeMs:null,answered:0,correct:0,progress:0,currentLevel:room.level,completed:false}];if(room.guestId)p.push({userId:room.guestId,role:'guest',score:room.guestScore,timeMs:null,answered:0,correct:0,progress:0,currentLevel:room.level,completed:false});return p;}
 
 function roomCode(){
   return crypto.randomBytes(5).toString('base64').replace(/[^A-Z0-9]/gi,'').toUpperCase().slice(0,8);
@@ -595,6 +599,8 @@ async function uniqueRoomCode(){
 }
 function freshScoreAlready(room,role){return role==='host'?room.hostScore!=null:room.guestScore!=null}
 function roomPlayer(room,userId){
+  const found=roomPlayers(room).find(p=>Number(p.userId)===Number(userId));
+  if(found)return found.role;
   if(room.hostId===userId)return 'host';
   if(room.guestId===userId)return 'guest';
   return null;
@@ -604,14 +610,14 @@ function roomPayload(room){
     id:room.id,code:room.code,gameType:room.gameType,level:room.level,seed:room.seed,
     hostId:room.hostId,guestId:room.guestId,targetUserId:room.targetUserId,
     status:room.status,hostScore:room.hostScore,guestScore:room.guestScore,
-    winnerId:room.winnerId,state:room.state,rewardCoins:Number(room.state?.rewardCoins||0),rewardedUserId:room.state?.rewardedUserId||null,expiresAt:room.expiresAt
+    winnerId:room.winnerId,state:room.state,rewardCoins:Number(room.state?.rewardCoins||0),rewardedUserId:room.state?.rewardedUserId||null,rewardedUserIds:room.state?.rewardedUserIds||[],expiresAt:room.expiresAt,maxPlayers:MULTI_GAMES.has(room.gameType)?ROOM_MAX_PLAYERS:2,players:roomPlayers(room).map(p=>({userId:p.userId,role:p.role,score:p.score??null,timeMs:p.timeMs??null,answered:p.answered||0,correct:p.correct||0,progress:p.progress||0,currentLevel:p.currentLevel||room.level,completed:!!p.completed,joinedAt:p.joinedAt||null}))
   };
 }
 function emitRoom(req,room,event='game:room:update'){
   const io=req.io||(req.app&&req.app.get('io'));
   if(!io)return;
   const payload=roomPayload(room);
-  [room.hostId,room.guestId].filter(Boolean).forEach(id=>{
+  roomPlayers(room).map(p=>p.userId).filter(Boolean).forEach(id=>{
     io.to(`user:${id}`).emit(event,payload);
     io.to(`user_${id}`).emit(event,payload);
   });
@@ -624,7 +630,7 @@ router.post('/rooms',async(req,res)=>{
     if(!GameRoom)return res.status(503).json({error:'Game rooms unavailable'});
     const userId=req.user?.id||req.userId;
     if(!userId)return res.status(401).json({error:'Unauthorized'});
-    const {gameType,level=1,targetUserId=null}=req.body||{};
+    const {gameType,level=1,targetUserId=null,subject=null}=req.body||{};
     if(!ROOM_GAMES.has(String(gameType)))return res.status(400).json({error:'Unsupported game'});
     if(targetUserId&&Number(targetUserId)===Number(userId))return res.status(400).json({error:'You cannot invite yourself'});
     if(targetUserId&&Friend){
@@ -643,7 +649,7 @@ router.post('/rooms',async(req,res)=>{
     const room=await GameRoom.create({
       code,gameType:String(gameType),level:Math.max(1,Math.min(100000,Number(level)||1)),
       hostId:userId,targetUserId:targetUserId?Number(targetUserId):null,seed,
-      expiresAt:new Date(Date.now()+ROOM_TTL_MS),state:{}
+      expiresAt:new Date(Date.now()+roomTtlMsFor(String(gameType))),state:{subject:subject?String(subject).slice(0,30):null,players:[{userId,role:'host',score:null,timeMs:null,answered:0,correct:0,progress:0,currentLevel:Number(level)||1,completed:false,joinedAt:new Date().toISOString()}]}
     });
     return res.status(201).json({ok:true,room:roomPayload(room),role:'host'});
   }catch(err){
@@ -684,12 +690,19 @@ router.post('/rooms/:code/join',async(req,res)=>{
     const room=await GameRoom.findOne({where:{code:String(req.params.code).toUpperCase()}});
     if(!room)return res.status(404).json({error:'Invalid game code'});
     if(new Date()>room.expiresAt||room.status==='closed')return res.status(410).json({error:'This game invitation has expired'});
+    if(room.status==='finished')return res.status(409).json({error:'This match is already finished'});
     if(room.hostId===userId)return res.json({ok:true,room:roomPayload(room),role:'host'});
-    if(room.guestId&&room.guestId!==userId)return res.status(409).json({error:'This game already has another guest'});
     if(room.targetUserId&&room.targetUserId!==userId)return res.status(403).json({error:'This invitation was not sent to your account'});
-    await room.update({guestId:userId,status:'playing',state:{...(room.state||{}),matchStartedAt:new Date().toISOString()}});
+    const players=roomPlayers(room),existing=players.find(p=>Number(p.userId)===Number(userId));
+    if(existing)return res.json({ok:true,room:roomPayload(room),role:existing.role});
+    const multi=MULTI_GAMES.has(room.gameType);
+    if(!multi&&room.guestId&&room.guestId!==userId)return res.status(409).json({error:'This game already has another guest'});
+    if(multi&&players.length>=ROOM_MAX_PLAYERS)return res.status(409).json({error:'This match is full'});
+    const role=multi?'player-'+(players.length+1):'guest';
+    players.push({userId,role,score:null,timeMs:null,answered:0,correct:0,progress:0,currentLevel:room.level,completed:false,joinedAt:new Date().toISOString()});
+    await room.update({guestId:room.guestId||(!multi?userId:null),status:'playing',state:{...(room.state||{}),players,matchStartedAt:room.state?.matchStartedAt||new Date().toISOString()}});
     emitRoom(req,room);
-    return res.json({ok:true,room:roomPayload(room),role:'guest'});
+    return res.json({ok:true,room:roomPayload(room),role});
   }catch(err){
     console.error('[games] POST /rooms/:code/join:',err.stack || err.message);
     return res.status(500).json({error:'Server error'});
@@ -707,8 +720,23 @@ router.post('/rooms/:code/state',async(req,res)=>{
     const role=roomPlayer(room,userId);
     if(!role)return res.status(403).json({error:'You are not a player in this room'});
     if(new Date()>room.expiresAt)return res.status(410).json({error:'Room expired'});
-    const state=(req.body&&req.body.state&&typeof req.body.state==='object')?req.body.state:{};
-    const patch={state,status:room.guestId?'playing':'waiting'};
+    const incoming=req.body&&req.body.state&&typeof req.body.state==='object'?req.body.state:{};
+    const players=roomPlayers(room);
+    const me=players.find(p=>Number(p.userId)===Number(userId));
+    if(!me)return res.status(403).json({error:'You are not a player in this room'});
+    const numeric=['answered','correct','score','timeMs','progress','currentLevel'];
+    numeric.forEach(f=>{if(incoming[f]!==undefined){const n=Number(incoming[f]);if(Number.isFinite(n))me[f]=Math.max(0,Math.floor(n));}});
+    ['position','turn','lastMove','result'].forEach(f=>{if(typeof incoming[f]==='string')me[f]=incoming[f].slice(0,f==='position'?20000:500);});
+    me.progress=Math.min(100,Number(me.progress)||0);
+    const mergedState={...(room.state||{}),players};
+    if(role==='host'&&incoming.subject)mergedState.subject=String(incoming.subject).slice(0,30);
+    if(room.gameType==='chess'){
+      if(typeof incoming.position==='string')mergedState.position=incoming.position.slice(0,20000);
+      if(typeof incoming.turn==='string')mergedState.turn=incoming.turn.slice(0,1);
+      if(typeof incoming.lastMove==='string')mergedState.lastMove=incoming.lastMove.slice(0,500);
+      if(typeof incoming.result==='string')mergedState.result=incoming.result.slice(0,30);
+    }
+    const patch={state:mergedState,status:(room.guestId||MULTI_GAMES.has(room.gameType))?'playing':'waiting'};
     if(req.body&&req.body.score!=null)patch[role==='host'?'hostScore':'guestScore']=Math.max(0,Math.floor(Number(req.body.score)||0));
     await room.update(patch);
     emitRoom(req,room);
@@ -727,28 +755,28 @@ router.post('/rooms/:code/result',async(req,res)=>{
     if(!userId)return res.status(401).json({error:'Unauthorized'});
     const room=await GameRoom.findOne({where:{code:String(req.params.code).toUpperCase()}});
     if(!room)return res.status(404).json({error:'Room not found'});
-    const role=roomPlayer(room,userId);
-    if(!role)return res.status(403).json({error:'You are not a player in this room'});
-    const score=Math.max(0,Math.floor(Number(req.body?.score)||0));
-    const key=role==='host'?'hostScore':'guestScore';
-    if(freshScoreAlready(room,role))return res.status(409).json({error:'Your match attempt is already submitted'});
-    await room.update({[key]:score,status:'playing'});
-    const fresh=await GameRoom.findByPk(room.id);
-    if(fresh.hostScore!=null&&fresh.guestScore!=null){
-      const winnerId=fresh.hostScore===fresh.guestScore?null:(fresh.hostScore>fresh.guestScore?fresh.hostId:fresh.guestId);
-      const rewardCoins=winnerId?100:25;
-      const nextState={...(fresh.state||{}),rewardCoins,rewardedUserId:winnerId||null,rewardedAt:new Date().toISOString()};
-      await fresh.update({winnerId,status:'finished',state:nextState});
-      if(winnerId&&GameProgress){const winner=await getOrCreate(winnerId);await winner.update({coins:(Number(winner.coins)||0)+rewardCoins,totalGames:(Number(winner.totalGames)||0)+1,lastSessionAt:new Date()});}
-      emitRoom(req,fresh,'game:room:finished');
-      return res.json({ok:true,room:roomPayload(fresh),result:winnerId?'completed':'draw'});
+    const role=roomPlayer(room,userId);if(!role)return res.status(403).json({error:'You are not a player in this room'});
+    const score=Math.max(0,Math.floor(Number(req.body?.score)||0)),timeMs=req.body?.timeMs==null?null:Math.max(0,Math.floor(Number(req.body.timeMs)||0));
+    const players=roomPlayers(room),me=players.find(p=>Number(p.userId)===Number(userId));
+    if(!me)return res.status(403).json({error:'You are not a player in this room'});
+    if(me.completed)return res.status(409).json({error:'Your match attempt is already submitted'});
+    me.score=score;me.timeMs=timeMs;me.completed=true;me.progress=100;me.answered=Math.max(me.answered||0,Number(req.body?.answered)||0);me.correct=Math.max(me.correct||0,Number(req.body?.correct)||0);
+    const multi=MULTI_GAMES.has(room.gameType),allDone=(multi?players.length>=2:players.length===2)&&players.every(p=>p.completed);
+    const ranked=[...players].filter(p=>p.completed).sort((a,b)=>(Number(b.score)||0)-(Number(a.score)||0)||((Number(a.timeMs)||Number.MAX_SAFE_INTEGER)-(Number(b.timeMs)||Number.MAX_SAFE_INTEGER)));
+    if(allDone){
+      const top=Number(ranked[0]?.score||0),winners=ranked.filter(p=>Number(p.score||0)===top),draw=winners.length>1;
+      const rewardByUser={};
+      ranked.forEach((p,i)=>{let reward=room.gameType==='trivia'||room.gameType==='crossword'?(i===0?(draw?50:100):i===1?75:i===2?50:25):(i===0?(draw?25:100):0);rewardByUser[p.userId]=reward;});
+      const rewardedUserIds=ranked.filter(p=>rewardByUser[p.userId]>0).map(p=>p.userId);
+      const results=ranked.map((p,i)=>({...p,rank:i+1,rewardCoins:rewardByUser[p.userId]||0}));
+      const nextState={...(room.state||{}),players,rewardCoins:draw?50:(rewardByUser[ranked[0]?.userId]||0),rewardedUserIds,rewardByUser,rewardedAt:new Date().toISOString(),results};
+      await room.update({winnerId:draw?null:ranked[0]?.userId||null,status:'finished',state:nextState,[role==='host'?'hostScore':'guestScore']:score});
+      if(GameProgress)for(const p of ranked){const reward=rewardByUser[p.userId]||0;const player=await getOrCreate(p.userId);await player.update({coins:(Number(player.coins)||0)+reward,totalGames:(Number(player.totalGames)||0)+1,lastSessionAt:new Date()});}
+      emitRoom(req,room,'game:room:finished');return res.json({ok:true,room:roomPayload(room),result:draw?'draw':'completed',ranking:results});
     }
-    emitRoom(req,fresh);
-    return res.json({ok:true,room:roomPayload(fresh),result:'waiting_for_opponent'});
-  }catch(err){
-    console.error('[games] POST /rooms/:code/result:',err.message);
-    return res.status(500).json({error:'Server error'});
-  }
+    await room.update({state:{...(room.state||{}),players},status:'playing',[role==='host'?'hostScore':'guestScore']:score});
+    emitRoom(req,room);return res.json({ok:true,room:roomPayload(room),result:'waiting_for_players',ranking:ranked.map((p,i)=>({...p,rank:i+1}))});
+  }catch(err){console.error('[games] POST /rooms/:code/result:',err.message);return res.status(500).json({error:'Server error'});}
 });
 
 // POST /api/games/rooms/:code/close — only host can close the invitation.
