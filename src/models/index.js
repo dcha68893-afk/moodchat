@@ -198,7 +198,7 @@ const MODEL_WHITELIST = [
   // ── Push notifications ───────────────────────────────────────────────────────
   'PushSubscription',
   // ── Games ───────────────────────────────────────────────────────────────────
-  'GameProgress', 'GameChallenge',
+  'GameProgress', 'GameChallenge', 'GameRoom',
   // ── Moderation ──────────────────────────────────────────────────────────────
   'ModerationLog', 'AuditLog',
   // ── Marketplace ─────────────────────────────────────────────────────────────
@@ -409,7 +409,8 @@ async function createMissingTables() {
     'Calls', 'Call', 'UserStatus', 'TypingIndicator', 'ReadReceipt',
     'statuses', 'status_views', 'status_reactions', 'status_replies',
     // ── Marketplace ───────────────────────────────────────────────────────────
-    'tools', 'marketplace_orders', 'marketplace_reviews', 'marketplace_carts',
+    'tools', 'marketplace_orders', 'marketplace_reviews',
+    'GameRooms', 'marketplace_carts',
     'wishlists', 'coupons', 'seller_profiles', 'payouts', 'refunds'
   ];
   
@@ -2105,6 +2106,8 @@ module.exports = {
   get Coupon()        { return db.models.Coupon        || null; },
   get Refund()        { return db.models.Refund        || null; },
   get SellerProfile() { return db.models.SellerProfile || null; },
+  // Multiplayer arcade rooms
+  get GameRoom() { return db.models.GameRoom || null; },
   get ContactMessage() { return db.models.ContactMessage || null; },
   get AuditLog()      { return db.models.AuditLog      || null; },
   get Payout()        { return db.models.Payout        || null; },

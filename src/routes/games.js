@@ -579,7 +579,7 @@ router.get('/push/vapid-public-key', (req, res) => {
 });
 
 const crypto = require('crypto');
-const GameRoom = db?.models?.GameRoom || db?.GameRoom;
+const GameRoom = db?.models?.GameRoom || db?.GameRoom || (typeof db?.getModel === 'function' ? db.getModel('GameRoom') : null);
 const ROOM_TTL_MS = 2 * 60 * 60 * 1000;
 const ROOM_GAMES = new Set(['water','block','trivia','crossword']);
 
@@ -646,7 +646,7 @@ router.post('/rooms',async(req,res)=>{
     });
     return res.status(201).json({ok:true,room:roomPayload(room),role:'host'});
   }catch(err){
-    console.error('[games] POST /rooms:',err.message);
+    console.error('[games] POST /rooms:',err.stack || err.message);
     return res.status(500).json({error:'Server error'});
   }
 });
@@ -669,7 +669,7 @@ router.get('/rooms/:code',async(req,res)=>{
     if(!role)return res.status(403).json({error:'Join this room with its invitation code'});
     return res.json({ok:true,room:roomPayload(room),role});
   }catch(err){
-    console.error('[games] GET /rooms/:code:',err.message);
+    console.error('[games] GET /rooms/:code:',err.stack || err.message);
     return res.status(500).json({error:'Server error'});
   }
 });
@@ -690,7 +690,7 @@ router.post('/rooms/:code/join',async(req,res)=>{
     emitRoom(req,room);
     return res.json({ok:true,room:roomPayload(room),role:'guest'});
   }catch(err){
-    console.error('[games] POST /rooms/:code/join:',err.message);
+    console.error('[games] POST /rooms/:code/join:',err.stack || err.message);
     return res.status(500).json({error:'Server error'});
   }
 });
