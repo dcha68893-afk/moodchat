@@ -628,11 +628,26 @@ router.post('/coins/mpesa/stk',async(req,res)=>{
     // module-level Wallet/WalletTransaction stay undefined forever and this route 503s.
     const WalletM=Wallet||db?.models?.Wallet||db?.Wallet, WalletTxM=WalletTransaction||db?.models?.WalletTransaction||db?.WalletTransaction;
     if(!WalletM||!WalletTxM)return res.status(503).json({error:'Payment wallet is unavailable'});
-    const amount=Math.max(1,Math.min(150000,Math.floor(Number(req.body?.amount)||0))),phone=normalizeMsisdn(req.body?.phone);
+    const rawAmount=Math.floor(Number(req.body?.amount)||0),phone=normalizeMsisdn(req.body?.phone);
+    // Any whole-shilling amount is allowed (5, 10, 50 or a custom value) within these limits.
+    const MIN_COIN_KES=5,MAX_COIN_KES=150000;
+    if(rawAmount<MIN_COIN_KES)return res.status(400).json({error:'Minimum purchase is KES '+MIN_COIN_KES});
+    if(rawAmount>MAX_COIN_KES)return res.status(400).json({error:'Maximum purchase is KES '+MAX_COIN_KES.toLocaleString()});
+    const amount=rawAmount;
     if(!phone)return res.status(400).json({error:'Valid Kenyan M-Pesa number required'});
-    const shortCode=process.env.MPESA_SHORTCODE,passkey=process.env.MPESA_PASSKEY,callback=process.env.MPESA_GAME_CALLBACK_URL;
+    const isProd=String(process.env.MPESA_ENV||'sandbox').toLowerCase()==='production';
+    // Reuse the same M-Pesa settings as the marketplace so games do not need a separate set of variables.
+    const shortCode=process.env.MPESA_GAME_SHORTCODE||process.env.MPESA_SHORTCODE||(isProd?'':'174379');
+    const passkey=process.env.MPESA_GAME_PASSKEY||process.env.MPESA_PASSKEY||(isProd?'':'bfb279f9aa9bdbcf158e97dd71a467cd2e0c893059b10f78e6b72ada1ed2c919');
+    const proto=String(req.headers['x-forwarded-proto']||req.protocol||'https').split(',')[0].trim();
+    const host=req.headers['x-forwarded-host']||req.get('host');
+    const callback=process.env.MPESA_GAME_CALLBACK_URL||(host?proto+'://'+host+'/api/games/coins/payment-callback':'');
     const missing=[!shortCode&&'MPESA_SHORTCODE',!passkey&&'MPESA_PASSKEY',!callback&&'MPESA_GAME_CALLBACK_URL',!process.env.MPESA_CONSUMER_KEY&&'MPESA_CONSUMER_KEY',!process.env.MPESA_CONSUMER_SECRET&&'MPESA_CONSUMER_SECRET'].filter(Boolean);
-    if(missing.length){console.error('[games] M-Pesa not configured, missing env:',missing.join(', '));return res.status(503).json({error:'Coin purchase is temporarily unavailable. Please try again later.'});}
+    if(missing.length){
+      console.error('[games] M-Pesa not configured, missing env:',missing.join(', '));
+      // Variable names are only exposed outside production, to make setup easy.
+      return res.status(503).json({error:'Coin purchase is temporarily unavailable. Please try again later.',...(isProd?{}:{missing})});
+    }
     const [wallet]=await WalletM.findOrCreate({where:{userId},defaults:{userId,currency:'KES',balance:0}});
     const reference='GC'+Date.now().toString(36).toUpperCase()+crypto.randomBytes(5).toString('hex').toUpperCase();
     const coins=amount*2;
@@ -780,6 +795,8 @@ router.post('/rooms/:code/join',async(req,res)=>{
     if(room.targetUserId&&room.targetUserId!==userId)return res.status(403).json({error:'This invitation was not sent to your account'});
     const players=roomPlayers(room),existing=players.find(p=>Number(p.userId)===Number(userId));
     if(existing)return res.json({ok:true,room:roomPayload(room),role:existing.role});
+    // A code that the original players reused for a different game is closed to newcomers: they need a new code.
+    if(room.state?.reused)return res.status(409).json({error:'This code is already being reused by two players for another game. Please ask for a new game code.',code:'NEW_CODE_REQUIRED'});
     const multi=MULTI_GAMES.has(room.gameType);
     if(!multi&&room.guestId&&room.guestId!==userId)return res.status(409).json({error:'This game already has another guest'});
     if(multi&&players.length>=ROOM_MAX_PLAYERS)return res.status(409).json({error:'This match is full'});
@@ -814,7 +831,7 @@ router.post('/rooms/:code/change-game',async(req,res)=>{
     await room.update({
       gameType,level:nextLevel,seed:nextSeed,status:'playing',hostScore:null,guestScore:null,winnerId:null,
       expiresAt:new Date(Date.now()+roomTtlMsFor(gameType)),
-      state:{subject:req.body?.subject?String(req.body.subject).slice(0,30):null,players:nextPlayers,matchStartedAt:new Date().toISOString(),results:[]}
+      state:{subject:req.body?.subject?String(req.body.subject).slice(0,30):null,players:nextPlayers,matchStartedAt:new Date().toISOString(),results:[],reused:true,switchCount:Number(room.state?.switchCount||0)+1,previousGame:room.gameType}
     });
     emitRoom(req,room);return res.json({ok:true,room:roomPayload(room),role});
   }catch(err){console.error('[games] POST /rooms/:code/change-game:',err.stack||err.message);return res.status(500).json({error:'Server error'});}
