@@ -110,7 +110,11 @@ const errorHandler = (err, req, res, next) => {
   }
 
   // Default to 500 internal server error
-  res.status(err.status || 500).json(response);
+  // err.status is the STRING 'fail'/'error' on utils/errors.js AppError
+  // subclasses (the HTTP code is in err.statusCode); passing it to res.status()
+  // throws RangeError and turns a 4xx into a 500.
+  const httpStatus = [err.statusCode, err.status].find((v) => Number.isInteger(v) && v >= 400 && v <= 599) || 500;
+  res.status(httpStatus).json(response);
 };
 
 // Custom error classes

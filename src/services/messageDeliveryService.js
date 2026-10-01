@@ -130,6 +130,9 @@ class MessageDeliveryService {
     // (senderId, receiverId); if it isn't (or the check can't confirm it),
     // fall back to the canonical resolver instead of trusting the chatId
     // blindly. When only one of the two is supplied, behavior is unchanged.
+    // resolveOrCreateDirectChat already ran the identical block + "who can
+    // message me" checks for this exact sender/receiver pair moments ago.
+    let _resolvedThisCall = false;
     if (chatId && receiverId) {
       const chatIdIntCheck = parseInt(chatId, 10);
       const receiverIdIntCheck = parseInt(receiverId, 10);
@@ -144,9 +147,11 @@ class MessageDeliveryService {
       ).catch(() => [null]);
       if (!match) {
         chatId = await this.resolveOrCreateDirectChat(senderId, receiverId);
+        _resolvedThisCall = true;
       }
     } else if (!chatId && receiverId) {
       chatId = await this.resolveOrCreateDirectChat(senderId, receiverId);
+      _resolvedThisCall = true;
     }
 
     if (!chatId || !senderId) throw new ValidationError('chatId (or receiverId) and senderId are required');
@@ -192,7 +197,7 @@ class MessageDeliveryService {
     // directChatResolver.assertDirectChatNotBlocked's doc comment for why
     // this is a shared helper rather than a third copy of this check.
     try {
-      await require('./directChatResolver').assertDirectChatNotBlocked(senderIdInt, chatIdInt);
+      if (!_resolvedThisCall) await require('./directChatResolver').assertDirectChatNotBlocked(senderIdInt, chatIdInt);
     } catch (blockErr) {
       // FIX (Privacy architecture audit, item #7): assertDirectChatNotBlocked
       // now also throws MESSAGING_DISABLED / MESSAGING_FRIENDS_ONLY for the

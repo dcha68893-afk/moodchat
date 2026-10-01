@@ -19,6 +19,7 @@
  */
 
 const EventEmitter = require('events');
+const { deliverToUser } = require('../../utils/userDelivery');
 
 // ── Canonical Event Registry ──────────────────────────────────────────────────
 const CANONICAL = Object.freeze({
@@ -187,7 +188,7 @@ class UnifiedRuntimeOrchestrator extends EventEmitter {
 
     if (timesSensitive) {
       // Always try direct Socket.IO first for real-time events
-      const directOk = this._sendSocketIO(uid, event, data);
+      const directOk = await this._sendSocketIO(uid, event, data);
       if (directOk) {
         this._stats.delivered++;
         this._stats.routed_internet++;
@@ -211,8 +212,10 @@ class UnifiedRuntimeOrchestrator extends EventEmitter {
       }
     }
 
-    // Final fallback: direct Socket.IO (also catches time-sensitive that failed above)
-    const delivered = this._sendSocketIO(uid, event, data);
+    // Final fallback: direct Socket.IO. Time-sensitive events already made one
+    // direct attempt above (which emitted); re-emitting here only produced
+    // duplicate copies, so it is skipped for them.
+    const delivered = timesSensitive ? false : await this._sendSocketIO(uid, event, data);
     if (delivered) {
       this._stats.delivered++;
       this._tracker.track(`${uid}:${event}`, DELIVERY_STATE.SENT, { transport: 'INTERNET' });
@@ -252,29 +255,15 @@ class UnifiedRuntimeOrchestrator extends EventEmitter {
 
   // ── Private ───────────────────────────────────────────────────────────────
 
-  _sendSocketIO(uid, event, data) {
+  // Emits ONCE to every room variant of the user and resolves to whether any
+  // socket — on this process OR another instance (Redis adapter) — is in the
+  // user's rooms. See utils/userDelivery.js for the verified failure this
+  // replaces (process-local room check + per-room emits => 7 copies / false
+  // offline-queue writes with 2 instances).
+  async _sendSocketIO(uid, event, data) {
     try {
       if (!this.io) return false;
-      const rooms = [`user:${uid}`, `user_${uid}`];
-      let sent = false;
-      for (const room of rooms) {
-        try {
-          // FIX-URO-DELIVERED-FALSE-POSITIVE: io.to(room).emit() never throws even
-          // when the room has zero members — Socket.IO broadcasts are fire-and-forget.
-          // The old code set sent = true unconditionally inside the try block, so a
-          // fully offline/disconnected recipient was still reported as "delivered".
-          // This is the same class of bug that webSocketService.sendToUser() was
-          // already fixed for (see FIX-DELIVERED-FALSE-POSITIVE there), but this
-          // URO wrapper now runs BEFORE that fix and short-circuits it, so the
-          // false positive was reintroduced at this layer. We now check the room's
-          // actual member count via io.sockets.adapter.rooms before counting it as sent.
-          const roomSet = this.io.sockets?.adapter?.rooms?.get(room);
-          const hasMembers = !!(roomSet && roomSet.size > 0);
-          this.io.to(room).emit(event, data);
-          if (hasMembers) sent = true;
-        } catch (_) {}
-      }
-      return sent;
+      return await deliverToUser(this.io, uid, event, data);
     } catch (_) { return false; }
   }
 

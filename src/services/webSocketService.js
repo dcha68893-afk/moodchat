@@ -1,4 +1,5 @@
 'use strict';
+const { emitToUserOnce, userHasSocketAnywhere } = require('../utils/userDelivery');
 
 // ── FIX: MaxListenersExceededWarning — raise cap before any listeners attach ──
 const EventEmitter = require('events');
@@ -487,6 +488,16 @@ class WebSocketService {
                     }
                 }
                 if (!socket.__typingIndicatorsEnabled) return;
+                // typing:start fires per keystroke burst and had no limit at all.
+                // Drop repeats for the same chat within 1.5s (receivers keep the
+                // indicator alive on the first event; typing:stop is never
+                // throttled). Map is per-socket and cleared by typing:stop, so
+                // it cannot grow beyond the chats one socket actively types in.
+                const _tNow = Date.now();
+                socket.__typingLastEmit = socket.__typingLastEmit || new Map();
+                const _tLast = socket.__typingLastEmit.get(chatId);
+                if (_tLast && _tNow - _tLast < 1500) return;
+                socket.__typingLastEmit.set(chatId, _tNow);
                 socket.to(`chat:${chatId}`).emit('typing:start', {
                     chatId,
                     userId: String(userId),
@@ -496,6 +507,7 @@ class WebSocketService {
 
             socket.on('typing:stop', ({ chatId } = {}) => {
                 if (!chatId) return;
+                if (socket.__typingLastEmit) socket.__typingLastEmit.delete(chatId);
                 socket.to(`chat:${chatId}`).emit('typing:stop', {
                     chatId,
                     userId: String(userId),
@@ -1263,6 +1275,11 @@ class WebSocketService {
             if (socketId) set.delete(socketId);
             if (!socketId || set.size === 0) {
                 this.onlineUsers.delete(uid);
+                // Bounded memory: heartbeat / stale-tracking entries were never
+                // removed, so they grew with every distinct user that ever
+                // connected during the process lifetime.
+                if (this._lastHeartbeatAt) { this._lastHeartbeatAt.delete(uid); this._lastHeartbeatAt.delete(String(uid)); }
+                if (this._staleUsers) { this._staleUsers.delete(uid); this._staleUsers.delete(String(uid)); }
                 // FIX-AUDIT: scope offline broadcast to contacts only (see online fix above)
                 this._broadcastPresenceToContacts(uid, 'user:offline', {
                     userId: uid, lastSeen: new Date().toISOString(), timestamp: Date.now()
@@ -1403,6 +1420,13 @@ class WebSocketService {
         if (!this._emitLogCache) this._emitLogCache = new Map();
         if (!this._emitLogCache.has(_emitLogKey) || _now - this._emitLogCache.get(_emitLogKey) > 5000) {
             this._emitLogCache.set(_emitLogKey, _now);
+            // Log-throttle cache only needs entries from the last 5s; it was
+            // never pruned (one key per user x event forever).
+            if (this._emitLogCache.size > 5000) {
+                for (const [k, t] of this._emitLogCache) {
+                    if (_now - t > 5000) this._emitLogCache.delete(k);
+                }
+            }
             _flog(`[WSService] EMITTING TO: uid=${uid} event=${event}`);
         }
 
@@ -1472,19 +1496,16 @@ class WebSocketService {
         // exactly ONCE across all room variants via a single chained `.to()` call, so
         // a socket in multiple room variants is only ever delivered to once.
         const { rooms } = await this.getActiveSocketsForUser(uid);
-        let _anyRoomHasMembers = false;
-        for (const room of rooms) {
-            try {
-                const roomSet = io.sockets?.adapter?.rooms?.get(room);
-                if (roomSet && roomSet.size > 0) _anyRoomHasMembers = true;
-            } catch (_) {}
-        }
+        // Emit exactly once across all room variants, and decide "delivered"
+        // cluster-wide. io.sockets.adapter.rooms is PROCESS-LOCAL with the Redis
+        // adapter, so the old local-only check reported users connected to
+        // another instance as offline (verified with a real 2-instance test):
+        // the message was then queued in offline_message_queue and pushed even
+        // though it had just been delivered. See utils/userDelivery.js.
         if (rooms.length > 0) {
             try {
-                let emitter = io;
-                for (const room of rooms) emitter = emitter.to(room);
-                emitter.emit(event, payload);
-                if (_anyRoomHasMembers) delivered = true;
+                emitToUserOnce(io, uid, event, payload);
+                if (await userHasSocketAnywhere(io, uid)) delivered = true;
             } catch (_) {}
         }
 

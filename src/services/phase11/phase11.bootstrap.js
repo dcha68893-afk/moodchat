@@ -4,6 +4,8 @@
  * Activates UnifiedRuntimeOrchestrator and wires it into all existing services.
  */
 
+const { deliverToUser } = require('../../utils/userDelivery');
+
 let _initialized = false;
 
 function initPhase11(io, app, options = {}) {
@@ -81,15 +83,9 @@ function _wireWebSocketService(uro, logger) {
       try {
         const _io = global.__io || uro.io;
         if (_io) {
-          const uid = String(userId);
-          const room1 = `user:${uid}`;
-          const room2 = `user_${uid}`;
-          const set1 = _io.sockets?.adapter?.rooms?.get(room1);
-          const set2 = _io.sockets?.adapter?.rooms?.get(room2);
-          const hasMembers = !!(set1 && set1.size > 0) || !!(set2 && set2.size > 0);
-          _io.to(room1).emit(event, data);
-          _io.to(room2).emit(event, data);
-          if (hasMembers) return true;
+          // Single emit across both room variants + cluster-aware membership
+          // (see utils/userDelivery.js).
+          if (await deliverToUser(_io, userId, event, data)) return true;
         }
       } catch (err) {
         console.error(`[Phase11] fallback direct io.emit threw for uid=${userId} event=${event}:`, err?.message || err);

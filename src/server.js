@@ -2177,9 +2177,14 @@ class DatabaseService {
             
             logger.info('Loading database models from models/index.js...', 'DATABASE');
             
-            // Clear require cache for fresh load
-            delete require.cache[require.resolve(modelsPath)];
-            
+            // Reuse the already-loaded models module. This used to delete the
+            // require cache entry first ("fresh load"), but most services/routes
+            // have already imported ../models by now, so that created a SECOND
+            // Sequelize instance + connection pool + model class set in the same
+            // process (verified: 2 pools x max 8 = 16 live Postgres connections
+            // per process while the pool object itself reported 8), and because
+            // initialize() is re-invoked on every DB reconnect attempt it created
+            // another orphaned instance (and pool timers) on each retry.
             const dbModule = require(modelsPath);
             if (!dbModule || !dbModule.sequelize) {
                 throw new Error('Invalid database module structure in models/index.js');
@@ -3250,22 +3255,51 @@ class AuthMiddlewareManager {
     // same NAT/proxy, and raising the ceiling to match real chat-app usage
     // (polling/reconnect bursts routinely exceed ~6.7 req/min, which is what
     // 100/15min works out to).
-    createRateLimitMiddleware(limit = 1000, windowMs = 15 * 60 * 1000) {
+    // Options:
+    //   fixedWindow (default false) — true: the window starts at the key's first
+    //     hit and resets windowMs later (what "N per 15 minutes" means). false:
+    //     legacy sliding behaviour (every allowed hit refreshes the timestamp),
+    //     kept for the strict auth limiter so brute-force protection is not
+    //     loosened. Verified with the real code + a fake clock: under the
+    //     sliding behaviour a client polling one path every 2s is blocked at
+    //     request 1001 and stays blocked for as long as it keeps polling.
+    // The expired-entry sweep used to iterate the WHOLE store on EVERY request
+    // (keys are user x req.path, and paths include chat/message ids, so the
+    // store grows with activity: measured 1.9 ms of event-loop time per request
+    // at 40k keys). It now runs at most every SWEEP_EVERY_MS, with a hard cap.
+    createRateLimitMiddleware(limit = 1000, windowMs = 15 * 60 * 1000, options = {}) {
+        const fixedWindow = options.fixedWindow === true;
+        const SWEEP_EVERY_MS = 30 * 1000;
+        const MAX_KEYS = 50000;
+        let lastSweep = 0;
         return (req, res, next) => {
             const identity = (req.user && req.user.id) ? `user:${req.user.id}` : req.ip;
             const key = identity + ':' + req.path;
             const now = Date.now();
-            const windowStart = now - windowMs;
-            
-            // Clean old entries
-            for (const [entryKey, entry] of this.rateLimitStore.entries()) {
-                if (entry.timestamp < windowStart) {
-                    this.rateLimitStore.delete(entryKey);
+
+            if (now - lastSweep >= SWEEP_EVERY_MS || this.rateLimitStore.size > MAX_KEYS) {
+                lastSweep = now;
+                const cutoff = now - windowMs;
+                for (const [entryKey, entry] of this.rateLimitStore.entries()) {
+                    if (entry.timestamp < cutoff) this.rateLimitStore.delete(entryKey);
+                }
+                if (this.rateLimitStore.size > MAX_KEYS) {
+                    // Still over the cap after dropping expired keys: drop the
+                    // oldest-inserted 10% (Map preserves insertion order).
+                    let toDrop = Math.ceil(this.rateLimitStore.size * 0.1);
+                    for (const k of this.rateLimitStore.keys()) {
+                        if (toDrop-- <= 0) break;
+                        this.rateLimitStore.delete(k);
+                    }
                 }
             }
-            
-            const entry = this.rateLimitStore.get(key) || { count: 0, timestamp: now };
-            
+
+            let entry = this.rateLimitStore.get(key);
+            // An entry older than the window is expired even if the periodic
+            // sweep has not removed it yet.
+            if (entry && entry.timestamp < now - windowMs) entry = null;
+            if (!entry) entry = { count: 0, timestamp: now };
+
             if (entry.count >= limit) {
                 return res.status(429).json({
                     success: false,
@@ -3274,11 +3308,11 @@ class AuthMiddlewareManager {
                     retryAfter: Math.ceil((entry.timestamp + windowMs - now) / 1000)
                 });
             }
-            
+
             entry.count++;
-            entry.timestamp = now;
+            if (!fixedWindow) entry.timestamp = now;
             this.rateLimitStore.set(key, entry);
-            
+
             next();
         };
     }
@@ -4125,7 +4159,7 @@ async mountRoutersSelective(loadedRouters) {
       }
       
       // Add rate limiting for all routes
-      handlers.push(this.authMiddlewareManager.createRateLimitMiddleware(1000, 15 * 60 * 1000));
+      handlers.push(this.authMiddlewareManager.createRateLimitMiddleware(1000, 15 * 60 * 1000, { fixedWindow: true }));
       
       // Mount the router
       handlers.push(router);
@@ -5105,7 +5139,14 @@ class Application {
                 logger.error(`Unhandled error: ${err.message}`, null, 'HTTP');
             }
             
-            const status = err.status || 500;
+            // AppError (utils/errors.js) sets err.status to the STRING 'fail'/'error'
+            // and keeps the HTTP code in err.statusCode, so `err.status || 500`
+            // passed 'fail' to res.status() -> RangeError -> every
+            // ValidationError/ForbiddenError/ConflictError became a bare 500
+            // (verified: a sender blocked by the recipient's "nobody" privacy
+            // setting got a 500 instead of a 403). Use whichever of the two is
+            // a valid numeric HTTP error code.
+            const status = [err.statusCode, err.status].find((v) => Number.isInteger(v) && v >= 400 && v <= 599) || 500;
             const message = status === 500 ? 'Internal server error' : err.message;
             const code = err.code || (status === 500 ? 'INTERNAL_SERVER_ERROR' : 'HTTP_ERROR');
             

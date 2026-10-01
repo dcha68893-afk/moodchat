@@ -95,6 +95,31 @@ async function resolveOrCreateDirectChat({ userId, otherUserId, otherUser = null
     if (!_otherUserRecord) throw new Error('Receiver not found');
   }
 
+  // Fast path (no transaction, no advisory lock): the lock below only exists
+  // to stop two concurrent requests from CREATING duplicate chats for a pair.
+  // When an active direct chat already exists there is nothing to create, so
+  // find it with ONE indexed join instead of the old BEGIN + lock + two
+  // unbounded ChatParticipant.findAll (every chat id of BOTH users, intersected
+  // in JS) + COMMIT on every single send. Anything else — no chat yet, or an
+  // inactive one that must be re-activated — falls through to the unchanged
+  // locked path below. ORDER BY id keeps the same "lowest shared chat id" pick.
+  try {
+    const [fast] = await sequelize.query(
+      `SELECT c.id FROM chats c
+         JOIN chat_participants a ON a."chatId" = c.id AND a."userId" = :u
+         JOIN chat_participants b ON b."chatId" = c.id AND b."userId" = :o
+        WHERE c.type = 'direct'
+        ORDER BY c.id ASC LIMIT 1`,
+      { replacements: { u: _uidNum, o: _otherNum }, type: sequelize.QueryTypes.SELECT }
+    );
+    if (fast) {
+      const existing = await Chat.findByPk(fast.id);
+      if (existing && existing.type === 'direct' && existing.isActive !== false) {
+        return { chat: existing, isNew: false, otherUser: _otherUserRecord };
+      }
+    }
+  } catch (_) { /* fall through to the locked path */ }
+
   const _lockA = Math.min(_uidNum, _otherNum);
   const _lockB = Math.max(_uidNum, _otherNum);
 

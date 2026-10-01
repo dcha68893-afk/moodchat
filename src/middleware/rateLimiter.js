@@ -21,6 +21,7 @@ const rateLimit = require('express-rate-limit');
 //    own store instance via makeStore(), each with a unique key prefix so
 //    they don't collide with each other in Redis either.
 const { RedisStore } = require('rate-limit-redis');
+const { MemoryStore } = require('express-rate-limit');
 const redis = require('redis');
 
 // Create Redis client if REDIS_URL is set
@@ -29,7 +30,22 @@ let redisClient;
 if (process.env.REDIS_URL) {
   try {
     redisClient = redis.createClient({
-      url: process.env.REDIS_URL
+      url: process.env.REDIS_URL,
+      // Fail commands immediately while disconnected instead of queueing them
+      // without limit: with the default offline queue every rate-limited
+      // request waited for Redis to come back (verified: all authenticated
+      // API requests hung ~30s and were dropped during a Redis outage).
+      // ResilientStore below falls back to the in-memory store meanwhile.
+      disableOfflineQueue: true
+    });
+
+    // Without a listener a node-redis 'error' event is an unhandled 'error'
+    // event on an EventEmitter.
+    redisClient.on('error', (e) => {
+      if (!redisClient.__errLoggedAt || Date.now() - redisClient.__errLoggedAt > 30000) {
+        redisClient.__errLoggedAt = Date.now();
+        console.error('[RateLimiter] Redis error (using in-memory fallback until ready):', e && e.message);
+      }
     });
 
     redisClient.connect().catch(console.error);
@@ -44,12 +60,49 @@ if (process.env.REDIS_URL) {
 // Returns a fresh RedisStore for the given limiter, or undefined (falls
 // back to express-rate-limit's built-in in-memory store) if Redis isn't
 // configured/available. `prefix` must be unique per limiter.
+const REDIS_STORE_TIMEOUT_MS = parseInt(process.env.RATE_LIMIT_REDIS_TIMEOUT_MS, 10) || 500;
+
+// Redis-backed when Redis is ready, in-memory otherwise (per instance), so a
+// Redis outage neither hangs requests nor silently turns rate limiting off
+// (the auth limiter keeps limiting). Each limiter owns one instance.
+class ResilientStore {
+  constructor(redisStore) {
+    this.redis = redisStore;
+    this.mem = new MemoryStore();
+    this.localKeys = false;
+    this.prefix = redisStore.prefix;
+  }
+  init(options) { this.redis.init(options); this.mem.init(options); }
+  _useRedis() { return !!(redisClient && redisClient.isReady); }
+  _withTimeout(promise) {
+    let t;
+    return Promise.race([
+      promise,
+      new Promise((_, rej) => { t = setTimeout(() => rej(new Error('redis timeout')), REDIS_STORE_TIMEOUT_MS); }),
+    ]).finally(() => clearTimeout(t));
+  }
+  async increment(key) {
+    if (this._useRedis()) {
+      try { return await this._withTimeout(this.redis.increment(key)); } catch (_) { /* fall through */ }
+    }
+    return this.mem.increment(key);
+  }
+  async decrement(key) {
+    this.mem.decrement(key);
+    if (this._useRedis()) { try { await this._withTimeout(this.redis.decrement(key)); } catch (_) {} }
+  }
+  async resetKey(key) {
+    this.mem.resetKey(key);
+    if (this._useRedis()) { try { await this._withTimeout(this.redis.resetKey(key)); } catch (_) {} }
+  }
+}
+
 function makeStore(prefix) {
   if (!redisClient) return undefined;
-  return new RedisStore({
+  return new ResilientStore(new RedisStore({
     sendCommand: (...args) => redisClient.sendCommand(args),
     prefix: `rate-limit:${prefix}:`,
-  });
+  }));
 }
 
 // Rate limiter for authentication routes (login, register)

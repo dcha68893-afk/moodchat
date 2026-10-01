@@ -14,6 +14,7 @@
  */
 
 const EventEmitter = require('events');
+const { userHasSocketAnywhere, emitToUserOnce } = require('../../utils/userDelivery');
 
 const TRANSPORT = Object.freeze({
   INTERNET : 'INTERNET',
@@ -249,36 +250,16 @@ class HybridTransportRuntime extends EventEmitter {
     }
   }
 
-  _sendViaInternet(uid, event, data) {
+  // One emit across all room variants (a socket in both `user:<id>` and
+  // `user_<id>` previously got each event once per room) and a cluster-aware
+  // membership check (process-local rooms falsely reported multi-instance
+  // users as offline). See utils/userDelivery.js.
+  async _sendViaInternet(uid, event, data) {
     try {
       if (!this.io) return false;
-      const strUid = String(uid);
-      const numUid = String(Number(uid));
-      const rooms = [...new Set([
-        `user:${strUid}`,
-        `user_${strUid}`,
-        `user:${numUid}`,
-        `user_${numUid}`,
-      ])];
-      let sent = false;
-      for (const room of rooms) {
-        try {
-          // FIX-ROOT-CAUSE: Check actual room membership BEFORE marking as sent.
-          // io.to(room).emit() is fire-and-forget and NEVER throws, even when the
-          // room has zero members. The old code set sent=true unconditionally, so
-          // HTR always returned { ok: true } — causing sendToUser to return early
-          // without ever reaching the per-socket-ID fallback delivery. Receivers
-          // that were online but whose room join was slightly delayed (race on
-          // connect) silently missed messages. Now we only count as delivered when
-          // at least one socket is actually in the room.
-          const roomSockets = this.io.sockets?.adapter?.rooms?.get(room);
-          if (roomSockets && roomSockets.size > 0) {
-            this.io.to(room).emit(event, data);
-            sent = true;
-          }
-        } catch (_) {}
-      }
-      return sent;
+      const online = await userHasSocketAnywhere(this.io, uid);
+      if (!online) return false;
+      return emitToUserOnce(this.io, uid, event, data);
     } catch (err) {
       this.log.warn(`[HTR] Internet send failed for uid=${uid}:`, err.message);
       return false;

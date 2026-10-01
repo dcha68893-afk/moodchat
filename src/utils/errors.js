@@ -7,7 +7,14 @@ class AppError extends Error {
     // name-based and instanceof-based checks work.
     this.name = this.constructor.name;
     this.statusCode = statusCode;
-    this.status = `${statusCode}`.startsWith('4') ? 'fail' : 'error';
+    // `status` used to be the STRING 'fail'/'error'. It is truthy, so every
+    // `err.status || <fallback>` / res.status(err.status) in routes/handlers
+    // passed 'fail' to res.status() (RangeError at write time) and every
+    // ValidationError / ForbiddenError / ConflictError reached the client as a
+    // 500. Keep `status` numeric (what Express and those call sites expect)
+    // and preserve the old classification as `statusText`.
+    this.status = statusCode;
+    this.statusText = `${statusCode}`.startsWith('4') ? 'fail' : 'error';
     this.isOperational = true;
     Error.captureStackTrace(this, this.constructor);
   }
