@@ -175,7 +175,89 @@ app.get('/health', async (req, res) => {
   }
 });
 
-// API routes with global error wrapper
+
+// Official Necpra Android APK download proxy.
+// The APK stays in the private GitHub release; this server fetches it with a
+// server-side read-only GitHub token and streams the binary to the user.
+const NECPRA_APK_REPO = 'dcha68893-afk/moodfronted';
+const NECPRA_APK_NAME = 'necpra-android.apk';
+const GITHUB_API_VERSION = '2022-11-28';
+
+app.get('/download/necpra-android.apk', async (req, res) => {
+  const token = process.env.GITHUB_READ_TOKEN;
+  if (!token) {
+    return res.status(503).json({ success: false, message: 'APK download service is not configured.' });
+  }
+
+  const authHeaders = {
+    Accept: 'application/vnd.github+json',
+    Authorization: `Bearer ${token}`,
+    'X-GitHub-Api-Version': GITHUB_API_VERSION,
+    'User-Agent': 'Necpra-Android-Download'
+  };
+
+  try {
+    const releaseResponse = await fetch(
+      `https://api.github.com/repos/${NECPRA_APK_REPO}/releases/latest`,
+      { headers: authHeaders }
+    );
+
+    if (!releaseResponse.ok) {
+      logger.error(`Necpra APK release lookup failed: HTTP ${releaseResponse.status}`);
+      return res.status(502).json({ success: false, message: 'Latest Necpra APK is temporarily unavailable.' });
+    }
+
+    const release = await releaseResponse.json();
+    const asset = Array.isArray(release.assets)
+      ? release.assets.find((item) => item.name === NECPRA_APK_NAME && item.state === 'uploaded')
+      : null;
+
+    if (!asset || !asset.url) {
+      return res.status(404).json({ success: false, message: 'Latest Necpra APK was not found.' });
+    }
+
+    const assetResponse = await fetch(asset.url, {
+      headers: { ...authHeaders, Accept: 'application/octet-stream' },
+      redirect: 'manual'
+    });
+
+    let binaryResponse = assetResponse;
+    if (assetResponse.status === 301 || assetResponse.status === 302 || assetResponse.status === 303 || assetResponse.status === 307 || assetResponse.status === 308) {
+      const location = assetResponse.headers.get('location');
+      if (!location) throw new Error('GitHub APK download redirect did not include a location.');
+      binaryResponse = await fetch(location, { redirect: 'follow' });
+    }
+
+    if (!binaryResponse.ok || !binaryResponse.body) {
+      logger.error(`Necpra APK asset download failed: HTTP ${binaryResponse.status}`);
+      return res.status(502).json({ success: false, message: 'Necpra APK could not be downloaded right now.' });
+    }
+
+    res.status(200);
+    res.setHeader('Content-Type', 'application/vnd.android.package-archive');
+    res.setHeader('Content-Disposition', 'attachment; filename="necpra-android.apk"');
+    res.setHeader('Cache-Control', 'public, max-age=300, s-maxage=300');
+    if (asset.size) res.setHeader('Content-Length', String(asset.size));
+    if (asset.digest) res.setHeader('X-Necpra-APK-Digest', String(asset.digest));
+
+    if (req.method === 'HEAD') return res.end();
+    const reader = binaryResponse.body.getReader();
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!res.write(Buffer.from(value))) await new Promise((resolve) => res.once('drain', resolve));
+      }
+      res.end();
+    } finally {
+      reader.releaseLock();
+    }
+  } catch (error) {
+    logger.error('Necpra APK download proxy failed:', error);
+    if (!res.headersSent) res.status(502).json({ success: false, message: 'Necpra APK download is temporarily unavailable.' });
+  }
+});
+\n// API routes with global error wrapper
 const wrappedRoutes = (router) => {
   // Wrap each route handler with try/catch
   const wrapAsync = (fn) => (req, res, next) => {
