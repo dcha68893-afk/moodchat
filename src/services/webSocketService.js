@@ -478,6 +478,10 @@ class WebSocketService {
             // this file already makes for other per-connection state.
             socket.on('typing:start', async ({ chatId } = {}) => {
                 if (!chatId) return;
+                // Sender must be a member of the chat room (rooms are joined
+                // server-side from DB membership); otherwise anyone could
+                // inject typing events into arbitrary chats.
+                if (!socket.rooms || !socket.rooms.has(`chat:${chatId}`)) return;
                 if (socket.__typingIndicatorsEnabled === undefined) {
                     try {
                         const UsersModel = require('../models').Users;
@@ -507,6 +511,7 @@ class WebSocketService {
 
             socket.on('typing:stop', ({ chatId } = {}) => {
                 if (!chatId) return;
+                if (!socket.rooms || !socket.rooms.has(`chat:${chatId}`)) return;
                 if (socket.__typingLastEmit) socket.__typingLastEmit.delete(chatId);
                 socket.to(`chat:${chatId}`).emit('typing:stop', {
                     chatId,
@@ -658,6 +663,22 @@ class WebSocketService {
             // second implementation (spec §10).
             socket.removeAllListeners('message:send').on('message:send', async (payload = {}) => {
                 const { localId } = payload || {};
+                // Per-socket token bucket (state lives on the socket, so it is freed
+                // with it — no global map to leak). Burst 30, sustained 5 msg/s
+                // (300/min): far above human typing, but stops a flooding client from
+                // running ~16 DB queries per event without bound. The sender is told
+                // via the same error event the client already handles.
+                {
+                    const _now = Date.now();
+                    const _b = socket.__sendBucket || (socket.__sendBucket = { tokens: 30, ts: _now });
+                    _b.tokens = Math.min(30, _b.tokens + ((_now - _b.ts) / 1000) * 5);
+                    _b.ts = _now;
+                    if (_b.tokens < 1) {
+                        socket.emit('message:send:error', { localId, error: 'Too many messages, please slow down', code: 'RATE_LIMITED' });
+                        return;
+                    }
+                    _b.tokens -= 1;
+                }
                 try {
                     const { chatId, receiverId, content, type, replyToId, metadata, expiresAt } = payload;
                     const messageDeliveryService = require('./messageDeliveryService');
@@ -683,7 +704,13 @@ class WebSocketService {
                     }
                 } catch (err) {
                     console.warn('[WSService] message:send socket error:', err.message);
-                    socket.emit('message:send:error', { localId, error: err.message, code: err.code });
+                    // A database outage is transient: tell the client it may retry the SAME
+                    // localId (idempotent) instead of presenting a permanent failure.
+                    if (require('../utils/dbErrors').isDbUnavailable(err)) {
+                        socket.emit('message:send:error', { localId, error: 'Service temporarily unavailable', code: 'DB_UNAVAILABLE', retryable: true });
+                    } else {
+                        socket.emit('message:send:error', { localId, error: err.message, code: err.code });
+                    }
                 }
             });
             // NOTE: delivered/read state over the socket already has live,
@@ -844,13 +871,14 @@ class WebSocketService {
                              SELECT unnest(ARRAY[:messageIds]::int[]), :userId, NOW(), NOW(), NOW()
                              ON CONFLICT ("messageId","userId") DO NOTHING`,
                             { replacements: { messageIds: messageIds.map(Number), userId }, type: sequelize.QueryTypes.INSERT }
-                        ).catch(() => {});
+                        ); // errors propagate to the catch below: do NOT tell the sender "read" if the receipt was not stored
                     }
                     socket.to(`chat:${chatId}`).emit('message:read', {
                         chatId, readerId: userId, messageIds: messageIds || [], readAt: new Date().toISOString()
                     });
                 } catch (err) {
                     console.warn('[WSService] mark_as_read error:', err.message);
+                    socket.emit('mark_as_read:error', { chatId, retryable: require('../utils/dbErrors').isDbUnavailable(err) });
                 }
             });
 
@@ -920,8 +948,7 @@ class WebSocketService {
                 const io = this.getIO();
                 if (!io) return;
                 try {
-                    io.to(`user:${hbTarget}`).emit('call:heartbeat', { callId: hbCallId, fromUserId: userId, ts: Date.now() });
-                    io.to(`user_${hbTarget}`).emit('call:heartbeat', { callId: hbCallId, fromUserId: userId, ts: Date.now() });
+                    io.to([`user:${hbTarget}`, `user_${hbTarget}`]).emit('call:heartbeat', { callId: hbCallId, fromUserId: userId, ts: Date.now() });
                 } catch (_) {}
             });
             }
@@ -1918,8 +1945,7 @@ class WebSocketService {
                 } else if (visibilityRule === 'friends' && friendIdSet && !friendIdSet.has(String(cid))) {
                     toSend = maskedPayload;
                 }
-                io.to(`user:${cid}`).emit(event, toSend);
-                io.to(`user_${cid}`).emit(event, toSend);
+                io.to([`user:${cid}`, `user_${cid}`]).emit(event, toSend);
             }
             return true;
         } catch (_) {
@@ -1969,8 +1995,7 @@ class WebSocketService {
             if (Array.isArray(participantIds) && participantIds.length > 0) {
                 for (const uid of participantIds) {
                     if (uid) {
-                        io.to(`user:${uid}`).emit(event, enriched);
-                        io.to(`user_${uid}`).emit(event, enriched);
+                        io.to([`user:${uid}`, `user_${uid}`]).emit(event, enriched);
                     }
                 }
             }
@@ -2018,8 +2043,7 @@ class WebSocketService {
             io.to(`group_${groupId}`).emit(event, groupPayload);
             // Also send to sender user rooms (multi-device support)
             if (excludeSenderId) {
-                io.to(`user:${excludeSenderId}`).emit(event, groupPayload);
-                io.to(`user_${excludeSenderId}`).emit(event, groupPayload);
+                io.to([`user:${excludeSenderId}`, `user_${excludeSenderId}`]).emit(event, groupPayload);
             }
             return true;
         } catch (error) {
@@ -2042,8 +2066,7 @@ class WebSocketService {
             );
             const groupPayload = { ...payload, groupId, timestamp: payload.timestamp || new Date().toISOString() };
             for (const { userId } of (members || [])) {
-                io.to(`user:${userId}`).emit(event, groupPayload);
-                io.to(`user_${userId}`).emit(event, groupPayload);
+                io.to([`user:${userId}`, `user_${userId}`]).emit(event, groupPayload);
             }
             io.to(`group:${groupId}`).emit(event, groupPayload);
             return true;

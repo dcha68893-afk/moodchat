@@ -48,8 +48,7 @@ async function emitToUser(io, userId, event, payload) {
     }
     // Fallback: io rooms (works if socket joined user room via webSocketService.registerUser)
     if (io) {
-        io.to(`user:${userId}`).emit(event, payload);
-        io.to(`user_${userId}`).emit(event, payload);
+        io.to([`user:${userId}`, `user_${userId}`]).emit(event, payload);
     }
 }
 
@@ -96,7 +95,7 @@ const buildVisibleLastMessageInclude = (userId) => ({
         isDeleted: false,
         [Op.and]: [
             db.sequelize.literal(
-                `NOT ("chatMessages"."metadata" -> 'deletedFor' ? ${db.sequelize.escape(String(userId))})`
+                `NOT (COALESCE("chatMessages"."metadata" -> 'deletedFor', '[]'::jsonb) ? ${db.sequelize.escape(String(userId))} OR COALESCE("chatMessages"."metadata" -> 'deletedFor', '[]'::jsonb) @> to_jsonb(${Number.isFinite(Number(userId)) ? Number(userId) : -1}::int))`
             )
         ]
     },

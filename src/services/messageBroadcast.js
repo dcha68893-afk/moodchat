@@ -30,13 +30,13 @@ async function broadcastNewMessage(message, senderId) {
       replacements: { chatId: chatIdInt, senderId: senderIdInt },
       type: sequelize.QueryTypes.SELECT,
     }
-  ).catch(() => []);
+  ); // errors propagate: callers log them; swallowing made a failed lookup look like "no recipients"
   const recipientIds = participants.map(p => p.userId).filter(Boolean);
 
   const [chat] = await sequelize.query(
     `SELECT "type" FROM "chats" WHERE id = :chatId LIMIT 1`,
     { replacements: { chatId: chatIdInt }, type: sequelize.QueryTypes.SELECT }
-  ).catch(() => [null]);
+  );
   const chatType = String(chat?.type || '').toLowerCase();
 
   if (chatType !== 'group' && chatType !== 'direct') {

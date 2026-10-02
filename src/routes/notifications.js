@@ -22,8 +22,12 @@ router.get(
   apiRateLimiter,
   asyncHandler(async (req, res) => {
     try {
-      const { page = 1, limit = 20, unreadOnly = false, type } = req.query;
-      const offset = (parseInt(page) - 1) * parseInt(limit);
+      const { unreadOnly = false, type } = req.query;
+      // Clamp client-supplied paging: an unbounded `limit` let one request pull a
+      // user's whole notification history (and NaN reached the query as-is).
+      const page = Math.min(Math.max(parseInt(req.query.page, 10) || 1, 1), 1000);
+      const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 20, 1), 100);
+      const offset = (page - 1) * limit;
 
       const where = { userId: req.user.id };
 

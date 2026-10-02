@@ -248,7 +248,7 @@ class ChatService {
                      FROM "Messages" m LEFT JOIN "Users" u ON u.id = m."senderId"
                      WHERE m."chatId" = c.id AND m."isDeleted" = false
                        AND (cp."clearedAt" IS NULL OR m."createdAt" > cp."clearedAt")
-                       AND NOT (m.metadata -> 'deletedFor' ? :userIdStr)
+                       AND NOT (COALESCE(m.metadata -> 'deletedFor', '[]'::jsonb) ? :userIdStr OR COALESCE(m.metadata -> 'deletedFor', '[]'::jsonb) @> to_jsonb(:userIdInt::int))
                      ORDER BY m."createdAt" DESC LIMIT 1
                    ) AS "lastMessage",
                    (
@@ -257,7 +257,7 @@ class ChatService {
                      WHERE m2."chatId" = c.id AND m2."isDeleted" = false
                        AND m2."senderId" != :userId AND rr.id IS NULL
                        AND (cp."clearedAt" IS NULL OR m2."createdAt" > cp."clearedAt")
-                       AND NOT (m2.metadata -> 'deletedFor' ? :userIdStr)
+                       AND NOT (COALESCE(m2.metadata -> 'deletedFor', '[]'::jsonb) ? :userIdStr OR COALESCE(m2.metadata -> 'deletedFor', '[]'::jsonb) @> to_jsonb(:userIdInt::int))
                    ) AS "unreadCount"
                  FROM chats c
                  INNER JOIN chat_participants cp ON cp."chatId" = c.id AND cp."userId" = :userId
@@ -266,7 +266,7 @@ class ChatService {
                  ${typeClause} ${searchClause}
                  ORDER BY ${orderCol} ${orderDir} NULLS LAST
                  LIMIT :limit OFFSET :offset`,
-                { replacements: { ...replacements, userIdStr: String(userId) }, type: sequelize.QueryTypes.SELECT }
+                { replacements: { ...replacements, userIdStr: String(userId), userIdInt: Number.isFinite(Number(userId)) ? Number(userId) : -1 }, type: sequelize.QueryTypes.SELECT }
             );
 
             const processed = await Promise.all(chats.map(async (chat) => {
@@ -280,7 +280,7 @@ class ChatService {
                  WHERE c."isActive" = true
                    AND (cp."hiddenAt" IS NULL OR c."lastMessageAt" IS NULL OR c."lastMessageAt" > cp."hiddenAt")
                  ${typeClause} ${searchClause}`,
-                { replacements: { ...replacements, userIdStr: String(userId) }, type: sequelize.QueryTypes.SELECT }
+                { replacements: { ...replacements, userIdStr: String(userId), userIdInt: Number.isFinite(Number(userId)) ? Number(userId) : -1 }, type: sequelize.QueryTypes.SELECT }
             );
 
             return {

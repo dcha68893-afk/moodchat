@@ -1098,6 +1098,8 @@ class SystemStateManager {
         state.checks = {
             database: this.isServiceHealthy('database'),
             redis: this.isConnectionHealthy('redis'),
+            redisCacheManager: this.state.connections.get('redis')?.status || 'UNKNOWN',
+            socketAdapter: this.state.connections.get('socketAdapter')?.status || 'UNKNOWN',
             auth: this.areAuthRoutesActive(),
             models: this.getModelHealthStatus(),
             cors: corsManager.getAllowedOrigins().length > 0,
@@ -1214,7 +1216,7 @@ class SystemStateManager {
             authMode: 'PROTECTED_ROUTES_ONLY',
             optimizations: {
                 uvThreadpoolSize: parseInt(process.env.UV_THREADPOOL_SIZE, 10) || 16,
-                connectionPool: { max: 20, min: 5 },
+                connectionPool: { max: Number(config.get('DB_POOL_MAX')) || 10, min: Number(config.get('DB_POOL_MIN')) || 0 },
                 loginCacheTTL: 30,
                 duplicateRequestCooldown: 500,
                 queryTimeout: 8000,
@@ -1727,7 +1729,7 @@ class ProfessionalLogger {
         _slog(`${this.colors.green}══════════════════════════════════════════════════════════════════════════════${this.colors.reset}`);
         _slog(`${this.colors.cyan}   Optimizations Enabled:${this.colors.reset}`);
         _slog(`${this.colors.cyan}   • UV_THREADPOOL_SIZE: ${process.env.UV_THREADPOOL_SIZE}${this.colors.reset}`);
-        _slog(`${this.colors.cyan}   • Connection Pool: max=20, min=5${this.colors.reset}`);
+        _slog(`${this.colors.cyan}   • Connection Pool: max=${config.get('DB_POOL_MAX')}, min=${config.get('DB_POOL_MIN')}${this.colors.reset}`);
         _slog(`${this.colors.cyan}   • Login Cache TTL: 30 seconds${this.colors.reset}`);
         _slog(`${this.colors.cyan}   • Query Timeout: 30 seconds${this.colors.reset}`);
         _slog(`${this.colors.cyan}   • Response Compression: Enabled${this.colors.reset}`);
@@ -5095,6 +5097,38 @@ class Application {
             }
         });
         
+        // Dependency-aware readiness: pings PostgreSQL (and Redis when connected).
+        // 503 when a hard dependency is down so load balancers stop routing.
+        this.app.get('/health/ready', async (req, res) => {
+            const withTimeout = (p, ms) => Promise.race([
+                p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))
+            ]);
+            const checks = { database: 'unknown', redis: 'disabled' };
+            let ok = true;
+            try {
+                const db = this.app.locals.db;
+                const t0 = Date.now();
+                await withTimeout(db.query('SELECT 1'), 2000);
+                checks.database = 'ok';
+                checks.databaseLatencyMs = Date.now() - t0;
+            } catch (e) { checks.database = 'down'; ok = false; }
+            try {
+                const rc = this.app.locals.socketAdapterPub
+                    || (this.redis && this.redis.getClient && this.redis.getClient());
+                if (rc && typeof rc.ping === 'function') {
+                    const t0 = Date.now();
+                    await withTimeout(Promise.resolve(rc.ping()), 1000);
+                    checks.redis = 'ok';
+                    checks.redisLatencyMs = Date.now() - t0;
+                } // Redis has an in-memory fallback: report, but do not fail readiness
+            } catch (e) { checks.redis = 'down'; }
+            return res.status(ok ? 200 : 503).json({
+                ready: ok, checks, uptime: Math.floor(process.uptime()),
+                timestamp: new Date().toISOString()
+            });
+        });
+        this.app.get('/health/live', (req, res) => res.status(200).json({ live: true }));
+
         // Live endpoint for liveness probes (public)
         this.app.get('/live', (req, res) => {
             logger.logPublicRouteAccess(req.path, req.method);
@@ -5146,9 +5180,11 @@ class Application {
             // (verified: a sender blocked by the recipient's "nobody" privacy
             // setting got a 500 instead of a 403). Use whichever of the two is
             // a valid numeric HTTP error code.
-            const status = [err.statusCode, err.status].find((v) => Number.isInteger(v) && v >= 400 && v <= 599) || 500;
-            const message = status === 500 ? 'Internal server error' : err.message;
-            const code = err.code || (status === 500 ? 'INTERNAL_SERVER_ERROR' : 'HTTP_ERROR');
+            const dbDown = require('./utils/dbErrors').isDbUnavailable(err);
+            const status = dbDown ? 503 : ([err.statusCode, err.status].find((v) => Number.isInteger(v) && v >= 400 && v <= 599) || 500);
+            if (dbDown) res.setHeader('Retry-After', '5');
+            const message = dbDown ? 'Service temporarily unavailable' : (status === 500 ? 'Internal server error' : err.message);
+            const code = dbDown ? 'DB_UNAVAILABLE' : (err.code || (status === 500 ? 'INTERNAL_SERVER_ERROR' : 'HTTP_ERROR'));
             
             return res.status(status).json({
                 success: false,
@@ -5376,14 +5412,21 @@ class Application {
                             const adapterPubClient = redisLib.createClient({ url: config.get('REDIS_URL') });
                             const adapterSubClient = adapterPubClient.duplicate();
 
-                            adapterPubClient.on('error', (err) =>
-                                console.error('[Socket.IO Redis adapter] pub client error:', err.message));
+                            systemState.updateConnectionState('socketAdapter', { status: 'CONNECTING', connected: false, degraded: false, details: { reason: 'connecting' } });
+                            this.app.locals.socketAdapterPub = adapterPubClient;
+                            adapterPubClient.on('error', (err) => {
+                                systemState.updateConnectionState('socketAdapter', { status: 'ERROR', connected: false, degraded: true, details: { reason: err.message } });
+                                console.error('[Socket.IO Redis adapter] pub client error:', err.message);
+                            });
+                            adapterPubClient.on('ready', () =>
+                                systemState.updateConnectionState('socketAdapter', { status: 'CONNECTED', connected: true, degraded: false, details: {} }));
                             adapterSubClient.on('error', (err) =>
                                 console.error('[Socket.IO Redis adapter] sub client error:', err.message));
 
                             Promise.all([adapterPubClient.connect(), adapterSubClient.connect()])
                                 .then(() => {
                                     this.io.adapter(createAdapter(adapterPubClient, adapterSubClient));
+                                    systemState.updateConnectionState('socketAdapter', { status: 'CONNECTED', connected: true, degraded: false, details: {} });
                                     logger.success('Socket.IO Redis adapter connected — cross-worker/instance delivery enabled', 'WEBSOCKET');
                                 })
                                 .catch((err) => {
@@ -5393,6 +5436,7 @@ class Application {
                             console.error('[Socket.IO Redis adapter] setup error, staying in single-process mode:', err.message);
                         }
                     } else {
+                        systemState.updateConnectionState('socketAdapter', { status: 'DISABLED', connected: false, degraded: false, details: { reason: 'REDIS_ENABLED/REDIS_URL not set' } });
                         logger.warn('Socket.IO Redis adapter NOT enabled (set REDIS_ENABLED + REDIS_URL) — sockets only visible within this single process', 'WEBSOCKET');
                     }
 
@@ -5959,7 +6003,7 @@ async function main() {
             _slog('\n⚡ OPTIMIZATION VALIDATION:');
             _slog('='.repeat(80));
             _slog(`✅ UV_THREADPOOL_SIZE=${process.env.UV_THREADPOOL_SIZE} (More threads = better concurrency)`);
-            _slog(`✅ Connection Pool: max=20, min=5 (Faster database access)`);
+            _slog(`✅ Connection Pool: max=${config.get('DB_POOL_MAX')}, min=${config.get('DB_POOL_MIN')}`);
             _slog(`✅ Login Cache: 30s TTL (Repeat logins: 1-5ms vs 200-500ms)`);
             _slog(`✅ Query Timeout: 8s (Prevents hanging queries)`);
             _slog(`✅ Response Compression: Enabled (Smaller payloads)`);
@@ -6037,7 +6081,7 @@ async function main() {
                         { expiresAt: null, createdAt: { [Op.lt]: cutoff } },
                     ],
                 },
-                attributes: ['id', 'userId', 'mediaUrl'],
+                attributes: ['id', 'userId'], // mediaUrl not needed here; selecting it broke the cron when the column was absent
                 limit: 100
             });
 
@@ -6054,8 +6098,7 @@ async function main() {
                 expired.forEach(s => { (byUser[s.userId] = byUser[s.userId] || []).push(s.id); });
                 for (const [userId, statusIds] of Object.entries(byUser)) {
                     const payload = { statusIds, expiredAt: new Date().toISOString() };
-                    io.to(`user:${userId}`).emit('status:expired', payload);
-                    io.to(`user_${userId}`).emit('status:expired', payload);
+                    io.to([`user:${userId}`, `user_${userId}`]).emit('status:expired', payload);
                 }
             }
 
@@ -6164,8 +6207,7 @@ async function main() {
                                               require('./services/webSocketService');
                             try {
                                 const lanPayload = { ...payload, _transport: 'LAN', _lanRelayed: true };
-                                io.to(`user:${uid}`).emit('lan:message', lanPayload);
-                                io.to(`user_${uid}`).emit('lan:message', lanPayload);
+                                io.to([`user:${uid}`, `user_${uid}`]).emit('lan:message', lanPayload);
                                 // Also emit as new_message so messages-core picks it up
                                 io.to(`user:${uid}`).emit('new_message', lanPayload);
                                 delivered = true;

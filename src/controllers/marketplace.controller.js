@@ -2503,8 +2503,7 @@ function _socketBroadcast(req, event, data, targetUserId = null) {
             if (wsService && typeof wsService.sendToUser === 'function') {
                 wsService.sendToUser(uid, event, data);
             } else if (io) {
-                io.to(`user:${uid}`).emit(event, data);
-                io.to(`user_${uid}`).emit(event, data);
+                io.to([`user:${uid}`, `user_${uid}`]).emit(event, data);
             }
         } else {
             // Broadcast to all connected clients

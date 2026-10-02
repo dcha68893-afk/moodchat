@@ -8,7 +8,7 @@ const router = express.Router();
 router.use(apiRateLimiter);
 function getUserId(req){ return req.user && (req.user.userId || req.user.id || req.user.sub); }
 function safeInt(v){ const n=parseInt(v,10); return Number.isFinite(n)&&n>0?n:null; }
-function statusFor(err){ return err.status || (err.name==='ValidationError'?400:err.name==='ForbiddenError'?403:500); }
+function statusFor(err){ if(require('../utils/dbErrors').isDbUnavailable(err)) return 503; return err.status || (err.name==='ValidationError'?400:err.name==='ForbiddenError'?403:500); }
 // Compatibility transport for the legacy Group OS client. Storage and lifecycle
 // remain canonical in Messages/chat_participants + messageDeliveryService.
 router.get('/:groupId/messages', asyncHandler(async(req,res)=>{

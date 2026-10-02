@@ -6,6 +6,7 @@
  */
 'use strict';
 
+const { paymentLimiter } = require('../middleware/rateLimiter');
 const express = require('express');
 const router  = express.Router();
 const { authenticateToken } = require('../middleware/auth');
@@ -33,7 +34,7 @@ router.use(authenticateToken);
 
 if (ctrl) {
     // M-Pesa STK Push — frontend calls /api/payments/mpesa/stk-push
-    router.post('/mpesa/stk-push',    ctrl.initiateMpesa.bind(ctrl));
+    router.post('/mpesa/stk-push',    paymentLimiter, ctrl.initiateMpesa.bind(ctrl));
     // M-Pesa verify — frontend calls /api/payments/mpesa/verify
     router.get('/mpesa/verify',       ctrl.verifyMpesa.bind(ctrl));
 
@@ -42,10 +43,10 @@ if (ctrl) {
     // already has real, working implementations (Flutterwave card charge
     // with honest 503 when unconfigured; row-locked wallet DB debit with
     // transaction logging) — they were just never wired here. Use them.
-    router.post('/card',   ctrl.cardPayment.bind(ctrl));
-    router.post('/wallet', ctrl.walletPayment.bind(ctrl));
+    router.post('/card',   paymentLimiter, ctrl.cardPayment.bind(ctrl));
+    router.post('/wallet', paymentLimiter, ctrl.walletPayment.bind(ctrl));
     router.get('/wallet/:userId/balance', ctrl.getWalletBalance.bind(ctrl));
-    router.post('/wallet/topup', ctrl.walletTopup.bind(ctrl));
+    router.post('/wallet/topup', paymentLimiter, ctrl.walletTopup.bind(ctrl));
 }
 
 // Fallback for missing ctrl

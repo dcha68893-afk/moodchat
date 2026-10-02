@@ -290,6 +290,28 @@ const chatLimiter = rateLimit({
   }
 });
 
+// Rate limiter for money-moving / charge-initiating operations (M-Pesa STK push,
+// card, wallet debit/top-up, coin spend). Keyed by authenticated user so one user
+// cannot spam STK prompts to a phone or hammer wallet debits; deliberately NOT
+// applied to the Safaricom callback (server-to-server, no user).
+const paymentLimiter = rateLimit({
+  store: makeStore('payment'),
+  windowMs: 60 * 1000,
+  max: 10,
+  message: {
+    success: false,
+    message: 'Too many payment requests, please wait a minute and try again',
+    code: 'RATE_LIMITED',
+    timestamp: new Date().toISOString()
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => {
+    const uid = req.user && (req.user.id || req.user.userId);
+    return uid ? `pay-user:${uid}` : `pay-ip:${req.ip}`;
+  }
+});
+
 // Rate limiter for call initiation — per CALLER:CALLEE pair (anti-harassment)
 // Max 5 call attempts to the same target per 60 seconds
 const callInitiationLimiter = rateLimit({
@@ -383,5 +405,6 @@ module.exports = {
   uploadLimiter,
   chatLimiter,
   callInitiationLimiter,
+  paymentLimiter,
   dynamicLimiter
 };

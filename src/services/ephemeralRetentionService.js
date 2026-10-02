@@ -135,7 +135,7 @@ async function deleteMessageFromServer(db, messageId, reason = 'delivered') {
 
 async function cleanupDeliveredMessages(db, limit = 200) {
   const rows = await db.sequelize.query(
-    \`SELECT id FROM "Messages" WHERE "deliveredAt" IS NOT NULL AND "isDeleted"=false ORDER BY "deliveredAt" ASC LIMIT :limit\`,
+    `SELECT id FROM "Messages" WHERE "deliveredAt" IS NOT NULL AND "isDeleted"=false ORDER BY "deliveredAt" ASC LIMIT :limit`,
     { replacements: { limit }, type: db.sequelize.QueryTypes.SELECT }
   ).catch(() => []);
   let deleted = 0;

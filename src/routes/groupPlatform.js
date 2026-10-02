@@ -50,8 +50,7 @@ async function emitChat(chatId, event, payload) {
   if (!socket) return;
   const ids = await usersInChat(chatId);
   for (const id of ids) {
-    socket.to(`user:${id}`).emit(event, payload);
-    socket.to(`user_${id}`).emit(event, payload);
+    socket.to([`user:${id}`, `user_${id}`]).emit(event, payload);
   }
 }
 
@@ -506,8 +505,7 @@ router.post('/:chatId/report', async (req, res) => {
       const payload = { chatId: access.chat.id, reportId, targetId, reason };
       for (const id of await managerIds(access.chat.id)) {
         if (id === userId) continue;
-        socket.to(`user:${id}`).emit('group:moderation:report', payload);
-        socket.to(`user_${id}`).emit('group:moderation:report', payload);
+        socket.to([`user:${id}`, `user_${id}`]).emit('group:moderation:report', payload);
       }
     }
   } catch (_) { /* realtime nudge only; the report is already stored */ }

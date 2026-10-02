@@ -144,7 +144,7 @@ class MessageDeliveryService {
            AND EXISTS (SELECT 1 FROM chat_participants WHERE "chatId" = c.id AND "userId" = :receiverId)
          LIMIT 1`,
         { replacements: { chatId: chatIdIntCheck, senderId: senderIdIntCheck, receiverId: receiverIdIntCheck }, type: sequelize.QueryTypes.SELECT }
-      ).catch(() => [null]);
+      );
       if (!match) {
         chatId = await this.resolveOrCreateDirectChat(senderId, receiverId);
         _resolvedThisCall = true;
@@ -171,11 +171,16 @@ class MessageDeliveryService {
     // socket path) with the same underlying id is still recognized as a
     // duplicate instead of creating a second row. See the matching fix in
     // routes/messages.js for the reverse direction.
+    // Lookup by the indexed (senderId, clientMessageId) column. The previous
+    // `OR metadata->>'localId' = ...` could not use that index.
     const [existing] = await sequelize.query(
-      `SELECT * FROM "Messages" WHERE "senderId" = :senderId
-         AND ("clientMessageId" = :clientMessageId OR metadata->>'localId' = :clientMessageId) LIMIT 1`,
+      `SELECT * FROM "Messages" WHERE "senderId" = :senderId AND "clientMessageId" = :clientMessageId LIMIT 1`,
       { replacements: { senderId: senderIdInt, clientMessageId }, type: sequelize.QueryTypes.SELECT }
-    ).catch(() => [null]);
+    ); // errors propagate: an outage must not look like "not a duplicate"
+    // No metadata->>'localId' fallback: every row written by sendMessage() (REST and
+    // socket) stores clientMessageId in its own column, so the indexed lookup is
+    // authoritative and the fallback only added a per-send scan of the sender's rows.
+
 
     if (existing) {
       return { message: existing, alreadyExisted: true };
@@ -185,7 +190,7 @@ class MessageDeliveryService {
     const [participant] = await sequelize.query(
       `SELECT 1 FROM chat_participants WHERE "chatId" = :chatId AND "userId" = :senderId LIMIT 1`,
       { replacements: { chatId: chatIdInt, senderId: senderIdInt }, type: sequelize.QueryTypes.SELECT }
-    ).catch(() => [null]);
+    );
     if (!participant) throw new ValidationError('Sender is not a participant in this chat');
 
     // FIX (ENFORCE-BLOCK-ON-CONVERSATION-CREATION, part 2): the check inside
@@ -260,7 +265,7 @@ class MessageDeliveryService {
           WHERE cp."chatId" = :chatId AND cp."userId" != :senderId AND c.type = 'direct'
           LIMIT 1`,
         { replacements: { chatId: chatIdInt, senderId: senderIdInt }, type: sequelize.QueryTypes.SELECT }
-      ).catch(() => [null]);
+      );
       if (otherParticipant) resolvedReceiverId = otherParticipant.userId;
     }
 
@@ -599,7 +604,7 @@ class MessageDeliveryService {
     const [participant] = await sequelize.query(
       `SELECT 1 FROM chat_participants WHERE "chatId" = :chatId AND "userId" = :userId LIMIT 1`,
       { replacements: { chatId: chatIdInt, userId: userIdInt }, type: sequelize.QueryTypes.SELECT }
-    ).catch(() => [null]);
+    );
     if (!participant) throw new ValidationError('User is not a participant in this chat');
 
     // ROOT-CAUSE FIX (DELETED-FOR-ME-MESSAGE-REAPPEARS-ON-RELOGIN): same gap
@@ -607,8 +612,8 @@ class MessageDeliveryService {
     // there. This is the reconnect/catch-up query (also reachable via the
     // msg:* socket sync path), so it needs the same exclusion or a message
     // deleted "for me" resurfaces the next time this device reconnects.
-    const conditions = [`m."chatId" = :chatId`, `m."isDeleted" = false`, `NOT (m.metadata -> 'deletedFor' ? :userIdStr)`];
-    const replacements = { chatId: chatIdInt, limit: Math.min(limit, 200), userIdStr: String(userIdInt) };
+    const conditions = [`m."chatId" = :chatId`, `m."isDeleted" = false`, `NOT (COALESCE(m.metadata -> 'deletedFor', '[]'::jsonb) ? :userIdStr OR COALESCE(m.metadata -> 'deletedFor', '[]'::jsonb) @> to_jsonb(:userIdInt::int))`];
+    const replacements = { chatId: chatIdInt, limit: Math.min(limit, 200), userIdStr: String(userIdInt), userIdInt: Number.isFinite(userIdInt) ? userIdInt : -1 };
 
     const isIncrementalCatchup = !!(sinceId || sinceTimestamp);
     if (sinceId) {
@@ -645,7 +650,7 @@ class MessageDeliveryService {
        ORDER BY m.id ${order}
        LIMIT :limit`,
       { replacements, type: sequelize.QueryTypes.SELECT }
-    ).catch(() => []);
+    ); // errors propagate: [] here made a failed catch-up look like "nothing missed"
 
     return isIncrementalCatchup ? (messages || []) : (messages || []).reverse();
   }

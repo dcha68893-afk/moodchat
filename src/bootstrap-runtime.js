@@ -69,8 +69,7 @@ patchAuthBoundary();
       const uid = Number(userId);
       const io = global.__socketIO || global.__io || global.io;
       if (!io || !Number.isInteger(uid) || uid <= 0) return;
-      try { io.to(`user:${uid}`).emit(event, payload); } catch (_) {}
-      try { io.to(`user_${uid}`).emit(event, payload); } catch (_) {}
+      try { io.to([`user:${uid}`, `user_${uid}`]).emit(event, payload); } catch (_) {}
     }
     function patchedJson(body) {
       try {

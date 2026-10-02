@@ -40,7 +40,7 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: false,
       },
       result: {
-        type: DataTypes.ENUM('challenger_wins', 'target_wins', 'draw', null),
+        type: DataTypes.ENUM('challenger_wins', 'target_wins', 'draw'),
         allowNull: true,
       },
       expiresAt: {

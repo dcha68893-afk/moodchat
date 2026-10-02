@@ -4,6 +4,7 @@
 //         share score/achievement to chat, basic anti-cheat
 const express = require('express');
 const router = express.Router();
+const { paymentLimiter } = require('../middleware/rateLimiter');
 // ── CRITICAL: Inject global.__socketIO into req.io so all handlers can emit ──
 router.use((req, _, next) => { if (!req.io) req.io = global.__socketIO || null; next(); });
 
@@ -52,8 +53,8 @@ async function getOrCreate(userId) {
 function emitTo(req, room, event, data) {
   const io = req.io || (req.app && req.app.get('io'));
   if (io) {
-    io.to(`user:${room}`).emit(event, data);
-    io.to(`user_${room}`).emit(event, data);
+    // one emit to the union of both room names: a socket joined to both receives it once
+    io.to([`user:${room}`, `user_${room}`]).emit(event, data);
   }
 }
 
@@ -600,7 +601,7 @@ const roomTtlMsFor = gameType => MULTI_GAMES.has(String(gameType)) || String(gam
 function roomPlayers(room){const raw=room.state&&Array.isArray(room.state.players)?room.state.players:null;if(raw&&raw.length)return raw;const p=[{userId:room.hostId,role:'host',score:room.hostScore,timeMs:null,answered:0,correct:0,progress:0,currentLevel:room.level,completed:false}];if(room.guestId)p.push({userId:room.guestId,role:'guest',score:room.guestScore,timeMs:null,answered:0,correct:0,progress:0,currentLevel:room.level,completed:false});return p;}
 
 // POST /api/games/progress/coins/spend — server-authoritative coin spending for game hints/continues.
-router.post('/progress/coins/spend',async(req,res)=>{
+router.post('/progress/coins/spend',paymentLimiter,async(req,res)=>{
   try{
     const userId=req.user?.id||req.userId;if(!userId)return res.status(401).json({error:'Unauthorized'});
     const amount=Math.max(1,Math.min(10000,Math.floor(Number(req.body?.amount)||0)));
@@ -621,7 +622,7 @@ async function mpesaToken(){
   const r=await fetch(mpesaBase()+'/oauth/v1/generate?grant_type=client_credentials',{headers:{Authorization:'Basic '+auth}});
   const j=await r.json();if(!r.ok||!j.access_token)throw new Error(j.errorMessage||'Could not authenticate with Daraja');return j.access_token;
 }
-router.post('/coins/mpesa/stk',async(req,res)=>{
+router.post('/coins/mpesa/stk',paymentLimiter,async(req,res)=>{
   try{
     const userId=req.user?.id||req.userId;if(!userId)return res.status(401).json({error:'Unauthorized'});
     // Resolve lazily: at require() time the Wallet models are not registered yet, so the
@@ -718,8 +719,7 @@ function emitRoom(req,room,event='game:room:update'){
   if(!io)return;
   const payload=roomPayload(room);
   roomPlayers(room).map(p=>p.userId).filter(Boolean).forEach(id=>{
-    io.to(`user:${id}`).emit(event,payload);
-    io.to(`user_${id}`).emit(event,payload);
+    io.to([`user:${id}`,`user_${id}`]).emit(event,payload);
   });
 }
 
