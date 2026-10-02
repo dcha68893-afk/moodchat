@@ -87,9 +87,9 @@ if (ctrl) {
 
     // ── Payments ─────────────────────────────────────────────────────────────
     router.post('/payment/mpesa',              paymentLimiter, safe(ctrl.initiateMpesa?.bind(ctrl)));
-    router.post('/payment/mpesa/callback',     safe(ctrl.mpesaCallback?.bind(ctrl)));
+    router.post('/payment/mpesa/callback',     safe(ctrl.mpesaCallback?.bind(ctrl)));\n    router.post('/payout/mpesa/result',       safe(ctrl.mpesaB2CResult?.bind(ctrl)));\n    router.post('/payout/mpesa/timeout',      safe(ctrl.mpesaB2CTimeout?.bind(ctrl)));\n    router.post('/payment/card/webhook',      safe(ctrl.flutterwaveWebhook?.bind(ctrl)));
     router.get('/payment/mpesa/verify',        safe(ctrl.verifyMpesa?.bind(ctrl)));
-    router.post('/payment/card',               paymentLimiter, safe(ctrl.cardPayment?.bind(ctrl)));
+    router.post('/payment/card',               paymentLimiter, safe(ctrl.cardPayment?.bind(ctrl)));\n    router.post('/payment/card/verify',       paymentLimiter, safe(ctrl.verifyCard?.bind(ctrl)));
     router.post('/payment/wallet',             paymentLimiter, safe(ctrl.walletPayment?.bind(ctrl)));
     router.get('/payment/wallet/balance',      safe(ctrl.getWalletBalance?.bind(ctrl)));
     router.post('/payment/wallet/topup',       paymentLimiter, safe(ctrl.walletTopup?.bind(ctrl)));

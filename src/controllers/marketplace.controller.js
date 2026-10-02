@@ -650,6 +650,11 @@ class MarketplaceController {
             if (!buyerId) return next(new AppError('Authentication required', 401));
 
             const { items, delivery_address, payment_method, phone, notes, total, subtotal, delivery, currency='KES', idempotency_key, coupon_code } = req.body;
+            const riskTotal=Number(total||0);
+            let riskScore=riskTotal>Number(process.env.MARKETPLACE_MAX_ORDER_KES||250000)?80:0;
+            const RiskOrder=Model.Order;
+            if(RiskOrder&&req.user?.id){const recent=await RiskOrder.count({where:{buyerId:req.user.id,createdAt:{[Op.gte]:new Date(Date.now()-10*60*1000)}}}).catch(()=>0);if(recent>=6)riskScore+=30;}
+            if(riskScore>=100)return next(new AppError('Checkout blocked by automated risk controls. Please contact support if this was a legitimate purchase.',403));
             if (!items?.length) return next(new AppError('Cart is empty', 400));
             if (!delivery_address) return next(new AppError('Delivery address required', 400));
 
@@ -1160,68 +1165,77 @@ class MarketplaceController {
         }
     }
 
-    async verifyMpesa(req, res, next) {
-        try {
-            const { request_id, order_id } = req.body;
-            const O = Model.Order;
-            const order = O ? await O.findByPk(order_id) : null;
-            const isPaid = order?.status === 'paid';
-            return ok(res, { status: isPaid ? 'paid' : 'pending', order_id });
-        } catch(e) { err(next, e, 'verifyMpesa'); }
+    async verifyMpesa(req,res,next){
+      try{
+        const {request_id,order_id}=req.body||{},O=Model.Order,order=O?await O.findByPk(order_id):null;
+        if(!order)return next(new AppError('Order not found',404));
+        if(order.buyerId!==req.user?.id&&req.user?.role!=='admin')return next(new AppError('Not authorized',403));
+        if(order.status==='paid')return ok(res,{status:'paid',order_id,payment_ref:order.paymentRef});
+        if(!request_id)return ok(res,{status:'pending',order_id});
+        const key=process.env.MPESA_CONSUMER_KEY,secret=process.env.MPESA_CONSUMER_SECRET,shortcode=process.env.MPESA_SHORTCODE,passkey=process.env.MPESA_PASSKEY;
+        if(!key||!secret||!shortcode||!passkey)return next(new AppError('M-Pesa is not configured on the server.',503));
+        const base=process.env.MPESA_ENV==='production'?'https://api.safaricom.co.ke':'https://sandbox.safaricom.co.ke';
+        const ar=await fetch(base+'/oauth/v1/generate?grant_type=client_credentials',{headers:{Authorization:'Basic '+Buffer.from(key+':'+secret).toString('base64')}}),ad=await ar.json();
+        if(!ad.access_token)throw new Error(ad.errorMessage||'M-Pesa authentication failed');
+        const ts=new Date().toISOString().replace(/[^0-9]/g,'').slice(0,14),pw=Buffer.from(shortcode+passkey+ts).toString('base64');
+        const qr=await fetch(base+'/mpesa/stkpushquery/v1/query',{method:'POST',headers:{Authorization:'Bearer '+ad.access_token,'Content-Type':'application/json'},body:JSON.stringify({BusinessShortCode:shortcode,Password:pw,Timestamp:ts,CheckoutRequestID:request_id})}),result=await qr.json();
+        if(String(result.ResultCode)==='0')await _handleMpesaSuccess({CheckoutRequestID:request_id,CallbackMetadata:{Item:[{Name:'Amount',Value:order.totalPrice},{Name:'MpesaReceiptNumber',Value:result.MpesaReceiptNumber||result.ReceiptNumber||request_id}]}});
+        const refreshed=await O.findByPk(order_id);return ok(res,{status:refreshed?.status==='paid'?'paid':'pending',order_id,payment_ref:refreshed?.paymentRef,provider_result:result.ResultDesc||result.ResponseDescription});
+      }catch(x){err(next,x,'verifyMpesa')}
     }
 
-    // P2 FIX: Card payment via Flutterwave (implement when FLW_SECRET_KEY env var is set)
-    async cardPayment(req, res, next) {
-        try {
-            const { order_id, amount, currency='KES', card_token, email } = req.body;
-            if (!order_id || !amount) return next(new AppError('order_id and amount required', 400));
-
-            // FIX-ORDER-OWNERSHIP: same missing check as walletPayment above —
-            // verify the order belongs to the paying user before charging a
-            // card and marking it paid.
-            const OrderCheck = Model.Order;
-            const orderRecord = OrderCheck ? await OrderCheck.findByPk(order_id) : null;
-            if (!orderRecord) return next(new AppError('Order not found', 404));
-            if (orderRecord.buyerId !== req.user?.id) return next(new AppError('Not authorized', 403));
-
-            const flwKey = process.env.FLW_SECRET_KEY;
-            if (!flwKey) {
-                return res.status(503).json({
-                    success: false,
-                    message: 'Card payment is not yet configured. Please use M-Pesa.',
-                    code: 'PROVIDER_NOT_CONFIGURED'
-                });
-            }
-
-            // Flutterwave charge initiation
-            const flwResponse = await fetch('https://api.flutterwave.com/v3/charges?type=card', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${flwKey}` },
-                body: JSON.stringify({
-                    card_number: req.body.card_number,
-                    cvv: req.body.cvv,
-                    expiry_month: req.body.expiry_month,
-                    expiry_year: req.body.expiry_year,
-                    currency,
-                    amount,
-                    email: email || req.user?.email,
-                    tx_ref: `order-${order_id}-${Date.now()}`,
-                    fullname: req.body.fullname || 'Customer',
-                    redirect_url: req.body.redirect_url || process.env.BACKEND_URL,
-                })
-            });
-            const flwData = await flwResponse.json();
-
-            if (flwData.status === 'success') {
-                const O = Model.Order;
-                if (O) await O.update({ status: 'paid', paidAt: new Date(), paymentRef: flwData.data?.id }, { where: { id: order_id } });
-                _socketBroadcast(req, 'payment:confirmed', { order_id, method: 'card' });
-                return ok(res, { order_id, payment_ref: flwData.data?.id, status: 'paid' }, 'Card payment successful');
-            }
-            return next(new AppError(flwData.message || 'Card payment failed', 402));
-        } catch(e) { err(next, e, 'cardPayment'); }
+    async verifyCard(req,res,next){
+      try{
+        const {transaction_id,tx_ref}=req.body||{},O=Model.Order;
+        if(!transaction_id&&!tx_ref)return next(new AppError('transaction_id or tx_ref required',400));
+        const order=O&&tx_ref?await O.findOne({where:{paymentRef:tx_ref}}):null;
+        if(order&&order.buyerId!==req.user?.id&&req.user?.role!=='admin')return next(new AppError('Not authorized',403));
+        const key=process.env.FLW_SECRET_KEY;if(!key)return next(new AppError('Card payment is not configured on the server.',503));
+        const url=transaction_id?'https://api.flutterwave.com/v3/transactions/'+encodeURIComponent(transaction_id)+'/verify':'https://api.flutterwave.com/v3/transactions/verify_by_reference?tx_ref='+encodeURIComponent(tx_ref);
+        const vr=await fetch(url,{headers:{Authorization:'Bearer '+key,'Content-Type':'application/json'}}),p=await vr.json(),d=p?.data||{};
+        if(!order)return ok(res,{status:d.status||'pending',transaction:d});
+        if(d.status==='successful'&&String(d.tx_ref)===String(order.paymentRef)&&Number(d.amount)>=Number(order.totalPrice)&&String(d.currency).toUpperCase()===String(order.currency||'KES').toUpperCase()){
+          await order.update({status:'paid',paidAt:new Date(),paymentRef:String(d.id||d.flw_ref||order.paymentRef),metadata:{...(order.metadata||{}),payment_reconciled:true,payment_gateway:'flutterwave'}});
+          return ok(res,{status:'paid',order_id:order.id,payment_ref:d.id||d.flw_ref});
+        }
+        return ok(res,{status:'pending',order_id:order.id,provider_status:d.status||'unknown'});
+      }catch(x){err(next,x,'verifyCard')}
     }
 
+    async flutterwaveWebhook(req,res,next){
+      try{
+        const secret=process.env.FLW_SECRET_HASH||process.env.FLW_WEBHOOK_HASH;
+        if(!secret||req.headers['verif-hash']!==secret)return res.status(401).json({success:false,message:'Invalid webhook signature'});
+        const d=req.body?.data||{};if(!d.id&&!d.tx_ref)return res.status(200).json({received:true});
+        const key=process.env.FLW_SECRET_KEY;if(!key)return res.status(503).json({success:false,message:'Gateway not configured'});
+        const vr=await fetch('https://api.flutterwave.com/v3/transactions/'+encodeURIComponent(d.id)+'/verify',{headers:{Authorization:'Bearer '+key,'Content-Type':'application/json'}}),p=await vr.json(),v=p?.data||{},O=Model.Order;
+        const order=O?await O.findOne({where:{paymentRef:v.tx_ref||d.tx_ref}}):null;
+        if(order&&v.status==='successful'&&String(v.tx_ref)===String(order.paymentRef)&&Number(v.amount)>=Number(order.totalPrice)&&String(v.currency).toUpperCase()===String(order.currency||'KES').toUpperCase()&&order.status!=='paid'){
+          await order.update({status:'paid',paidAt:new Date(),metadata:{...(order.metadata||{}),payment_reconciled:true,payment_gateway:'flutterwave',gateway_transaction_id:v.id}});
+          _socketBroadcast(req,'payment:confirmed',{order_id:order.id,method:'card',payment_ref:v.id});
+        }
+        return res.status(200).json({received:true});
+      }catch(x){logger.error('[Marketplace] Flutterwave webhook error:',x.message);return res.status(200).json({received:true});}
+    }
+
+    async cardPayment(req,res,next){
+      try{
+        const {order_id,amount,currency='KES',email,fullname,phone,redirect_url}=req.body||{},O=Model.Order,order=O?await O.findByPk(order_id):null;
+        if(!order_id||!amount)return next(new AppError('order_id and amount required',400));
+        if(!order)return next(new AppError('Order not found',404));
+        if(order.buyerId!==req.user?.id)return next(new AppError('Not authorized',403));
+        const key=process.env.FLW_SECRET_KEY;if(!key)return next(new AppError('Card payment is not configured on the server. Set FLW_SECRET_KEY and FLW_SECRET_HASH.',503));
+        if(Math.abs(Number(amount)-Number(order.totalPrice))>0.01)return next(new AppError('Payment amount does not match the order total.',400));
+        const txRef=String(order.paymentRef||('NECPRA-'+order.id+'-'+Date.now()));
+        const callback=redirect_url||process.env.FLW_REDIRECT_URL||((process.env.FRONTEND_URL||'https://necpra.co.ke')+'/chat.html?marketplacePayment=1');
+        const customer={email:email||req.user?.email||'customer@necpra.co.ke',name:fullname||req.user?.displayName||req.user?.username||'Necpra Customer'};if(phone)customer.phonenumber=phone;
+        const payload={tx_ref:txRef,amount:Number(order.totalPrice),currency:order.currency||currency,redirect_url:callback,customer,customizations:{title:'Necpra Marketplace',description:'Secure marketplace checkout'},configurations:{session_duration:30,max_retry_attempt:5},meta:{order_id:String(order.id),buyer_id:String(order.buyerId)}};
+        const response=await fetch('https://api.flutterwave.com/v3/payments',{method:'POST',headers:{Authorization:'Bearer '+key,'Content-Type':'application/json'},body:JSON.stringify(payload)}),data=await response.json();
+        if(!response.ok||data.status!=='success'||!data.data?.link)return next(new AppError(data.message||'Unable to create card checkout',502));
+        await order.update({paymentMethod:'card',paymentRef:txRef,metadata:{...(order.metadata||{}),payment_gateway:'flutterwave',payment_status:'pending'}});
+        return ok(res,{status:'pending',order_id:order.id,tx_ref:txRef,checkout_url:data.data.link},'Secure card checkout created');
+      }catch(x){err(next,x,'cardPayment')}
+    }
     // P2 FIX: Wallet system — balance-based payment
     async walletPayment(req, res, next) {
         try {
@@ -1891,6 +1905,13 @@ class MarketplaceController {
                     await t.commit();
                 } catch(_) { await t.rollback().catch(()=>{}); }
             } else if (order?.paymentMethod === 'card' || order?.paymentMethod === 'mpesa') {
+                if(order.paymentMethod==='card'&&process.env.FLW_SECRET_KEY&&/^\\d+$/.test(String(order.paymentRef||''))){
+                    const rr=await fetch('https://api.flutterwave.com/v3/transactions/'+encodeURIComponent(order.paymentRef)+'/refund',{method:'POST',headers:{Authorization:'Bearer '+process.env.FLW_SECRET_KEY,'Content-Type':'application/json'},body:JSON.stringify({amount:Number(refund.amount),comments:'Necpra marketplace refund '+refund.id})}),rd=await rr.json();
+                    if(!rr.ok||rd.status!=='success')return next(new AppError(rd.message||'Gateway refund failed',502));
+                    await refund.update({metadata:{...(refund.metadata||{}),manual_gateway_refund_needed:false,gateway_refund_id:rd.data?.id||rd.data?.flw_ref,gateway_refund_status:rd.data?.status||'initiated'}});
+                } else {
+                    await refund.update({metadata:{...(refund.metadata||{}),manual_gateway_refund_needed:true,refund_reason:'M-Pesa refund requires the merchant reversal workflow or dashboard approval'}});
+                }
                 manualActionNeeded = true;
             }
 
@@ -2140,19 +2161,49 @@ class MarketplaceController {
         } catch(e) { err(next, e, 'adminGetPendingPayouts'); }
     }
 
-    async adminDisbursePayout(req, res, next) {
-        try {
-            const db = getDb();
-            const Payout = db.Payout;
-            if (!Payout) return next(new AppError('Payout system unavailable', 503));
-            const payout = await Payout.findByPk(req.params.id);
-            if (!payout) return next(new AppError('Payout not found', 404));
-            if (payout.status === 'paid') return next(new AppError('Already disbursed', 409));
-            const { reference } = req.body;
-            await payout.update({ status: 'paid', paidAt: new Date(), reference, disbursedBy: req.user.id });
-            _socketBroadcast(req, 'payout:disbursed', { seller_id: payout.sellerId, amount: payout.amount, reference });
-            return ok(res, { payout_id: payout.id, status: 'paid' }, 'Payout disbursed');
-        } catch(e) { err(next, e, 'adminDisbursePayout'); }
+    async adminDisbursePayout(req,res,next){
+        try{
+            const db=getDb(),Payout=db.Payout;if(!Payout)return next(new AppError('Payout system unavailable',503));
+            const payout=await Payout.findByPk(req.params.id);if(!payout)return next(new AppError('Payout not found',404));
+            if(payout.status==='paid')return next(new AppError('Already disbursed',409));
+            const key=process.env.MPESA_CONSUMER_KEY,secret=process.env.MPESA_CONSUMER_SECRET,initiator=process.env.MPESA_B2C_INITIATOR,credential=process.env.MPESA_B2C_SECURITY_CREDENTIAL,shortcode=process.env.MPESA_B2C_SHORTCODE;
+            if(!key||!secret||!initiator||!credential||!shortcode)return next(new AppError('M-Pesa B2C payout is not configured.',503));
+            const Users=db.Users||db.User,seller=Users?await Users.findByPk(payout.sellerId,{attributes:['id','phone','displayName','username']}):null;
+            const phone=String(seller?.phone||'').replace(/^\+/,'').replace(/^0/,'254');
+            if(!/^254\d{9}$/.test(phone))return next(new AppError('Seller must have a valid Kenyan phone number for payout.',400));
+            const base=process.env.MPESA_ENV==='production'?'https://api.safaricom.co.ke':'https://sandbox.safaricom.co.ke';
+            const ar=await fetch(base+'/oauth/v1/generate?grant_type=client_credentials',{headers:{Authorization:'Basic '+Buffer.from(key+':'+secret).toString('base64')}}),ad=await ar.json();
+            if(!ad.access_token)throw new Error(ad.errorMessage||'M-Pesa authentication failed');
+            const resultUrl=(process.env.BACKEND_URL||'').replace(/\/$/,'')+'/api/tools/marketplace/payout/mpesa/result',timeoutUrl=(process.env.BACKEND_URL||'').replace(/\/$/,'')+'/api/tools/marketplace/payout/mpesa/timeout';
+            if(!process.env.BACKEND_URL)return next(new AppError('BACKEND_URL is required for M-Pesa payout callbacks.',500));
+            const body={InitiatorName:initiator,SecurityCredential:credential,CommandID:process.env.MPESA_B2C_COMMAND_ID||'BusinessPayment',Amount:Math.floor(Number(payout.amount)),PartyA:shortcode,PartyB:phone,Remarks:'Necpra seller payout '+payout.id,QueueTimeOutURL:timeoutUrl,ResultURL:resultUrl,Occassion:String(payout.id)};
+            const br=await fetch(base+'/mpesa/b2c/v3/paymentrequest',{method:'POST',headers:{Authorization:'Bearer '+ad.access_token,'Content-Type':'application/json'},body:JSON.stringify(body)}),bd=await br.json();
+            if(!br.ok||!bd.OriginatorConversationID)return next(new AppError(bd.errorMessage||bd.ResponseDescription||'M-Pesa payout request failed',502));
+            await payout.update({status:'processing',reference:bd.OriginatorConversationID,metadata:{...(payout.metadata||{}),mpesa_conversation_id:bd.ConversationID,mpesa_originator_conversation_id:bd.OriginatorConversationID}});
+            return ok(res,{payout_id:payout.id,status:'processing',conversation_id:bd.ConversationID},'M-Pesa payout submitted');
+        }catch(x){err(next,x,'adminDisbursePayout')}
+    }
+
+    async mpesaB2CResult(req,res,next){
+        try{
+            const result=req.body?.Result||{};const Payout=getDb().Payout;
+            if(Payout&&result.OriginatorConversationID){
+                const payout=await Payout.findOne({where:{reference:result.OriginatorConversationID}});
+                if(payout){
+                    const okCode=String(result.ResultCode)==='0';
+                    const params=result.ResultParameters?.ResultParameter||[];
+                    const receipt=params.find(x=>x.Key==='TransactionReceipt')?.Value||result.TransactionID||null;
+                    await payout.update({status:okCode?'paid':'failed',paidAt:okCode?new Date():null,reference:receipt||payout.reference,metadata:{...(payout.metadata||{}),mpesa_result:result}});
+                    _socketBroadcast(req,'payout:disbursed',{seller_id:payout.sellerId,payout_id:payout.id,status:payout.status,reference:receipt||payout.reference});
+                }
+            }
+            return res.status(200).json({ResultCode:0,ResultDesc:'Accepted'});
+        }catch(x){logger.error('[Marketplace] B2C result error:',x.message);return res.status(200).json({ResultCode:0,ResultDesc:'Accepted'});}
+    }
+
+    async mpesaB2CTimeout(req,res,next){
+        try{logger.warn('[Marketplace] B2C payout timeout',req.body?.Result||req.body);return res.status(200).json({ResultCode:0,ResultDesc:'Accepted'});}
+        catch(x){return res.status(200).json({ResultCode:0,ResultDesc:'Accepted'});}
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -2524,10 +2575,7 @@ async function _mpesaStkPush({ phone, amount, orderId, description, callbackUrl 
         ? 'https://api.safaricom.co.ke'
         : 'https://sandbox.safaricom.co.ke';
 
-    if (!consumerKey || !consumerSecret) {
-        logger.warn('[Marketplace] M-Pesa env vars not set — returning mock response');
-        return { CheckoutRequestID: 'MOCK-' + Date.now(), mock: true };
-    }
+    if (!consumerKey || !consumerSecret || !passkey || !shortcode) throw new AppError('M-Pesa is not configured on the server.',503);
 
     try {
         // 1. Get access token
