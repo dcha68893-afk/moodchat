@@ -163,6 +163,16 @@ router.get(
                 ? { isActive: { [Op.ne]: false } }
                 : { isArchived: false, isActive: { [Op.ne]: false } };
             
+            // DELTA SYNC: ?updatedSince=<ISO> returns only chats that changed (new message,
+            // rename, etc.) after that moment, so reopening the app downloads changes
+            // instead of the whole list again. Omit it for a full list.
+            const _since = req.query.updatedSince ? new Date(req.query.updatedSince) : null;
+            if (_since && !isNaN(_since.getTime())) {
+                whereCondition[Op.or] = [
+                    { updatedAt: { [Op.gt]: _since } },
+                    { lastMessageAt: { [Op.gt]: _since } }
+                ];
+            }
             const { count, rows: chats } = await Chat.findAndCountAll({
                 where: whereCondition,
                 include: [

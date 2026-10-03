@@ -15,6 +15,15 @@ const express          = require('express');
 const router           = express.Router();
 const toolsController  = require('../controllers/toolsController');
 
+// FIX (upload): these routes read req.file but had no multer middleware, so
+// req.file was always undefined and every call returned 400 "file is required".
+let uploadSingle;
+try {
+    uploadSingle = require('../middleware/upload').uploadSingle;
+} catch (_) {
+    uploadSingle = () => [(_req, _res, next) => next()];
+}
+
 let apiRateLimiter, marketplaceLimiter;
 try {
     const rl = require('../middleware/rateLimiter');
@@ -76,8 +85,8 @@ router.post('/:toolId/usage', marketplaceLimiter, toolsController.recordUsage.bi
 // ═════════════════════════════════════════════════════════════════════════════
 // FILE UPLOAD
 // ═════════════════════════════════════════════════════════════════════════════
-router.post('/upload/image',   marketplaceLimiter, toolsController.uploadImage.bind(toolsController));
-router.post('/upload/file',    marketplaceLimiter, toolsController.uploadFile.bind(toolsController));
+router.post('/upload/image',   marketplaceLimiter, ...uploadSingle('image'), toolsController.uploadImage.bind(toolsController));
+router.post('/upload/file',    marketplaceLimiter, ...uploadSingle('file'), toolsController.uploadFile.bind(toolsController));
 router.delete('/upload/:fileId', marketplaceLimiter, toolsController.deleteFile.bind(toolsController));
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -108,9 +117,9 @@ router.post('/text/sentiment', marketplaceLimiter, toolsController.analyzeSentim
 // QR / BARCODE
 // ═════════════════════════════════════════════════════════════════════════════
 router.post('/qrcode/generate', marketplaceLimiter, toolsController.generateQRCode.bind(toolsController));
-router.post('/qrcode/scan',     marketplaceLimiter, toolsController.scanQRCode.bind(toolsController));
+router.post('/qrcode/scan',     marketplaceLimiter, ...uploadSingle('image'), toolsController.scanQRCode.bind(toolsController));
 router.post('/barcode/generate',marketplaceLimiter, toolsController.generateBarcode.bind(toolsController));
-router.post('/barcode/scan',    marketplaceLimiter, toolsController.scanBarcode.bind(toolsController));
+router.post('/barcode/scan',    marketplaceLimiter, ...uploadSingle('image'), toolsController.scanBarcode.bind(toolsController));
 
 // ═════════════════════════════════════════════════════════════════════════════
 // SECURITY GENERATORS
@@ -132,8 +141,8 @@ router.post('/base64/decode', marketplaceLimiter, toolsController.decodeBase64.b
 router.post('/json/format',   marketplaceLimiter, toolsController.formatJSON.bind(toolsController));
 router.post('/json/validate', marketplaceLimiter, toolsController.validateJSON.bind(toolsController));
 router.post('/json/minify',   marketplaceLimiter, toolsController.minifyJSON.bind(toolsController));
-router.post('/csv/convert',   marketplaceLimiter, toolsController.convertCSV.bind(toolsController));
-router.post('/csv/validate',  marketplaceLimiter, toolsController.validateCSV.bind(toolsController));
+router.post('/csv/convert',   marketplaceLimiter, ...uploadSingle('file'), toolsController.convertCSV.bind(toolsController));
+router.post('/csv/validate',  marketplaceLimiter, ...uploadSingle('file'), toolsController.validateCSV.bind(toolsController));
 
 // ═════════════════════════════════════════════════════════════════════════════
 // DATE / TIME
@@ -163,7 +172,7 @@ router.get('/url/:shortCode',   marketplaceLimiter, toolsController.redirectShor
 router.get('/ip/info',         marketplaceLimiter, toolsController.getIPInfo.bind(toolsController));
 router.get('/ip/location',     marketplaceLimiter, toolsController.getIPLocation.bind(toolsController));
 router.get('/user-agent/parse',marketplaceLimiter, toolsController.parseUserAgent.bind(toolsController));
-router.post('/file/info',      marketplaceLimiter, toolsController.getFileInfo.bind(toolsController));
+router.post('/file/info',      marketplaceLimiter, ...uploadSingle('file'), toolsController.getFileInfo.bind(toolsController));
 router.get('/system/status',   marketplaceLimiter, toolsController.getSystemStatus.bind(toolsController));
 router.get('/system/health',   marketplaceLimiter, toolsController.getHealthStatus.bind(toolsController));
 
@@ -180,7 +189,7 @@ router.post('/cleanup/old',    marketplaceLimiter, toolsController.cleanupOldFil
 // EXPORT / IMPORT / BATCH
 // ═════════════════════════════════════════════════════════════════════════════
 router.post('/export/data',    marketplaceLimiter, toolsController.exportData.bind(toolsController));
-router.post('/import/data',    marketplaceLimiter, toolsController.importData.bind(toolsController));
+router.post('/import/data',    marketplaceLimiter, ...uploadSingle('file'), toolsController.importData.bind(toolsController));
 router.post('/batch/process',  marketplaceLimiter, toolsController.processBatch.bind(toolsController));
 
 // ═════════════════════════════════════════════════════════════════════════════

@@ -276,14 +276,27 @@ router.post('/read', asyncHandler(async (req, res) => {
   const userId = getUserId(req);
   if (!userId) return res.status(401).json({ success: false, message: 'Authentication required' });
 
-  const { messageIds } = req.body || {};
-  if (!Array.isArray(messageIds) || messageIds.length === 0) {
-    return res.status(400).json({ success: false, message: 'messageIds array is required' });
-  }
-  const ids = messageIds.map(Number).filter(Boolean);
-  if (ids.length === 0) return res.status(400).json({ success: false, message: 'messageIds must be numeric' });
-
+  const { messageIds, chatId, silent } = req.body || {};
   const sequelize = getSequelize();
+  let ids = Array.isArray(messageIds) ? messageIds.map(Number).filter(Boolean) : [];
+  // WhatsApp-style: opening a chat marks EVERYTHING unread in it as read, not just
+  // the messages that happened to be loaded. Without this the chat-list badge kept
+  // counting every message received since the last receipt.
+  if (ids.length === 0 && chatId) {
+    const rows = await sequelize.query(
+      `SELECT m.id FROM "Messages" m
+         JOIN chat_participants cp ON cp."chatId" = m."chatId" AND cp."userId" = :userId
+         LEFT JOIN "ReadReceipts" rr ON rr."messageId" = m.id AND rr."userId" = :userId
+        WHERE m."chatId" = :chatId AND m."senderId" != :userId AND m."isDeleted" = false AND rr.id IS NULL`,
+      { replacements: { chatId: Number(chatId), userId }, type: sequelize.QueryTypes.SELECT }
+    ).catch(() => []);
+    ids = rows.map(r => r.id);
+    if (ids.length === 0) return res.json({ success: true, marked: 0 });
+  }
+  if (ids.length === 0) {
+    return res.status(400).json({ success: false, message: 'messageIds array or chatId is required' });
+  }
+
   await sequelize.query(
     `INSERT INTO "ReadReceipts" ("messageId","userId","readAt","createdAt","updatedAt")
      SELECT unnest(ARRAY[:ids]::int[]), :userId, NOW(), NOW(), NOW()
@@ -293,7 +306,8 @@ router.post('/read', asyncHandler(async (req, res) => {
 
   // Tell the sender(s) their message(s) were read, over the live socket if
   // connected — same generic transport every other realtime event here uses.
-  try {
+  // `silent` = reader has read-receipts off: counts as read for THEIR badge, sender not told.
+  if (!silent) try {
     const wsService = require('../services/webSocketService');
     const senderRows = await sequelize.query(
       `SELECT DISTINCT "senderId", "chatId" FROM "Messages" WHERE id = ANY(:ids::int[]) AND "senderId" != :userId`,

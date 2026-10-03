@@ -37,6 +37,7 @@ const safe = (fn) => (req, res, next) => {
 if (ctrl) {
     // ── Products ─────────────────────────────────────────────────────────────
     router.get('/products',              safe(ctrl.getProducts?.bind(ctrl)));
+    router.get('/products/deleted-ids',  safe(ctrl.getDeletedProductIds?.bind(ctrl)));
     router.get('/products/:id',          safe(ctrl.getProductById?.bind(ctrl)));
     router.post('/products',             safe(ctrl.createProduct?.bind(ctrl)));
     router.put('/products/:id',          safe(ctrl.updateProduct?.bind(ctrl)));

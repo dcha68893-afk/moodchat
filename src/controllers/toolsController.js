@@ -664,7 +664,7 @@ class ToolsController {
         try {
             console.log('[TOOLS FLOW] Step 1: Backend createListing triggered', { userId: req.user?.id });
 
-            const { title, description, price, category, type, images, tags, stock, currency, metadata, condition,
+            const { title, description, price, category, subcategory, type, images, tags, stock, currency, metadata, condition,
                     isPremium, featured, boosted, expiresAt } = req.body;
             if (!title) throw new AppError('title is required', 400);
 
@@ -683,6 +683,22 @@ class ToolsController {
             // reads the same canonical array every other validator uses.
             const validCategories  = MARKETPLACE_CATEGORIES;
             const normalizedCat    = validCategories.includes(category) ? category : (normalizedType === 'digital' ? 'digital' : normalizedType === 'premium' ? 'premium' : 'services');
+            // FIX (listing never appears under its category): the browse UI
+            // looks listings up by top-level group ('digital' / 'services')
+            // plus a subcategory label (Games, Cleaning...), but this endpoint
+            // saved the raw dropdown value ('software', 'cleaning') as the
+            // category and silently dropped `subcategory`. Service/digital
+            // listings are now stored under their group, and the specific
+            // choice is kept in metadata.subcategory.
+            let groupCat = normalizedCat;
+            let subCat   = String(subcategory || (metadata && metadata.subcategory) || '').trim();
+            if (normalizedType === 'service' && groupCat !== 'accommodation') {
+                if (!subCat && groupCat !== 'services' && groupCat !== 'other') subCat = groupCat;
+                groupCat = 'services';
+            } else if (normalizedType === 'digital') {
+                if (!subCat && groupCat !== 'digital' && groupCat !== 'other') subCat = groupCat;
+                groupCat = 'digital';
+            }
             const validConditions  = ['new','used','refurbished'];
             const normalizedCond   = validConditions.includes(condition) ? condition : 'new';
 
@@ -706,11 +722,11 @@ class ToolsController {
             const listing = await db.Tool.create({
                 sellerId: req.user.id, title, description,
                 price: price !== undefined ? parseFloat(price) : 0,
-                category: normalizedCat, type: normalizedType,
+                category: groupCat, type: normalizedType,
                 images: images || [], tags: tags || [],
                 stock: stock !== undefined ? parseInt(stock) : null,
                 currency: currency || 'KES',
-                metadata: { ...(metadata || {}), condition: normalizedCond },
+                metadata: { ...(metadata || {}), condition: normalizedCond, subcategory: subCat },
                 status: 'pending_review', available: false, approvalStatus: 'pending_review',
                 // FIX (2026-07-22): these columns already existed on the Tool
                 // model but nothing ever set them, so "Premium" listings were

@@ -137,7 +137,13 @@ class MarketplaceController {
                 delete where.status;
                 delete where.available;
             }
-            if (category)  where.category  = category;
+            // FIX: 'digital' and 'services' are browse GROUPS. Older listings were
+            // saved under the raw dropdown value (software, audio, cleaning...),
+            // so an exact category match returned "No products found". Match
+            // these two groups by listing type instead.
+            if (category === 'digital')       where.type = 'digital';
+            else if (category === 'services') where.type = 'service';
+            else if (category)                where.category = category;
             // ROOT-CAUSE FIX ("No products found" on every leaf category):
             // this endpoint is a second, independent listing-search
             // implementation (reached via marketplace.routes.js -> here),
@@ -150,7 +156,7 @@ class MarketplaceController {
             // this path also matched zero rows, in every vertical, exactly
             // as on the other path.
             if (subcategory) where['metadata.subcategory'] = subcategory;
-            if (type)      where.type      = type;
+            if (type && !where.type) where.type = type;
             if (seller_id) where.sellerId  = seller_id;
             if (featured === 'true') where.isFeatured = true;
             if (min_price !== undefined || max_price !== undefined) {
@@ -197,6 +203,18 @@ class MarketplaceController {
     }
 
     // ── GET /api/marketplace/products/:id ─────────────────────────────────────
+    // GET /products/deleted-ids?since=ISO  -> ids of listings removed (by seller or admin).
+    // Lets apps that were offline when the delete happened drop them on reconnect.
+    async getDeletedProductIds(req, res, next) {
+        try {
+            const T = Model.Tool;
+            if (!T) return ok(res, { ids: [] }, 'ok');
+            const where = { status: 'deleted' };
+            if (req.query.since && !isNaN(Date.parse(req.query.since))) where.updatedAt = { [Op.gt]: new Date(req.query.since) };
+            const rows = await T.findAll({ where, attributes: ['id'], limit: 5000, raw: true });
+            return ok(res, { ids: rows.map(r => r.id), serverTime: new Date().toISOString() }, 'ok');
+        } catch (e) { err(next, e, 'getDeletedProductIds'); }
+    }
     async getProductById(req, res, next) {
         try {
             const T = Model.Tool;
@@ -1600,6 +1618,9 @@ class MarketplaceController {
             const p = T ? await T.findByPk(req.params.id) : null;
             if (!p) return next(new AppError('Product not found', 404));
             await p.update({ status: 'deleted', available: false });
+            // FIX: the admin path never told anyone. Broadcast so every connected app
+            // purges it from home, categories, cart, wishlist and caches at once.
+            _socketBroadcast(req, 'product:deleted', { product_id: p.id });
             return ok(res, null, 'Product removed by admin');
         } catch(e) { err(next, e, 'adminRemoveProduct'); }
     }
