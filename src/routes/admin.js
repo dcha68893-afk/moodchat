@@ -133,6 +133,12 @@ router.post('/problem-reports', asyncHandler(async (req, res) => {
   const subject    = String(req.body?.subject || '').slice(0, 200);
   const targetUserId = Number(req.body?.targetUserId) || null;
   const targetRef    = req.body?.targetRef ? String(req.body.targetRef).slice(0, 120) : null;
+  // Tagged user must be a real account, and nobody can report themselves.
+  if (targetUserId) {
+    if (targetUserId === reporterId) return res.status(400).json({ success:false, message:'You cannot report your own account' });
+    const targetUser = await Users.findByPk(targetUserId, { attributes: ['id'] }).catch(() => null);
+    if (!targetUser) return res.status(400).json({ success:false, message:'The tagged user could not be found' });
+  }
   const db = await ensureProblemReports();
   const [rows] = await db.query(
     `INSERT INTO problem_reports ("reporterId",category,module,subject,details,"targetUserId","targetRef")

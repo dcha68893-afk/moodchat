@@ -151,7 +151,14 @@ async function listingsOnce(req,res,next){try{const result=await searchListings(
 router.get('/listings',listingsOnce);
 router.get('/search',listingsOnce);
 router.get('/products',listingsOnce);
-router.get('/products/:id',async(req,res,next)=>{try{const row=await Tool.findByPk(req.params.id);if(!row)return res.status(404).json({success:false,message:'Listing not found'});return res.json({success:true,data:normalizeRows([row])[0]});}catch(e){next(e)}});
+// FIX (GET /api/marketplace/products/deleted-ids -> 500): this router is mounted at /marketplace BEFORE
+// marketplace.routes.js (marketplace.js sorts ahead of marketplace.routes.js), so the generic
+// '/products/:id' below captured the literal path 'deleted-ids' and ran Tool.findByPk('deleted-ids')
+// against a UUID primary key -> Postgres "invalid input syntax for type uuid" -> HTTP 500.
+// Serve the static path first, and 404 (not 500) for any id that is not a valid UUID.
+router.get('/products/deleted-ids', marketplaceController.getDeletedProductIds.bind(marketplaceController));
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+router.get('/products/:id',async(req,res,next)=>{try{if(!UUID_RE.test(String(req.params.id)))return res.status(404).json({success:false,message:'Listing not found'});const row=await Tool.findByPk(req.params.id);if(!row)return res.status(404).json({success:false,message:'Listing not found'});return res.json({success:true,data:normalizeRows([row])[0]});}catch(e){next(e)}});
 
 router.post('/listings',async(req,res,next)=>{try{const row=await Tool.create({...req.body,sellerId:req.user?.userId||req.user?.id});return res.status(201).json({success:true,data:row});}catch(e){next(e)}});
 router.patch('/listings/:id',async(req,res,next)=>{try{const row=await Tool.findByPk(req.params.id);if(!row)return res.status(404).json({success:false,message:'Listing not found'});if(Number(row.sellerId)!==Number(req.user?.userId||req.user?.id))return res.status(403).json({success:false,message:'Seller access required'});await row.update(req.body);return res.json({success:true,data:row});}catch(e){next(e)}});
