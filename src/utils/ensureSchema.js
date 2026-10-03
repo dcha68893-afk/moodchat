@@ -147,6 +147,10 @@ const REQUIRED_COLUMNS = [
   // exist" / "column \"createdAt\" does not exist" as a result. Fixed to
   // add the camelCase columns these four models actually use.
   {
+    table: 'marketplace_reviews', column: 'is_hidden',
+    sql: `ALTER TABLE IF EXISTS "marketplace_reviews" ADD COLUMN IF NOT EXISTS "is_hidden" BOOLEAN NOT NULL DEFAULT false`,
+  },
+  {
     table: 'marketplace_orders', column: 'createdAt',
     sql: `ALTER TABLE "marketplace_orders" ADD COLUMN IF NOT EXISTS "createdAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()`,
   },

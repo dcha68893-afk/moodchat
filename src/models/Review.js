@@ -54,6 +54,12 @@ module.exports = (sequelize, DataTypes) => {
         defaultValue: 0,
         field: 'helpful_count',
       },
+      isHidden: {
+        type: DataTypes.BOOLEAN,
+        allowNull: false,
+        defaultValue: false,
+        field: 'is_hidden',
+      },
       sellerReply: {
         type: DataTypes.TEXT,
         allowNull: true,

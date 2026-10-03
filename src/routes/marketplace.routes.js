@@ -43,6 +43,8 @@ if (ctrl) {
     router.put('/products/:id',          safe(ctrl.updateProduct?.bind(ctrl)));
     router.delete('/products/:id',       safe(ctrl.deleteProduct?.bind(ctrl)));
     router.post('/products/:id/stock',   safe(ctrl.updateStock?.bind(ctrl)));
+    // Frontend (marketplace-ecommerce.js) sends PATCH — it 404'd before.
+    router.patch('/products/:id/stock',  safe(ctrl.updateStock?.bind(ctrl)));
     router.post('/products/:id/image',   safe(ctrl.uploadImage?.bind(ctrl)));
 
     // ── Search ────────────────────────────────────────────────────────────────
@@ -61,6 +63,8 @@ if (ctrl) {
     router.post('/cart',                 safe(ctrl.addToCart?.bind(ctrl)));
     router.patch('/cart',                safe(ctrl.updateCartItem?.bind(ctrl)));
     router.post('/cart/sync',            safe(ctrl.syncCart?.bind(ctrl)));
+    // Authoritative price/stock check used by marketplace-commercial-hardening.js
+    router.post('/cart/revalidate',      safe(ctrl.revalidateCart?.bind(ctrl)));
     router.delete('/cart/clear',         safe(ctrl.clearCart?.bind(ctrl)));
     router.delete('/cart',               safe(ctrl.removeFromCart?.bind(ctrl)));
 
@@ -79,6 +83,9 @@ if (ctrl) {
     router.get('/orders/:id',            safe(ctrl.getOrder?.bind(ctrl)));
     router.patch('/orders/:id/status',   safe(ctrl.updateOrderStatus?.bind(ctrl)));
     router.get('/orders/:id/tracking',   safe(ctrl.getOrderTracking?.bind(ctrl)));
+    router.get('/orders/:id/eta',        safe(ctrl.getOrderEta?.bind(ctrl)));
+    router.get('/orders/:id/invoice',    safe(ctrl.getOrderInvoice?.bind(ctrl)));
+    router.get('/orders/:id/qr',         safe(ctrl.getOrderQr?.bind(ctrl)));
     router.put('/orders/:id/tracking',   safe(ctrl.updateTracking?.bind(ctrl)));
     router.post('/orders/:id/refund',    safe(ctrl.requestRefund?.bind(ctrl)));
     router.post('/orders/:id/cancel',    safe(ctrl.cancelOrder?.bind(ctrl)));
@@ -90,6 +97,8 @@ if (ctrl) {
     router.post('/payment/mpesa',              paymentLimiter, safe(ctrl.initiateMpesa?.bind(ctrl)));
     router.post('/payment/mpesa/callback',     safe(ctrl.mpesaCallback?.bind(ctrl)));
     router.get('/payment/mpesa/verify',        safe(ctrl.verifyMpesa?.bind(ctrl)));
+    // marketplace-checkout.js polls with POST + JSON body; GET-only meant a 404 on every poll.
+    router.post('/payment/mpesa/verify',       safe(ctrl.verifyMpesa?.bind(ctrl)));
     router.post('/payment/card',               paymentLimiter, safe(ctrl.cardPayment?.bind(ctrl)));
     router.post('/payment/wallet',             paymentLimiter, safe(ctrl.walletPayment?.bind(ctrl)));
     router.get('/payment/wallet/balance',      safe(ctrl.getWalletBalance?.bind(ctrl)));
@@ -210,9 +219,12 @@ if (ctrl) {
     router.post('/admin/sellers/:userId/ban',        safe(ctrl.adminBanSeller?.bind(ctrl)));
 
     router.get('/admin/orders',                      safe(ctrl.adminGetOrders?.bind(ctrl)));
+    router.put('/admin/orders/:id/status',           safe(ctrl.updateOrderStatus?.bind(ctrl)));
+    router.patch('/admin/orders/:id/status',         safe(ctrl.updateOrderStatus?.bind(ctrl)));
 
     router.get('/admin/returns',                     safe(ctrl.adminGetRefunds?.bind(ctrl)));
     router.get('/admin/refunds',                     safe(ctrl.adminGetRefunds?.bind(ctrl)));
+    router.post('/admin/returns/:id/process',        safe(ctrl.adminProcessReturn?.bind(ctrl)));
     router.post('/admin/refunds/:id/approve',        safe(ctrl.adminApproveRefund?.bind(ctrl)));
     router.post('/admin/refunds/:id/reject',         safe(ctrl.adminRejectRefund?.bind(ctrl)));
 
@@ -231,6 +243,7 @@ if (ctrl) {
 
     router.get('/admin/reviews',                     safe(ctrl.adminGetReviews?.bind(ctrl)));
     router.delete('/admin/reviews/:id',              safe(ctrl.adminDeleteReview?.bind(ctrl)));
+    router.post('/admin/reviews/:id/hide',           safe(ctrl.adminHideReview?.bind(ctrl)));
 
     router.get('/admin/tickets',                     safe(ctrl.adminGetTickets?.bind(ctrl)));
     router.post('/admin/tickets/:id/reply',          safe(ctrl.adminReplyTicket?.bind(ctrl)));

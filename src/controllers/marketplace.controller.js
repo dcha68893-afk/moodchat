@@ -1118,7 +1118,7 @@ class MarketplaceController {
             // Without a valid callbackUrl, M-Pesa never delivers payment confirmation.
             const backendUrl = process.env.BACKEND_URL || process.env.RENDER_EXTERNAL_URL || '';
             const resolvedCallback = callback_url
-                || (backendUrl ? `${backendUrl.replace(/\/$/, '')}/api/tools/marketplace/payment/mpesa/callback` : null);
+                || (backendUrl ? `${backendUrl.replace(/\/$/, '')}/api/marketplace/payment/mpesa/callback` : null);
 
             if (!resolvedCallback) {
                 logger.error('[Marketplace] initiateMpesa: callbackUrl is empty. Set BACKEND_URL env var.');
@@ -1142,6 +1142,11 @@ class MarketplaceController {
                         { paymentRef: result.CheckoutRequestID, paymentMethod: 'mpesa' },
                         { where: { id: order_id } }
                     );
+                    // A retry after a declined/cancelled push must not keep reporting 'failed'.
+                    if (orderRecord.metadata?.mpesa_failure) {
+                        const { mpesa_failure, ...restMeta } = orderRecord.metadata;
+                        await orderRecord.update({ metadata: restMeta }).catch(() => {});
+                    }
                 }
             }
 
@@ -1158,11 +1163,21 @@ class MarketplaceController {
                 '196.201.212.127', '196.201.212.138', '196.201.212.129',
                 '196.201.212.136', '196.201.212.74', '196.201.212.69',
             ];
-            const clientIp = req.ip || req.connection?.remoteAddress || req.headers['x-forwarded-for']?.split(',')[0]?.trim();
-            const isProduction = process.env.NODE_ENV === 'production';
-            if (isProduction && clientIp && !SAFARICOM_IPS.includes(clientIp)) {
-                logger.warn(`[Marketplace] M-Pesa callback from unauthorized IP: ${clientIp}`);
-                return res.status(200).json({ ResultCode: 0, ResultDesc: 'Accepted' });
+            // The live server does not set `trust proxy`, so on Render req.ip is the proxy's
+            // address, never Safaricom's — the old strict check would drop every real callback.
+            // Check the whole forwarded chain; enforce strictly only with MPESA_STRICT_IP=true.
+            // Without it, a callback is still only honoured when its secret CheckoutRequestID
+            // matches a pending order AND the amount matches (see _handleMpesaSuccess).
+            const chain = [
+                ...String(req.headers['x-forwarded-for'] || '').split(',').map(x => x.trim()),
+                req.ip, req.connection?.remoteAddress,
+            ].filter(Boolean).map(x => x.replace(/^::ffff:/, ''));
+            const fromSafaricom = chain.some(ip => SAFARICOM_IPS.includes(ip));
+            if (!fromSafaricom) {
+                logger.warn(`[Marketplace] M-Pesa callback from non-whitelisted chain: ${chain.join(' > ')}`);
+                if (process.env.NODE_ENV === 'production' && process.env.MPESA_STRICT_IP === 'true') {
+                    return res.status(200).json({ ResultCode: 0, ResultDesc: 'Accepted' });
+                }
             }
 
             const body = req.body?.Body?.stkCallback || req.body;
@@ -1170,6 +1185,8 @@ class MarketplaceController {
 
             if (resultCode === 0 || resultCode === '0') {
                 await _handleMpesaSuccess(body);
+            } else if (resultCode !== undefined && resultCode !== null) {
+                await _handleMpesaFailure(body);
             }
             return res.status(200).json({ ResultCode: 0, ResultDesc: 'Accepted' });
         } catch(e) {
@@ -1178,13 +1195,38 @@ class MarketplaceController {
         }
     }
 
+    // Polled by marketplace-checkout.js (POST + JSON body) and by /api/payments/mpesa/verify (GET).
+    // Accepts body or query, only reveals status to the buyer/seller/admin, and reports
+    // 'failed' once the Safaricom callback said the STK push was declined/cancelled/timed out.
     async verifyMpesa(req, res, next) {
         try {
-            const { request_id, order_id } = req.body;
+            const userId = req.user?.id;
+            if (!userId) return next(new AppError('Authentication required', 401));
+            const src = { ...(req.query || {}), ...(req.body || {}) };
+            let ids = [];
+            if (Array.isArray(src.order_ids)) ids = src.order_ids;
+            else if (typeof src.order_ids === 'string' && src.order_ids) ids = src.order_ids.split(',');
+            if (src.order_id) ids.unshift(src.order_id);
+            ids = [...new Set(ids.map(x => String(x).trim()).filter(Boolean))].slice(0, 20);
+            if (!ids.length) return next(new AppError('order_id required', 400));
+
             const O = Model.Order;
-            const order = O ? await O.findByPk(order_id) : null;
-            const isPaid = order?.status === 'paid';
-            return ok(res, { status: isPaid ? 'paid' : 'pending', order_id });
+            if (!O) return ok(res, { status: 'pending', order_id: ids[0] });
+            const orders = await O.findAll({ where: { id: ids } });
+            if (!orders.length) return next(new AppError('Order not found', 404));
+            const isAdmin = req.user?.role === 'admin';
+            if (!isAdmin && orders.some(o => o.buyerId !== userId && o.sellerId !== userId)) {
+                return next(new AppError('Not authorized', 403));
+            }
+
+            const allPaid = orders.every(o => o.status === 'paid' || !!o.paidAt);
+            const failed  = !allPaid && orders.find(o => o.status !== 'paid' && o.metadata?.mpesa_failure);
+            const status  = allPaid ? 'paid' : (failed ? 'failed' : 'pending');
+            return ok(res, {
+                status,
+                order_id: ids[0],
+                ...(failed ? { reason: failed.metadata.mpesa_failure.desc || 'Payment was not completed' } : {}),
+            });
         } catch(e) { err(next, e, 'verifyMpesa'); }
     }
 
@@ -1389,7 +1431,7 @@ class MarketplaceController {
             if (!R) return ok(res, { reviews: [], avgRating: 0, total: 0 });
 
             const { count, rows } = await R.findAndCountAll({
-                where:  { productId },
+                where:  { productId, isHidden: false },
                 order:  [['createdAt', 'DESC']],
                 limit:  parseInt(limit),
                 offset: (parseInt(page)-1) * parseInt(limit),
@@ -2587,6 +2629,28 @@ async function _mpesaStkPush({ phone, amount, orderId, description, callbackUrl 
     }
 }
 
+// Safaricom reported the STK push as failed/cancelled/timed out (ResultCode != 0).
+// Record it on the order so verifyMpesa can tell the polling checkout screen to stop waiting.
+async function _handleMpesaFailure(callbackData) {
+    try {
+        const O = Model.Order;
+        const checkoutId = callbackData?.CheckoutRequestID;
+        if (!O || !checkoutId) return;
+        const orders = await O.findAll({ where: { paymentRef: checkoutId } });
+        for (const o of orders) {
+            if (o.status === 'paid' || o.paidAt) continue;
+            await o.update({ metadata: { ...(o.metadata || {}), mpesa_failure: {
+                code: callbackData.ResultCode ?? callbackData.result_code ?? null,
+                desc: callbackData.ResultDesc || callbackData.result_desc || 'Payment was not completed',
+                at: new Date().toISOString(),
+            } } });
+        }
+        logger.warn(`[Marketplace] M-Pesa payment failed for checkoutId ${checkoutId}: ${callbackData.ResultDesc || callbackData.ResultCode}`);
+    } catch(e) {
+        logger.error('[Marketplace] M-Pesa failure handler error:', e.message);
+    }
+}
+
 async function _handleMpesaSuccess(callbackData) {
     try {
         const O = Model.Order;
@@ -2620,14 +2684,21 @@ async function _handleMpesaSuccess(callbackData) {
                 }
             }
 
+            // Replayed callbacks (Safaricom retries) must not re-notify or move paidAt.
+            const toPay = pendingOrders.filter(o => o.status !== 'paid' && !o.paidAt);
+            if (!toPay.length) return;
+            const payIds = toPay.map(o => o.id);
+
             await O.update(
-                { status:'paid', paidAt: new Date(), paymentRef: ref },
-                { where: { paymentRef: checkoutId } }
+                { status:'paid', paidAt: new Date(), paymentRef: ref || checkoutId },
+                { where: { id: payIds } }
             );
 
-            // FIX: find updated order and notify buyer + seller via socket
+            // FIX: find updated order and notify buyer + seller via socket.
+            // paymentRef was just overwritten with the receipt number, so look the orders
+            // up by id — the old `where: { paymentRef: checkoutId }` never matched anything.
             try {
-                const updatedOrders = await O.findAll({ where: { paymentRef: checkoutId }, limit: 5 });
+                const updatedOrders = await O.findAll({ where: { id: payIds }, limit: 20 });
                 const io = global.__socketIO;
                 if (io && updatedOrders.length) {
                     updatedOrders.forEach(order => {
@@ -3676,6 +3747,154 @@ class MarketplaceExtensions {
             if (req.body.commission_pct != null) process.env.SELLER_COMMISSION = String(parseFloat(req.body.commission_pct)/100);
             return ok(res, null, 'Settings updated');
         } catch(e) { err(next, e, 'adminUpdateSettings'); }
+    }
+
+    // ── POST /api/marketplace/cart/revalidate ─────────────────────────────────
+    // Authoritative price/stock for the cart, mirroring createOrder's own rules
+    // (flash-sale price while active, stock === null means unlimited).
+    static async revalidateCart(req, res, next) {
+        try {
+            if (!req.user?.id) return next(new AppError('Authentication required', 401));
+            const T = Model.Tool;
+            if (!T) return ok(res, { items: [] });
+            const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+            const raw = Array.isArray(req.body?.items) ? req.body.items : [];
+            const ids = [...new Set(raw.map(i => String(i && typeof i === 'object' ? (i.product_id || i.id) : i)))]
+                .filter(id => UUID.test(id)).slice(0, 100);
+            if (!ids.length) return ok(res, { items: [] });
+
+            const rows = await T.findAll({ where: { id: ids } });
+            const items = rows
+                .filter(p => p.status === 'active' && p.available !== false)
+                .map(p => {
+                    const flashActive = p.isFlashSale && p.flashSalePrice != null &&
+                        (!p.flashSaleEnd || new Date(p.flashSaleEnd) > new Date());
+                    const stockKnown = p.stock != null;
+                    return {
+                        id: p.id,
+                        product_id: p.id,
+                        title: p.title,
+                        price: parseFloat(flashActive ? p.flashSalePrice : p.price) || 0,
+                        stock_quantity: stockKnown ? p.stock : 999999,
+                        stock_unlimited: !stockKnown,
+                        delivery_fee: parseFloat(p.metadata?.delivery_fee) || 0,
+                        seller_id: p.sellerId,
+                    };
+                });
+            return ok(res, { items });
+        } catch(e) { err(next, e, 'revalidateCart'); }
+    }
+
+    // ── GET /api/marketplace/orders/:id/eta ───────────────────────────────────
+    static async getOrderEta(req, res, next) {
+        try {
+            const O = Model.Order;
+            if (!O) return next(new AppError('Order not found', 404));
+            const order = await O.findByPk(req.params.id, { attributes: ['id','buyerId','sellerId','status','shippedAt','deliveredAt'] });
+            if (!order) return next(new AppError('Order not found', 404));
+            const uid = req.user?.id;
+            if (order.buyerId !== uid && order.sellerId !== uid && req.user?.role !== 'admin') {
+                return next(new AppError('Not authorized', 403));
+            }
+            const etaByStatus = {
+                pending:    'Awaiting payment',
+                paid:       '2-4 business days',
+                processing: '2-3 business days',
+                shipped:    '1-2 business days',
+                delivered:  'Delivered',
+                cancelled:  'Cancelled',
+                refunded:   'Refunded',
+            };
+            return ok(res, { order_id: order.id, status: order.status, eta: etaByStatus[order.status] || '2-3 business days' });
+        } catch(e) { err(next, e, 'getOrderEta'); }
+    }
+
+    // ── GET /api/marketplace/orders/:id/invoice ───────────────────────────────
+    // Reuses services/invoiceService (the same source as /api/invoices/orders/:id) and
+    // reshapes it to what marketplace-advanced.js's invoice modal renders.
+    static async getOrderInvoice(req, res, next) {
+        try {
+            const { getInvoiceData } = require('../services/invoiceService');
+            const O = Model.Order;
+            const order = O ? await O.findByPk(req.params.id) : null;
+            if (!order) return next(new AppError('Order not found', 404));
+            const uid = req.user?.id;
+            if (order.buyerId !== uid && order.sellerId !== uid && req.user?.role !== 'admin') {
+                return next(new AppError('Not authorized', 403));
+            }
+            let inv;
+            try { inv = await getInvoiceData(order.id); }
+            catch (e) { return next(new AppError(e.message || 'Invoice not available', e.statusCode || 500)); }
+
+            const metaItems = Array.isArray(order.metadata?.items) ? order.metadata.items : [];
+            const items = metaItems.length
+                ? metaItems.map(i => ({ title: i.title, quantity: i.quantity, price: i.price, image: i.image || '' }))
+                : [{ title: inv.item.title, quantity: inv.item.quantity, price: inv.item.unitPrice, image: '' }];
+            const subtotal = items.reduce((s, i) => s + (parseFloat(i.price) || 0) * (parseInt(i.quantity) || 1), 0);
+            const delivery = metaItems.length ? metaItems.reduce((s, i) => s + (parseFloat(i.delivery_fee) || 0), 0) : 0;
+            const discount = parseFloat(order.metadata?.discount_amount || 0);
+            const addr = inv.deliveryAddress || {};
+
+            return ok(res, { invoice: {
+                invoice_number: inv.invoiceNumber,
+                status:         inv.status,
+                subtotal:       parseFloat(subtotal.toFixed(2)),
+                delivery_fee:   parseFloat(delivery.toFixed(2)),
+                discount,
+                total:          inv.total,
+                currency:       inv.currency,
+                payment_method: inv.paymentMethod,
+                buyer: {
+                    name:    inv.buyer.name,
+                    address: addr.address || addr.street || addr.line1 || '',
+                    city:    addr.city || addr.town || '',
+                },
+                items,
+                issued_at: inv.issuedAt,
+            } });
+        } catch(e) { err(next, e, 'getOrderInvoice'); }
+    }
+
+    // ── GET /api/marketplace/orders/:id/qr ────────────────────────────────────
+    static async getOrderQr(req, res, next) {
+        try {
+            const O = Model.Order;
+            const order = O ? await O.findByPk(req.params.id, { attributes: ['id','buyerId','sellerId','trackingNumber'] }) : null;
+            if (!order) return next(new AppError('Order not found', 404));
+            const uid = req.user?.id;
+            if (order.buyerId !== uid && order.sellerId !== uid && req.user?.role !== 'admin') {
+                return next(new AppError('Not authorized', 403));
+            }
+            return ok(res, {
+                qr_data: JSON.stringify({ order_id: order.id, tracking_number: order.trackingNumber || null }),
+                tracking_number: order.trackingNumber || '',
+            });
+        } catch(e) { err(next, e, 'getOrderQr'); }
+    }
+
+    // ── POST /api/marketplace/admin/returns/:id/process  { approve, reason } ──
+    // marketplace-admin.js sends one endpoint with an approve flag; dispatch to the
+    // existing approve/reject handlers so refund/stock/wallet logic stays in one place.
+    static async adminProcessReturn(req, res, next) {
+        try {
+            const approve = req.body?.approve === true || req.body?.approve === 'true';
+            const handler = approve ? this.adminApproveRefund : this.adminRejectRefund;
+            if (typeof handler !== 'function') return next(new AppError('Refund system unavailable', 503));
+            if (!approve && !req.body?.reason) req.body = { ...(req.body || {}), reason: 'Rejected by admin' };
+            return handler.call(this, req, res, next);
+        } catch(e) { err(next, e, 'adminProcessReturn'); }
+    }
+
+    // ── POST /api/marketplace/admin/reviews/:id/hide ──────────────────────────
+    static async adminHideReview(req, res, next) {
+        try {
+            const R = Model.Review;
+            if (!R) return next(new AppError('Review system unavailable', 503));
+            const review = await R.findByPk(req.params.id);
+            if (!review) return next(new AppError('Review not found', 404));
+            await review.update({ isHidden: true });
+            return ok(res, { review_id: review.id, hidden: true }, 'Review hidden');
+        } catch(e) { err(next, e, 'adminHideReview'); }
     }
 
     static async adminProcessPayout(req, res, next) {

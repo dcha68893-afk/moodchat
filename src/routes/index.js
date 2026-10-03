@@ -393,6 +393,19 @@ function scanAndMountRouters() {
 }
 
 // ===== EXECUTE ROUTER MOUNTING =====
+// FIX: Safaricom's STK-push callback is server-to-server and carries no JWT, but
+// every router that handled it (/marketplace, /payments, /tools) is wrapped in
+// authenticateToken by the scanner below, so it 401'd and no M-Pesa order was ever
+// confirmed. Register it publicly FIRST so it matches before any auth wrapper.
+try {
+  const _mpCtrl = require('../controllers/marketplace.controller');
+  ['/marketplace/payment/mpesa/callback', '/payments/mpesa/callback'].forEach(p =>
+    router.post(p, _mpCtrl.mpesaCallback.bind(_mpCtrl)));
+  _slog('✅ Public M-Pesa callback registered (no auth)');
+} catch (e) {
+  console.error('❌ Failed to register public M-Pesa callback:', e.message);
+}
+
 const mountResults = scanAndMountRouters();
 
 // FIX: tools.js's own route definitions are already prefixed with

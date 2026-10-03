@@ -257,7 +257,8 @@ app.get('/download/necpra-android.apk', async (req, res) => {
     if (!res.headersSent) res.status(502).json({ success: false, message: 'Necpra APK download is temporarily unavailable.' });
   }
 });
-\n// API routes with global error wrapper
+
+// API routes with global error wrapper
 const wrappedRoutes = (router) => {
   // Wrap each route handler with try/catch
   const wrapAsync = (fn) => (req, res, next) => {
