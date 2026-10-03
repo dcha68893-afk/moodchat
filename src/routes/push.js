@@ -80,39 +80,9 @@ router.post('/test', asyncHandler(async (req, res) => {
   res.json({ status: 'success', message: 'Test notification sent' });
 }));
 
-// ── FCM Token Registration ────────────────────────────────────────────────────
-// POST /api/push/fcm-token — save FCM token for native push delivery
-router.post('/fcm-token', asyncHandler(async (req, res) => {
-  const userId = req.user?.id || req.user?.userId;
-  const { token } = req.body;
-  if (!token) return res.status(400).json({ status: 'error', message: 'token is required' });
-  try {
-    if (typeof pushService.registerFCMToken === 'function') {
-      await pushService.registerFCMToken(userId, token);
-    } else {
-      // Fallback: store on Users row directly
-      const db = require('../models');
-      const User = db.Users || db.User;
-      if (User) await User.update({ fcmToken: token }, { where: { id: userId } });
-    }
-    res.json({ status: 'success', message: 'FCM token registered' });
-  } catch (err) {
-    res.status(500).json({ status: 'error', message: err.message });
-  }
-}));
-
-// DELETE /api/push/fcm-token — remove FCM token on logout/unregister
-router.delete('/fcm-token', asyncHandler(async (req, res) => {
-  const userId = req.user?.id || req.user?.userId;
-  try {
-    const db   = require('../models');
-    const User = db.Users || db.User;
-    if (User) await User.update({ fcmToken: null }, { where: { id: userId } });
-    res.json({ status: 'success', message: 'FCM token removed' });
-  } catch (err) {
-    res.status(500).json({ status: 'error', message: err.message });
-  }
-}));
-
-
-module.exports = router;
+const nativePush=require('../services/pushService');
+router.post('/fcm-token',asyncHandler(async(req,res)=>{const userId=req.user?.id||req.user?.userId||req.user?.sub;const {token,platform,userAgent}=req.body||{};if(!userId||!token)return res.status(400).json({status:'error',message:'token is required'});await nativePush.registerToken(userId,token,{platform,userAgent});res.json({status:'success',message:'FCM device registered'});}));
+router.delete('/fcm-token',asyncHandler(async(req,res)=>{const userId=req.user?.id||req.user?.userId||req.user?.sub;if(!userId)return res.status(401).json({status:'error',message:'Authentication required'});await nativePush.unregisterToken(userId,req.body?.token||req.query?.token||null);res.json({status:'success',message:'FCM device removed'});}));
+router.get('/status',asyncHandler(async(req,res)=>{const userId=req.user?.id||req.user?.userId||req.user?.sub;res.json({status:'success',data:await nativePush.getStatus(userId)});}));
+router.post('/test',asyncHandler(async(req,res)=>{const userId=req.user?.id||req.user?.userId||req.user?.sub;const result=await nativePush.sendToUsers([userId],{title:'Necpra',body:'Push notifications are working.'},{type:'test',url:'/chat.html'},{category:'messages'});res.json({status:'success',data:result});}));
+module.exports=router;

@@ -220,6 +220,7 @@ router.post('/', authenticateToken, requireUser, apiRateLimiter, asyncHandler(as
       io.to('user:' + friendId).emit('status:new', { story: result });
       io.to('user_' + friendId).emit('status:new', { story: result });
     }
+    if(friendIds.length&&data.publicationTarget!=='vibe'){const pushService=require('../services/pushService');await pushService.sendToUsers(friendIds,{title:'New status',body:'A friend shared a new status'},{type:'status',statusId:String(status.id),userId:String(userId),url:'/chat.html?statusId='+status.id},{category:'status'}).catch(()=>{});}
   }
   return res.status(201).json({ success: true, status: result });
 }));

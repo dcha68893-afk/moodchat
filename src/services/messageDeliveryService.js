@@ -509,12 +509,10 @@ class MessageDeliveryService {
         messageId: message.id,
       }).catch(() => {});
 
-      if (push && (!offlineSet || offlineSet.has(recipientId))) {
-        const pushNotificationService = require('./pushNotificationService');
-        await pushNotificationService.notifyNewMessage(recipientId, {
-          senderName, senderAvatar, content: preview,
-          chatId: message.chatId, messageId: message.id,
-        }, sequelize).catch(() => {});
+      if (push) {
+        const pushService=require('./pushService');
+        await pushService.sendToUsers([recipientId],{title:senderName,body:preview,...(senderAvatar?{imageUrl:senderAvatar}:{})},{type:'message',chatId:String(message.chatId),messageId:String(message.id||''),senderId:String(message.senderId||''),url:'/chat.html?chatId='+message.chatId+'&messageId='+(message.id||'')},{category:'messages'}).catch(()=>{});
+        if(!offlineSet||offlineSet.has(recipientId)){const pushNotificationService=require('./pushNotificationService');await pushNotificationService.notifyNewMessage(recipientId,{senderName,senderAvatar,content:preview,chatId:message.chatId,messageId:message.id},sequelize).catch(()=>{});}
       }
     }));
   }
