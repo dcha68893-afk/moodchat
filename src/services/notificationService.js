@@ -17,6 +17,19 @@ class NotificationService {
       const webSocketService = require('./webSocketService');
       webSocketService.sendNotification(userId, notification);
 
+      // FIX (NO-OS-NOTIFICATION-FOR-NON-MESSAGE-EVENTS): this was the only
+      // place every feature's notification (friend requests, status likes /
+      // comments, group invites, mentions, ...) passes through, yet it only
+      // wrote a DB row + a socket event - and sendPushNotification() below was
+      // a log-only mock. So anyone not looking at the app got nothing.
+      // 'new_message' is skipped on purpose: messageDeliveryService already
+      // sends its own push with chatId/messageId routing data (and respects
+      // per-chat mute), so pushing here too would show every message twice.
+      if (String(notification.type) !== 'new_message') {
+        require('./pushService').pushForNotification(userId, notification)
+          .catch(e => logger.warn('OS push for notification failed: ' + e.message));
+      }
+
       return notification;
     } catch (error) {
       logger.error('Create notification error:', error);
@@ -257,14 +270,13 @@ class NotificationService {
 
   async sendPushNotification(userId, notificationData) {
     try {
-      // This would integrate with a push notification service like Firebase Cloud Messaging
-      // For now, log and return success
-      logger.info(`Would send push notification to user ${userId}:`, notificationData.title);
-
-      return {
-        success: true,
-        messageId: `mock-push-${Date.now()}`,
-      };
+      const r = await require('./pushService').sendToUsers(
+        [Number(userId)],
+        { title: notificationData.title || 'Necpra', body: notificationData.body || '' },
+        { type: String(notificationData.type || 'notification'), channelId: 'general' },
+        { category: 'other' }
+      );
+      return { success: !!r.successCount, ...r };
     } catch (error) {
       logger.error('Send push notification error:', error);
       throw error;
