@@ -93,9 +93,22 @@ router.post('/contact', asyncHandler(async (req, res) => {
   if (!userId) return res.status(401).json({ success:false, message:'Authentication required' });
   const admins = await getAdminUsers();
   const admin = admins.find(a => a.id !== userId) || admins[0];
-  if (!admin) return res.status(404).json({ success:false, message:'No administrator account is configured' });
-  const chatId = await messageDeliveryService.resolveOrCreateDirectChat(userId, admin.id);
-  return res.json({ success:true, data:{ chatId, admin:{ userId:admin.id, username:admin.username, displayName:admin.displayName || admin.username } } });
+
+  // Prefer a real in-app administrator account. If none is configured, fall
+  // back to the WhatsApp destination already stored in the environment.
+  if (admin) {
+    try {
+      const chatId = await messageDeliveryService.resolveOrCreateDirectChat(userId, admin.id);
+      return res.json({ success:true, data:{ chatId, admin:{ userId:admin.id, username:admin.username, displayName:admin.displayName || admin.username } } });
+    } catch (error) {
+      console.warn('[Admin] internal contact chat unavailable; checking WhatsApp fallback:', error.message);
+    }
+  }
+
+  const raw = String(process.env.ADMIN_WHATSAPP_NUMBER || process.env.ADMIN_WHATSAPP || '').trim();
+  const digits = raw.replace(/[^0-9]/g, '');
+  if (digits) return res.json({ success:true, data:{ whatsapp:`https://wa.me/${digits}`, fallback:'whatsapp' } });
+  return res.status(404).json({ success:false, message:'No administrator account or WhatsApp support contact is configured' });
 }));
 
 // Uses environment configuration only; no phone number is embedded in source.
