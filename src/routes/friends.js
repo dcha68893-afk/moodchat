@@ -3,6 +3,7 @@
 const express = require('express');
 const { Op } = require('sequelize');
 const db = require('../models');
+const notificationService = require('../services/notificationService');
 
 const router = express.Router();
 const Users = db.models.Users;
@@ -291,6 +292,29 @@ router.post('/requests', async (req, res) => {
     }
 
     await transaction.commit();
+
+    // Notify the recipient only after the friendship row is committed. This uses
+    // the canonical DB notification -> socket -> FCM pipeline and respects the
+    // recipient's Friend Requests notification setting.
+    try {
+      const requester = await Users.findByPk(userId, { attributes: ['id', 'username', 'firstName', 'lastName', 'avatar'] });
+      const requesterName = publicUser(requester)?.displayName || requester?.username || 'Someone';
+      if (initialStatus === 'pending') {
+        await notificationService.createFromTemplate(targetId, 'friend_request', {
+          requesterId: userId, requesterName, requesterAvatar: requester?.avatar || null, requestId: saved.id
+        });
+      } else if (initialStatus === 'accepted') {
+        const acceptor = await Users.findByPk(targetId, { attributes: ['id', 'username', 'firstName', 'lastName', 'avatar'] });
+        await notificationService.createFromTemplate(userId, 'friend_request_accepted', {
+          acceptorId: targetId, acceptorName: publicUser(acceptor)?.displayName || acceptor?.username || 'Someone',
+          acceptorAvatar: acceptor?.avatar || null, requestId: saved.id
+        });
+      }
+    } catch (notificationError) {
+      // A push failure must never undo a successfully-created friendship.
+      console.warn('[Friends] request notification failed:', notificationError.message);
+    }
+
     return res.status(201).json({ success: true, request: { id: saved.id, status: saved.status, requesterId: saved.requesterId, addresseeId: saved.addresseeId } });
   } catch (error) {
     await transaction.rollback().catch(() => {});
@@ -331,6 +355,18 @@ async function changeRequest(req, res, action) {
       );
       await transaction.commit();
       const saved = mapFriend(updated[0]);
+
+      // Tell the original requester that their request was accepted.
+      try {
+        const acceptor = await Users.findByPk(userId, { attributes: ['id', 'username', 'firstName', 'lastName', 'avatar'] });
+        await notificationService.createFromTemplate(row.requesterId, 'friend_request_accepted', {
+          acceptorId: userId, acceptorName: publicUser(acceptor)?.displayName || acceptor?.username || 'Someone',
+          acceptorAvatar: acceptor?.avatar || null, requestId: saved.id
+        });
+      } catch (notificationError) {
+        console.warn('[Friends] acceptance notification failed:', notificationError.message);
+      }
+
       return res.json({ success: true, request: { id: saved.id, status: saved.status } });
     }
     if (action === 'cancel') {
