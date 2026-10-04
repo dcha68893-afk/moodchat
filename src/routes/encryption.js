@@ -330,56 +330,64 @@ router.post('/keys', asyncHandler(async (req, res) => {
   // separate X3DH prekey/device tables (user_signed_prekeys/
   // user_one_time_prekeys/user_devices), which remain unused by the 1:1 DM
   // path per the Sep 9 2026 architecture audit.
-  const previousActive = await sequelize.query(
-    `SELECT "keyId" FROM user_encryption_keys WHERE "userId"=:userId AND "isActive"=true LIMIT 1`,
-    { replacements: { userId }, type: sequelize.QueryTypes.SELECT }
-  );
-  const isRotation = !!(previousActive && previousActive.length && previousActive[0].keyId !== keyId);
+  // FIX (KEY-REGISTRATION-NOT-ATOMIC + NOT-IDEMPOTENT): the SELECT / deactivate-all / INSERT below used
+  // to run as three separate statements with no transaction. Between the deactivate and the insert
+  // there was a window where GET /keys/:userId found NO active key ("User has not enabled
+  // encryption"), so a sender checking in that instant fell back or failed; two concurrent
+  // registrations (retry + background re-register) could also interleave and leave two (or zero)
+  // active rows. Now: one transaction, serialised per user with a transaction-scoped advisory lock,
+  // and re-registering the key that is already active is a no-op (no deactivate, no rotation event).
+  const { isRotation, changed } = await sequelize.transaction(async (t) => {
+    await sequelize.query(
+      'SELECT pg_advisory_xact_lock(7001, :userId)',
+      { replacements: { userId }, transaction: t }
+    );
 
-  // Deactivate every previously active key for this user, across ALL
-  // devices — see comment above for why per-device scoping here was wrong.
-  await sequelize.query(
-    `UPDATE user_encryption_keys SET "isActive"=false, "updatedAt"=NOW() WHERE "userId"=:userId AND "isActive"=true`,
-    { replacements: { userId } }
-  );
+    const previousActive = await sequelize.query(
+      `SELECT "keyId","publicKey" FROM user_encryption_keys WHERE "userId"=:userId AND "isActive"=true ORDER BY "createdAt" DESC LIMIT 1`,
+      { replacements: { userId }, type: sequelize.QueryTypes.SELECT, transaction: t }
+    );
+    const prev = previousActive && previousActive.length ? previousActive[0] : null;
+    const alreadyActive = !!(prev && prev.keyId === keyId && prev.publicKey === publicKey);
+    const rotation = !!(prev && prev.keyId !== keyId);
 
-  // Insert new key
-  //
-  // ROOT-CAUSE FIX (MULTI-DEVICE-CANNOT-DECRYPT-OLD-MESSAGES): the
-  // "encryptedPrivateKey" column has existed on this table since it was
-  // first created, but nothing ever wrote to it — each device generated its
-  // own ECDH keypair locally (js/e2e-encryption.js's init()) and only ever
-  // persisted the wrapped private key in THAT BROWSER's localStorage. A
-  // second device (or the same device after storage was cleared) had no way
-  // to recover the first device's private key, so it minted a brand-new
-  // identity instead — every message previously encrypted against the old
-  // device's public key (i.e. the entire prior chat history) became
-  // permanently undecryptable there, exactly matching the reported "switch
-  // devices, every old chat says Unable to decrypt". Accepting and storing
-  // the caller's own password-wrapped private key here (still opaque
-  // ciphertext to the server — see js/e2e-encryption.js's
-  // _encryptPrivateKey/_decryptPrivateKey, AES-256-GCM under a
-  // PBKDF2-derived key that never leaves the client) lets a new device pull
-  // the SAME identity back down via GET /identity-backup below instead of
-  // generating a replacement.
-  await sequelize.query(
-    `INSERT INTO user_encryption_keys ("userId","deviceId","publicKey","keyId","encryptedPrivateKey","algorithm","isActive","createdAt","updatedAt")
-     VALUES (:userId,:deviceId,:publicKey,:keyId,:encryptedPrivateKey,'ECDH-P256-AES256GCM',true,NOW(),NOW())
-     ON CONFLICT ("userId","keyId") DO UPDATE
-       SET "publicKey"=:publicKey,
-           "encryptedPrivateKey"=COALESCE(:encryptedPrivateKey, user_encryption_keys."encryptedPrivateKey"),
-           "isActive"=true, "updatedAt"=NOW()`,
-    { replacements: { userId, deviceId, publicKey, keyId, encryptedPrivateKey: encryptedPrivateKey || null } }
-  );
+    if (!alreadyActive) {
+      // Deactivate every OTHER active key for this user (across all devices - GET /keys/:userId
+      // assumes exactly one active DM key per user). The key being registered is excluded so it is
+      // never briefly inactive; the upsert below (same transaction) activates it.
+      await sequelize.query(
+        `UPDATE user_encryption_keys SET "isActive"=false, "updatedAt"=NOW() WHERE "userId"=:userId AND "isActive"=true AND "keyId"<>:keyId`,
+        { replacements: { userId, keyId }, transaction: t }
+      );
+    }
+
+    // Upsert (idempotent on ("userId","keyId")). encryptedPrivateKey is kept if the caller omits it,
+    // so identity-backup recovery keeps working across devices (see GET /identity-backup).
+    await sequelize.query(
+      `INSERT INTO user_encryption_keys ("userId","deviceId","publicKey","keyId","encryptedPrivateKey","algorithm","isActive","createdAt","updatedAt")
+       VALUES (:userId,:deviceId,:publicKey,:keyId,:encryptedPrivateKey,'ECDH-P256-AES256GCM',true,NOW(),NOW())
+       ON CONFLICT ("userId","keyId") DO UPDATE
+         SET "publicKey"=:publicKey,
+             "encryptedPrivateKey"=COALESCE(:encryptedPrivateKey, user_encryption_keys."encryptedPrivateKey"),
+             "isActive"=true, "updatedAt"=NOW()`,
+      { replacements: { userId, deviceId, publicKey, keyId, encryptedPrivateKey: encryptedPrivateKey || null }, transaction: t }
+    );
+
+    return { isRotation: rotation, changed: !alreadyActive };
+  });
 
   // Fire-and-forget: never let a slow/failed socket push delay or fail the
   // HTTP response the registering client is waiting on to confirm E2E_READY.
-  _broadcastKeyEvent(
-    userId,
-    isRotation ? 'e2e:key_rotated' : 'e2e:key_available',
-    { publicKey, keyId },
-    sequelize
-  ).catch(() => {});
+  // Only announce when something actually changed - an idempotent re-registration of the key that is
+  // already active must not make every friend purge/re-fetch their cached copy.
+  if (changed) {
+    _broadcastKeyEvent(
+      userId,
+      isRotation ? 'e2e:key_rotated' : 'e2e:key_available',
+      { publicKey, keyId },
+      sequelize
+    ).catch(() => {});
+  }
 
   res.status(201).json({ status: 'success', data: { keyId }, message: 'Public key registered' });
 }));
