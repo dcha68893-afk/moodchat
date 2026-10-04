@@ -63,6 +63,7 @@ function createListingCompat(req, res, next) {
 // Response shape: { tools: [...], total, categories, generatedAt }
 // ═════════════════════════════════════════════════════════════════════════════
 router.get('/',          marketplaceLimiter, toolsController.getToolsList.bind(toolsController));
+router.get('/admin-contact', marketplaceLimiter, toolsController.getAdminContact.bind(toolsController));
 
 // ─── [FIX 2] TOOL REGISTRY ───────────────────────────────────────────────────
 // GET /api/tools/registry
