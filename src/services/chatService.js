@@ -176,7 +176,7 @@ class ChatService {
 
             const vals = uniqueIds.map(pid => `(${safeInt(chatId)}, ${safeInt(pid)}, NOW(), NOW(), NOW())`).join(',');
             await sequelize.query(
-                `INSERT INTO chat_participants ("chatId", "userId", "joinedAt", "createdAt", "updatedAt") VALUES ${vals}`
+                `INSERT INTO chat_participants ("chatId", "userId", "role", "joinedAt", "createdAt", "updatedAt") VALUES ${uniqueIds.map(pid => `(${safeInt(chatId)}, ${safeInt(pid)}, ${String(pid) === String(userId) ? "'admin'" : "'member'"}, NOW(), NOW(), NOW())`).join(",")}`
             );
 
             return await ChatService.getChatDetails(chatId, userId);
