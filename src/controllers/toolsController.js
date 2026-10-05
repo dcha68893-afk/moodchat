@@ -1385,10 +1385,28 @@ class ToolsController {
     async getAdminContact(req, res, next) {
         try {
             const whatsapp = (process.env.ADMIN_WHATSAPP_NUMBER || '').replace(/[^\d]/g, '');
-            if (!whatsapp) {
-                throw new AppError('Admin WhatsApp contact is not configured. Set ADMIN_WHATSAPP_NUMBER in .env.', 503);
+            // In-app support chat: the admin account users message. ADMIN_USER_ID wins; otherwise the
+            // oldest user with role 'admin'. Never the requester themself.
+            let adminUserId = null;
+            try {
+                const envId = parseInt(process.env.ADMIN_USER_ID, 10);
+                if (envId > 0) adminUserId = envId;
+                else {
+                    const { User } = require('../models');
+                    if (User) {
+                        const { Op } = require('sequelize');
+                        const where = { role: 'admin' };
+                        if (req.user && req.user.id) where.id = { [Op.ne]: req.user.id };
+                        const adminRow = await User.findOne({ where, attributes: ['id'], order: [['id', 'ASC']] });
+                        if (adminRow) adminUserId = adminRow.id;
+                    }
+                }
+            } catch (_) { /* fall back to WhatsApp only */ }
+            if (!whatsapp && !adminUserId) {
+                throw new AppError('Admin contact is not configured. Set ADMIN_USER_ID or ADMIN_WHATSAPP_NUMBER in .env.', 503);
             }
             return ok(res, {
+                adminUserId,
                 whatsapp,
                 name: process.env.ADMIN_NAME || 'Support',
                 defaultMessage: process.env.ADMIN_WHATSAPP_GREETING || 'Hi, I need help with my account.',

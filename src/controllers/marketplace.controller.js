@@ -2471,6 +2471,7 @@ function _formatProduct(row) {
         is_flash_sale:  !!(r.isFlashSale || r.is_flash_sale),
         available:      !!r.available,
         status:         r.status,
+        rejection_reason: r.rejectionReason || r.rejection_reason || null,
         views:          parseInt(r.views) || 0,
         sold_count:     (r.purchasedBy || []).length,
         created_at:     r.createdAt,

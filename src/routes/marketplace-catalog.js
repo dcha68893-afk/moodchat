@@ -116,7 +116,19 @@ async function searchListings(req){
   const q=String(req.query.q||req.query.search||'').trim();
   const page=Math.max(Number(req.query.page)||1,1),limit=Math.min(Number(req.query.limit)||24,100);
   const where={status:'active',available:true};
-  if(req.query.category)where.category=req.query.category;
+  // FIX ("No products found" under Categories → Digital / Services / Physical): 'digital',
+  // 'services' and 'physical' are browse GROUPS. Older listings carry the raw dropdown value as
+  // category (games, cleaning, phones...), so an exact category match hid approved listings.
+  // Match the group by listing TYPE as well.
+  const GROUP_TYPE={digital:'digital',services:'service',service:'service',physical:'physical'};
+  const reqCat=String(req.query.category||'').trim();
+  const reqType=String(req.query.type||'').trim();
+  const andClauses=[];
+  if(reqCat){
+    const grp=GROUP_TYPE[reqCat.toLowerCase()];
+    if(grp)andClauses.push({[Op.or]:[{type:grp},{category:reqCat}]});
+    else where.category=reqCat;
+  }
   // ROOT-CAUSE FIX ("No products found" on every leaf category, e.g. Fridges,
   // Cookers, Irons -- even though the seller's listing is approved and right
   // there): the category tree shown to buyers (Physical > Appliances >
@@ -128,8 +140,12 @@ async function searchListings(req){
   // top-level `subcategory` field on the way OUT, in normalizeRows() below)
   // but was never accepted as a filter on the way IN here -- so every
   // leaf-category click silently matched zero rows, in every vertical.
-  if(req.query.subcategory)where['metadata.subcategory']=req.query.subcategory;
-  if(req.query.type)where.type=req.query.type;
+  // Case-insensitive match on the stored sub-category (Games / games / GAMES).
+  if(req.query.subcategory){
+    const sub=String(req.query.subcategory).trim().toLowerCase();
+    andClauses.push(Tool.sequelize.where(Tool.sequelize.fn('lower',Tool.sequelize.literal(`"Tool"."metadata"->>'subcategory'`)),sub));
+  }
+  if(reqType)where.type=GROUP_TYPE[reqType.toLowerCase()]||reqType;
   if(req.query.minPrice!==undefined||req.query.maxPrice!==undefined){where.price={};if(req.query.minPrice!==undefined)where.price[Op.gte]=req.query.minPrice;if(req.query.maxPrice!==undefined)where.price[Op.lte]=req.query.maxPrice;}
   if(q){
     // Search each word across the actual seller listing fields, not just the
@@ -140,6 +156,7 @@ async function searchListings(req){
       {title:{[Op.iLike]:`%${token}%`}},{description:{[Op.iLike]:`%${token}%`}},{brand:{[Op.iLike]:`%${token}%`}},{sku:{[Op.iLike]:`%${token}%`}}
     ]}));
   }
+  if(andClauses.length)where[Op.and]=[...(where[Op.and]||[]),...andClauses];
   const {count,rows}=await Tool.findAndCountAll({where,order:orderFor(String(req.query.sort||'newest')),limit,offset:(page-1)*limit,include:sellerInclude()});
   return {listings:normalizeRows(rows),total:count,page,limit,totalPages:Math.ceil(count/limit)};
 }
@@ -147,7 +164,7 @@ async function searchListings(req){
 async function listings(req,res,next){try{return res.json({success:true,data:(await searchListings(req)).listings,total:(await searchListings(req)).total,page:(await searchListings(req)).page,limit:(await searchListings(req)).limit,totalPages:(await searchListings(req)).totalPages});}catch(e){next(e)}}
 
 // Avoid executing the database query multiple times for one request.
-async function listingsOnce(req,res,next){try{const result=await searchListings(req);return res.json({success:true,data:result.listings,total:result.total,page:result.page,limit:result.limit,totalPages:result.totalPages});}catch(e){next(e)}}
+async function listingsOnce(req,res,next){try{const result=await searchListings(req);return res.json({success:true,data:result.listings,products:result.listings,total:result.total,page:result.page,limit:result.limit,totalPages:result.totalPages});}catch(e){next(e)}}
 router.get('/listings',listingsOnce);
 router.get('/search',listingsOnce);
 router.get('/products',listingsOnce);
