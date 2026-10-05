@@ -2731,6 +2731,7 @@ async function _handleMpesaSuccess(callbackData) {
 }
 
 module.exports = new MarketplaceController();
+module.exports.mpesaStkPush = _mpesaStkPush;
 // ═══════════════════════════════════════════════════════════════════════════
 // FORENSIC ADDITIONS — All methods called by frontend but missing from controller
 // ═══════════════════════════════════════════════════════════════════════════

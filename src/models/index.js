@@ -203,7 +203,7 @@ const MODEL_WHITELIST = [
   'ModerationLog', 'AuditLog',
   // ── Marketplace ─────────────────────────────────────────────────────────────
   'Tool', 'Order', 'Review', 'Cart', 'Coupon', 'Wishlist',
-  'Wallet', 'WalletTransaction', 'Refund', 'Payout', 'SellerProfile',
+  'Wallet', 'WalletTransaction', 'AirtimeTransaction', 'Refund', 'Payout', 'SellerProfile',
   // ── Account security ────────────────────────────────────────────────────────
   'PasswordHistory',
   // ── Support / Contact Us ─────────────────────────────────────────────────────
@@ -409,7 +409,7 @@ async function createMissingTables() {
     'Calls', 'Call', 'UserStatus', 'TypingIndicator', 'ReadReceipt',
     'statuses', 'status_views', 'status_reactions', 'status_replies',
     // ── Marketplace ───────────────────────────────────────────────────────────
-    'tools', 'marketplace_orders', 'marketplace_reviews',
+    'tools', 'marketplace_orders', 'marketplace_reviews', 'airtime_transactions',
     'GameRooms', 'marketplace_carts',
     'wishlists', 'coupons', 'seller_profiles', 'payouts', 'refunds'
   ];
@@ -2103,6 +2103,7 @@ module.exports = {
   get Cart()              { return db.models.Cart              || null; },
   get Wallet()            { return db.models.Wallet            || null; },
   get WalletTransaction() { return db.models.WalletTransaction || null; },
+  get AirtimeTransaction() { return db.models.AirtimeTransaction || null; },
   get Coupon()        { return db.models.Coupon        || null; },
   get Refund()        { return db.models.Refund        || null; },
   get SellerProfile() { return db.models.SellerProfile || null; },

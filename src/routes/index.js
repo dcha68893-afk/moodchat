@@ -137,6 +137,7 @@ const ROUTE_MAPPING = {
   'marketplace.routes.js': '/marketplace',
   // PHASE14 FIX: payments.js — frontend calls /api/payments/* (mpesa, card, wallet)
   'payments.js': '/payments',
+  'airtime.js': '/airtime',
   // FIX: smart-groups.js was missing — ALL Group OS tabs returned 404
   // AUTH-X FIX: smart-groups.js has its own internal auth middleware.
   // Mounting it at /groups alongside group.js (which gets a separate auth
@@ -238,6 +239,8 @@ function isPublicRoute(mountPath, filename) {
   // empty regardless of how many listings were approved. A logged-in
   // seller checking their own fresh listing wouldn't always notice this,
   // since their own session already carried a valid token.
+  if (filename === 'airtime.js') return true;
+
   if (filename === 'accommodation.js') {
     return true;
   }
