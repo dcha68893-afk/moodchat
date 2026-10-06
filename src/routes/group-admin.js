@@ -19,6 +19,73 @@ function metadata(chat) { return (chat.metadata && typeof chat.metadata === 'obj
 function saveMetadata(chat, next) { return chat.update({ metadata: next, updatedAt: new Date() }); }
 async function loadMessage(chatId, messageId) { const message=await Message.findOne({where:{id:messageId,chatId,isDeleted:false}}); if(!message){const e=new Error('Message not found');e.status=404;throw e;} return message; }
 
+// Discoverable groups are explicitly opted-in by the owner/admin. Browsing
+// reveals only public metadata; joining still goes through the group's join policy.
+router.get('/discover', async (req, res) => {
+  try {
+    const viewer = uid(req);
+    const q = String(req.query?.q || '').trim().toLowerCase();
+    const limit = Math.min(Math.max(Number(req.query?.limit) || 30, 1), 60);
+    const groups = await Chat.findAll({
+      where: { type: 'group', isActive: true },
+      order: [['updatedAt', 'DESC']],
+      limit: Math.min(limit * 3, 180),
+    });
+    const memberRows = await ChatParticipant.findAll({
+      where: { userId: viewer },
+      attributes: ['chatId'],
+    });
+    const mine = new Set(memberRows.map(r => Number(r.chatId)));
+    const rows = [];
+    for (const chat of groups) {
+      if (mine.has(Number(chat.id))) continue;
+      const settings = chat.settings && typeof chat.settings === 'object' ? chat.settings : {};
+      if (settings.discoverable !== true) continue;
+      const name = String(chat.name || '');
+      const description = String(chat.description || '');
+      if (q && !name.toLowerCase().includes(q) && !description.toLowerCase().includes(q)) continue;
+      const count = await ChatParticipant.count({ where: { chatId: chat.id } });
+      rows.push({
+        id: chat.id, name, description, avatar: chat.avatar || null,
+        participantCount: count,
+        requiresApproval: settings.requireAdminApproval === true,
+      });
+      if (rows.length >= limit) break;
+    }
+    return res.json({ success:true, data:{ groups: rows, query:q } });
+  } catch (e) {
+    return res.status(e.status || 500).json({ success:false, message:e.message || 'Unable to discover groups' });
+  }
+});
+
+router.post('/discover/:chatId/join', async (req, res) => {
+  try {
+    const userId = Number(uid(req));
+    const chat = await loadGroup(req.params.chatId);
+    if (!Number.isInteger(userId) || userId <= 0) return res.status(401).json({success:false,message:'Authentication required'});
+    if (await membership(chat.id, userId)) return res.json({success:true,data:{status:'already_member',chatId:chat.id}});
+    const settings = chat.settings && typeof chat.settings === 'object' ? chat.settings : {};
+    if (settings.discoverable !== true) return res.status(404).json({success:false,message:'This group is not discoverable'});
+    const meta = metadata(chat);
+    const requests = Array.isArray(meta.joinRequests) ? meta.joinRequests.slice() : [];
+    if (settings.requireAdminApproval === true) {
+      const existing = requests.find(x => Number(x.userId) === userId && x.status === 'pending');
+      if (existing) return res.status(202).json({success:true,data:{status:'pending',requestId:existing.id,chatId:chat.id}});
+      const request = { id:'jr_'+crypto.randomBytes(10).toString('hex'), userId, requestedAt:new Date().toISOString(), status:'pending', source:'discover' };
+      requests.push(request);
+      meta.joinRequests = requests.slice(-500);
+      await saveMetadata(chat, meta);
+      await emitGroup(req, 'GROUP_JOIN_REQUEST', {groupId:chat.id, request, timestamp:new Date().toISOString()});
+      return res.status(202).json({success:true,data:{status:'pending',requestId:request.id,chatId:chat.id}});
+    }
+    await ChatParticipant.create({chatId:chat.id,userId,role:'member',joinedAt:new Date()});
+    await emitGroup(req,'GROUP_MEMBER_ADDED',{groupId:chat.id,member:{id:userId,userId,role:'member'},addedBy:'discover',timestamp:new Date().toISOString()});
+    return res.status(201).json({success:true,data:{status:'joined',chatId:chat.id}});
+  } catch (e) {
+    return res.status(e.status || 500).json({success:false,message:e.message || 'Unable to join group'});
+  }
+});
+
 router.get('/:chatId/members', async (req, res) => { try { const chat = await loadGroup(req.params.chatId); await requireMember(chat, uid(req)); const rows = await ChatParticipant.findAll({ where: { chatId: chat.id }, include: [{ model: User, as: 'chatParticipantUser', attributes: ['id','username','avatar','firstName','lastName','status','lastSeen'] }], order: [['joinedAt','ASC']] }); return res.json({ success:true, data:rows.map(p=>({ id:p.userId, role:String(p.userId)===String(chat.createdBy)?'owner':(p.role||'member'), isMuted:!!p.isMuted, mutedUntil:p.mutedUntil, joinedAt:p.joinedAt, user:p.chatParticipantUser })) }); } catch(e) { return res.status(e.status||500).json({success:false,message:e.message}); } });
 router.post('/:chatId/members', async (req, res) => { try { const chat=await loadGroup(req.params.chatId); const actor=uid(req); const actorMembership=await requireMember(chat,actor); const actorIsManager=actorMembership.owner || actorMembership.participant.role === 'admin'; const allowMemberInvites=chat.settings?.allowMemberInvites !== false; if(!actorIsManager && !allowMemberInvites){const e=new Error('Only group admins can add members');e.status=403;throw e;} const userId=Number(req.body?.userId); if(!Number.isInteger(userId)||userId<=0)return res.status(400).json({success:false,message:'Valid userId is required'}); const user=await User.findByPk(userId,{attributes:['id','username','avatar','firstName','lastName','status','settings']}); if(!user)return res.status(404).json({success:false,message:'User not found'}); if(await membership(chat.id,userId))return res.status(409).json({success:false,message:'User is already a member'});
   // FIX (Groups architecture audit, item #10: "who can add me" enforcement):
