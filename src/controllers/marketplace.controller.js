@@ -2588,6 +2588,16 @@ async function _mpesaStkPush({ phone, amount, orderId, description, callbackUrl 
         ? 'https://api.safaricom.co.ke'
         : 'https://sandbox.safaricom.co.ke';
 
+    // Daraja only accepts 2547XXXXXXXX / 2541XXXXXXXX (digits only, no '+', no leading 0). Callers pass
+    // +254..., 07.., 01.. or 254..; anything else would come back as "Bad Request - Invalid PhoneNumber".
+    {
+        let d = String(phone == null ? '' : phone).replace(/\D/g, '');
+        if (/^0[17]\d{8}$/.test(d)) d = '254' + d.slice(1);
+        else if (/^[17]\d{8}$/.test(d)) d = '254' + d;
+        if (!/^254[17]\d{8}$/.test(d)) return { errorMessage: 'Enter a valid Safaricom M-Pesa number (07XX XXX XXX)' };
+        phone = d;
+    }
+
     if (!consumerKey || !consumerSecret) {
         logger.warn('[Marketplace] M-Pesa env vars not set — returning mock response');
         return { CheckoutRequestID: 'MOCK-' + Date.now(), mock: true };
