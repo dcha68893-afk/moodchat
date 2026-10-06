@@ -74,7 +74,7 @@ router.get('/', authenticateToken, async (req, res) => {
 });
 
 // GET /api/conversations/pinned|muted|archived|backup|restore
-router.get('/pinned',   authenticateToken, (req, res) => res.json({ success: true, data: [] }));
+router.get('/pinned',authenticateToken,async(req,res)=>{try{const db=req.app.locals.models||require('../models'),CP=db.ChatParticipant||db.models?.ChatParticipant,uid=req.user?.id||req.user?.userId;if(!CP||!uid)return res.status(503).json({success:false,message:'Conversation pin service unavailable'});const rows=await CP.findAll({where:{userId:uid,isPinned:true},attributes:['chatId','pinnedAt'],order:[['pinnedAt','DESC']]});res.json({success:true,data:rows.map(r=>String(r.chatId))});}catch(e){res.status(500).json({success:false,message:e.message});}});
 router.get('/muted',    authenticateToken, (req, res) => res.json({ success: true, data: [] }));
 router.get('/archived', authenticateToken, (req, res) => res.json({ success: true, data: [] }));
 router.get('/backup',   authenticateToken, (req, res) => res.json({ success: true, data: [], format: 'json' }));
