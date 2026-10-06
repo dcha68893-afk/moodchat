@@ -135,11 +135,29 @@ let _prTable = null;
 async function ensureProblemReports() {
   if (_prTable) return _prTable;
   const { sequelize } = require('../models');
+  // Older deployments created this table from an earlier shape. Verify every
+  // column additively instead of assuming the old table already matches the
+  // current INSERT contract; this makes report submission self-healing after
+  // partial/older migrations.
   await sequelize.query(`CREATE TABLE IF NOT EXISTS problem_reports (
       id SERIAL PRIMARY KEY, "reporterId" INTEGER NOT NULL, category VARCHAR(40) NOT NULL,
       module VARCHAR(60), subject VARCHAR(200), details TEXT, "targetUserId" INTEGER, "targetRef" VARCHAR(120),
       status VARCHAR(20) NOT NULL DEFAULT 'pending', "actionTaken" VARCHAR(30), "adminNote" TEXT,
       "handledBy" INTEGER, "handledAt" TIMESTAMPTZ, "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(), "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
+  await sequelize.query(`ALTER TABLE problem_reports ADD COLUMN IF NOT EXISTS "reporterId" INTEGER`);
+  await sequelize.query(`ALTER TABLE problem_reports ADD COLUMN IF NOT EXISTS category VARCHAR(40)`);
+  await sequelize.query(`ALTER TABLE problem_reports ADD COLUMN IF NOT EXISTS module VARCHAR(60)`);
+  await sequelize.query(`ALTER TABLE problem_reports ADD COLUMN IF NOT EXISTS subject VARCHAR(200)`);
+  await sequelize.query(`ALTER TABLE problem_reports ADD COLUMN IF NOT EXISTS details TEXT`);
+  await sequelize.query(`ALTER TABLE problem_reports ADD COLUMN IF NOT EXISTS "targetUserId" INTEGER`);
+  await sequelize.query(`ALTER TABLE problem_reports ADD COLUMN IF NOT EXISTS "targetRef" VARCHAR(120)`);
+  await sequelize.query(`ALTER TABLE problem_reports ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'pending'`);
+  await sequelize.query(`ALTER TABLE problem_reports ADD COLUMN IF NOT EXISTS "actionTaken" VARCHAR(30)`);
+  await sequelize.query(`ALTER TABLE problem_reports ADD COLUMN IF NOT EXISTS "adminNote" TEXT`);
+  await sequelize.query(`ALTER TABLE problem_reports ADD COLUMN IF NOT EXISTS "handledBy" INTEGER`);
+  await sequelize.query(`ALTER TABLE problem_reports ADD COLUMN IF NOT EXISTS "handledAt" TIMESTAMPTZ`);
+  await sequelize.query(`ALTER TABLE problem_reports ADD COLUMN IF NOT EXISTS "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW()`);
+  await sequelize.query(`ALTER TABLE problem_reports ADD COLUMN IF NOT EXISTS "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW()`);
   await sequelize.query(`ALTER TABLE problem_reports ADD COLUMN IF NOT EXISTS attachments JSONB NOT NULL DEFAULT '[]'::jsonb`);
   await sequelize.query(`ALTER TABLE problem_reports ADD COLUMN IF NOT EXISTS "messageRef" JSONB`);
   await sequelize.query(`CREATE INDEX IF NOT EXISTS problem_reports_status_idx ON problem_reports (status, "createdAt" DESC)`);
@@ -194,6 +212,8 @@ async function buildMessageRef(req, db, reporterId, raw) {
 
 // Any signed-in user: submit a report from any module.
 router.post('/problem-reports', asyncHandler(async (req, res) => {
+  const requestId = req.id || req.requestId || null;
+  try {
   const reporterId = callerId(req);
   if (!reporterId) return res.status(401).json({ success:false, message:'Authentication required' });
   const category = String(req.body?.category || 'other');
@@ -225,6 +245,17 @@ router.post('/problem-reports', asyncHandler(async (req, res) => {
   await Promise.allSettled(admins.map(a => prNotify(a.id, 'system', 'New problem report',
     `${category.replace(/_/g,' ')} reported in ${moduleName}.`, { reportId, category, module: moduleName, kind: 'problem_report' })));
   return res.status(201).json({ success:true, data:{ id: reportId } });
+  } catch (error) {
+    console.error('[Admin] problem report submission failed', {
+      requestId, reporterId: callerId(req), name: error?.name, message: error?.message, stack: error?.stack
+    });
+    return res.status(500).json({
+      success:false,
+      message:'Internal server error',
+      code:'INTERNAL_SERVER_ERROR',
+      requestId
+    });
+  }
 }));
 
 // Reporter: see own reports and outcomes.
