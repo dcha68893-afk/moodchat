@@ -199,6 +199,8 @@ const MODEL_WHITELIST = [
   'PushSubscription',
   // ── Games ───────────────────────────────────────────────────────────────────
   'GameProgress', 'GameChallenge', 'GameRoom',
+  // ── Money ──────────────────────────────────────────────────────────────────
+  'MoneyCircle', 'MoneyCircleMember', 'MoneyContribution', 'MoneyRequest',
   // ── Moderation ──────────────────────────────────────────────────────────────
   'ModerationLog', 'AuditLog',
   // ── Marketplace ─────────────────────────────────────────────────────────────
@@ -411,7 +413,8 @@ async function createMissingTables() {
     // ── Marketplace ───────────────────────────────────────────────────────────
     'tools', 'marketplace_orders', 'marketplace_reviews', 'airtime_transactions',
     'GameRooms', 'marketplace_carts',
-    'wishlists', 'coupons', 'seller_profiles', 'payouts', 'refunds'
+    'wishlists', 'coupons', 'seller_profiles', 'payouts', 'refunds',
+    'money_circles', 'money_circle_members', 'money_contributions', 'money_requests'
   ];
   
   const missingTables = [];
@@ -2109,6 +2112,12 @@ module.exports = {
   get SellerProfile() { return db.models.SellerProfile || null; },
   // Multiplayer arcade rooms
   get GameRoom() { return db.models.GameRoom || null; },
+  // Money models must be exposed here because routes/money.js consumes the
+  // canonical models export rather than reaching into db.models directly.
+  get MoneyCircle() { return db.models.MoneyCircle || null; },
+  get MoneyCircleMember() { return db.models.MoneyCircleMember || null; },
+  get MoneyContribution() { return db.models.MoneyContribution || null; },
+  get MoneyRequest() { return db.models.MoneyRequest || null; },
   get ContactMessage() { return db.models.ContactMessage || null; },
   get AuditLog()      { return db.models.AuditLog      || null; },
   get Payout()        { return db.models.Payout        || null; },
