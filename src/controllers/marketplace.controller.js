@@ -1158,12 +1158,14 @@ class MarketplaceController {
                 if (O) {
                     await O.update(
                         { paymentRef: result.CheckoutRequestID, paymentMethod: 'mpesa' },
-                        { where: { id: order_id } }
+                        { where: { id: { [Op.in]: uniqueIds }, buyerId: req.user.id } }
                     );
                     // A retry after a declined/cancelled push must not keep reporting 'failed'.
-                    if (orderRecord.metadata?.mpesa_failure) {
-                        const { mpesa_failure, ...restMeta } = orderRecord.metadata;
-                        await orderRecord.update({ metadata: restMeta }).catch(() => {});
+                    for (const po of paymentOrders) {
+                        if (po.metadata?.mpesa_failure) {
+                            const { mpesa_failure, ...restMeta } = po.metadata;
+                            await po.update({ metadata: restMeta }).catch(() => {});
+                        }
                     }
                 }
             }
@@ -2703,12 +2705,9 @@ async function _handleMpesaSuccess(callbackData) {
             }
 
             if (amt !== undefined && amt !== null) {
-                const mismatched = pendingOrders.filter(o => {
-                    const expected = parseFloat(o.totalPrice);
-                    return !Number.isNaN(expected) && Math.abs(expected - parseFloat(amt)) > 0.5;
-                });
-                if (mismatched.length) {
-                    logger.error(`[Marketplace] M-Pesa amount mismatch for checkoutId ${checkoutId}: received ${amt}, expected ${mismatched.map(o => o.totalPrice).join(', ')}`);
+                const expectedTotal = pendingOrders.reduce((sum, o) => sum + Number(o.totalPrice || 0), 0);
+                if (Number.isFinite(expectedTotal) && Math.abs(expectedTotal - parseFloat(amt)) > 0.5) {
+                    logger.error(`[Marketplace] M-Pesa amount mismatch for checkoutId ${checkoutId}: received ${amt}, expected total ${expectedTotal}`);
                     return; // do not mark as paid — amount does not match
                 }
             }
