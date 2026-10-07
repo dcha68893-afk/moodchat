@@ -45,6 +45,8 @@ class SyncService {
 
       for (const message of messages) {
         try {
+          // E2E gate: offline-sync must not become a plaintext back door.
+          require('../utils/e2eEnvelope').assertEncryptedContent(message && message.content);
           // Check if message already exists (by clientMessageId)
           if (message.clientMessageId) {
             const existing = await Message.findOne({

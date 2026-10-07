@@ -146,7 +146,12 @@ router.post('/:conversationId/messages', authenticateToken, async (req, res) => 
             return res.status(400).json({ success: false, message: 'clientMessageId is required for idempotent send' });
         }
         const rawContent = req.body.content || req.body.message || '';
-        const content = String(rawContent).trim().substring(0, 5000);
+        // E2E gate + never truncate an envelope (see utils/e2eEnvelope.js).
+        const _e2e = require('../utils/e2eEnvelope');
+        try { _e2e.assertEncryptedContent(rawContent); }
+        catch (e2eErr) { return res.status(e2eErr.status || 400).json({ success: false, message: e2eErr.message, code: e2eErr.code }); }
+        const _trimmed = String(rawContent).trim();
+        const content = _e2e.isEnvelope(_trimmed) ? _trimmed : _trimmed.substring(0, 5000);
         if (!content) return res.status(400).json({ success: false, message: 'Content cannot be empty' });
 
         // Idempotency: mirror messageDeliveryService.sendMessage's dedup check

@@ -688,6 +688,9 @@ class WebSocketService {
                         ? String(localId)
                         : `nolocalid:${userId}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
 
+                    // E2E gate (same rule as POST /messages): no plaintext over the socket either.
+                    require('../utils/e2eEnvelope').assertEncryptedContent(content);
+
                     const { message, alreadyExisted } = await messageDeliveryService.sendMessage({
                         chatId, receiverId, senderId: userId, content, type, clientMessageId, replyToId, metadata, expiresAt,
                     });

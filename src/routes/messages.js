@@ -26,6 +26,7 @@ router.use(apiRateLimiter);
 const messageDeliveryService = require('../services/messageDeliveryService');
 const { broadcastNewMessage } = require('../services/messageBroadcast');
 const { isDbUnavailable } = require('../utils/dbErrors');
+const { assertEncryptedContent, isEnvelope } = require('../utils/e2eEnvelope');
 
 function getUserId(req) {
   return req.user && (req.user.userId || req.user.id);
@@ -122,6 +123,8 @@ router.post('/', asyncHandler(async (req, res) => {
   const { chatId, receiverId, content, type, clientMessageId, replyToId, metadata, expiresAt } = req.body || {};
 
   try {
+    // E2E gate: refuse plaintext from any client path that skipped encryption.
+    assertEncryptedContent(content);
     const { message, alreadyExisted } = await messageDeliveryService.sendMessage({
       chatId, receiverId, senderId, content, type, clientMessageId, replyToId, metadata, expiresAt,
     });
@@ -474,7 +477,12 @@ const _editMessageHandler = asyncHandler(async (req, res) => {
 
   const { content } = req.body || {};
   if (!content || !content.trim()) return res.status(400).json({ success: false, message: 'Message content is required' });
-  const safeContent = stripHtmlTags(content).trim();
+  try { assertEncryptedContent(content); }
+  catch (err) { return res.status(err.status || 400).json({ success: false, message: err.message, code: err.code }); }
+  // Never run HTML-stripping over an encrypted envelope: the \bon\w+= rule can
+  // rewrite a base64 value that happens to start with "on" and end in "=",
+  // corrupting the ciphertext so the edited message can never be decrypted.
+  const safeContent = isEnvelope(content) ? String(content).trim() : stripHtmlTags(content).trim();
 
   const sequelize = getSequelize();
   const [msg] = await sequelize.query(

@@ -156,7 +156,15 @@ class MessageDeliveryService {
 
     if (!chatId || !senderId) throw new ValidationError('chatId (or receiverId) and senderId are required');
     if (!clientMessageId) throw new ValidationError('clientMessageId is required for idempotent send');
-    const sanitizedContent = content ? String(content).trim().substring(0, 5000) : '';
+    // FIX (LONG-ENCRYPTED-MESSAGE-TRUNCATED): this used to cut EVERY message at 5000
+    // chars. An E2E envelope is ~1.4x the plaintext + ~450 chars of keys/header, so a
+    // ~3.3k-char message became >5000 chars, got sliced mid-JSON, was stored as invalid
+    // JSON and could never be decrypted ("sent but won't decrypt"). Envelopes are
+    // never truncated; plain (server-generated) text keeps the old 5000 cap.
+    const _rawContent = content ? String(content).trim() : '';
+    const sanitizedContent = require('../utils/e2eEnvelope').isEnvelope(_rawContent)
+      ? _rawContent
+      : _rawContent.substring(0, 5000);
     if (type === 'text' && !sanitizedContent) throw new ValidationError('Content cannot be empty for text messages');
 
     const chatIdInt = parseInt(chatId, 10);

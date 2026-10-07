@@ -24,6 +24,9 @@ router.post('/:groupId/messages', asyncHandler(async(req,res)=>{
  const clientMessageId=String(body.clientMessageId||body.localId||'').trim();
  if(!clientMessageId)return res.status(400).json({success:false,message:'clientMessageId is required'});
  if(type==='text'&&!content)return res.status(400).json({success:false,message:'Content cannot be empty for text messages'});
+ /* E2E gate: the canonical group route (/group-messages) already rejects anything that is not a group ciphertext
+    envelope; this legacy transport accepted raw plaintext. Same rule here (kill switch: E2E_ALLOW_PLAINTEXT=1). */
+ if(content&&require('../utils/e2eEnvelope').enforcementEnabled()&&!require('../services/groupMessagingService').parseEnvelope(content))return res.status(400).json({success:false,message:'Group messages must be end-to-end encrypted before sending',code:'E2E_REQUIRED'});
  try{
   const {message,alreadyExisted}=await messageDeliveryService.sendMessage({chatId:groupId,senderId,content,type,clientMessageId,replyToId:body.replyToId||null,metadata:body.metadata||null,expiresAt:body.expiresAt||null});
   if(!alreadyExisted)broadcastNewMessage(message,senderId).catch(err=>console.error('[GroupMessages] broadcastNewMessage failed:',err.message));
