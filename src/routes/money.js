@@ -1,10 +1,14 @@
 'use strict';
 const express=require('express');
+const jwt=require('jsonwebtoken');
 const router=express.Router();
 const db=()=>require('../models');
 const uid=req=>Number(req.user?.id||req.user?.userId||req.user?.sub||req.userId);
 const wrap=fn=>(req,res,next)=>Promise.resolve(fn(req,res,next)).catch(e=>{console.error('[money]',e.message);if(!res.headersSent)res.status(e.status||500).json({success:false,message:e.message||'Server error'});});
 function ok(res,data,status=200){return res.status(status).json({success:true,...data});}
+const moneyJwtSecret=()=>process.env.JWT_ACCESS_SECRET||process.env.JWT_SECRET||'';
+function verifyMoneyStepUp(req,userId){const token=String(req.get('X-Money-Step-Up')||'').trim();const secret=moneyJwtSecret();if(!token||!secret)return false;try{const p=jwt.verify(token,secret);return p&&p.type==='money_step_up'&&Number(p.userId)===Number(userId);}catch(_){return false;}}
+function requireMoneyStepUp(req,res,userId){if(!verifyMoneyStepUp(req,userId)){res.status(401).json({success:false,message:'Fresh account authentication is required for this money action.',errorCode:'MONEY_STEP_UP_REQUIRED'});return false;}return true;}
 
 function normalizePhone(phone){let d=String(phone||'').replace(/\D/g,'');if(/^0[17]\d{8}$/.test(d))d='254'+d.slice(1);else if(/^[17]\d{8}$/.test(d))d='254'+d;if(!/^254[17]\d{8}$/.test(d))throw Object.assign(new Error('Enter a valid Kenyan M-Pesa number (07XX XXX XXX)'),{status:400});return d;}
 async function mpesaStk({phone,amount,reference,description,callbackPath}){
@@ -25,6 +29,8 @@ async function handleMoneyCallback(body){
  if(C){if(Number(C.amount)!==amount)return;if(body.ResultCode===0||String(body.ResultCode)==='0'){if(C.status!=='paid'){await C.update({status:'paid',paymentRef:receipt||checkoutId,metadata:{...(C.metadata||{}),checkoutRequestId:checkoutId,receipt}});const circle=await d.MoneyCircle.findByPk(C.circleId);if(circle)await circle.increment('collectedAmount',{by:amount});}}else if(C.status==='pending')await C.update({status:'failed',metadata:{...(C.metadata||{}),failureCode:body.ResultCode,failureDescription:body.ResultDesc}});return;}
  const R=d.MoneyRequest&&await d.MoneyRequest.findOne({where:{paymentRef:checkoutId}});if(R){if(Number(R.amount)!==amount)return;if(body.ResultCode===0||String(body.ResultCode)==='0'){if(R.status!=='paid')await R.update({status:'paid',paymentRef:receipt||checkoutId,metadata:{...(R.metadata||{}),checkoutRequestId:checkoutId,receipt}});}else if(R.status==='requested')await R.update({status:'expired',metadata:{...(R.metadata||{}),failureCode:body.ResultCode,failureDescription:body.ResultDesc}});}
 }
+
+router.post('/security/step-up',wrap(async(req,res)=>{const d=db(),userId=uid(req);if(!userId)return res.status(401).json({success:false,message:'Unauthorized'});const password=String(req.body?.password||'');if(!password)return res.status(400).json({success:false,message:'Account password is required'});const User=d.Users||d.User;if(!User)return res.status(500).json({success:false,message:'User service unavailable'});const user=await User.findByPk(userId);if(!user)return res.status(401).json({success:false,message:'Account not found'});const valid=typeof user.validatePassword==='function'?await user.validatePassword(password):false;if(!valid)return res.status(401).json({success:false,message:'Incorrect account password',errorCode:'MONEY_STEP_UP_FAILED'});const secret=moneyJwtSecret();if(!secret)return res.status(503).json({success:false,message:'Money security is not configured',errorCode:'MONEY_SECURITY_NOT_CONFIGURED'});const stepUpToken=jwt.sign({userId:Number(userId),type:'money_step_up'},secret,{expiresIn:'10m'});return ok(res,{stepUpToken,expiresIn:600},200);}));
 
 router.get('/overview',wrap(async(req,res)=>{
  const d=db(), userId=uid(req); if(!userId)return res.status(401).json({success:false,message:'Unauthorized'});
@@ -142,6 +148,7 @@ router.post('/requests/:id/cancel',wrap(async(req,res)=>{
 
 router.post('/requests',wrap(async(req,res)=>{
  const d=db(),userId=uid(req);if(!userId)return res.status(401).json({success:false,message:'Unauthorized'});
+ if(!requireMoneyStepUp(req,res,userId))return;
  const amount=Number(req.body?.amount),rawPhone=String(req.body?.recipientPhone||'').trim(),purpose=String(req.body?.purpose||'').trim().slice(0,255);
  let phone;try{phone=normalizePhone(rawPhone);}catch(e){return res.status(400).json({success:false,message:'Enter a valid Kenyan M-Pesa number'});}
  if(!Number.isFinite(amount)||amount<=0||amount>50000)return res.status(400).json({success:false,message:'Amount must be between KSh 1 and KSh 50,000'});
