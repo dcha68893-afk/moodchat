@@ -34,7 +34,7 @@ router.get('/overview',wrap(async(req,res)=>{
   d.MoneyContribution?.findAll({where:{contributorId:userId},order:[['createdAt','DESC']],limit:20})||[]
  ]);
  const activity=[
-  ...requests.map(x=>({kind:'request',title:x.purpose||'Payment request',subtitle:x.status+' · '+x.recipientPhone,amount:x.amount,createdAt:x.createdAt})),
+  ...requests.map(x=>({kind:'request',title:x.purpose||'Payment request',subtitle:x.status+' · '+x.recipientPhone.replace(/^(\\+?254|0)(\\d{2})\\d{5}(\\d{2})$/,'$1$2*****$3'),amount:x.amount,createdAt:x.createdAt})),
   ...contributions.map(x=>({kind:'contribution',title:'Circle contribution',subtitle:x.status,amount:x.amount,createdAt:x.createdAt}))
  ].sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt)).slice(0,20);
  const circleRows=circles.map(x=>x.toJSON());
@@ -104,17 +104,63 @@ router.post('/circles/:id/contributions/:contributionId/pay',wrap(async(req,res)
 
 router.get('/requests',wrap(async(req,res)=>{
  const d=db(),userId=uid(req);if(!userId)return res.status(401).json({success:false,message:'Unauthorized'});
+ const now=new Date();
+ await d.MoneyRequest?.update({status:'expired'},{where:{requesterId:userId,status:'requested',expiresAt:{[d.Op.lt]:now}}});
  const requests=await d.MoneyRequest?.findAll({where:{requesterId:userId},order:[['createdAt','DESC']],limit:50})||[];
- return ok(res,{requests});
+ return ok(res,{requests:requests.map(x=>{const j=x.toJSON();j.recipientPhone=j.recipientPhone.replace(/^(\\+?254|0)(\\d{2})\\d{5}(\\d{2})$/,'$1$2*****$3');return j;})});
+}));
+
+router.get('/requests/incoming',wrap(async(req,res)=>{
+ const d=db(),userId=uid(req);if(!userId)return res.status(401).json({success:false,message:'Unauthorized'});
+ const now=new Date();
+ await d.MoneyRequest?.update({status:'expired'},{where:{recipientUserId:userId,status:'requested',expiresAt:{[d.Op.lt]:now}}});
+ const requests=await d.MoneyRequest?.findAll({where:{recipientUserId:userId},order:[['createdAt','DESC']],limit:50})||[];
+ const User=d.Users;
+ const requesterIds=[...new Set(requests.map(x=>x.requesterId))];
+ const users=User&&requesterIds.length?await User.findAll({where:{id:requesterIds},attributes:['id','username','firstName','lastName','avatar','isVerified']}):[];
+ const byId=new Map(users.map(u=>[u.id,u]));
+ return ok(res,{requests:requests.map(x=>{const j=x.toJSON();delete j.recipientPhone;const u=byId.get(x.requesterId);j.requester=u?{id:u.id,username:u.username,displayName:u.displayName,avatar:u.avatar,isVerified:!!u.isVerified}:null;return j;})});
+}));
+
+router.get('/requests/:id',wrap(async(req,res)=>{
+ const d=db(),userId=uid(req);if(!userId)return res.status(401).json({success:false,message:'Unauthorized'});
+ const request=await d.MoneyRequest?.findByPk(req.params.id);if(!request)return res.status(404).json({success:false,message:'Payment request not found'});
+ if(request.requesterId!==userId&&request.recipientUserId!==userId)return res.status(403).json({success:false,message:'You are not allowed to view this request'});
+ if(request.status==='requested'&&request.expiresAt&&new Date(request.expiresAt)<new Date()){await request.update({status:'expired'});}
+ const j=request.toJSON();
+ if(request.recipientUserId!==userId)j.recipientPhone=j.recipientPhone.replace(/^(\\+?254|0)(\\d{2})\\d{5}(\\d{2})$/,'$1$2*****$3');
+ else delete j.recipientPhone;
+ return ok(res,{request:j});
+}));
+
+router.post('/requests/:id/cancel',wrap(async(req,res)=>{
+ const d=db(),userId=uid(req);if(!userId)return res.status(401).json({success:false,message:'Unauthorized'});
+ const request=await d.MoneyRequest?.findOne({where:{id:req.params.id,requesterId:userId,status:'requested'}});if(!request)return res.status(404).json({success:false,message:'Active payment request not found'});
+ await request.update({status:'cancelled'});
+ return ok(res,{request});
 }));
 
 router.post('/requests',wrap(async(req,res)=>{
  const d=db(),userId=uid(req);if(!userId)return res.status(401).json({success:false,message:'Unauthorized'});
- const amount=Number(req.body?.amount),phone=String(req.body?.recipientPhone||'').trim(),purpose=String(req.body?.purpose||'').trim();
- if(!/^\+?254[17]\d{8}$/.test(phone.replace(/\s+/g,''))&&!/^0[17]\d{8}$/.test(phone.replace(/\s+/g,'')))return res.status(400).json({success:false,message:'Enter a valid Kenyan mobile number'});
- if(!Number.isFinite(amount)||amount<=0)return res.status(400).json({success:false,message:'Valid amount required'});
- const request=await d.MoneyRequest.create({requesterId:userId,recipientPhone:phone,amount,purpose:purpose||null});
- return ok(res,{request,nextStep:'A payment request has been created. Actual bill/beneficiary settlement requires the configured merchant or B2C rail.'},201);
+ const amount=Number(req.body?.amount),rawPhone=String(req.body?.recipientPhone||'').trim(),purpose=String(req.body?.purpose||'').trim().slice(0,255);
+ let phone;try{phone=normalizePhone(rawPhone);}catch(e){return res.status(400).json({success:false,message:'Enter a valid Kenyan M-Pesa number'});}
+ if(!Number.isFinite(amount)||amount<=0||amount>50000)return res.status(400).json({success:false,message:'Amount must be between KSh 1 and KSh 50,000'});
+ if(!purpose)return res.status(400).json({success:false,message:'A clear payment purpose is required'});
+ const User=d.Users;
+ let recipient=null;
+ if(User)recipient=await User.findOne({where:{phone:{[d.Op.or]:[phone,'+'+phone,'0'+phone.slice(3)]}}});
+ const requester=User?await User.findByPk(userId,{attributes:['id','phone','username','firstName','lastName','isVerified']}):null;
+ if(requester?.phone){try{if(normalizePhone(requester.phone)===phone)return res.status(400).json({success:false,message:'You cannot create a payment request to your own number'});}catch(_){}}
+ const dayStart=new Date(Date.now()-24*60*60*1000);
+ const recent=await d.MoneyRequest.count({where:{requesterId:userId,createdAt:{[d.Op.gte]:dayStart}}});
+ if(recent>=20)return res.status(429).json({success:false,message:'Too many payment requests today. Try again tomorrow.'});
+ const duplicate=await d.MoneyRequest.findOne({where:{requesterId:userId,recipientPhone:phone,amount,purpose,status:'requested',createdAt:{[d.Op.gte]:new Date(Date.now()-10*60*1000)}}});
+ if(duplicate)return ok(res,{request:duplicate,nextStep:'This request already exists. Do not create another copy.'},200);
+ const idem=String(req.get('Idempotency-Key')||'').trim().slice(0,120)||null;
+ if(idem){const existing=await d.MoneyRequest.findOne({where:{requesterId:userId,idempotencyKey:idem}});if(existing)return ok(res,{request:existing,nextStep:'This request was already created.'},200);}
+ const expiresAt=new Date(Date.now()+24*60*60*1000);
+ const request=await d.MoneyRequest.create({requesterId:userId,recipientUserId:recipient?.id||null,recipientPhone:phone,amount,purpose,status:'requested',expiresAt,idempotencyKey:idem,metadata:{security:{recipientMatchedToNecpraAccount:!!recipient,requesterAccountVerified:!!requester?.isVerified,createdFromAuthenticatedSession:true},warning:recipient?'Verified NECPRA recipient account matched to this phone.':'This phone is not currently matched to a NECPRA account; verify the recipient through a trusted channel before any payment.'}});
+ return ok(res,{request,nextStep:recipient?'Request created for a matched NECPRA account. The payer must independently verify the recipient and purpose before approving any future payment.':'Request created, but the recipient is not a matched NECPRA account. Do not pay based on the request alone.'},201);
 }));
 
 module.exports=router;
