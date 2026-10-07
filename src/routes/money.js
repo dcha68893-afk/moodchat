@@ -1,6 +1,7 @@
 'use strict';
 const express=require('express');
 const jwt=require('jsonwebtoken');
+const { comparePassword }=require('../utils/passwordUtils');
 const router=express.Router();
 const db=()=>require('../models');
 const uid=req=>Number(req.user?.id||req.user?.userId||req.user?.sub||req.userId);
@@ -30,7 +31,7 @@ async function handleMoneyCallback(body){
  const R=d.MoneyRequest&&await d.MoneyRequest.findOne({where:{paymentRef:checkoutId}});if(R){if(Number(R.amount)!==amount)return;if(body.ResultCode===0||String(body.ResultCode)==='0'){if(R.status!=='paid')await R.update({status:'paid',paymentRef:receipt||checkoutId,metadata:{...(R.metadata||{}),checkoutRequestId:checkoutId,receipt}});}else if(R.status==='requested')await R.update({status:'expired',metadata:{...(R.metadata||{}),failureCode:body.ResultCode,failureDescription:body.ResultDesc}});}
 }
 
-router.post('/security/step-up',wrap(async(req,res)=>{const d=db(),userId=uid(req);if(!userId)return res.status(401).json({success:false,message:'Unauthorized'});const password=String(req.body?.password||'');if(!password)return res.status(400).json({success:false,message:'Account password is required'});const User=d.Users||d.User;if(!User)return res.status(500).json({success:false,message:'User service unavailable'});const user=await User.findByPk(userId);if(!user)return res.status(401).json({success:false,message:'Account not found'});const valid=typeof user.validatePassword==='function'?await user.validatePassword(password):false;if(!valid)return res.status(401).json({success:false,message:'Incorrect account password',errorCode:'MONEY_STEP_UP_FAILED'});const secret=moneyJwtSecret();if(!secret)return res.status(503).json({success:false,message:'Money security is not configured',errorCode:'MONEY_SECURITY_NOT_CONFIGURED'});const stepUpToken=jwt.sign({userId:Number(userId),type:'money_step_up'},secret,{expiresIn:'10m'});return ok(res,{stepUpToken,expiresIn:600},200);}));
+router.post('/security/step-up',wrap(async(req,res)=>{const d=db(),userId=uid(req);if(!userId)return res.status(401).json({success:false,message:'Unauthorized'});const password=String(req.body?.password||'');if(!password)return res.status(400).json({success:false,message:'Account password is required'});const User=d.Users||d.User;if(!User)return res.status(500).json({success:false,message:'User service unavailable'});const user=await User.findByPk(userId);if(!user)return res.status(401).json({success:false,message:'Account not found'});const valid=await comparePassword(password,user.password);if(!valid)return res.status(401).json({success:false,message:'Incorrect account password',errorCode:'MONEY_STEP_UP_FAILED'});const secret=moneyJwtSecret();if(!secret)return res.status(503).json({success:false,message:'Money security is not configured',errorCode:'MONEY_SECURITY_NOT_CONFIGURED'});const stepUpToken=jwt.sign({userId:Number(userId),type:'money_step_up'},secret,{expiresIn:'10m'});return ok(res,{stepUpToken,expiresIn:600},200);}));
 
 router.get('/overview',wrap(async(req,res)=>{
  const d=db(), userId=uid(req); if(!userId)return res.status(401).json({success:false,message:'Unauthorized'});
