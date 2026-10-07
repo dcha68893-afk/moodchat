@@ -401,6 +401,16 @@ function scanAndMountRouters() {
 // authenticateToken by the scanner below, so it 401'd and no M-Pesa order was ever
 // confirmed. Register it publicly FIRST so it matches before any auth wrapper.
 try {
+  const _moneyRouter = require('./money');
+  if (typeof _moneyRouter.mpesaCallback === 'function') {
+    router.post('/money/mpesa/callback', _moneyRouter.mpesaCallback);
+    _slog('✅ Public NECPRA Money M-Pesa callback registered (no auth)');
+  }
+} catch (e) {
+  console.error('❌ Failed to register NECPRA Money M-Pesa callback:', e.message);
+}
+
+try {
   const _mpCtrl = require('../controllers/marketplace.controller');
   ['/marketplace/payment/mpesa/callback', '/payments/mpesa/callback'].forEach(p =>
     router.post(p, _mpCtrl.mpesaCallback.bind(_mpCtrl)));
