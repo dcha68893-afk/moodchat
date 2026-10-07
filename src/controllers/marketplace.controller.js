@@ -1100,8 +1100,8 @@ class MarketplaceController {
 
     async initiateMpesa(req, res, next) {
         try {
-            const { phone, amount, order_id, description, callback_url } = req.body;
-            if (!phone || !amount || !order_id) return next(new AppError('phone, amount, order_id required', 400));
+            const { phone, amount: requestedAmount, order_id, order_ids, description, callback_url } = req.body;
+            if (!phone || !order_id) return next(new AppError('phone and order_id required', 400));
 
             // FIX-ORDER-OWNERSHIP: verify the order belongs to the initiating
             // user before attaching a payment reference to it — same gap as
@@ -1112,6 +1112,18 @@ class MarketplaceController {
             const orderRecord = OrderCheck ? await OrderCheck.findByPk(order_id) : null;
             if (!orderRecord) return next(new AppError('Order not found', 404));
             if (orderRecord.buyerId !== req.user?.id) return next(new AppError('Not authorized', 403));
+
+            // The checkout UI intentionally does not trust a client-supplied amount.
+            // Derive the amount from the persisted order(s), including split orders,
+            // so every marketplace category follows the same safe STK path as other
+            // NECPRA payment products.
+            const requestedIds = Array.isArray(order_ids) ? order_ids.map(String).filter(Boolean) : [String(order_id)];
+            const uniqueIds = [...new Set(requestedIds)].slice(0, 20);
+            const paymentOrders = OrderCheck ? await OrderCheck.findAll({ where: { id: uniqueIds, buyerId: req.user.id } }) : [orderRecord];
+            if (!paymentOrders.length) return next(new AppError('No payable order found', 404));
+            const totalAmount = paymentOrders.reduce((sum, o) => sum + Number(o.totalPrice || 0), 0);
+            const amount = Number.isFinite(totalAmount) && totalAmount > 0 ? Math.ceil(totalAmount) : Number(requestedAmount || 0);
+            if (!amount || amount <= 0) return next(new AppError('Order has no payable amount', 400));
 
             // FIX (Forensic Audit P2): Validate/derive callbackUrl.
             // If caller doesn't supply one, auto-derive from BACKEND_URL env var.
@@ -1130,6 +1142,12 @@ class MarketplaceController {
 
             // M-Pesa STK Push via Safaricom Daraja API
             const result = await _mpesaStkPush({ phone, amount, orderId: order_id, description, callbackUrl: resolvedCallback });
+            if (result?.errorMessage || result?.errorCode || result?.ResponseCode && String(result.ResponseCode) !== '0') {
+                return next(new AppError(result.errorMessage || result.errorMessage || result.ResponseDescription || 'M-Pesa STK request was rejected by the payment provider.', 502));
+            }
+            if (!result?.CheckoutRequestID) {
+                return next(new AppError('M-Pesa did not return a checkout request. Please try again.', 502));
+            }
 
             // P1 FIX (Forensic Audit): persist CheckoutRequestID as paymentRef
             // immediately so the async mpesaCallback can find this order via
