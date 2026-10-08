@@ -109,6 +109,10 @@ if (ctrl) {
     router.post('/wallet/top-up',        paymentLimiter, safe(ctrl.walletTopup?.bind(ctrl)));
     router.post('/wallet/topup',         paymentLimiter, safe(ctrl.walletTopup?.bind(ctrl)));
     router.get('/wallet/topup/:ref',     safe(ctrl.getWalletTopupStatus?.bind(ctrl)));
+    router.post('/wallet/transfer',          paymentLimiter, safe(ctrl.walletTransfer?.bind(ctrl)));
+    router.post('/wallet/withdraw',           paymentLimiter, safe(ctrl.walletWithdraw?.bind(ctrl)));
+    router.get('/wallet/withdrawals',         safe(ctrl.getWalletWithdrawals?.bind(ctrl)));
+
 
     // ── Shipping: buyer picks a destination, server returns the transport cost ──
     router.get('/shipping/counties',     safe(ctrl.getShippingCounties?.bind(ctrl)));

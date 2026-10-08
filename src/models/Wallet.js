@@ -3,7 +3,7 @@
 module.exports = (sequelize, DataTypes) => {
   const Wallet = sequelize.define('Wallet', {
     id:       { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
-    userId:   { type: DataTypes.UUID, allowNull: false, unique: true, field: 'user_id' },
+    userId:   { type: DataTypes.INTEGER, allowNull: false, unique: true, field: 'user_id' },
     balance:  { type: DataTypes.DECIMAL(15,2), defaultValue: 0, allowNull: false, validate: { min: 0 } },
     currency: { type: DataTypes.STRING(10), defaultValue: 'KES' },
     isFrozen: { type: DataTypes.BOOLEAN, defaultValue: false, field: 'is_frozen' },

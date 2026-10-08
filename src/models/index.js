@@ -1464,7 +1464,7 @@ async function runFullMigration() {
       await sequelize.query(`
         CREATE TABLE IF NOT EXISTS "wallets" (
           "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-          "user_id" UUID NOT NULL UNIQUE,
+          "user_id" INTEGER NOT NULL UNIQUE,
           "balance" DECIMAL(15,2) NOT NULL DEFAULT 0 CHECK ("balance" >= 0),
           "currency" VARCHAR(10) NOT NULL DEFAULT 'KES',
           "is_frozen" BOOLEAN NOT NULL DEFAULT false,
@@ -1477,7 +1477,7 @@ async function runFullMigration() {
         CREATE TABLE IF NOT EXISTS "wallet_transactions" (
           "id" UUID PRIMARY KEY DEFAULT gen_random_uuid(),
           "wallet_id" UUID NOT NULL,
-          "user_id" UUID NOT NULL,
+          "user_id" INTEGER NOT NULL,
           "type" VARCHAR(10) NOT NULL CHECK ("type" IN ('credit','debit')),
           "amount" DECIMAL(15,2) NOT NULL CHECK ("amount" > 0),
           "currency" VARCHAR(10) DEFAULT 'KES',
@@ -1492,6 +1492,23 @@ async function runFullMigration() {
         CREATE INDEX IF NOT EXISTS idx_wallet_tx_wallet ON "wallet_transactions" ("wallet_id");
         CREATE INDEX IF NOT EXISTS idx_wallet_tx_user ON "wallet_transactions" ("user_id");
       `).catch(e => _slog('[Migration] ⚠️ wallets (non-fatal):', e.message));
+      // Canonical Users.id is INTEGER. Legacy wallet tables may have UUID user_id.
+      // Convert only empty legacy tables; never guess a live UUID-to-user mapping.
+      try {
+        const [[wt]] = await sequelize.query("SELECT data_type FROM information_schema.columns WHERE table_name='wallets' AND column_name='user_id'");
+        if (wt?.data_type === 'uuid') {
+          const [[wc]] = await sequelize.query('SELECT COUNT(*)::int AS count FROM "wallets"');
+          if (Number(wc?.count || 0) === 0) await sequelize.query('ALTER TABLE "wallets" ALTER COLUMN "user_id" TYPE INTEGER USING NULL::integer');
+          else _slog('[Migration] ⚠️ wallets.user_id is legacy UUID with existing rows; refusing destructive conversion.');
+        }
+        const [[tt]] = await sequelize.query("SELECT data_type FROM information_schema.columns WHERE table_name='wallet_transactions' AND column_name='user_id'");
+        if (tt?.data_type === 'uuid') {
+          const [[tc]] = await sequelize.query('SELECT COUNT(*)::int AS count FROM "wallet_transactions"');
+          if (Number(tc?.count || 0) === 0) await sequelize.query('ALTER TABLE "wallet_transactions" ALTER COLUMN "user_id" TYPE INTEGER USING NULL::integer');
+          else _slog('[Migration] ⚠️ wallet_transactions.user_id is legacy UUID with existing rows; refusing destructive conversion.');
+        }
+      } catch (walletTypeErr) { _slog('[Migration] ⚠️ Wallet user-id compatibility check failed (non-fatal):', walletTypeErr.message); }
+
 
       // ── P1 FIX: Refund table ──────────────────────────────────────────────
       await sequelize.query(`
