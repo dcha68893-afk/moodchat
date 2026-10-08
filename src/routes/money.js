@@ -60,10 +60,17 @@ router.get('/overview',wrap(async(req,res)=>{
   ms.forEach(m=>memberCounts.set(m.circleId,(memberCounts.get(m.circleId)||0)+1));
   mc.forEach(x=>myTotals.set(x.circleId,(myTotals.get(x.circleId)||0)+Number(x.amount||0)));
  }
+ // Contributions this user still owes (fixed-amount circles, due within 3 days or overdue) - drives the bottom reminder ticker in the app shell
+ const dues=[];
+ try{const W=require('../services/moneyReminderWorker'),today=W.nairobiParts();
+  for(const c of circles){const sc=c.settings&&c.settings.schedule;if(!sc||!sc.dueDate||sc.remindersEnabled===false)continue;
+   const daysLeft=W.dayDiff(sc.dueDate,today);if(daysLeft>3)continue;
+   const pm=await W.paidByMember(d,c);if(W.hasPaid(sc,pm.get(Number(userId))||0))continue;
+   dues.push({circleId:c.id,name:c.name,amount:Number(sc.amountPerMember||0),dueDate:sc.dueDate,daysLeft});}}catch(e){console.error('[money] dues',e.message);}
  const tracked=circles.reduce((n,x)=>n+Number(x.collectedAmount||0),0);
  const pendingIncoming=d.MoneyRequest?await d.MoneyRequest.count({where:{recipientUserId:userId,status:'requested',expiresAt:{[d.Op.gt]:new Date()}}}):0;
  const pendingOutgoing=requests.filter(x=>x.status==='requested').length;
- return ok(res,{overview:{trackedAmount:tracked,circleCount:circleRows.length,pendingIncoming,pendingOutgoing},circles:circleRows.map(c=>({...c,isOwner:c.ownerId===userId,memberCount:memberCounts.get(c.id)||1,myContributed:myTotals.get(c.id)||0})),activity});
+ return ok(res,{overview:{trackedAmount:tracked,circleCount:circleRows.length,pendingIncoming,pendingOutgoing},circles:circleRows.map(c=>({...c,isOwner:c.ownerId===userId,memberCount:memberCounts.get(c.id)||1,myContributed:myTotals.get(c.id)||0})),activity,dues});
 }));
 
 router.get('/circles',wrap(async(req,res)=>{
@@ -268,7 +275,8 @@ router.post('/circles/:id/contributions',wrap(async(req,res)=>{
  const d=db(),userId=uid(req);if(!userId)return res.status(401).json({success:false,message:'Unauthorized'});
  const circle=await d.MoneyCircle?.findByPk(req.params.id);if(!circle)return res.status(404).json({success:false,message:'Circle not found'});
  const member=await d.MoneyCircleMember?.findOne({where:{circleId:circle.id,userId,status:'active'}});if(!member)return res.status(403).json({success:false,message:'Not a circle member'});
- const amount=Number(req.body?.amount);if(!Number.isFinite(amount)||amount<=0)return res.status(400).json({success:false,message:'Valid amount required'});
+ const sc0=circle.settings&&circle.settings.schedule,fixedAmt=sc0&&Number(sc0.amountPerMember)>0?Number(sc0.amountPerMember):0; // owner turned "same amount for every member" on: prompt is exactly that amount
+ const amount=fixedAmt||Number(req.body?.amount);if(!Number.isFinite(amount)||amount<=0)return res.status(400).json({success:false,message:'Valid amount required'});
  const contribution=await d.MoneyContribution.create({circleId:circle.id,contributorId:userId,amount,method:'mpesa',status:'pending',note:req.body?.note||null});
  return ok(res,{contribution,nextStep:'Call /money/circles/:id/contributions/:contributionId/pay with the payer phone.'},201);
 }));
