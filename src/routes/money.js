@@ -28,7 +28,7 @@ async function handleMoneyCallback(body){
  const d=db(),checkoutId=body?.CheckoutRequestID;if(!checkoutId)return;
  const items=body?.CallbackMetadata?.Item||[];const receipt=items.find(i=>i.Name==='MpesaReceiptNumber')?.Value;const amount=Number(items.find(i=>i.Name==='Amount')?.Value||0);
  const C=d.MoneyContribution&&await d.MoneyContribution.findOne({where:{paymentRef:checkoutId}});
- if(C){if(Number(C.amount)!==amount)return;if(body.ResultCode===0||String(body.ResultCode)==='0'){if(C.status!=='paid'){await C.update({status:'paid',paymentRef:receipt||checkoutId,metadata:{...(C.metadata||{}),checkoutRequestId:checkoutId,receipt}});const circle=await d.MoneyCircle.findByPk(C.circleId);if(circle)await circle.increment('collectedAmount',{by:amount});}}else if(C.status==='pending')await C.update({status:'failed',metadata:{...(C.metadata||{}),failureCode:body.ResultCode,failureDescription:body.ResultDesc}});return;}
+ if(C){if(Number(C.amount)!==amount)return;if(body.ResultCode===0||String(body.ResultCode)==='0'){if(C.status!=='paid'){const [moved]=await d.MoneyContribution.update({status:'paid',paymentRef:receipt||checkoutId,metadata:{...(C.metadata||{}),checkoutRequestId:checkoutId,receipt}},{where:{id:C.id,status:{[d.Op.ne]:'paid'}}});if(moved)await d.MoneyCircle.increment('collectedAmount',{by:amount,where:{id:C.circleId}});}}else if(C.status==='pending')await C.update({status:'failed',metadata:{...(C.metadata||{}),failureCode:body.ResultCode,failureDescription:body.ResultDesc}});return;}
  const R=d.MoneyRequest&&await d.MoneyRequest.findOne({where:{paymentRef:checkoutId}});if(R){if(Number(R.amount)!==amount)return;if(body.ResultCode===0||String(body.ResultCode)==='0'){if(R.status!=='paid')await R.update({status:'paid',paymentRef:receipt||checkoutId,metadata:{...(R.metadata||{}),checkoutRequestId:checkoutId,receipt}});}else if(R.status==='requested')await R.update({status:'expired',metadata:{...(R.metadata||{}),failureCode:body.ResultCode,failureDescription:body.ResultDesc}});}
 }
 
@@ -48,10 +48,19 @@ router.get('/overview',wrap(async(req,res)=>{
   ...contributions.map(x=>({kind:'contribution',title:'Circle contribution',subtitle:x.status,amount:x.amount,createdAt:x.createdAt}))
  ].sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt)).slice(0,20);
  const circleRows=circles.map(x=>x.toJSON());
+ const cids=circleRows.map(c=>c.id),memberCounts=new Map(),myTotals=new Map();
+ if(cids.length){
+  const [ms,mc]=await Promise.all([
+   d.MoneyCircleMember?d.MoneyCircleMember.findAll({where:{circleId:cids,status:'active'},attributes:['circleId']}):[],
+   d.MoneyContribution?d.MoneyContribution.findAll({where:{circleId:cids,contributorId:userId,status:'paid'},attributes:['circleId','amount']}):[]
+  ]);
+  ms.forEach(m=>memberCounts.set(m.circleId,(memberCounts.get(m.circleId)||0)+1));
+  mc.forEach(x=>myTotals.set(x.circleId,(myTotals.get(x.circleId)||0)+Number(x.amount||0)));
+ }
  const tracked=circles.reduce((n,x)=>n+Number(x.collectedAmount||0),0);
  const pendingIncoming=d.MoneyRequest?await d.MoneyRequest.count({where:{recipientUserId:userId,status:'requested',expiresAt:{[d.Op.gt]:new Date()}}}):0;
  const pendingOutgoing=requests.filter(x=>x.status==='requested').length;
- return ok(res,{overview:{trackedAmount:tracked,circleCount:circleRows.length,pendingIncoming,pendingOutgoing},circles:circleRows.map(c=>({...c,isOwner:c.ownerId===userId})),activity});
+ return ok(res,{overview:{trackedAmount:tracked,circleCount:circleRows.length,pendingIncoming,pendingOutgoing},circles:circleRows.map(c=>({...c,isOwner:c.ownerId===userId,memberCount:memberCounts.get(c.id)||1,myContributed:myTotals.get(c.id)||0})),activity});
 }));
 
 router.get('/circles',wrap(async(req,res)=>{
@@ -84,12 +93,62 @@ router.get('/circles/:id',wrap(async(req,res)=>{
  const circle=await d.MoneyCircle?.findByPk(req.params.id);if(!circle)return res.status(404).json({success:false,message:'Circle not found'});
  const member=d.MoneyCircleMember?await d.MoneyCircleMember.findOne({where:{circleId:circle.id,userId,status:'active'}}):null;
  if(!member)return res.status(403).json({success:false,message:'Not a circle member'});
- const contributions=d.MoneyContribution?await d.MoneyContribution.findAll({where:{circleId:circle.id},order:[['createdAt','DESC']],limit:100}):[];
-  const memberRows=d.MoneyCircleMember?await d.MoneyCircleMember.findAll({where:{circleId:circle.id,status:'active'}}):[];
- const ids=[...new Set([...memberRows.map(m=>m.userId),...contributions.map(c=>c.contributorId)])];
- const us=d.Users&&ids.length?await d.Users.findAll({where:{id:ids},attributes:['id','username','firstName','lastName']}):[];
+ // Every figure below comes from MoneyContribution rows. A row only becomes 'paid' inside
+ // handleMoneyCallback after Safaricom confirms the payment, so neither the owner nor the
+ // member can type a contribution in by hand.
+ const allContribs=d.MoneyContribution?await d.MoneyContribution.findAll({where:{circleId:circle.id,status:['paid','pending']},order:[['createdAt','DESC']],limit:5000}):[];
+ const memberRows=d.MoneyCircleMember?await d.MoneyCircleMember.findAll({where:{circleId:circle.id,status:'active'},order:[['createdAt','ASC']]}):[];
+ const ids=[...new Set([...memberRows.map(m=>m.userId),...allContribs.map(c=>c.contributorId)])];
+ const us=d.Users&&ids.length?await d.Users.findAll({where:{id:ids},attributes:['id','username','firstName','lastName','avatar']}):[];
  const nm=new Map(us.map(u=>[Number(u.id),[u.firstName,u.lastName].filter(Boolean).join(' ')||u.username||('User '+u.id)]));
- return ok(res,{circle,isOwner:circle.ownerId===userId,members:memberRows.map(m=>({...m.toJSON(),name:nm.get(Number(m.userId))||('User '+m.userId)})),contributions:contributions.map(c=>({...c.toJSON(),contributorName:nm.get(Number(c.contributorId))||'Member'}))});
+ const av=new Map(us.map(u=>[Number(u.id),u.avatar||null]));
+ const un=new Map(us.map(u=>[Number(u.id),u.username||null]));
+ const stats=new Map(),guestMap=new Map();
+ const now=Date.now();
+ const isOffline=c=>!!c.method&&c.method!=='mpesa';
+ allContribs.forEach(c=>{const k=Number(c.contributorId),meta=c.metadata||{},amt=Number(c.amount||0),off=isOffline(c);
+  if(off&&k===0){ // cash/goods from someone who is not on Necpra, recorded by the owner under a typed name
+   if(c.status!=='paid')return;const label=String(meta.guestName||'Guest').trim()||'Guest',gk=label.toLowerCase();
+   const g=guestMap.get(gk)||{name:label,contributed:0,contributionCount:0,items:[],lastPaidAt:null};
+   g.contributed+=amt;g.contributionCount++;if(meta.item)g.items.push(meta.item);if(!g.lastPaidAt||new Date(c.createdAt)>new Date(g.lastPaidAt))g.lastPaidAt=c.createdAt;guestMap.set(gk,g);return;}
+  const e=stats.get(k)||{contributed:0,contributionCount:0,pendingAmount:0,lastPaidAt:null,mpesaAmount:0,cashAmount:0,items:[]};
+  if(c.status==='paid'){e.contributed+=amt;e.contributionCount++;if(off){e.cashAmount+=amt;if(meta.item)e.items.push(meta.item);}else e.mpesaAmount+=amt;if(!e.lastPaidAt||new Date(c.createdAt)>new Date(e.lastPaidAt))e.lastPaidAt=c.createdAt;}
+  else if(c.status==='pending'&&now-new Date(c.createdAt).getTime()<30*60*1000)e.pendingAmount+=amt;
+  stats.set(k,e);});
+ const blank={contributed:0,contributionCount:0,pendingAmount:0,lastPaidAt:null,mpesaAmount:0,cashAmount:0,items:[]};
+ const members=memberRows.map(m=>{const k=Number(m.userId),e=stats.get(k)||blank;return {...m.toJSON(),name:nm.get(k)||('User '+m.userId),username:un.get(k)||null,avatar:av.get(k)||null,isYou:k===Number(userId),...e};})
+  .sort((a,b)=>(b.contributed-a.contributed)||(a.role==='owner'?-1:b.role==='owner'?1:0)||String(a.name).localeCompare(String(b.name)));
+ const paidList=allContribs.filter(c=>c.status==='paid');
+ const ledgerTotal=paidList.reduce((n,c)=>n+Number(c.amount||0),0);
+ const cashTotal=paidList.filter(isOffline).reduce((n,c)=>n+Number(c.amount||0),0);
+ const guests=[...guestMap.values()].sort((a,b)=>(b.contributed-a.contributed)||a.name.localeCompare(b.name));
+ return ok(res,{circle,isOwner:circle.ownerId===userId,members,guests,
+  totals:{collected:ledgerTotal,mpesa:ledgerTotal-cashTotal,cash:cashTotal,paidCount:paidList.length,membersPaid:members.filter(m=>m.contributed>0||m.items.length>0).length,membersUnpaid:members.filter(m=>!(m.contributed>0||m.items.length>0)).length},
+  contributions:paidList.slice(0,100).map(c=>{const meta=c.metadata||{},k=Number(c.contributorId),off=isOffline(c);return {...c.toJSON(),offline:off,item:meta.item||null,contributorName:(off&&k===0)?(meta.guestName||'Guest'):(nm.get(k)||'Member')}})});
+}));
+
+// Type-to-search for the "Add member" box (owner only, same rule as adding).
+router.get('/circles/:id/member-search',wrap(async(req,res)=>{
+ const d=db(),userId=uid(req);if(!userId)return res.status(401).json({success:false,message:'Unauthorized'});
+ const circle=await d.MoneyCircle?.findByPk(req.params.id);if(!circle)return res.status(404).json({success:false,message:'Circle not found'});
+ if(circle.ownerId!==userId)return res.status(403).json({success:false,message:'Only the circle owner can add members'});
+ const U=d.Users;if(!U)return res.status(503).json({success:false,message:'User service unavailable'});
+ const q=String(req.query.q||'').trim().replace(/^@/,'').slice(0,40);
+ const have=new Set((await d.MoneyCircleMember.findAll({where:{circleId:circle.id,status:'active'},attributes:['userId']})).map(m=>Number(m.userId)));
+ let friendUsers=[];
+ try{if(d.Friend&&d.Friend.getUserFriends){friendUsers=(await d.Friend.getUserFriends(userId)).map(r=>r.user).filter(Boolean);}}catch(_){friendUsers=[];}
+ const friendIds=new Set(friendUsers.map(u=>Number(u.id)));
+ let users=[];
+ if(q.length>=2){
+  const like=q.replace(/[\\%_]/g,'\\$&'),Op=d.Op;
+  const or=[{username:{[Op.iLike]:'%'+like+'%'}},{firstName:{[Op.iLike]:'%'+like+'%'}},{lastName:{[Op.iLike]:'%'+like+'%'}}];
+  const digits=q.replace(/\D/g,'');
+  if(digits.length>=9)or.push({phone:{[Op.like]:'%'+digits.slice(-9)}});
+  users=await U.findAll({where:{isActive:true,[Op.or]:or},attributes:['id','username','firstName','lastName','avatar'],limit:25});
+ }else if(!q){users=friendUsers.slice(0,30);}
+ const out=users.filter(u=>!have.has(Number(u.id))).map(u=>({id:u.id,username:u.username||null,displayName:[u.firstName,u.lastName].filter(Boolean).join(' ')||u.username||('User '+u.id),avatar:u.avatar||null,isFriend:friendIds.has(Number(u.id))}))
+  .sort((a,b)=>(b.isFriend-a.isFriend)||String(a.displayName).localeCompare(String(b.displayName)));
+ return ok(res,{users:out,query:q,suggestions:!q});
 }));
 
 router.post('/circles/:id/members',wrap(async(req,res)=>{
@@ -101,13 +160,53 @@ router.post('/circles/:id/members',wrap(async(req,res)=>{
   const U=d.Users,phoneRaw=String(req.body?.phone||'').trim(),uname=String(req.body?.username||'').trim().replace(/^@/,'');
   let found=null;
   if(U&&phoneRaw){let ph;try{ph=normalizePhone(phoneRaw);}catch(e){return res.status(400).json({success:false,message:e.message});}found=await U.findOne({where:{phone:{[d.Op.or]:[ph,'+'+ph,'0'+ph.slice(3)]}}});}
-  else if(U&&uname){found=await U.findOne({where:{username:uname}});}
-  if(!found)return res.status(404).json({success:false,message:'No NECPRA user found with those details'});
+  else if(U&&uname){found=await U.findOne({where:{username:{[d.Op.iLike]:uname.replace(/[\\%_]/g,'\\$&')}}});}
+  if(!found)return res.status(404).json({success:false,message:'No Necpra account matches that. Ask them to join Necpra first, or pick them from the search results.',errorCode:'MONEY_MEMBER_NOT_FOUND'});
   targetId=Number(found.id);
  }
  const [member,created]=await d.MoneyCircleMember.findOrCreate({where:{circleId:circle.id,userId:targetId},defaults:{circleId:circle.id,userId:targetId,role:'member',status:'active'}});
  if(!created&&member.status!=='active')await member.update({status:'active'});
  return ok(res,{member,created},created?201:200);
+}));
+
+// Cash / goods received outside M-Pesa (e.g. "1 goat + 1,000"). Only the circle owner can record these, they need a fresh
+// password step-up, they are labelled as owner-recorded everywhere, and they can be voided (never silently edited).
+router.post('/circles/:id/offline-contributions',wrap(async(req,res)=>{
+ const d=db(),userId=uid(req);if(!userId)return res.status(401).json({success:false,message:'Unauthorized'});
+ const circle=await d.MoneyCircle?.findByPk(req.params.id);if(!circle)return res.status(404).json({success:false,message:'Circle not found'});
+ if(circle.ownerId!==userId)return res.status(403).json({success:false,message:'Only the circle owner can record cash or goods'});
+ if(!requireMoneyStepUp(req,res,userId))return;
+ const b=req.body||{},amount=Number(b.amount||0),item=String(b.item||'').trim().slice(0,120),note=String(b.note||'').trim().slice(0,255);
+ if(!Number.isFinite(amount)||amount<0||amount>10000000)return res.status(400).json({success:false,message:'Enter a valid cash amount (0 if only goods)'});
+ if(!(amount>0)&&!item)return res.status(400).json({success:false,message:'Enter a cash amount or describe the goods (e.g. 1 goat)'});
+ let contributorId=0,guestName=null;
+ const targetId=Number(b.userId);
+ if(Number.isInteger(targetId)&&targetId>0){
+  const m=await d.MoneyCircleMember.findOne({where:{circleId:circle.id,userId:targetId,status:'active'}});
+  if(!m)return res.status(400).json({success:false,message:'That person is not a member of this circle'});
+  contributorId=targetId;
+ }else{
+  guestName=String(b.guestName||'').trim().replace(/\s+/g,' ').slice(0,80);
+  if(guestName.length<2)return res.status(400).json({success:false,message:'Choose a member or type the contributor\'s name'});
+ }
+ const recent=await d.MoneyContribution.count({where:{circleId:circle.id,method:['cash','in_kind'],createdAt:{[d.Op.gte]:new Date(Date.now()-60*1000)}}});
+ if(recent>=30)return res.status(429).json({success:false,message:'Too many entries in a minute. Wait a moment and try again.'});
+ const contribution=await d.MoneyContribution.create({circleId:circle.id,contributorId,amount,method:item?'in_kind':'cash',status:'paid',note:note||null,
+  metadata:{offline:true,recordedBy:userId,recordedAt:new Date().toISOString(),item:item||null,guestName}});
+ if(amount>0)await d.MoneyCircle.increment('collectedAmount',{by:amount,where:{id:circle.id}});
+ return ok(res,{contribution},201);
+}));
+
+router.post('/circles/:id/offline-contributions/:contributionId/void',wrap(async(req,res)=>{
+ const d=db(),userId=uid(req);if(!userId)return res.status(401).json({success:false,message:'Unauthorized'});
+ const circle=await d.MoneyCircle?.findByPk(req.params.id);if(!circle)return res.status(404).json({success:false,message:'Circle not found'});
+ if(circle.ownerId!==userId)return res.status(403).json({success:false,message:'Only the circle owner can void an entry'});
+ if(!requireMoneyStepUp(req,res,userId))return;
+ const c=await d.MoneyContribution.findOne({where:{id:req.params.contributionId,circleId:circle.id,method:['cash','in_kind'],status:'paid'}});
+ if(!c)return res.status(404).json({success:false,message:'Cash or goods entry not found'});
+ const [moved]=await d.MoneyContribution.update({status:'refunded',metadata:{...(c.metadata||{}),voided:true,voidedBy:userId,voidedAt:new Date().toISOString()}},{where:{id:c.id,status:'paid'}});
+ if(moved&&Number(c.amount)>0)await d.MoneyCircle.decrement('collectedAmount',{by:Number(c.amount),where:{id:circle.id}});
+ return ok(res,{voided:!!moved});
 }));
 
 router.post('/circles/:id/contributions',wrap(async(req,res)=>{
