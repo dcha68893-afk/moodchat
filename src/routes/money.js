@@ -4,7 +4,10 @@ const jwt=require('jsonwebtoken');
 const { comparePassword }=require('../utils/passwordUtils');
 const { authenticator } = require('otplib');
 const router=express.Router();
-const db=()=>require('../models');
+const db=()=>{const m=require('../models');
+ // The models index exports the user model as `User` (getter), never `Users`. money.js read `d.Users`,
+ // which was always undefined, so names fell back to "User <id>" and member search/add found nobody.
+ return new Proxy(m,{get:(t,k)=>k==='Users'?(t.User||t.Users||(t.sequelize&&t.sequelize.models&&(t.sequelize.models.Users||t.sequelize.models.User))||null):t[k]});};
 const uid=req=>Number(req.user?.id||req.user?.userId||req.user?.sub||req.userId);
 const wrap=fn=>(req,res,next)=>Promise.resolve(fn(req,res,next)).catch(e=>{console.error('[money]',e.message);if(!res.headersSent)res.status(e.status||500).json({success:false,message:e.message||'Server error'});});
 function ok(res,data,status=200){return res.status(status).json({success:true,...data});}
@@ -118,11 +121,14 @@ router.get('/circles/:id',wrap(async(req,res)=>{
  const blank={contributed:0,contributionCount:0,pendingAmount:0,lastPaidAt:null,mpesaAmount:0,cashAmount:0,items:[]};
  const members=memberRows.map(m=>{const k=Number(m.userId),e=stats.get(k)||blank;return {...m.toJSON(),name:nm.get(k)||('User '+m.userId),username:un.get(k)||null,avatar:av.get(k)||null,isYou:k===Number(userId),...e};})
   .sort((a,b)=>(b.contributed-a.contributed)||(a.role==='owner'?-1:b.role==='owner'?1:0)||String(a.name).localeCompare(String(b.name)));
+ const W=require('../services/moneyReminderWorker');
+ const sched=(circle.settings&&circle.settings.schedule&&circle.settings.schedule.dueDate)?circle.settings.schedule:null;
+ if(sched){const pm=await W.paidByMember(d,circle);members.forEach(m=>{m.cyclePaid=pm.get(Number(m.userId))||0;m.owes=!W.hasPaid(sched,m.cyclePaid);});}
  const paidList=allContribs.filter(c=>c.status==='paid');
  const ledgerTotal=paidList.reduce((n,c)=>n+Number(c.amount||0),0);
  const cashTotal=paidList.filter(isOffline).reduce((n,c)=>n+Number(c.amount||0),0);
  const guests=[...guestMap.values()].sort((a,b)=>(b.contributed-a.contributed)||a.name.localeCompare(b.name));
- return ok(res,{circle,isOwner:circle.ownerId===userId,members,guests,
+ return ok(res,{circle,isOwner:circle.ownerId===userId,members,guests,schedule:sched?{...sched,daysLeft:W.dayDiff(sched.dueDate,W.nairobiParts())}:null,
   totals:{collected:ledgerTotal,mpesa:ledgerTotal-cashTotal,cash:cashTotal,paidCount:paidList.length,membersPaid:members.filter(m=>m.contributed>0||m.items.length>0).length,membersUnpaid:members.filter(m=>!(m.contributed>0||m.items.length>0)).length},
   contributions:paidList.slice(0,100).map(c=>{const meta=c.metadata||{},k=Number(c.contributorId),off=isOffline(c);return {...c.toJSON(),offline:off,item:meta.item||null,contributorName:(off&&k===0)?(meta.guestName||'Guest'):(nm.get(k)||'Member')}})});
 }));
@@ -166,7 +172,56 @@ router.post('/circles/:id/members',wrap(async(req,res)=>{
  }
  const [member,created]=await d.MoneyCircleMember.findOrCreate({where:{circleId:circle.id,userId:targetId},defaults:{circleId:circle.id,userId:targetId,role:'member',status:'active'}});
  if(!created&&member.status!=='active')await member.update({status:'active'});
+ if(created&&targetId!==userId){try{const W=require('../services/moneyReminderWorker'),sc=circle.settings&&circle.settings.schedule;
+  const amt=sc&&Number(sc.amountPerMember)>0?' Contribution: KSh '+Number(sc.amountPerMember).toLocaleString('en-KE')+(sc.dueDate?' by '+sc.dueDate:'')+'.':'';
+  await W.notify(targetId,circle,'You were added to "'+circle.name+'"','You are now a member of this Money Circle.'+amt,'added');}catch(e){console.warn('[money] add-member notify failed',e.message);}}
  return ok(res,{member,created},created?201:200);
+}));
+
+// Owner sets / changes / clears the contribution schedule. Changing it starts a new cycle (startedAt = now),
+// so earlier payments no longer count as "paid" for the new due date.
+router.put('/circles/:id/schedule',wrap(async(req,res)=>{
+ const d=db(),userId=uid(req);if(!userId)return res.status(401).json({success:false,message:'Unauthorized'});
+ const circle=await d.MoneyCircle?.findByPk(req.params.id);if(!circle)return res.status(404).json({success:false,message:'Circle not found'});
+ if(circle.ownerId!==userId)return res.status(403).json({success:false,message:'Only the circle owner can set the schedule'});
+ const W=require('../services/moneyReminderWorker');
+ const settings={...(circle.settings||{})};
+ if(req.body?.clear===true){delete settings.schedule;delete settings.reminderLog;}
+ else{
+  const dueDate=String(req.body?.dueDate||'').trim(),amount=Number(req.body?.amountPerMember||0);
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(dueDate)||isNaN(Date.parse(dueDate+'T00:00:00Z')))return res.status(400).json({success:false,message:'Choose a valid due date'});
+  if(!Number.isFinite(amount)||amount<0||amount>1000000)return res.status(400).json({success:false,message:'Enter a valid amount per member'});
+  settings.schedule={dueDate,amountPerMember:amount,remindersEnabled:req.body?.remindersEnabled!==false,startedAt:new Date().toISOString()};
+  delete settings.reminderLog;
+ }
+ circle.settings=settings;circle.changed('settings',true);await circle.save();
+ if(settings.schedule){ // tell every other member right away
+  const members=await d.MoneyCircleMember.findAll({where:{circleId:circle.id,status:'active'},attributes:['userId']});
+  const sc=settings.schedule,amt=sc.amountPerMember>0?'KSh '+Number(sc.amountPerMember).toLocaleString('en-KE'):'your contribution';
+  for(const m of members){if(Number(m.userId)===userId)continue;try{await W.notify(Number(m.userId),circle,'New contribution schedule: '+circle.name,'Please pay '+amt+' by '+sc.dueDate+'. You will get reminders before the due date.','schedule');}catch(_){}}
+ }
+ return ok(res,{schedule:settings.schedule||null});
+}));
+
+// Owner prompts one chosen member (or all unpaid members) at any time. Paid members are never prompted.
+router.post('/circles/:id/prompt',wrap(async(req,res)=>{
+ const d=db(),userId=uid(req);if(!userId)return res.status(401).json({success:false,message:'Unauthorized'});
+ const circle=await d.MoneyCircle?.findByPk(req.params.id);if(!circle)return res.status(404).json({success:false,message:'Circle not found'});
+ if(circle.ownerId!==userId)return res.status(403).json({success:false,message:'Only the circle owner can send prompts'});
+ const W=require('../services/moneyReminderWorker');
+ const sc=circle.settings&&circle.settings.schedule;
+ const unpaid=sc&&sc.dueDate?await W.unpaidMembers(d,circle):(await d.MoneyCircleMember.findAll({where:{circleId:circle.id,status:'active'},attributes:['userId']})).map(m=>Number(m.userId));
+ const target=req.body?.userId!=null?[Number(req.body.userId)]:unpaid;
+ const log={...((circle.settings&&circle.settings.manualPrompts)||{})};const now=Date.now();let sent=0,skippedPaid=0,throttled=0;
+ for(const t of target){
+  if(t===userId)continue;
+  if(!unpaid.includes(t)){skippedPaid++;continue;}
+  if(log[t]&&now-log[t]<10*60*1000){throttled++;continue;} // max one manual prompt per member per 10 minutes
+  const amt=sc&&Number(sc.amountPerMember)>0?'KSh '+Number(sc.amountPerMember).toLocaleString('en-KE'):'your contribution';
+  try{await W.notify(t,circle,'Payment reminder: '+circle.name,'The circle owner is reminding you to pay '+amt+(sc&&sc.dueDate?' (due '+sc.dueDate+')':'')+'.','prompt');log[t]=now;sent++;}catch(e){console.warn('[money] prompt failed',e.message);}
+ }
+ circle.settings={...(circle.settings||{}),manualPrompts:log};circle.changed('settings',true);await circle.save();
+ return ok(res,{sent,skippedPaid,throttled});
 }));
 
 // Cash / goods received outside M-Pesa (e.g. "1 goat + 1,000"). Only the circle owner can record these, they need a fresh

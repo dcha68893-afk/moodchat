@@ -6291,6 +6291,12 @@ setTimeout(() => {
   }
 }, 8000);
 
+// Money Circle (chama) payment reminders: 08:00 / 13:00 / 18:00 Nairobi, unpaid members only.
+setTimeout(() => {
+  try { require('./services/moneyReminderWorker').start(); }
+  catch (e) { console.error('⚠️ moneyReminderWorker failed to start (non-fatal):', e.message); }
+}, 9000);
+
 // FIX (Play Store compliance audit #1): the 30-day account-deletion purge
 // job promised in the deletion confirmation email never existed. See
 // src/jobs/accountPurgeJob.js and src/services/accountDeletionService.js.
