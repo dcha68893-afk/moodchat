@@ -14,7 +14,7 @@ function requireMoneyStepUp(req,res,userId){if(!verifyMoneyStepUp(req,userId)){r
 
 function normalizePhone(phone){let d=String(phone||'').replace(/\D/g,'');if(/^0[17]\d{8}$/.test(d))d='254'+d.slice(1);else if(/^[17]\d{8}$/.test(d))d='254'+d;if(!/^254[17]\d{8}$/.test(d))throw Object.assign(new Error('Enter a valid Kenyan M-Pesa number (07XX XXX XXX)'),{status:400});return d;}
 async function mpesaStk({phone,amount,reference,description,callbackPath}){
- const consumerKey=process.env.MPESA_CONSUMER_KEY||'',consumerSecret=process.env.MPESA_CONSUMER_SECRET||'',shortcode=process.env.MPESA_SHORTCODE||'',passkey=process.env.MPESA_PASSKEY||'';
+ const consumerKey=process.env.MPESA_CONSUMER_KEY||'',consumerSecret=process.env.MPESA_CONSUMER_SECRET||'',shortcode=process.env.MPESA_SHORTCODE||process.env.MPESA_GAME_SHORTCODE||(process.env.MPESA_ENV==='production'?'':'174379'),passkey=process.env.MPESA_PASSKEY||process.env.MPESA_GAME_PASSKEY||(process.env.MPESA_ENV==='production'?'':'bfb279f9aa9bdbcf158e97dd71a467cd2e0c893059b10f78e6b72ada1ed2c919');
  if(!consumerKey||!consumerSecret||!shortcode||!passkey) throw Object.assign(new Error('M-Pesa STK is not configured on the server'),{status:503,code:'MPESA_NOT_CONFIGURED'});
  const base=process.env.MPESA_ENV==='production'?'https://api.safaricom.co.ke':'https://sandbox.safaricom.co.ke';
  const p=normalizePhone(phone); const tokenRes=await fetch(base+'/oauth/v1/generate?grant_type=client_credentials',{headers:{Authorization:'Basic '+Buffer.from(consumerKey+':'+consumerSecret).toString('base64')}}); const tokenJson=await tokenRes.json(); if(!tokenRes.ok||!tokenJson.access_token)throw Object.assign(new Error('Unable to authenticate with M-Pesa'),{status:502});
@@ -36,8 +36,10 @@ router.post('/security/step-up',wrap(async(req,res)=>{const d=db(),userId=uid(re
 
 router.get('/overview',wrap(async(req,res)=>{
  const d=db(), userId=uid(req); if(!userId)return res.status(401).json({success:false,message:'Unauthorized'});
+ const memberRows=d.MoneyCircleMember?await d.MoneyCircleMember.findAll({where:{userId,status:'active'},attributes:['circleId']}):[];
+ const memberIds=memberRows.map(x=>x.circleId);
  const [circles,requests,contributions]=await Promise.all([
-  d.MoneyCircle?.findAll({where:{ownerId:userId},order:[['createdAt','DESC']],limit:30})||[],
+  d.MoneyCircle?.findAll({where:memberIds.length?{[d.Op.or]:[{ownerId:userId},{id:memberIds}]}:{ownerId:userId},order:[['createdAt','DESC']],limit:30})||[],
   d.MoneyRequest?.findAll({where:{requesterId:userId},order:[['createdAt','DESC']],limit:20})||[],
   d.MoneyContribution?.findAll({where:{contributorId:userId},order:[['createdAt','DESC']],limit:20})||[]
  ]);
@@ -47,7 +49,9 @@ router.get('/overview',wrap(async(req,res)=>{
  ].sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt)).slice(0,20);
  const circleRows=circles.map(x=>x.toJSON());
  const tracked=circles.reduce((n,x)=>n+Number(x.collectedAmount||0),0);
- return ok(res,{overview:{trackedAmount:tracked},circles:circleRows,activity});
+ const pendingIncoming=d.MoneyRequest?await d.MoneyRequest.count({where:{recipientUserId:userId,status:'requested',expiresAt:{[d.Op.gt]:new Date()}}}):0;
+ const pendingOutgoing=requests.filter(x=>x.status==='requested').length;
+ return ok(res,{overview:{trackedAmount:tracked,circleCount:circleRows.length,pendingIncoming,pendingOutgoing},circles:circleRows.map(c=>({...c,isOwner:c.ownerId===userId})),activity});
 }));
 
 router.get('/circles',wrap(async(req,res)=>{
@@ -81,15 +85,28 @@ router.get('/circles/:id',wrap(async(req,res)=>{
  const member=d.MoneyCircleMember?await d.MoneyCircleMember.findOne({where:{circleId:circle.id,userId,status:'active'}}):null;
  if(!member)return res.status(403).json({success:false,message:'Not a circle member'});
  const contributions=d.MoneyContribution?await d.MoneyContribution.findAll({where:{circleId:circle.id},order:[['createdAt','DESC']],limit:100}):[];
- return ok(res,{circle,members:d.MoneyCircleMember?await d.MoneyCircleMember.findAll({where:{circleId:circle.id,status:'active'}}):[],contributions});
+  const memberRows=d.MoneyCircleMember?await d.MoneyCircleMember.findAll({where:{circleId:circle.id,status:'active'}}):[];
+ const ids=[...new Set([...memberRows.map(m=>m.userId),...contributions.map(c=>c.contributorId)])];
+ const us=d.Users&&ids.length?await d.Users.findAll({where:{id:ids},attributes:['id','username','firstName','lastName']}):[];
+ const nm=new Map(us.map(u=>[Number(u.id),[u.firstName,u.lastName].filter(Boolean).join(' ')||u.username||('User '+u.id)]));
+ return ok(res,{circle,isOwner:circle.ownerId===userId,members:memberRows.map(m=>({...m.toJSON(),name:nm.get(Number(m.userId))||('User '+m.userId)})),contributions:contributions.map(c=>({...c.toJSON(),contributorName:nm.get(Number(c.contributorId))||'Member'}))});
 }));
 
 router.post('/circles/:id/members',wrap(async(req,res)=>{
  const d=db(),userId=uid(req);if(!userId)return res.status(401).json({success:false,message:'Unauthorized'});
  const circle=await d.MoneyCircle?.findByPk(req.params.id);if(!circle)return res.status(404).json({success:false,message:'Circle not found'});
  if(circle.ownerId!==userId)return res.status(403).json({success:false,message:'Only the circle owner can add members'});
- const targetId=Number(req.body?.userId);if(!Number.isInteger(targetId)||targetId<1)return res.status(400).json({success:false,message:'Valid userId required'});
+ let targetId=Number(req.body?.userId);
+ if(!Number.isInteger(targetId)||targetId<1){
+  const U=d.Users,phoneRaw=String(req.body?.phone||'').trim(),uname=String(req.body?.username||'').trim().replace(/^@/,'');
+  let found=null;
+  if(U&&phoneRaw){let ph;try{ph=normalizePhone(phoneRaw);}catch(e){return res.status(400).json({success:false,message:e.message});}found=await U.findOne({where:{phone:{[d.Op.or]:[ph,'+'+ph,'0'+ph.slice(3)]}}});}
+  else if(U&&uname){found=await U.findOne({where:{username:uname}});}
+  if(!found)return res.status(404).json({success:false,message:'No NECPRA user found with those details'});
+  targetId=Number(found.id);
+ }
  const [member,created]=await d.MoneyCircleMember.findOrCreate({where:{circleId:circle.id,userId:targetId},defaults:{circleId:circle.id,userId:targetId,role:'member',status:'active'}});
+ if(!created&&member.status!=='active')await member.update({status:'active'});
  return ok(res,{member,created},created?201:200);
 }));
 
@@ -170,6 +187,16 @@ router.post('/requests',wrap(async(req,res)=>{
  const expiresAt=new Date(Date.now()+24*60*60*1000);
  const request=await d.MoneyRequest.create({requesterId:userId,recipientUserId:recipient?.id||null,recipientPhone:phone,amount,purpose,status:'requested',expiresAt,idempotencyKey:idem,metadata:{security:{recipientMatchedToNecpraAccount:!!recipient,requesterAccountVerified:!!requester?.isVerified,createdFromAuthenticatedSession:true},warning:recipient?'Verified NECPRA recipient account matched to this phone.':'This phone is not currently matched to a NECPRA account; verify the recipient through a trusted channel before any payment.'}});
  return ok(res,{request,nextStep:recipient?'Request created for a matched NECPRA account. The payer must independently verify the recipient and purpose before approving any future payment.':'Request created, but the recipient is not a matched NECPRA account. Do not pay based on the request alone.'},201);
+}));
+
+router.post('/requests/:id/pay',wrap(async(req,res)=>{
+ const d=db(),userId=uid(req);if(!userId)return res.status(401).json({success:false,message:'Unauthorized'});
+ const R=await d.MoneyRequest?.findOne({where:{id:req.params.id,recipientUserId:userId,status:'requested'}});
+ if(!R)return res.status(404).json({success:false,message:'Active payment request not found'});
+ if(R.expiresAt&&new Date(R.expiresAt)<new Date()){await R.update({status:'expired'});return res.status(410).json({success:false,message:'This request has expired'});}
+ const result=await mpesaStk({phone:req.body?.phone||R.recipientPhone,amount:Number(R.amount),reference:'NR'+String(R.id).replace(/-/g,'').slice(-10),description:'NECPRA Payment',callbackPath:'/api/money/mpesa/callback'});
+ await R.update({paymentRef:result.CheckoutRequestID,metadata:{...(R.metadata||{}),checkoutRequestId:result.CheckoutRequestID}});
+ return ok(res,{status:'pending',requestId:R.id,checkoutRequestId:result.CheckoutRequestID},202);
 }));
 
 module.exports=router;

@@ -2602,9 +2602,16 @@ async function _mpesaStkPush({ phone, amount, orderId, description, callbackUrl 
     // Production implementation should call Safaricom Daraja API
     const consumerKey    = process.env.MPESA_CONSUMER_KEY    || '';
     const consumerSecret = process.env.MPESA_CONSUMER_SECRET || '';
-    const shortcode      = process.env.MPESA_SHORTCODE       || '174379';
-    const passkey        = process.env.MPESA_PASSKEY         || '';
-    const baseUrl        = process.env.MPESA_ENV === 'production'
+    // Same settings resolution the Games coin purchase uses (routes/games.js), so
+    // Marketplace checkout works wherever coin purchase already works: it used to read
+    // ONLY MPESA_SHORTCODE/MPESA_PASSKEY, with an empty-string passkey fallback, so a
+    // deploy that only had the MPESA_GAME_* values (or the sandbox defaults) built an
+    // invalid STK password here while games kept working.
+    const isProd         = String(process.env.MPESA_ENV || 'sandbox').toLowerCase() === 'production';
+    const shortcode      = process.env.MPESA_SHORTCODE || process.env.MPESA_GAME_SHORTCODE || (isProd ? '' : '174379');
+    const passkey        = process.env.MPESA_PASSKEY   || process.env.MPESA_GAME_PASSKEY   ||
+        (isProd ? '' : 'bfb279f9aa9bdbcf158e97dd71a467cd2e0c893059b10f78e6b72ada1ed2c919');
+    const baseUrl        = isProd
         ? 'https://api.safaricom.co.ke'
         : 'https://sandbox.safaricom.co.ke';
 
@@ -2618,9 +2625,21 @@ async function _mpesaStkPush({ phone, amount, orderId, description, callbackUrl 
         phone = d;
     }
 
-    if (!consumerKey || !consumerSecret) {
-        logger.warn('[Marketplace] M-Pesa env vars not set — returning mock response');
-        return { CheckoutRequestID: 'MOCK-' + Date.now(), mock: true };
+    // ROOT-CAUSE FIX (checkout shows "waiting for payment" but no prompt ever reaches
+    // the buyer's phone): when the Daraja credentials were missing this returned a
+    // fake CheckoutRequestID, so initiateMpesa() answered "STK Push sent" and the UI
+    // waited forever for a prompt that was never requested. Games, by contrast,
+    // answers 503 when M-Pesa is not configured. A mock is now only possible
+    // outside production AND with MPESA_ALLOW_MOCK=true; otherwise it is a real error.
+    const _missing = [!consumerKey && 'MPESA_CONSUMER_KEY', !consumerSecret && 'MPESA_CONSUMER_SECRET',
+                      !shortcode && 'MPESA_SHORTCODE', !passkey && 'MPESA_PASSKEY'].filter(Boolean);
+    if (_missing.length) {
+        if (!isProd && process.env.MPESA_ALLOW_MOCK === 'true') {
+            logger.warn('[Marketplace] M-Pesa env vars not set — MPESA_ALLOW_MOCK=true, returning mock response');
+            return { CheckoutRequestID: 'MOCK-' + Date.now(), mock: true };
+        }
+        logger.error('[Marketplace] M-Pesa not configured, missing env: ' + _missing.join(', '));
+        return { errorMessage: 'M-Pesa payment is temporarily unavailable. Please try again later or choose another payment method.' };
     }
 
     try {
@@ -2630,7 +2649,12 @@ async function _mpesaStkPush({ phone, amount, orderId, description, callbackUrl 
                 Authorization: 'Basic ' + Buffer.from(`${consumerKey}:${consumerSecret}`).toString('base64'),
             }
         });
-        const { access_token } = await authRes.json();
+        const authJson = await authRes.json().catch(() => ({}));
+        const access_token = authJson.access_token;
+        if (!authRes.ok || !access_token) {
+            logger.error('[Marketplace] M-Pesa OAuth failed:', authRes.status, JSON.stringify(authJson));
+            return { errorMessage: 'M-Pesa could not be reached (authorisation failed). Please try again shortly.' };
+        }
 
         // 2. STK Push
         const timestamp = new Date().toISOString().replace(/[^0-9]/g,'').slice(0,14);
@@ -2653,10 +2677,14 @@ async function _mpesaStkPush({ phone, amount, orderId, description, callbackUrl 
                 TransactionDesc: description || 'Marketplace Payment',
             })
         });
-        return await stkRes.json();
+        const stkJson = await stkRes.json().catch(() => ({}));
+        if (!stkRes.ok || (stkJson.ResponseCode !== undefined && String(stkJson.ResponseCode) !== '0')) {
+            logger.error('[Marketplace] M-Pesa STK rejected:', stkRes.status, JSON.stringify(stkJson));
+        }
+        return stkJson;
     } catch(e) {
         logger.error('[Marketplace] M-Pesa STK error:', e.message);
-        throw e;
+        return { errorMessage: 'M-Pesa request failed. Please try again.' };
     }
 }
 
