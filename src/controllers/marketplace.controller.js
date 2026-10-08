@@ -21,6 +21,7 @@ const fs     = require('fs');
 // from the displayed list used to silently save as 'other').
 const { MARKETPLACE_CATEGORIES, MARKETPLACE_CATEGORY_DISPLAY } = require('../utils/constants');
 const multer = require('multer');
+const shippingService = require('../services/shippingService');
 
 // ─── Ensure marketplace uploads directory exists ──────────────────────────────
 const MARKETPLACE_UPLOAD_DIR = path.join(process.cwd(), 'uploads', 'marketplace');
@@ -53,6 +54,16 @@ try { logger = require('../utils/logger'); }
 catch (_) { logger = { error: console.error, info: console.info, warn: console.warn }; }
 
 const ok  = (res, data, msg='OK', code=200) => res.status(code).json({ success: true, message: msg, data });
+
+// FIX-FREE-ORDER: a genuinely free order (total 0) needs no payment step.
+// Mark it paid immediately instead of sending it to M-Pesa/wallet/card.
+async function _settleFreeOrders(orders, opts = {}) {
+    const now = new Date();
+    for (const o of orders) {
+        if (Number(o.totalPrice || 0) > 0) continue;
+        await o.update({ status: 'paid', paidAt: now, paymentMethod: 'free', paymentRef: `FREE-${Date.now()}` }, opts);
+    }
+}
 const err = (next, e, label) => { logger.error(`[Marketplace] ${label}:`, e.message||e); next(e); };
 
 // ─── Model loader (works whether db is passed by ref or require) ──────────────
@@ -667,9 +678,20 @@ class MarketplaceController {
             const buyerId = req.user?.id;
             if (!buyerId) return next(new AppError('Authentication required', 401));
 
-            const { items, delivery_address, payment_method, phone, notes, total, subtotal, delivery, currency='KES', idempotency_key, coupon_code } = req.body;
+            const { items, delivery_address, payment_method, phone, notes, total, subtotal, delivery, currency='KES', idempotency_key, coupon_code, delivery_option } = req.body;
             if (!items?.length) return next(new AppError('Cart is empty', 400));
             if (!delivery_address) return next(new AppError('Delivery address required', 400));
+
+            // DESTINATION-BASED TRANSPORT: the fee comes from where the buyer wants the order
+            // delivered (county + town) and the delivery option they chose — never from the client.
+            const shipQuote = shippingService.quote({
+                county: delivery_address.county || delivery_address.region,
+                town:   delivery_address.city || delivery_address.town,
+                option: delivery_option || 'standard',
+            });
+            if (!shipQuote.ok) return res.status(400).json({ success: false, message: shipQuote.message, code: shipQuote.code });
+            const zoneFee = shipQuote.selected.fee;
+            const shippingMeta = { county: shipQuote.county, town: shipQuote.town, zone: shipQuote.zone, option: shipQuote.selected.id, fee: zoneFee, eta: shipQuote.selected.eta };
 
             // FIX-P12: The fake order fallback was silently returning a non-persisted order UUID.
             // Buyers would receive a success response for an order that never existed in the DB.
@@ -764,6 +786,9 @@ class MarketplaceController {
                         const deliveryTotal = authoritativeItems.reduce((s,i) => s + i.delivery_fee, 0);
                         groupResults.push({ sellerId, authoritativeItems, itemsSubtotal, deliveryTotal, categories });
                     }
+
+                    // Transport is charged once (on the first seller group), priced from the buyer's destination.
+                    groupResults.forEach((g, idx) => { g.deliveryTotal = idx === 0 ? zoneFee : 0; if (idx === 0) g.shippingMeta = shippingMeta; });
 
                     // ── PHASE B: FIX (Audit #7 - coupons need server validation): checkout
                     // used to accept coupon_code in the request but createOrder never looked
@@ -862,6 +887,7 @@ class MarketplaceController {
                                 idempotency_key: idempotency_key || null,
                                 coupon_code: couponApplied ? couponApplied.code : null,
                                 discount_amount: discountShare || 0,
+                                ...(g.shippingMeta ? { shipping: g.shippingMeta } : {}),
                             },
                         }, { transaction: t });
                         orders.push(order);
@@ -893,7 +919,8 @@ class MarketplaceController {
                             if (product.stock != null) await product.update({ stock: Math.max(0, product.stock - qty), available: Math.max(0, product.stock - qty) > 0 });
                         } catch(_) {}
                     }
-                    const groupTotal = authoritativeItems.reduce((s,i) => s + (i.price * i.quantity) + i.delivery_fee, 0);
+                    let groupTotal = authoritativeItems.reduce((s,i) => s + (i.price * i.quantity) + i.delivery_fee, 0);
+                    groupTotal = authoritativeItems.reduce((s,i) => s + (i.price * i.quantity), 0) + (orders.length === 0 ? zoneFee : 0);
                     const order = await O.create({
                         buyerId, sellerId, productId: sellerItems[0].product_id, status: 'pending',
                         quantity: authoritativeItems.reduce((s,i) => s+i.quantity, 0),
@@ -904,6 +931,10 @@ class MarketplaceController {
                     orders.push(order);
                 }
             }
+
+            // FIX-FREE-ORDER: nothing to pay -> confirm the order right away.
+            await _settleFreeOrders(orders);
+            const allFree = orders.length > 0 && orders.every(o => Number(o.totalPrice || 0) <= 0);
 
             // Emit socket events after commit
             for (const order of orders) {
@@ -922,8 +953,8 @@ class MarketplaceController {
             const appliedCouponCode = orders.find(o => o.metadata?.coupon_code)?.metadata?.coupon_code || null;
             return ok(res, {
                 order: {
-                    id: primaryOrder.id, buyer_id: buyerId, status: 'pending',
-                    total: parseFloat(serverTotal.toFixed(2)), currency, payment_method,
+                    id: primaryOrder.id, buyer_id: buyerId, status: allFree ? 'paid' : 'pending',
+                    total: parseFloat(serverTotal.toFixed(2)), total_price: parseFloat(serverTotal.toFixed(2)), is_free: allFree, shipping: shippingMeta, delivery_fee: zoneFee, currency, payment_method: allFree ? 'free' : payment_method,
                     coupon_code: appliedCouponCode, discount_amount: parseFloat(totalDiscount.toFixed(2)),
                     delivery_address, items: serverItems, orders: orders.map(o => o.id), created_at: primaryOrder.createdAt,
                 }
@@ -1122,8 +1153,13 @@ class MarketplaceController {
             const paymentOrders = OrderCheck ? await OrderCheck.findAll({ where: { id: uniqueIds, buyerId: req.user.id } }) : [orderRecord];
             if (!paymentOrders.length) return next(new AppError('No payable order found', 404));
             const totalAmount = paymentOrders.reduce((sum, o) => sum + Number(o.totalPrice || 0), 0);
-            const amount = Number.isFinite(totalAmount) && totalAmount > 0 ? Math.ceil(totalAmount) : Number(requestedAmount || 0);
-            if (!amount || amount <= 0) return next(new AppError('Order has no payable amount', 400));
+            // FIX-FREE-ORDER: a zero-total order is not an error — settle it and tell the
+            // client no payment is needed instead of failing with "no payable amount".
+            if (!Number.isFinite(totalAmount) || totalAmount <= 0) {
+                await _settleFreeOrders(paymentOrders);
+                return ok(res, { status: 'paid', free: true, payable: 0, order_id }, 'No payment required — order confirmed');
+            }
+            const amount = Math.ceil(totalAmount);
 
             // FIX (Forensic Audit P2): Validate/derive callbackUrl.
             // If caller doesn't supply one, auto-derive from BACKEND_URL env var.
@@ -1254,7 +1290,7 @@ class MarketplaceController {
     async cardPayment(req, res, next) {
         try {
             const { order_id, amount, currency='KES', card_token, email } = req.body;
-            if (!order_id || !amount) return next(new AppError('order_id and amount required', 400));
+            if (!order_id) return next(new AppError('order_id required', 400));
 
             // FIX-ORDER-OWNERSHIP: same missing check as walletPayment above —
             // verify the order belongs to the paying user before charging a
@@ -1263,6 +1299,13 @@ class MarketplaceController {
             const orderRecord = OrderCheck ? await OrderCheck.findByPk(order_id) : null;
             if (!orderRecord) return next(new AppError('Order not found', 404));
             if (orderRecord.buyerId !== req.user?.id) return next(new AppError('Not authorized', 403));
+
+            // FIX-FREE-ORDER: free order -> skip the card provider entirely.
+            if (Number(orderRecord.totalPrice || 0) <= 0) {
+                await _settleFreeOrders([orderRecord]);
+                return ok(res, { status: 'paid', free: true, payable: 0, order_id }, 'No payment required — order confirmed');
+            }
+            if (!amount) return next(new AppError('amount required', 400));
 
             const flwKey = process.env.FLW_SECRET_KEY;
             if (!flwKey) {
@@ -1303,77 +1346,128 @@ class MarketplaceController {
     }
 
     // P2 FIX: Wallet system — balance-based payment
-    async walletPayment(req, res, next) {
+    // ══════════════════════════════════════════════════════════════════════════
+    // SHIPPING — destination-based transport cost
+    // ══════════════════════════════════════════════════════════════════════════
+
+    // GET /api/marketplace/shipping/counties
+    async getShippingCounties(req, res, next) {
+        try { return ok(res, { counties: shippingService.KENYA_COUNTIES }); }
+        catch(e) { err(next, e, 'getShippingCounties'); }
+    }
+
+    // POST /api/marketplace/shipping/quote   { county, town, option? }
+    // The buyer chooses the destination; the server returns every delivery option
+    // available there with its fee. createOrder re-runs the same quote, so the
+    // price shown here is the price charged.
+    async getShippingQuote(req, res, next) {
         try {
-            const { order_id, amount, currency='KES' } = req.body;
-            const userId = req.user?.id;
-            if (!order_id || !amount || !userId) return next(new AppError('order_id, amount required', 400));
+            const b = req.body || {};
+            const q = shippingService.quote({ county: b.county || b.region, town: b.town || b.city, option: b.option });
+            if (!q.ok) return res.status(400).json({ success: false, message: q.message, code: q.code });
+            return ok(res, q);
+        } catch(e) { err(next, e, 'getShippingQuote'); }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // WALLET
+    //  • Balance only ever changes inside a DB transaction with the wallet row locked.
+    //  • Every change writes a ledger row (wallet_transactions) with balance_after.
+    //  • Top-ups are credited ONLY after Safaricom confirms payment (see _creditWalletTopup).
+    //  • The charge for an order is read from the order(s) in the DB, never from the client.
+    // ══════════════════════════════════════════════════════════════════════════
+
+    // POST /api/marketplace/payment/wallet   { order_id, order_ids? }
+    async walletPayment(req, res, next) {
+        const userId = req.user?.id;
+        let t = null;
+        try {
+            if (!userId) return next(new AppError('Authentication required', 401));
+            const { order_id, order_ids } = req.body || {};
+            const ids = [...new Set([order_id, ...(Array.isArray(order_ids) ? order_ids : [])].filter(Boolean).map(String))].slice(0, 20);
+            if (!ids.length) return next(new AppError('order_id required', 400));
 
             const db = getDb();
             const Wallet = db.Wallet;
-            if (!Wallet) {
+            const O = Model.Order;
+            if (!Wallet || !O) {
                 return res.status(503).json({ success: false, message: 'Wallet system not available.', code: 'WALLET_UNAVAILABLE' });
             }
 
-            // FIX-ORDER-OWNERSHIP: verify this order actually belongs to the
-            // paying user before debiting their wallet and marking it paid —
-            // getOrder/updateOrderStatus in this same file already do this
-            // check; it was missing here, letting any user pay for (and thus
-            // corrupt the payment state of) an order that isn't theirs.
-            const OrderCheck = Model.Order;
-            const orderRecord = OrderCheck ? await OrderCheck.findByPk(order_id) : null;
-            if (!orderRecord) return next(new AppError('Order not found', 404));
-            if (orderRecord.buyerId !== userId) return next(new AppError('Not authorized', 403));
-
             const sequelize = getSequelize();
-            const t = sequelize ? await sequelize.transaction() : null;
-            try {
-                const wallet = t
-                    ? await Wallet.findOne({ where: { userId }, lock: true, transaction: t })
-                    : await Wallet.findOne({ where: { userId } });
+            t = sequelize ? await sequelize.transaction() : null;
+            const lockOpts = t ? { transaction: t, lock: t.LOCK.UPDATE } : {};
+            const txOpts   = t ? { transaction: t } : {};
 
-                if (!wallet) {
-                    if (t) await t.rollback();
-                    return next(new AppError('Wallet not found. Please top up your wallet first.', 404));
-                }
-                const balance = parseFloat(wallet.balance || 0);
-                const charge = parseFloat(amount);
-                if (balance < charge) {
-                    if (t) await t.rollback();
-                    return next(new AppError(`Insufficient wallet balance. Balance: KES ${balance.toFixed(2)}, Required: KES ${charge.toFixed(2)}`, 402));
-                }
-
-                const newBalance = balance - charge;
-                if (t) {
-                    await wallet.update({ balance: newBalance }, { transaction: t });
-                    const O = Model.Order;
-                    if (O) await O.update({ status: 'paid', paidAt: new Date(), paymentMethod: 'wallet', paymentRef: `WALLET-${Date.now()}` }, { where: { id: order_id }, transaction: t });
-
-                    // Log wallet transaction
-                    const WalletTx = db.WalletTransaction;
-                    if (WalletTx) await WalletTx.create({
-                        walletId: wallet.id, userId, type: 'debit',
-                        amount: charge, currency, orderId: order_id,
-                        description: `Payment for order ${order_id}`, balanceAfter: newBalance,
-                    }, { transaction: t });
-
-                    await t.commit();
-                } else {
-                    await wallet.update({ balance: newBalance });
-                    const O = Model.Order;
-                    if (O) await O.update({ status: 'paid', paidAt: new Date(), paymentMethod: 'wallet' }, { where: { id: order_id } });
-                }
-
-                _socketBroadcast(req, 'payment:confirmed', { order_id, method: 'wallet' });
-                return ok(res, { order_id, balance_after: newBalance, status: 'paid' }, 'Wallet payment successful');
-            } catch(txErr) {
+            // Ownership is part of the query: someone else's order simply isn't found.
+            const orders = await O.findAll({ where: { id: ids, buyerId: userId }, ...lockOpts });
+            if (orders.length !== ids.length) {
                 if (t) await t.rollback();
-                throw txErr;
+                return next(new AppError('Order not found', 404));
             }
-        } catch(e) { err(next, e, 'walletPayment'); }
+            if (orders.some(o => ['cancelled', 'refunded'].includes(o.status))) {
+                if (t) await t.rollback();
+                return next(new AppError('This order was cancelled and cannot be paid.', 409));
+            }
+
+            const unpaid = orders.filter(o => o.status !== 'paid' && !o.paidAt);
+            if (!unpaid.length) {
+                if (t) await t.commit();
+                return ok(res, { status: 'paid', already_paid: true, charged: 0, order_ids: ids }, 'Order already paid');
+            }
+
+            const charge = Math.round(unpaid.reduce((s, o) => s + Number(o.totalPrice || 0), 0) * 100) / 100;
+            if (charge <= 0) {
+                await _settleFreeOrders(unpaid, txOpts);
+                if (t) await t.commit();
+                return ok(res, { status: 'paid', free: true, charged: 0, order_ids: ids }, 'No payment required — order confirmed');
+            }
+
+            const wallet = await Wallet.findOne({ where: { userId }, ...lockOpts });
+            if (!wallet) {
+                if (t) await t.rollback();
+                return next(new AppError('Your wallet has no funds yet. Top up first.', 404));
+            }
+            if (wallet.isFrozen) {
+                if (t) await t.rollback();
+                return next(new AppError('Your wallet is frozen. Please contact support.', 403));
+            }
+
+            const balance = Math.round(parseFloat(wallet.balance || 0) * 100) / 100;
+            if (balance < charge) {
+                if (t) await t.rollback();
+                return res.status(402).json({
+                    success: false, code: 'INSUFFICIENT_FUNDS',
+                    message: `Insufficient wallet balance. Balance: KES ${balance.toFixed(2)}, required: KES ${charge.toFixed(2)}.`,
+                    data: { balance, required: charge, shortfall: Math.round((charge - balance) * 100) / 100 },
+                });
+            }
+
+            const newBalance = Math.round((balance - charge) * 100) / 100;
+            const ref = `WALLET-${Date.now()}`;
+            await wallet.update({ balance: newBalance }, txOpts);
+            await O.update(
+                { status: 'paid', paidAt: new Date(), paymentMethod: 'wallet', paymentRef: ref },
+                { where: { id: unpaid.map(o => o.id) }, ...txOpts }
+            );
+            const WalletTx = db.WalletTransaction;
+            if (WalletTx) await WalletTx.create({
+                walletId: wallet.id, userId, type: 'debit', amount: charge,
+                currency: wallet.currency || 'KES', balanceAfter: newBalance,
+                orderId: unpaid.length === 1 ? unpaid[0].id : null, reference: ref,
+                description: unpaid.length === 1 ? `Payment for order #${String(unpaid[0].id).slice(-8)}` : `Payment for ${unpaid.length} orders`,
+                metadata: { kind: 'order_payment', status: 'completed', order_ids: unpaid.map(o => o.id) },
+            }, txOpts);
+
+            if (t) await t.commit();
+            return ok(res, { status: 'paid', charged: charge, balance: newBalance, reference: ref, order_ids: unpaid.map(o => o.id) }, 'Payment successful');
+        } catch(e) {
+            if (t) await t.rollback().catch(() => {});
+            err(next, e, 'walletPayment');
+        }
     }
 
-    // P2 FIX: Get wallet balance
+    // GET /api/marketplace/wallet  (also /payment/wallet/balance)
     async getWalletBalance(req, res, next) {
         try {
             const userId = req.user?.id;
@@ -1385,20 +1479,29 @@ class MarketplaceController {
             if (!Wallet) return ok(res, { balance: 0, currency: 'KES', available: false, transactions: [], loyaltyTier: 'bronze', loyaltyPoints: 0 });
 
             let wallet = await Wallet.findOne({ where: { userId } });
-            if (!wallet) {
-                wallet = await Wallet.create({ userId, balance: 0, currency: 'KES' });
-            }
+            if (!wallet) wallet = await Wallet.create({ userId, balance: 0, currency: 'KES' });
 
-            // AUDIT FIX: these were never included, so the Wallet page always
-            // showed "No transactions yet" and "0 loyalty points" regardless
-            // of real activity — undermining the real transaction logging
-            // and real loyalty point crediting already built elsewhere.
+            const limit = Math.min(Math.max(parseInt(req.query?.limit) || 20, 1), 100);
+            const TITLES = { topup: 'Top up', order_payment: 'Order payment', refund: 'Refund', admin_credit: 'Credit from support', cashback: 'Cashback', referral: 'Referral bonus', reward: 'Reward' };
             const transactions = WalletTransaction ? await WalletTransaction.findAll({
-                where: { userId }, order: [['createdAt', 'DESC']], limit: 20,
-            }).then(rows => rows.map(t => ({
-                type: t.type === 'credit' ? (t.reason || 'topup') : (t.reason || 'payment'),
-                amount: t.amount, created_at: t.createdAt,
-            }))) : [];
+                where: { userId }, order: [['createdAt', 'DESC']], limit,
+            }).then(rows => rows.map(t => {
+                const kind = t.metadata?.kind || (t.type === 'credit' ? 'credit' : 'order_payment');
+                const status = t.metadata?.status || 'completed';
+                return {
+                    id: t.id,
+                    direction: t.type,                                   // 'credit' | 'debit'
+                    type: kind === 'topup' ? 'topup' : (t.type === 'credit' ? (kind === 'admin_credit' ? 'reward' : kind) : 'payment'),
+                    title: TITLES[kind] || (t.type === 'credit' ? 'Credit' : 'Payment'),
+                    status,                                              // 'pending' | 'completed' | 'failed'
+                    amount: parseFloat(t.amount),
+                    balance_after: t.balanceAfter != null ? parseFloat(t.balanceAfter) : null,
+                    reference: t.reference || null,
+                    description: t.description || '',
+                    order_id: t.orderId || null,
+                    created_at: t.createdAt,
+                };
+            })) : [];
 
             const user = Users ? await Users.findByPk(userId, { attributes: ['id', 'loyaltyPoints'] }) : null;
             const loyaltyPoints = user?.loyaltyPoints || 0;
@@ -1406,37 +1509,76 @@ class MarketplaceController {
 
             return ok(res, {
                 balance: parseFloat(wallet.balance || 0), currency: wallet.currency || 'KES',
-                transactions, loyaltyTier, loyaltyPoints,
+                is_frozen: !!wallet.isFrozen, transactions, loyaltyTier, loyaltyPoints,
             });
         } catch(e) { err(next, e, 'getWalletBalance'); }
     }
 
-    // P2 FIX: Wallet top-up (for admin crediting or M-Pesa to wallet)
+    // POST /api/marketplace/wallet/top-up   { amount, phone }
+    // SECURITY FIX: this used to add `amount` to the balance immediately without any
+    // payment, so any signed-in user could credit themselves unlimited money.
+    // It now starts an M-Pesa STK push; the balance is credited by the callback.
     async walletTopup(req, res, next) {
         try {
-            const { amount, currency='KES', reference } = req.body;
             const userId = req.user?.id;
-            if (!amount || parseFloat(amount) <= 0) return next(new AppError('Valid amount required', 400));
+            if (!userId) return next(new AppError('Authentication required', 401));
+
+            const amount = Math.round(Number(req.body?.amount) * 100) / 100;
+            if (!Number.isFinite(amount) || amount < 10 || amount > 150000) {
+                return next(new AppError('Top-up amount must be between KES 10 and KES 150,000.', 400));
+            }
+            let digits = String(req.body?.phone || '').replace(/\D/g, '');
+            if (digits.startsWith('00254')) digits = digits.slice(2);
+            if (!digits.startsWith('254')) digits = digits.startsWith('0') ? '254' + digits.slice(1) : (/^[71]\d{8}$/.test(digits) ? '254' + digits : digits);
+            if (!/^254[71]\d{8}$/.test(digits)) return next(new AppError('Enter a valid Safaricom number, e.g. 0712 345 678.', 400));
 
             const db = getDb();
             const Wallet = db.Wallet;
             const WalletTx = db.WalletTransaction;
-            if (!Wallet) return res.status(503).json({ success: false, message: 'Wallet system not available' });
+            if (!Wallet || !WalletTx) return res.status(503).json({ success: false, message: 'Wallet system not available', code: 'WALLET_UNAVAILABLE' });
 
             let wallet = await Wallet.findOne({ where: { userId } });
-            if (!wallet) wallet = await Wallet.create({ userId, balance: 0, currency });
+            if (!wallet) wallet = await Wallet.create({ userId, balance: 0, currency: 'KES' });
+            if (wallet.isFrozen) return next(new AppError('Your wallet is frozen. Please contact support.', 403));
 
-            const newBalance = parseFloat(wallet.balance || 0) + parseFloat(amount);
-            await wallet.update({ balance: newBalance });
+            const backendUrl = process.env.BACKEND_URL || process.env.RENDER_EXTERNAL_URL || '';
+            if (!backendUrl) {
+                logger.error('[Wallet] top-up: BACKEND_URL is not set, M-Pesa cannot call back.');
+                return next(new AppError('Payment callback URL could not be resolved. Set BACKEND_URL environment variable.', 500));
+            }
+            const callbackUrl = `${backendUrl.replace(/\/$/, '')}/api/marketplace/payment/mpesa/callback`;
 
-            if (WalletTx) await WalletTx.create({
-                walletId: wallet.id, userId, type: 'credit',
-                amount: parseFloat(amount), currency, reference,
-                description: 'Wallet top-up', balanceAfter: newBalance,
+            const result = await _mpesaStkPush({ phone: digits, amount: Math.ceil(amount), orderId: 'TOPUP', description: 'Wallet top-up', callbackUrl });
+            if (result?.errorMessage || result?.errorCode || (result?.ResponseCode && String(result.ResponseCode) !== '0')) {
+                return next(new AppError(result.errorMessage || result.ResponseDescription || 'M-Pesa rejected the request.', 502));
+            }
+            if (!result?.CheckoutRequestID) return next(new AppError('M-Pesa did not return a checkout request. Please try again.', 502));
+
+            await WalletTx.create({
+                walletId: wallet.id, userId, type: 'credit', amount: Math.ceil(amount),
+                currency: wallet.currency || 'KES', balanceAfter: null, reference: result.CheckoutRequestID,
+                description: 'Wallet top-up via M-Pesa',
+                metadata: { kind: 'topup', status: 'pending', phone_last4: digits.slice(-4) },
             });
 
-            return ok(res, { balance: newBalance, credited: parseFloat(amount) }, 'Wallet topped up');
+            return ok(res, { status: 'pending', checkout_request_id: result.CheckoutRequestID, amount: Math.ceil(amount) },
+                'M-Pesa prompt sent. Enter your PIN to complete the top-up.');
         } catch(e) { err(next, e, 'walletTopup'); }
+    }
+
+    // GET /api/marketplace/wallet/topup/:ref   — poll a pending top-up
+    async getWalletTopupStatus(req, res, next) {
+        try {
+            const userId = req.user?.id;
+            const WalletTx = getDb().WalletTransaction;
+            if (!userId || !WalletTx) return next(new AppError('Not available', 503));
+            const tx = await WalletTx.findOne({ where: { userId, reference: String(req.params.ref) } });
+            if (!tx || tx.metadata?.kind !== 'topup') return next(new AppError('Top-up not found', 404));
+            const Wallet = getDb().Wallet;
+            const wallet = Wallet ? await Wallet.findOne({ where: { userId } }) : null;
+            return ok(res, { status: tx.metadata?.status || 'pending', amount: parseFloat(tx.amount), balance: wallet ? parseFloat(wallet.balance) : null,
+                reason: tx.metadata?.failure || undefined });
+        } catch(e) { err(next, e, 'getWalletTopupStatus'); }
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -2690,10 +2832,59 @@ async function _mpesaStkPush({ phone, amount, orderId, description, callbackUrl 
 
 // Safaricom reported the STK push as failed/cancelled/timed out (ResultCode != 0).
 // Record it on the order so verifyMpesa can tell the polling checkout screen to stop waiting.
+// ── Wallet top-up settlement (called from the M-Pesa callback) ────────────────
+async function _creditWalletTopup(checkoutId, receipt, paidAmount) {
+    const db = getDb();
+    const WalletTx = db.WalletTransaction, Wallet = db.Wallet;
+    if (!WalletTx || !Wallet) return false;
+    const seq = getSequelize();
+    const t = seq ? await seq.transaction() : null;
+    const o = t ? { transaction: t, lock: t.LOCK.UPDATE } : {};
+    try {
+        const tx = await WalletTx.findOne({ where: { reference: checkoutId, type: 'credit' }, ...o });
+        if (!tx || tx.metadata?.kind !== 'topup') { if (t) await t.rollback(); return false; }
+        if (tx.metadata?.status === 'completed') { if (t) await t.commit(); return true; }   // replayed callback
+        if (paidAmount !== undefined && paidAmount !== null && Math.abs(parseFloat(tx.amount) - parseFloat(paidAmount)) > 0.5) {
+            logger.error(`[Wallet] top-up amount mismatch for ${checkoutId}: paid ${paidAmount}, expected ${tx.amount}`);
+            await tx.update({ metadata: { ...(tx.metadata || {}), status: 'failed', failure: 'Amount mismatch' } }, t ? { transaction: t } : {});
+            if (t) await t.commit();
+            return true;
+        }
+        const wallet = await Wallet.findOne({ where: { id: tx.walletId }, ...o });
+        if (!wallet) { if (t) await t.rollback(); return false; }
+        const newBalance = Math.round((parseFloat(wallet.balance || 0) + parseFloat(tx.amount)) * 100) / 100;
+        await wallet.update({ balance: newBalance }, t ? { transaction: t } : {});
+        await tx.update({
+            reference: receipt || checkoutId, balanceAfter: newBalance,
+            metadata: { ...(tx.metadata || {}), status: 'completed', checkout_request_id: checkoutId, completed_at: new Date().toISOString() },
+        }, t ? { transaction: t } : {});
+        if (t) await t.commit();
+        return true;
+    } catch(e) {
+        if (t) await t.rollback().catch(() => {});
+        logger.error('[Wallet] top-up credit failed:', e.message);
+        return false;
+    }
+}
+
+async function _failWalletTopup(checkoutId, callbackData) {
+    try {
+        const WalletTx = getDb().WalletTransaction;
+        if (!WalletTx) return false;
+        const tx = await WalletTx.findOne({ where: { reference: checkoutId, type: 'credit' } });
+        if (!tx || tx.metadata?.kind !== 'topup') return false;
+        if (tx.metadata?.status === 'pending') {
+            await tx.update({ metadata: { ...(tx.metadata || {}), status: 'failed', failure: callbackData?.ResultDesc || 'Payment was not completed' } });
+        }
+        return true;
+    } catch(_) { return false; }
+}
+
 async function _handleMpesaFailure(callbackData) {
     try {
         const O = Model.Order;
         const checkoutId = callbackData?.CheckoutRequestID;
+        if (checkoutId && await _failWalletTopup(checkoutId, callbackData)) return;
         if (!O || !checkoutId) return;
         const orders = await O.findAll({ where: { paymentRef: checkoutId } });
         for (const o of orders) {
@@ -2728,6 +2919,8 @@ async function _handleMpesaSuccess(callbackData) {
             // order as paid using a tiny (or zero) confirmed amount.
             const pendingOrders = await O.findAll({ where: { paymentRef: checkoutId } });
             if (!pendingOrders.length) {
+                // Not an order payment — it may be a wallet top-up.
+                if (await _creditWalletTopup(checkoutId, ref, amt)) return;
                 logger.warn(`[Marketplace] M-Pesa callback for unknown checkoutId: ${checkoutId}`);
                 return;
             }
@@ -2957,6 +3150,33 @@ class MarketplaceExtensions {
 
     // AUDIT FIX: frontend address-book "delete" and "set default" buttons
     // called these paths already; neither existed, so both silently 404'd.
+    // PUT /api/marketplace/addresses/:id — the checkout "Edit address" form called this
+    // route but it did not exist, so edits (e.g. adding the county) never reached the
+    // server and were overwritten by the stale server copy on the next checkout.
+    static async updateAddress(req, res, next) {
+        try {
+            const userId = req.user?.id;
+            const db = getDb();
+            const Users = db.Users || db.User;
+            const user = Users ? await Users.findByPk(userId) : null;
+            if (!user) return next(new AppError('User not found', 404));
+            const id = String(req.params.id);
+            const list = user.settings?.addresses || [];
+            const i = list.findIndex(a => String(a.id) === id);
+            const b = req.body || {};
+            const clean = {
+                name: b.name, phone: b.phone || '', address: b.address, city: b.city,
+                county: b.county || b.region || '', region: b.county || b.region || '', country: b.country || 'Kenya',
+                is_default: !!b.is_default,
+            };
+            let addresses;
+            if (i >= 0) addresses = list.map(a => String(a.id) === id ? { ...a, ...clean, id: a.id, updated_at: new Date() } : a);
+            else addresses = [{ id: b.id || id, ...clean, created_at: new Date() }, ...list].slice(0, 5);
+            if (clean.is_default) addresses = addresses.map(a => ({ ...a, is_default: String(a.id) === id }));
+            await user.update({ settings: { ...(user.settings || {}), addresses } });
+            return ok(res, { addresses }, 'Address updated');
+        } catch(e) { err(next, e, 'updateAddress'); }
+    }
     static async deleteAddress(req, res, next) {
         try {
             const userId = req.user?.id;
@@ -3603,12 +3823,17 @@ class MarketplaceExtensions {
             try {
                 let wallet = await Wallet.findOne({ where: { userId: req.params.id }, transaction: t, lock: t?.LOCK?.UPDATE });
                 if (!wallet) wallet = await Wallet.create({ userId: req.params.id, balance: 0, currency: 'KES' }, { transaction: t });
-                await wallet.increment('balance', { by: amt, transaction: t });
+                // FIX: the ledger row used a non-existent `reason` column and omitted the
+                // NOT NULL walletId, so the credit threw after the balance had moved.
+                const newBalance = Math.round((parseFloat(wallet.balance || 0) + amt) * 100) / 100;
+                await wallet.update({ balance: newBalance }, { transaction: t });
                 if (WalletTransaction) {
                     await WalletTransaction.create({
-                        userId: req.params.id, type: 'credit', amount: amt,
-                        reason: reason || 'admin_credit', reference: `ADMIN-${req.user.id}-${Date.now()}`,
-                        metadata: { credited_by: req.user.id },
+                        walletId: wallet.id, userId: req.params.id, type: 'credit', amount: amt,
+                        currency: wallet.currency || 'KES', balanceAfter: newBalance,
+                        description: reason || 'Credit from support',
+                        reference: `ADMIN-${req.user.id}-${Date.now()}`,
+                        metadata: { kind: 'admin_credit', status: 'completed', credited_by: req.user.id },
                     }, { transaction: t });
                 }
                 if (t) await t.commit();

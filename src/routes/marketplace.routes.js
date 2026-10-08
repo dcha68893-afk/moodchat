@@ -107,6 +107,12 @@ if (ctrl) {
     // ── Wallet (advanced.js calls /marketplace/wallet) ────────────────────────
     router.get('/wallet',                safe(ctrl.getWalletBalance?.bind(ctrl)));
     router.post('/wallet/top-up',        paymentLimiter, safe(ctrl.walletTopup?.bind(ctrl)));
+    router.post('/wallet/topup',         paymentLimiter, safe(ctrl.walletTopup?.bind(ctrl)));
+    router.get('/wallet/topup/:ref',     safe(ctrl.getWalletTopupStatus?.bind(ctrl)));
+
+    // ── Shipping: buyer picks a destination, server returns the transport cost ──
+    router.get('/shipping/counties',     safe(ctrl.getShippingCounties?.bind(ctrl)));
+    router.post('/shipping/quote',       safe(ctrl.getShippingQuote?.bind(ctrl)));
 
     // ── Loyalty / Referral / Behavior (advanced.js) ──────────────────────────
     router.get('/loyalty',               safe(ctrl.getLoyalty?.bind(ctrl)));
@@ -117,6 +123,7 @@ if (ctrl) {
     // ── Addresses (checkout.js) ───────────────────────────────────────────────
     router.get('/addresses',             safe(ctrl.getAddresses?.bind(ctrl)));
     router.post('/addresses',            safe(ctrl.saveAddress?.bind(ctrl)));
+    router.put('/addresses/:id',         safe(ctrl.updateAddress?.bind(ctrl)));
     router.delete('/addresses/:id',      safe(ctrl.deleteAddress?.bind(ctrl)));
     router.patch('/addresses/:id/default', safe(ctrl.setDefaultAddress?.bind(ctrl)));
 
