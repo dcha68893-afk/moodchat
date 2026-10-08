@@ -652,7 +652,7 @@ router.get('/cors-info', (req, res) => {
     totalOrigins: corsManager ? corsManager.getAllowedOrigins().length : 0,
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Idempotency-Key', 'X-Money-Step-Up']
   });
 });
 

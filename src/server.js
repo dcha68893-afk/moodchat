@@ -371,7 +371,9 @@ if (this.environment === 'production' || this.isRender) {
                 'Pragma', 
                 'X-API-Key',
                 'X-Request-ID',
-                'X-Client-Version'
+                'X-Client-Version',
+                'Idempotency-Key',
+                'X-Money-Step-Up'
             ],
             exposedHeaders: [
                 'Content-Range', 
@@ -4572,7 +4574,7 @@ class Application {
                     // Set CORS headers for preflight
                     res.header('Access-Control-Allow-Origin', origin);
                     res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
-                    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept, Origin');
+                    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept, Origin, Idempotency-Key, X-Money-Step-Up');
                     res.header('Access-Control-Allow-Credentials', 'true');
                     res.header('Access-Control-Max-Age', '86400');
                     
@@ -4648,7 +4650,7 @@ class Application {
                 res.header('Access-Control-Allow-Origin', 'http://127.0.0.1:5500');
             }
             res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
-            res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+            res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Idempotency-Key, X-Money-Step-Up');
             res.header('Access-Control-Allow-Credentials', 'true');
             res.header('Access-Control-Max-Age', '86400');
             res.sendStatus(204);
