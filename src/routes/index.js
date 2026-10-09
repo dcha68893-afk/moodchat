@@ -355,7 +355,20 @@ function scanAndMountRouters() {
           _slog(`🔒 ${mountPath} - PROTECTED (JWT required)`);
           // Create a new router that applies auth middleware first
           const protectedRouter = express.Router();
-          protectedRouter.use(authenticateToken);
+          // Safaricom sends payment callbacks server-to-server without a user JWT.
+          // Let only the known callback paths reach their own controller-level
+          // validation (CheckoutRequestID/order amount or secret callback token);
+          // every other endpoint on these otherwise-protected routers still requires auth.
+          protectedRouter.use((req, res, next) => {
+            const callbackPath = req.path || '';
+            const isSafaricomCallback = req.method === 'POST' && (
+              callbackPath === '/payment/mpesa/callback' ||
+              callbackPath === '/mpesa/callback' ||
+              /^\\/b2c\\/(?:result|timeout)\\/[^/]+\\/?$/.test(callbackPath)
+            );
+            if (isSafaricomCallback) return next();
+            return authenticateToken(req, res, next);
+          });
           protectedRouter.use(routerInstance);
           router.use(mountPath, protectedRouter);
           results.protectedRoutes.push({ filename, path: mountPath });
