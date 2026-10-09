@@ -36,6 +36,7 @@ router.post('/reports', asyncHandler(async (req, res) => {
   if (!Number.isInteger(messageId) || messageId <= 0 || !Number.isInteger(chatId) || chatId <= 0 || !allowed.includes(reason)) return res.status(400).json({ success:false, message:'messageId, chatId and a valid reason are required' });
   const details = String(req.body?.details || '').slice(0, 5000);
   try {
+    await ensureMessageReports();
     const [report, created] = await MessageReport.findOrCreate({ where:{ reporterId, messageId }, defaults:{ reporterId, messageId, chatId, reason, details } });
     if (!created) return res.status(200).json({ success:true, duplicate:true, data:report });
     const admins = await getAdminUsers();
@@ -51,7 +52,11 @@ router.get('/reports', asyncHandler(async (req, res) => {
   if (!(await isAdmin(req))) return res.status(403).json({ success:false, message:'Admin access required' });
   const status = ['pending','reviewed','actioned','dismissed'].includes(String(req.query.status)) ? String(req.query.status) : null;
   const where = status ? { status } : {};
-  const reports = await MessageReport.findAll({ where, order:[['createdAt','DESC']], limit:Math.min(Number(req.query.limit)||100,200) });
+  let reports;
+  try {
+    await ensureMessageReports();
+    reports = await MessageReport.findAll({ where, order:[['createdAt','DESC']], limit:Math.min(Number(req.query.limit)||100,200) });
+  } catch (e) { return adminFail(res, 'Loading message reports', e); }
   // Add who sent / who reported and the message type. Content stays out: chats are end-to-end encrypted,
   // so the readable copy is the one the reporter attaches via a problem report.
   const { sequelize } = require('../models');
@@ -73,6 +78,7 @@ router.get('/reports', asyncHandler(async (req, res) => {
 router.patch('/reports/:id', asyncHandler(async (req, res) => {
   const adminId = callerId(req);
   if (!(await isAdmin(req))) return res.status(403).json({ success:false, message:'Admin access required' });
+  await ensureMessageReports().catch(() => {});
   const report = await MessageReport.findByPk(Number(req.params.id));
   if (!report) return res.status(404).json({ success:false, message:'Report not found' });
   const status = ['pending','reviewed','actioned','dismissed'].includes(String(req.body?.status)) ? String(req.body.status) : null;
@@ -131,38 +137,69 @@ router.get('/whatsapp', asyncHandler(async (req, res) => {
    dismiss, or reply (bugs/errors). The reporter is told the outcome.
    ===================================================================== */
 const PR_CATEGORIES = ['scam','harassment','bias','hate_speech','spam','inappropriate_content','fake_account','payment_issue','bug','error','other'];
-let _prTable = null;
+let _prPromise = null;
+// FIX (admin "Internal server error" on every report screen):
+//  - The old version ran ~15 ALTER TABLE statements on EVERY concurrent first request (the admin UI fires 4-16 requests at once),
+//    and did not cache until all of them finished: parallel DDL deadlocks / races, and any single failure (for example a table owned
+//    by another DB role, where even "ADD COLUMN IF NOT EXISTS" needs ownership) made every report request return 500 forever.
+//  - Now: one shared in-flight promise, columns are read from information_schema and ONLY missing ones are added, and each DDL
+//    step is isolated so one failure is logged instead of killing the endpoint. If the table can't be queried at all it is retried.
 async function ensureProblemReports() {
-  if (_prTable) return _prTable;
-  const { sequelize } = require('../models');
-  // Older deployments created this table from an earlier shape. Verify every
-  // column additively instead of assuming the old table already matches the
-  // current INSERT contract; this makes report submission self-healing after
-  // partial/older migrations.
-  await sequelize.query(`CREATE TABLE IF NOT EXISTS problem_reports (
+  if (_prPromise) return _prPromise;
+  _prPromise = (async () => {
+    const { sequelize } = require('../models');
+    const step = async (label, sql) => { try { await sequelize.query(sql); } catch (e) { console.warn('[Admin] problem_reports ' + label + ' skipped:', e.message); } };
+    await step('create', `CREATE TABLE IF NOT EXISTS problem_reports (
       id SERIAL PRIMARY KEY, "reporterId" INTEGER NOT NULL, category VARCHAR(40) NOT NULL,
       module VARCHAR(60), subject VARCHAR(200), details TEXT, "targetUserId" INTEGER, "targetRef" VARCHAR(120),
       status VARCHAR(20) NOT NULL DEFAULT 'pending', "actionTaken" VARCHAR(30), "adminNote" TEXT,
       "handledBy" INTEGER, "handledAt" TIMESTAMPTZ, "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(), "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
-  await sequelize.query(`ALTER TABLE problem_reports ADD COLUMN IF NOT EXISTS "reporterId" INTEGER`);
-  await sequelize.query(`ALTER TABLE problem_reports ADD COLUMN IF NOT EXISTS category VARCHAR(40)`);
-  await sequelize.query(`ALTER TABLE problem_reports ADD COLUMN IF NOT EXISTS module VARCHAR(60)`);
-  await sequelize.query(`ALTER TABLE problem_reports ADD COLUMN IF NOT EXISTS subject VARCHAR(200)`);
-  await sequelize.query(`ALTER TABLE problem_reports ADD COLUMN IF NOT EXISTS details TEXT`);
-  await sequelize.query(`ALTER TABLE problem_reports ADD COLUMN IF NOT EXISTS "targetUserId" INTEGER`);
-  await sequelize.query(`ALTER TABLE problem_reports ADD COLUMN IF NOT EXISTS "targetRef" VARCHAR(120)`);
-  await sequelize.query(`ALTER TABLE problem_reports ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'pending'`);
-  await sequelize.query(`ALTER TABLE problem_reports ADD COLUMN IF NOT EXISTS "actionTaken" VARCHAR(30)`);
-  await sequelize.query(`ALTER TABLE problem_reports ADD COLUMN IF NOT EXISTS "adminNote" TEXT`);
-  await sequelize.query(`ALTER TABLE problem_reports ADD COLUMN IF NOT EXISTS "handledBy" INTEGER`);
-  await sequelize.query(`ALTER TABLE problem_reports ADD COLUMN IF NOT EXISTS "handledAt" TIMESTAMPTZ`);
-  await sequelize.query(`ALTER TABLE problem_reports ADD COLUMN IF NOT EXISTS "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW()`);
-  await sequelize.query(`ALTER TABLE problem_reports ADD COLUMN IF NOT EXISTS "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW()`);
-  await sequelize.query(`ALTER TABLE problem_reports ADD COLUMN IF NOT EXISTS attachments JSONB NOT NULL DEFAULT '[]'::jsonb`);
-  await sequelize.query(`ALTER TABLE problem_reports ADD COLUMN IF NOT EXISTS "messageRef" JSONB`);
-  await sequelize.query(`CREATE INDEX IF NOT EXISTS problem_reports_status_idx ON problem_reports (status, "createdAt" DESC)`);
-  _prTable = sequelize;
-  return _prTable;
+    const wanted = {
+      reporterId: 'INTEGER', category: 'VARCHAR(40)', module: 'VARCHAR(60)', subject: 'VARCHAR(200)', details: 'TEXT',
+      targetUserId: 'INTEGER', targetRef: 'VARCHAR(120)', status: "VARCHAR(20) NOT NULL DEFAULT 'pending'",
+      actionTaken: 'VARCHAR(30)', adminNote: 'TEXT', handledBy: 'INTEGER', handledAt: 'TIMESTAMPTZ',
+      createdAt: 'TIMESTAMPTZ NOT NULL DEFAULT NOW()', updatedAt: 'TIMESTAMPTZ NOT NULL DEFAULT NOW()',
+      attachments: "JSONB NOT NULL DEFAULT '[]'::jsonb", messageRef: 'JSONB',
+    };
+    // Throws (-> retried on the next request) only if we cannot even read the schema.
+    const [cols] = await sequelize.query(`SELECT column_name FROM information_schema.columns WHERE table_name='problem_reports' AND table_schema=current_schema()`);
+    const have = new Set(cols.map(c => c.column_name));
+    if (!have.size) throw new Error('problem_reports table is missing and could not be created');
+    for (const [name, ddl] of Object.entries(wanted)) {
+      if (!have.has(name)) await step('add ' + name, `ALTER TABLE problem_reports ADD COLUMN IF NOT EXISTS "${name}" ${ddl}`);
+    }
+    await step('index', `CREATE INDEX IF NOT EXISTS problem_reports_status_idx ON problem_reports (status, "createdAt" DESC)`);
+    return sequelize;
+  })().catch(e => { _prPromise = null; throw e; });
+  return _prPromise;
+}
+
+// FIX (GET /api/admin/reports -> 500, and reporting a message -> 500): the message_reports table is created by the DDL list in
+// models/index.js WITHOUT reviewedBy / reviewedAt, but the MessageReport model selects (and INSERT ... RETURNING returns) both, so
+// every query failed with 'column "reviewedBy" does not exist'. Add whatever is missing, once, before the first use.
+let _mrPromise = null;
+async function ensureMessageReports() {
+  if (_mrPromise) return _mrPromise;
+  _mrPromise = (async () => {
+    const { sequelize } = require('../models');
+    await sequelize.query(`CREATE TABLE IF NOT EXISTS message_reports (
+      id SERIAL PRIMARY KEY, "reporterId" INTEGER NOT NULL, "messageId" INTEGER NOT NULL, "chatId" INTEGER,
+      reason VARCHAR(50) NOT NULL DEFAULT 'other', details TEXT, status VARCHAR(20) NOT NULL DEFAULT 'pending',
+      "reviewedBy" INTEGER, "reviewedAt" TIMESTAMPTZ,
+      "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(), "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(), UNIQUE("reporterId","messageId"))`).catch(() => {});
+    const [cols] = await sequelize.query(`SELECT column_name FROM information_schema.columns WHERE table_name='message_reports' AND table_schema=current_schema()`);
+    const have = new Set(cols.map(c => c.column_name));
+    for (const [name, ddl] of Object.entries({ reviewedBy: 'INTEGER', reviewedAt: 'TIMESTAMPTZ', chatId: 'INTEGER', details: 'TEXT' })) {
+      if (!have.has(name)) await sequelize.query(`ALTER TABLE message_reports ADD COLUMN IF NOT EXISTS "${name}" ${ddl}`);
+    }
+    return true;
+  })().catch(e => { _mrPromise = null; console.error('[Admin] message_reports schema repair failed:', e.message); throw e; });
+  return _mrPromise;
+}
+// Admin screens show this text instead of a bare "Internal server error" (these routes are admin-only, so it is safe to expose).
+function adminFail(res, label, e) {
+  console.error('[Admin] ' + label + ' failed:', e && e.stack || e);
+  return res.status(500).json({ success: false, message: label + ' failed: ' + (e && e.message || 'unknown error'), code: 'ADMIN_QUERY_FAILED' });
 }
 async function prNotify(userId, type, title, body, data) {
   try { await Notification.create({ userId, type, title, body, data }); } catch (_) {}
@@ -270,15 +307,23 @@ router.get('/problem-reports/mine', asyncHandler(async (req, res) => {
 // Admin: inbox with filters.
 router.get('/problem-reports', asyncHandler(async (req, res) => {
   if (!(await isAdmin(req))) return res.status(403).json({ success:false, message:'Admin access required' });
-  const db = await ensureProblemReports();
-  const where = []; const replacements = { limit: Math.min(Number(req.query.limit) || 100, 300) };
-  if (['pending','reviewed','actioned','dismissed'].includes(String(req.query.status))) { where.push('r.status=:status'); replacements.status = String(req.query.status); }
-  if (PR_CATEGORIES.includes(String(req.query.category))) { where.push('r.category=:category'); replacements.category = String(req.query.category); }
-  const [rows] = await db.query(
-    `SELECT r.*, ru.username AS "reporterName", tu.username AS "targetName"
-       FROM problem_reports r LEFT JOIN "Users" ru ON ru.id=r."reporterId" LEFT JOIN "Users" tu ON tu.id=r."targetUserId"
-      ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY r."createdAt" DESC LIMIT :limit`, { replacements });
-  return res.json({ success:true, data: rows });
+  try {
+    const db = await ensureProblemReports();
+    const where = []; const replacements = { limit: Math.min(Number(req.query.limit) || 100, 300) };
+    if (['pending','reviewed','actioned','dismissed'].includes(String(req.query.status))) { where.push('r.status=:status'); replacements.status = String(req.query.status); }
+    if (PR_CATEGORIES.includes(String(req.query.category))) { where.push('r.category=:category'); replacements.category = String(req.query.category); }
+    const [rows] = await db.query(
+      `SELECT r.* FROM problem_reports r ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY r."createdAt" DESC LIMIT :limit`, { replacements });
+    // Names are looked up separately: the old LEFT JOIN on "Users" failed outright if problem_reports."reporterId"/"targetUserId"
+    // had a different type than "Users".id, which made every status tab return 500.
+    const ids = [...new Set(rows.flatMap(r => [Number(r.reporterId), Number(r.targetUserId)]).filter(n => Number.isInteger(n) && n > 0))];
+    const names = {};
+    if (ids.length) {
+      try { (await Users.findAll({ where: { id: { [Op.in]: ids } }, attributes: ['id', 'username'] })).forEach(u => { names[u.id] = u.username; }); }
+      catch (e) { console.warn('[Admin] problem-reports name lookup failed:', e.message); }
+    }
+    return res.json({ success:true, data: rows.map(r => ({ ...r, reporterName: names[r.reporterId] || null, targetName: names[r.targetUserId] || null })) });
+  } catch (e) { return adminFail(res, 'Loading problem reports', e); }
 }));
 
 // Admin: act on a report. action = warn | suspend | remove | dismiss | respond

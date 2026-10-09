@@ -65,24 +65,20 @@ router.delete('/unsubscribe', asyncHandler(async (req, res) => {
   res.json({ status: 'success', message: 'Unsubscribed' });
 }));
 
-// POST /api/push/test — send test notification to self
-router.post('/test', asyncHandler(async (req, res) => {
-  const userId    = req.user.id;
-  const sequelize = getSequelize();
-
-  await pushService.sendToUser(userId, 'message:new', {
-    senderName: 'Kynecta',
-    content:    'Push notifications are working! 🎉',
-    chatId:     0,
-    messageId:  0,
-  }, sequelize);
-
-  res.json({ status: 'success', message: 'Test notification sent' });
-}));
+// (The old web-push POST /test was removed: it was registered first, shadowed the FCM test below, and the
+//  web-push service has no FCM path - so /api/push/test never reached the phone.)
 
 const nativePush=require('../services/pushService');
 router.post('/fcm-token',asyncHandler(async(req,res)=>{const userId=req.user?.id||req.user?.userId||req.user?.sub;const {token,platform,userAgent}=req.body||{};if(!userId||!token)return res.status(400).json({status:'error',message:'token is required'});await nativePush.registerToken(userId,token,{platform,userAgent});res.json({status:'success',message:'FCM device registered'});}));
 router.delete('/fcm-token',asyncHandler(async(req,res)=>{const userId=req.user?.id||req.user?.userId||req.user?.sub;if(!userId)return res.status(401).json({status:'error',message:'Authentication required'});await nativePush.unregisterToken(userId,req.body?.token||req.query?.token||null);res.json({status:'success',message:'FCM device removed'});}));
 router.get('/status',asyncHandler(async(req,res)=>{const userId=req.user?.id||req.user?.userId||req.user?.sub;res.json({status:'success',data:await nativePush.getStatus(userId)});}));
-router.post('/test',asyncHandler(async(req,res)=>{const userId=req.user?.id||req.user?.userId||req.user?.sub;const result=await nativePush.sendToUsers([userId],{title:'Necpra',body:'Push notifications are working.'},{type:'test',url:'/chat.html'},{category:'messages'});res.json({status:'success',data:result});}));
+router.post('/test',asyncHandler(async(req,res)=>{
+  const userId=req.user?.id||req.user?.userId||req.user?.sub;
+  const status=await nativePush.getStatus(userId);
+  if(!status.configured)return res.status(503).json({status:'error',message:'Firebase is not configured on the server',data:status});
+  if(!status.deviceCount)return res.status(409).json({status:'error',message:'No device is registered for this account. Open the app once while logged in (and allow notifications).',data:status});
+  // type 'message' + no chatId: goes through the same data-only path real chat pushes use.
+  const result=await nativePush.sendToUsers([userId],{title:'Necpra',body:'Push notifications are working.'},{type:'message',chatId:'0',messageId:'0',senderId:'0',url:'/chat.html'},{category:'messages'});
+  res.json({status:'success',data:{...result,...status}});
+}));
 module.exports=router;

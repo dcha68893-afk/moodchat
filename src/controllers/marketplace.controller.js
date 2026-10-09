@@ -3759,12 +3759,29 @@ class MarketplaceExtensions {
             }
             const listingOwnerIds = [...listingCountByUser.keys()];
 
-            const where = listingOwnerIds.length
-                ? { [Op.or]: [{ role: 'seller' }, { id: { [Op.in]: listingOwnerIds } }] }
+            // FIX (GET /api/marketplace/admin/sellers -> 500): this selected "isBanned" from the Users table, but no migration, model or
+            // ensureSchema statement ever creates that column on Users (only on GroupMembers), so Postgres rejected the query with
+            // 'column "isBanned" does not exist'. Only ask for it when the column is really there.
+            const baseAttrs = ['id','username','email','role','createdAt'];
+            let sellerAttrs = baseAttrs;
+            try {
+                if (Users.sequelize) {
+                    if (global.__usersHasIsBanned === undefined) {
+                        const [c] = await Users.sequelize.query(`SELECT 1 FROM information_schema.columns WHERE table_name='Users' AND column_name='isBanned' AND table_schema=current_schema() LIMIT 1`);
+                        global.__usersHasIsBanned = c.length > 0;
+                    }
+                    if (global.__usersHasIsBanned) sellerAttrs = baseAttrs.concat('isBanned');
+                }
+            } catch (_) { /* fall back to the safe attribute list */ }
+            // Listing owner ids can be non-numeric (e.g. legacy string ids); an INTEGER IN (...) with one of those throws, so keep numeric ones.
+
+            const numericOwnerIds = listingOwnerIds.filter(id => /^\d+$/.test(id)).map(Number);
+            const where = numericOwnerIds.length
+                ? { [Op.or]: [{ role: 'seller' }, { id: { [Op.in]: numericOwnerIds } }] }
                 : { role: 'seller' };
 
             const [sellerRows, total] = await Promise.all([
-                Users.findAll({ where, attributes: ['id','username','email','role','createdAt','isBanned'], order: [['createdAt','DESC']], limit: parseInt(limit), offset: (parseInt(page)-1)*parseInt(limit) }),
+                Users.findAll({ where, attributes: sellerAttrs, order: [['createdAt','DESC']], limit: parseInt(limit), offset: (parseInt(page)-1)*parseInt(limit) }),
                 Users.count({ where }),
             ]);
             const sellers = sellerRows.map(u => {
