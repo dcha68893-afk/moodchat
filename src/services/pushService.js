@@ -13,31 +13,74 @@
  *  5. getStatus() reports WHY push is off (error text, token counts) so /api/push/status is useful for diagnosis.
  */
 
-let _admin = null, _app = null, _ready = false, _initErr = null, _lastInitTry = 0;
+let _admin = null, _app = null, _ready = false, _initErr = null, _lastInitTry = 0, _projectId = null, _lastSendError = null;
+
+// Escape raw control characters (real newlines/tabs) that sit INSIDE JSON string values. Pasting a multi-line service-account
+// file into Render's env-var box keeps real newlines in "private_key", and JSON.parse rejects those ("Bad control character").
+function _escapeControlCharsInStrings(text) {
+  let out = '', inStr = false, esc = false;
+  for (const ch of text) {
+    if (inStr) {
+      if (esc) { out += ch; esc = false; continue; }
+      if (ch === '\\') { out += ch; esc = true; continue; }
+      if (ch === '"') { inStr = false; out += ch; continue; }
+      if (ch === '\n') { out += '\\n'; continue; }
+      if (ch === '\r') { continue; }
+      if (ch === '\t') { out += '\\t'; continue; }
+      out += ch;
+    } else {
+      if (ch === '"') inStr = true;
+      out += ch;
+    }
+  }
+  return out;
+}
+
+function _tryParseServiceAccount(rawIn) {
+  let raw = String(rawIn || '').trim();
+  if (!raw) return null;
+  if ((raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'"))) raw = raw.slice(1, -1).trim();
+  if (!raw.startsWith('{')) {                                   // base64-encoded JSON
+    try {
+      const dec = Buffer.from(raw, 'base64').toString('utf8').trim();
+      if (dec.startsWith('{')) raw = dec;
+    } catch (_) {}
+  }
+  if (!raw.startsWith('{')) return null;
+  let sa;
+  try { sa = JSON.parse(raw); }
+  catch (_) {
+    try { sa = JSON.parse(_escapeControlCharsInStrings(raw)); }
+    catch (e2) { throw new Error('service account JSON is not valid: ' + e2.message); }
+  }
+  if (!sa || typeof sa !== 'object') return null;
+  if (sa.private_key) sa.private_key = String(sa.private_key).replace(/\\n/g, '\n');
+  return (sa.private_key && sa.client_email) ? sa : null;
+}
 
 function _parseServiceAccount() {
-  let raw = process.env.FIREBASE_SERVICE_ACCOUNT || process.env.FIREBASE_SERVICE_ACCOUNT_JSON || '';
-  raw = String(raw).trim();
-  if (raw) {
-    if (!raw.startsWith('{')) {                       // base64 encoded JSON
-      try { raw = Buffer.from(raw, 'base64').toString('utf8').trim(); } catch (_) {}
-    }
-    if ((raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'"))) raw = raw.slice(1, -1);
-    let sa;
-    try { sa = JSON.parse(raw); }
-    catch (e) { throw new Error('FIREBASE_SERVICE_ACCOUNT is not valid JSON: ' + e.message); }
-    if (sa.private_key) sa.private_key = String(sa.private_key).replace(/\\n/g, '\n');
-    return sa;
+  // 1) well-known names first, then 2) ANY env var that looks like it holds a service-account JSON
+  //    (people name it FIREBASE_CREDENTIALS, FIREBASE_KEY, GOOGLE_CREDENTIALS, FCM_SERVICE_ACCOUNT ...).
+  const known = ['FIREBASE_SERVICE_ACCOUNT', 'FIREBASE_SERVICE_ACCOUNT_JSON', 'FIREBASE_SERVICE_ACCOUNT_KEY', 'FIREBASE_CREDENTIALS',
+    'FIREBASE_CONFIG_JSON', 'FIREBASE_ADMIN_SDK', 'FIREBASE_KEY', 'GOOGLE_SERVICE_ACCOUNT', 'GOOGLE_CREDENTIALS', 'FCM_SERVICE_ACCOUNT'];
+  const names = known.filter(n => process.env[n]).concat(
+    Object.keys(process.env).filter(n => !known.includes(n) && /FIREBASE|FCM|GOOGLE|SERVICE_ACCOUNT/i.test(n) && /^\s*["']?[{e]/.test(process.env[n] || '') && String(process.env[n]).length > 200));
+  let lastErr = null;
+  for (const n of names) {
+    try { const sa = _tryParseServiceAccount(process.env[n]); if (sa) { sa.__source = n; return sa; } }
+    catch (e) { lastErr = new Error(n + ': ' + e.message); }
   }
   if (process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_CLIENT_EMAIL && process.env.FIREBASE_PRIVATE_KEY) {
     let key = String(process.env.FIREBASE_PRIVATE_KEY).trim();
-    if ((key.startsWith('"') && key.endsWith('"'))) key = key.slice(1, -1);
+    if (key.startsWith('"') && key.endsWith('"')) key = key.slice(1, -1);
     return {
       project_id: process.env.FIREBASE_PROJECT_ID,
       client_email: process.env.FIREBASE_CLIENT_EMAIL,
       private_key: key.replace(/\\n/g, '\n'),
+      __source: 'FIREBASE_PROJECT_ID/CLIENT_EMAIL/PRIVATE_KEY',
     };
   }
+  if (lastErr) throw lastErr;
   return null;
 }
 
@@ -51,7 +94,13 @@ function _initFirebase() {
     if (_admin.apps.length) { _app = _admin.apps[0]; _ready = true; _initErr = null; return true; }
     const sa = _parseServiceAccount();
     let credential;
-    if (sa) credential = _admin.credential.cert(sa);
+    if (sa) {
+      const source = sa.__source; delete sa.__source;
+      credential = _admin.credential.cert(sa);
+      _projectId = sa.project_id || null;
+      console.log('[PushService] Using service account from env ' + source + ' (project_id=' + _projectId + ', client_email=' + sa.client_email + ')');
+      if (_projectId && _projectId !== 'necpra') console.warn('[PushService] WARNING: android/app/google-services.json is project "necpra" but this service account is for "' + _projectId + '" - FCM will reject every token (SenderId mismatch). Use a key from the SAME Firebase project.');
+    }
     else if (process.env.GOOGLE_APPLICATION_CREDENTIALS) credential = _admin.credential.applicationDefault();
     else { _initErr = 'Firebase not configured (set FIREBASE_SERVICE_ACCOUNT)'; return false; }
     _app = _admin.initializeApp({ credential });
@@ -129,10 +178,10 @@ async function sendToMultipleTokens(tokens, notification, data = {}, sendOptions
       response.responses.forEach((item, index) => {
         if (item.success) return;
         if (_invalidError(item.error && item.error.code)) invalidTokens.push(batch[index]);
-        else console.warn('[PushService] FCM send failed:', item.error && item.error.code, item.error && item.error.message);
+        else { _lastSendError = (item.error && item.error.code) + ': ' + (item.error && item.error.message); console.warn('[PushService] FCM send failed:', _lastSendError); }
       });
     } catch (e) {
-      console.error('[PushService] multicast failed:', e.message);
+      _lastSendError = e.message; console.error('[PushService] multicast failed:', e.message);
       failureCount += batch.length;
     }
   }
@@ -244,7 +293,7 @@ async function getStatus(userId) {
     'SELECT "userAgent" FROM device_push_tokens WHERE "userId"=:userId',
     { replacements: { userId: uid }, type: db.sequelize.QueryTypes.SELECT }) : [];
   return {
-    configured: isConfigured(), error: _initErr,
+    configured: isConfigured(), error: _initErr, projectId: _projectId, lastSendError: _lastSendError,
     deviceCount: rows.length,
     nativeDeviceCount: rows.filter(r => _hasNativeNotify(r.userAgent)).length,
   };

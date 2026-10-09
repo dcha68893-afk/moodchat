@@ -95,7 +95,7 @@ if (ctrl) {
 
     // ── Payments ─────────────────────────────────────────────────────────────
     router.post('/payment/mpesa',              paymentLimiter, safe(ctrl.initiateMpesa?.bind(ctrl)));
-    router.post('/payment/mpesa/callback',     safe(ctrl.mpesaCallback?.bind(ctrl)));
+    router.post(['/payment/mpesa/callback', '/payment/pay-callback'], safe(ctrl.mpesaCallback?.bind(ctrl)));
     router.get('/payment/mpesa/verify',        safe(ctrl.verifyMpesa?.bind(ctrl)));
     // marketplace-checkout.js polls with POST + JSON body; GET-only meant a 404 on every poll.
     router.post('/payment/mpesa/verify',       safe(ctrl.verifyMpesa?.bind(ctrl)));

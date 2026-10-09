@@ -17,14 +17,14 @@ function requireMoneyStepUp(req,res,userId){if(!verifyMoneyStepUp(req,userId)){r
 
 function normalizePhone(phone){let d=String(phone||'').replace(/\D/g,'');if(/^0[17]\d{8}$/.test(d))d='254'+d.slice(1);else if(/^[17]\d{8}$/.test(d))d='254'+d;if(!/^254[17]\d{8}$/.test(d))throw Object.assign(new Error('Enter a valid Kenyan M-Pesa number (07XX XXX XXX)'),{status:400});return d;}
 async function mpesaStk({phone,amount,reference,description,callbackPath}){
- const consumerKey=process.env.MPESA_CONSUMER_KEY||'',consumerSecret=process.env.MPESA_CONSUMER_SECRET||'',shortcode=process.env.MPESA_SHORTCODE||process.env.MPESA_GAME_SHORTCODE||(process.env.MPESA_ENV==='production'?'':'174379'),passkey=process.env.MPESA_PASSKEY||process.env.MPESA_GAME_PASSKEY||(process.env.MPESA_ENV==='production'?'':'bfb279f9aa9bdbcf158e97dd71a467cd2e0c893059b10f78e6b72ada1ed2c919');
+ const consumerKey=process.env.MPESA_CONSUMER_KEY||'',consumerSecret=process.env.MPESA_CONSUMER_SECRET||'',shortcode=process.env.MPESA_SHORTCODE||process.env.MPESA_GAME_SHORTCODE||(['production','prod','live'].includes(String(process.env.MPESA_ENV||'').trim().toLowerCase())?'':'174379'),passkey=process.env.MPESA_PASSKEY||process.env.MPESA_GAME_PASSKEY||(['production','prod','live'].includes(String(process.env.MPESA_ENV||'').trim().toLowerCase())?'':'bfb279f9aa9bdbcf158e97dd71a467cd2e0c893059b10f78e6b72ada1ed2c919');
  if(!consumerKey||!consumerSecret||!shortcode||!passkey) throw Object.assign(new Error('M-Pesa STK is not configured on the server'),{status:503,code:'MPESA_NOT_CONFIGURED'});
- const base=process.env.MPESA_ENV==='production'?'https://api.safaricom.co.ke':'https://sandbox.safaricom.co.ke';
+ const _prod=['production','prod','live'].includes(String(process.env.MPESA_ENV||'').trim().toLowerCase()); const base=_prod?'https://api.safaricom.co.ke':'https://sandbox.safaricom.co.ke';
  const p=normalizePhone(phone); const tokenRes=await fetch(base+'/oauth/v1/generate?grant_type=client_credentials',{headers:{Authorization:'Basic '+Buffer.from(consumerKey+':'+consumerSecret).toString('base64')}}); const tokenJson=await tokenRes.json(); if(!tokenRes.ok||!tokenJson.access_token)throw Object.assign(new Error('Unable to authenticate with M-Pesa'),{status:502});
- const timestamp=new Date().toISOString().replace(/[^0-9]/g,'').slice(0,14); const password=Buffer.from(shortcode+passkey+timestamp).toString('base64');
+ const timestamp=new Date(Date.now()+3*3600*1000).toISOString().replace(/[^0-9]/g,'').slice(0,14); const password=Buffer.from(shortcode+passkey+timestamp).toString('base64');
  const backend=process.env.BACKEND_URL||process.env.RENDER_EXTERNAL_URL||''; if(!backend)throw Object.assign(new Error('BACKEND_URL is required for M-Pesa callbacks'),{status:500});
  const callback=backend.replace(/\/$/,'')+callbackPath;
- const res=await fetch(base+'/mpesa/stkpush/v1/processrequest',{method:'POST',headers:{Authorization:'Bearer '+tokenJson.access_token,'Content-Type':'application/json'},body:JSON.stringify({BusinessShortCode:shortcode,Password:password,Timestamp:timestamp,TransactionType:'CustomerPayBillOnline',Amount:Math.ceil(amount),PartyA:p,PartyB:shortcode,PhoneNumber:p,CallBackURL:callback,AccountReference:String(reference).slice(0,12),TransactionDesc:String(description||'NECPRA Money').slice(0,20)})});
+ const res=await fetch(base+'/mpesa/stkpush/v1/processrequest',{method:'POST',headers:{Authorization:'Bearer '+tokenJson.access_token,'Content-Type':'application/json'},body:JSON.stringify({BusinessShortCode:shortcode,Password:password,Timestamp:timestamp,TransactionType:process.env.MPESA_TRANSACTION_TYPE||'CustomerPayBillOnline',Amount:Math.ceil(amount),PartyA:p,PartyB:process.env.MPESA_PARTY_B||shortcode,PhoneNumber:p,CallBackURL:callback,AccountReference:String(reference).slice(0,12),TransactionDesc:String(description||'NECPRA Money').slice(0,13)})});
  const data=await res.json(); if(!res.ok||data.ResponseCode&&String(data.ResponseCode)!=='0')throw Object.assign(new Error(data.errorMessage||data.ResponseDescription||'M-Pesa STK request failed'),{status:502,provider:data}); return data;
 }
 async function handleMoneyCallback(body){
@@ -284,7 +284,7 @@ router.post('/circles/:id/contributions',wrap(async(req,res)=>{
 router.post('/circles/:id/contributions/:contributionId/pay',wrap(async(req,res)=>{
  const d=db(),userId=uid(req);if(!userId)return res.status(401).json({success:false,message:'Unauthorized'});
  const c=await d.MoneyContribution?.findOne({where:{id:req.params.contributionId,circleId:req.params.id,contributorId:userId,status:'pending'}});if(!c)return res.status(404).json({success:false,message:'Pending contribution not found'});
- const result=await mpesaStk({phone:req.body?.phone,amount:Number(c.amount),reference:'NC'+String(c.id).replace(/-/g,'').slice(-10),description:'NECPRA Circle',callbackPath:'/api/money/mpesa/callback'});
+ const result=await mpesaStk({phone:req.body?.phone,amount:Number(c.amount),reference:'NC'+String(c.id).replace(/-/g,'').slice(-10),description:'NECPRA Circle',callbackPath:'/api/money/pay-callback'});
  await c.update({paymentRef:result.CheckoutRequestID,metadata:{...(c.metadata||{}),checkoutRequestId:result.CheckoutRequestID}});
  return ok(res,{status:'pending',contributionId:c.id,checkoutRequestId:result.CheckoutRequestID},202);
 }));
@@ -356,13 +356,13 @@ router.post('/requests/:id/pay',wrap(async(req,res)=>{
  const R=await d.MoneyRequest?.findOne({where:{id:req.params.id,recipientUserId:userId,status:'requested'}});
  if(!R)return res.status(404).json({success:false,message:'Active payment request not found'});
  if(R.expiresAt&&new Date(R.expiresAt)<new Date()){await R.update({status:'expired'});return res.status(410).json({success:false,message:'This request has expired'});}
- const result=await mpesaStk({phone:req.body?.phone||R.recipientPhone,amount:Number(R.amount),reference:'NR'+String(R.id).replace(/-/g,'').slice(-10),description:'NECPRA Payment',callbackPath:'/api/money/mpesa/callback'});
+ const result=await mpesaStk({phone:req.body?.phone||R.recipientPhone,amount:Number(R.amount),reference:'NR'+String(R.id).replace(/-/g,'').slice(-10),description:'NECPRA Payment',callbackPath:'/api/money/pay-callback'});
  await R.update({paymentRef:result.CheckoutRequestID,metadata:{...(R.metadata||{}),checkoutRequestId:result.CheckoutRequestID}});
  return ok(res,{status:'pending',requestId:R.id,checkoutRequestId:result.CheckoutRequestID},202);
 }));
 
 module.exports=router;
 
-router.post('/mpesa/callback',(req,res)=>{handleMoneyCallback(req.body?.Body?.stkCallback||req.body).then(()=>res.status(200).json({ResultCode:0,ResultDesc:'Accepted'})).catch(e=>{console.error('[money] callback',e.message);res.status(200).json({ResultCode:0,ResultDesc:'Accepted'});});});
+router.post(['/mpesa/callback','/pay-callback'],(req,res)=>{handleMoneyCallback(req.body?.Body?.stkCallback||req.body).then(()=>res.status(200).json({ResultCode:0,ResultDesc:'Accepted'})).catch(e=>{console.error('[money] callback',e.message);res.status(200).json({ResultCode:0,ResultDesc:'Accepted'});});});
 router.mpesaCallback=(req,res)=>handleMoneyCallback(req.body?.Body?.stkCallback||req.body).then(()=>res.status(200).json({ResultCode:0,ResultDesc:'Accepted'})).catch(e=>{console.error('[money] callback',e.message);res.status(200).json({ResultCode:0,ResultDesc:'Accepted'});});
 router.requireMoneyStepUp=requireMoneyStepUp;

@@ -26,7 +26,7 @@ try {
 // FIRST, then apply authenticateToken only to the routes that need it.
 if (ctrl) {
     // M-Pesa callback from Safaricom — no auth needed, must stay unauthenticated
-    router.post('/mpesa/callback', ctrl.mpesaCallback.bind(ctrl));
+    router.post(['/mpesa/callback', '/pay-callback'], ctrl.mpesaCallback.bind(ctrl));
 }
 
 // All remaining payment routes require auth

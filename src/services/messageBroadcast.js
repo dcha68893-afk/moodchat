@@ -105,7 +105,7 @@ async function broadcastNewMessage(message, senderId) {
   await messageDeliveryService.notifyMessageRecipients(message, recipientIds, {
     push: true,
     offlineRecipientIds: offline,
-  }).catch(() => {});
+  }).catch(e => console.error('[Messages] notifyMessageRecipients (push) failed:', e && e.message));
 
   return { recipientIds, delivered, offline };
 }

@@ -1166,7 +1166,7 @@ class MarketplaceController {
             // Without a valid callbackUrl, M-Pesa never delivers payment confirmation.
             const backendUrl = process.env.BACKEND_URL || process.env.RENDER_EXTERNAL_URL || '';
             const resolvedCallback = callback_url
-                || (backendUrl ? `${backendUrl.replace(/\/$/, '')}/api/marketplace/payment/mpesa/callback` : null);
+                || (backendUrl ? `${backendUrl.replace(/\/$/, '')}/api/marketplace/payment/pay-callback` : null);
 
             if (!resolvedCallback) {
                 logger.error('[Marketplace] initiateMpesa: callbackUrl is empty. Set BACKEND_URL env var.');
@@ -1546,7 +1546,7 @@ class MarketplaceController {
                 logger.error('[Wallet] top-up: BACKEND_URL is not set, M-Pesa cannot call back.');
                 return next(new AppError('Payment callback URL could not be resolved. Set BACKEND_URL environment variable.', 500));
             }
-            const callbackUrl = `${backendUrl.replace(/\/$/, '')}/api/marketplace/payment/mpesa/callback`;
+            const callbackUrl = `${backendUrl.replace(/\/$/, '')}/api/marketplace/payment/pay-callback`;
 
             const result = await _mpesaStkPush({ phone: digits, amount: Math.ceil(amount), orderId: 'TOPUP', description: 'Wallet top-up', callbackUrl });
             if (result?.errorMessage || result?.errorCode || (result?.ResponseCode && String(result.ResponseCode) !== '0')) {
@@ -2738,6 +2738,18 @@ function _socketBroadcast(req, event, data, targetUserId = null) {
     } catch(_) {}
 }
 
+// ---- M-Pesa production helpers (sandbox -> production switch) -------------------------------------------------
+// Daraja PRODUCTION rejects any CallBackURL whose text contains words such as "mpesa" or "safaricom" (sandbox does not
+// check), so the STK prompt is never sent. Legacy ".../mpesa/callback" URLs are rewritten to neutral ".../pay-callback"
+// paths (routes for both exist). MPESA_ENV is also accepted as production|prod|live (case-insensitive).
+const _isProdEnv = () => ['production', 'prod', 'live'].includes(String(process.env.MPESA_ENV || 'sandbox').trim().toLowerCase());
+const _eatTimestamp = () => new Date(Date.now() + 3 * 3600 * 1000).toISOString().replace(/\D/g, '').slice(0, 14); // Nairobi time
+const _neutralCallback = (u) => String(u || '')
+    .replace(/\/payment\/mpesa\/callback/i, '/payment/pay-callback')
+    .replace(/\/payments\/mpesa\/callback/i, '/payments/pay-callback')
+    .replace(/\/airtime\/mpesa\/callback/i, '/airtime/pay-callback')
+    .replace(/\/money\/mpesa\/callback/i, '/money/pay-callback');
+
 async function _mpesaStkPush({ phone, amount, orderId, description, callbackUrl }) {
     // Production implementation should call Safaricom Daraja API
     const consumerKey    = process.env.MPESA_CONSUMER_KEY    || '';
@@ -2747,7 +2759,7 @@ async function _mpesaStkPush({ phone, amount, orderId, description, callbackUrl 
     // ONLY MPESA_SHORTCODE/MPESA_PASSKEY, with an empty-string passkey fallback, so a
     // deploy that only had the MPESA_GAME_* values (or the sandbox defaults) built an
     // invalid STK password here while games kept working.
-    const isProd         = String(process.env.MPESA_ENV || 'sandbox').toLowerCase() === 'production';
+    const isProd         = _isProdEnv();
     const shortcode      = process.env.MPESA_SHORTCODE || process.env.MPESA_GAME_SHORTCODE || (isProd ? '' : '174379');
     const passkey        = process.env.MPESA_PASSKEY   || process.env.MPESA_GAME_PASSKEY   ||
         (isProd ? '' : 'bfb279f9aa9bdbcf158e97dd71a467cd2e0c893059b10f78e6b72ada1ed2c919');
@@ -2797,8 +2809,14 @@ async function _mpesaStkPush({ phone, amount, orderId, description, callbackUrl 
         }
 
         // 2. STK Push
-        const timestamp = new Date().toISOString().replace(/[^0-9]/g,'').slice(0,14);
+        const timestamp = _eatTimestamp();
         const password  = Buffer.from(`${shortcode}${passkey}${timestamp}`).toString('base64');
+        // Till numbers (Buy Goods) need CustomerBuyGoodsOnline + PartyB = till; paybill keeps CustomerPayBillOnline.
+        const txType    = process.env.MPESA_TRANSACTION_TYPE || 'CustomerPayBillOnline';
+        const partyB    = process.env.MPESA_PARTY_B || shortcode;
+        const cbUrl     = _neutralCallback(callbackUrl);
+        if (/mpesa|safaricom/i.test(cbUrl)) logger.warn('[Marketplace] CallBackURL contains a word Daraja production rejects: ' + cbUrl);
+        logger.info(`[Marketplace] STK -> ${baseUrl} shortcode=${shortcode} type=${txType} partyB=${partyB} callback=${cbUrl}`);
 
         const stkRes = await fetch(`${baseUrl}/mpesa/stkpush/v1/processrequest`, {
             method: 'POST',
@@ -2807,14 +2825,15 @@ async function _mpesaStkPush({ phone, amount, orderId, description, callbackUrl 
                 BusinessShortCode: shortcode,
                 Password: password,
                 Timestamp: timestamp,
-                TransactionType: 'CustomerPayBillOnline',
+                TransactionType: txType,
                 Amount: Math.ceil(amount),
                 PartyA: phone,
-                PartyB: shortcode,
+                PartyB: partyB,
                 PhoneNumber: phone,
-                CallBackURL: callbackUrl,
-                AccountReference: `Order-${orderId?.slice(-8)||'KNT'}`,
-                TransactionDesc: description || 'Marketplace Payment',
+                CallBackURL: cbUrl,
+                // Production limits: AccountReference max 12 chars, TransactionDesc max 13 chars (sandbox ignores this).
+                AccountReference: `Ord${String(orderId || 'KNT').slice(-8)}`.slice(0, 12),
+                TransactionDesc: String(description || 'Payment').slice(0, 13),
             })
         });
         const stkJson = await stkRes.json().catch(() => ({}));

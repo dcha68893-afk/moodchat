@@ -355,20 +355,7 @@ function scanAndMountRouters() {
           _slog(`🔒 ${mountPath} - PROTECTED (JWT required)`);
           // Create a new router that applies auth middleware first
           const protectedRouter = express.Router();
-          // Safaricom sends payment callbacks server-to-server without a user JWT.
-          // Let only the known callback paths reach their own controller-level
-          // validation (CheckoutRequestID/order amount or secret callback token);
-          // every other endpoint on these otherwise-protected routers still requires auth.
-          protectedRouter.use((req, res, next) => {
-            const callbackPath = req.path || '';
-            const isSafaricomCallback = req.method === 'POST' && (
-              callbackPath === '/payment/mpesa/callback' ||
-              callbackPath === '/mpesa/callback' ||
-              /^\/b2c\/(?:result|timeout)\/[^/]+\/?$/.test(callbackPath)
-            );
-            if (isSafaricomCallback) return next();
-            return authenticateToken(req, res, next);
-          });
+          protectedRouter.use(authenticateToken);
           protectedRouter.use(routerInstance);
           router.use(mountPath, protectedRouter);
           results.protectedRoutes.push({ filename, path: mountPath });
@@ -418,7 +405,7 @@ function scanAndMountRouters() {
 try {
   const _moneyRouter = require('./money');
   if (typeof _moneyRouter.mpesaCallback === 'function') {
-    router.post('/money/mpesa/callback', _moneyRouter.mpesaCallback);
+    router.post(['/money/mpesa/callback', '/money/pay-callback'], _moneyRouter.mpesaCallback);
     _slog('✅ Public NECPRA Money M-Pesa callback registered (no auth)');
   }
 } catch (e) {
@@ -427,7 +414,7 @@ try {
 
 try {
   const _mpCtrl = require('../controllers/marketplace.controller');
-  ['/marketplace/payment/mpesa/callback', '/payments/mpesa/callback'].forEach(p =>
+  ['/marketplace/payment/mpesa/callback', '/marketplace/payment/pay-callback', '/payments/mpesa/callback', '/payments/pay-callback'].forEach(p =>
     router.post(p, _mpCtrl.mpesaCallback.bind(_mpCtrl)));
   _slog('✅ Public M-Pesa callback registered (no auth)');
 } catch (e) {

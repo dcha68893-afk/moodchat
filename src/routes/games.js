@@ -613,9 +613,9 @@ router.post('/progress/coins/spend',paymentLimiter,async(req,res)=>{
   }catch(err){console.error('[games] POST /progress/coins/spend:',err.message);return res.status(500).json({error:'Server error'});}
 });
 
-function mpesaBase(){return String(process.env.MPESA_ENV||'sandbox').toLowerCase()==='production'?'https://api.safaricom.co.ke':'https://sandbox.safaricom.co.ke'}
+function mpesaBase(){return ['production','prod','live'].includes(String(process.env.MPESA_ENV||'sandbox').trim().toLowerCase())?'https://api.safaricom.co.ke':'https://sandbox.safaricom.co.ke'}
 function normalizeMsisdn(v){let s=String(v||'').replace(/\D/g,'');if(s.startsWith('254'))s=s;else if(s.startsWith('0'))s='254'+s.slice(1);else if(/^[71]\d{8}$/.test(s))s='254'+s;return /^254[71]\d{8}$/.test(s)?s:null}
-function mpesaTimestamp(){const d=new Date();const p=n=>String(n).padStart(2,'0');return d.getFullYear()+p(d.getMonth()+1)+p(d.getDate())+p(d.getHours())+p(d.getMinutes())+p(d.getSeconds())}
+function mpesaTimestamp(){const d=new Date(Date.now()+3*3600*1000);const p=n=>String(n).padStart(2,'0');return d.getUTCFullYear()+p(d.getUTCMonth()+1)+p(d.getUTCDate())+p(d.getUTCHours())+p(d.getUTCMinutes())+p(d.getUTCSeconds())}
 async function mpesaToken(){
   const key=process.env.MPESA_CONSUMER_KEY,secret=process.env.MPESA_CONSUMER_SECRET;if(!key||!secret)throw new Error('M-Pesa credentials are not configured');
   const auth=Buffer.from(key+':'+secret).toString('base64');
@@ -636,7 +636,7 @@ router.post('/coins/mpesa/stk',paymentLimiter,async(req,res)=>{
     if(rawAmount>MAX_COIN_KES)return res.status(400).json({error:'Maximum purchase is KES '+MAX_COIN_KES.toLocaleString()});
     const amount=rawAmount;
     if(!phone)return res.status(400).json({error:'Valid Kenyan M-Pesa number required'});
-    const isProd=String(process.env.MPESA_ENV||'sandbox').toLowerCase()==='production';
+    const isProd=['production','prod','live'].includes(String(process.env.MPESA_ENV||'sandbox').trim().toLowerCase());
     // Reuse the same M-Pesa settings as the marketplace so games do not need a separate set of variables.
     const shortCode=process.env.MPESA_GAME_SHORTCODE||process.env.MPESA_SHORTCODE||(isProd?'':'174379');
     const passkey=process.env.MPESA_GAME_PASSKEY||process.env.MPESA_PASSKEY||(isProd?'':'bfb279f9aa9bdbcf158e97dd71a467cd2e0c893059b10f78e6b72ada1ed2c919');
@@ -654,7 +654,7 @@ router.post('/coins/mpesa/stk',paymentLimiter,async(req,res)=>{
     const coins=amount*2;
     await WalletTxM.create({walletId:wallet.id,userId,type:'credit',amount,currency:'KES',balanceAfter:Number(wallet.balance||0),reference,description:'Pending Necpra game coin purchase',metadata:{status:'pending',gameCoins:coins}});
     const ts=mpesaTimestamp(),password=Buffer.from(String(shortCode)+String(passkey)+ts).toString('base64'),token=await mpesaToken();
-    const payload={BusinessShortCode:String(shortCode),Password:password,Timestamp:ts,TransactionType:process.env.MPESA_TRANSACTION_TYPE||'CustomerPayBillOnline',Amount:amount,PartyA:phone,PartyB:String(shortCode),PhoneNumber:phone,CallBackURL:callback,AccountReference:reference.slice(0,20),TransactionDesc:'Necpra game coins'};
+    const payload={BusinessShortCode:String(shortCode),Password:password,Timestamp:ts,TransactionType:process.env.MPESA_TRANSACTION_TYPE||'CustomerPayBillOnline',Amount:amount,PartyA:phone,PartyB:String(process.env.MPESA_PARTY_B||shortCode),PhoneNumber:phone,CallBackURL:callback,AccountReference:reference.slice(0,12),TransactionDesc:'Game coins'};
     const r=await fetch(mpesaBase()+'/mpesa/stkpush/v1/processrequest',{method:'POST',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},body:JSON.stringify(payload)});
     const j=await r.json().catch(()=>({}));if(!r.ok||j.ResponseCode!=='0'&&j.ResponseCode!==0){await WalletTxM.update({metadata:{status:'failed',gameCoins:coins,providerResponse:j}},{where:{reference}});return res.status(502).json({error:j.errorMessage||j.ResponseDescription||'M-Pesa request failed'});}
     await WalletTxM.update({metadata:{status:'pending',gameCoins:coins,checkoutRequestId:j.CheckoutRequestID||null,merchantRequestId:j.MerchantRequestID||null}},{where:{reference}});

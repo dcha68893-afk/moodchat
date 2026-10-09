@@ -963,17 +963,18 @@ class ToolsController {
                     try {
                         const axios   = require('axios');
                         const auth    = Buffer.from(`${ck}:${cs}`).toString('base64');
-                        const tok     = (await axios.get('https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials', { headers: { Authorization: `Basic ${auth}` } })).data.access_token;
-                        const ts      = new Date().toISOString().replace(/\D/g,'').slice(0,14);
+                        const _mb = ['production','prod','live'].includes(String(process.env.MPESA_ENV||'').trim().toLowerCase()) ? 'https://api.safaricom.co.ke' : 'https://sandbox.safaricom.co.ke';
+                        const tok     = (await axios.get(_mb + '/oauth/v1/generate?grant_type=client_credentials', { headers: { Authorization: `Basic ${auth}` } })).data.access_token;
+                        const ts      = new Date(Date.now()+3*3600*1000).toISOString().replace(/\D/g,'').slice(0,14);
                         const pw      = Buffer.from(`${sc}${pk}${ts}`).toString('base64');
-                        const stk     = (await axios.post('https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest', {
+                        const stk     = (await axios.post(_mb + '/mpesa/stkpush/v1/processrequest', {
                             BusinessShortCode: sc, Password: pw, Timestamp: ts,
                             TransactionType: 'CustomerPayBillOnline',
                             Amount: Math.ceil(amount), PartyA: normalized, PartyB: sc,
                             PhoneNumber: normalized,
                             CallBackURL: cbUrl || `${process.env.BASE_URL || 'https://example.com'}/api/tools/payments/mpesa/callback`,
-                            AccountReference: `KNT-${listingId.slice(0,8)}`,
-                            TransactionDesc: `Payment for ${listingId}`,
+                            AccountReference: `KNT-${String(listingId).slice(0,8)}`.slice(0,12),
+                            TransactionDesc: 'Payment'.slice(0,13),
                         }, { headers: { Authorization: `Bearer ${tok}`, 'Content-Type': 'application/json' } })).data;
 
                         return ok(res, { transactionId, checkoutRequestId: stk.CheckoutRequestID, amount, currency: 'KES', listingId, paymentMethod: 'mpesa', phone: normalized, status: 'pending' }, 'M-Pesa STK Push sent');
