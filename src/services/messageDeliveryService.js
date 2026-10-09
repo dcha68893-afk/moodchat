@@ -519,7 +519,7 @@ class MessageDeliveryService {
 
       if (push) {
         const pushService=require('./pushService');
-        await pushService.sendToUsers([recipientId],{title:senderName,body:preview,...(senderAvatar?{imageUrl:senderAvatar}:{})},{type:'message',chatId:String(message.chatId),messageId:String(message.id||''),senderId:String(message.senderId||''),url:'/chat.html?chatId='+message.chatId+'&messageId='+(message.id||'')},{category:'messages'}).catch(()=>{});
+        await pushService.sendToUsers([recipientId],{title:senderName,body:preview,...(senderAvatar?{imageUrl:senderAvatar}:{})},{type:'message',chatId:String(message.chatId),messageId:String(message.id||''),senderId:String(message.senderId||''),url:'/chat.html?chatId='+message.chatId+'&messageId='+(message.id||'')},{category:'messages'}).then(r=>{if(r&&r.configured===false)return;if(r&&!r.successCount)console.warn('[Push] message push not delivered to user '+recipientId+': sent=0 failed='+(r.failureCount||0));}).catch(e=>console.warn('[Push] message push error:',e.message));
         if(!offlineSet||offlineSet.has(recipientId)){const pushNotificationService=require('./pushNotificationService');await pushNotificationService.notifyNewMessage(recipientId,{senderName,senderAvatar,content:preview,chatId:message.chatId,messageId:message.id},sequelize).catch(()=>{});}
       }
     }));

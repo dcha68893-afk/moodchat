@@ -365,3 +365,4 @@ module.exports=router;
 
 router.post('/mpesa/callback',(req,res)=>{handleMoneyCallback(req.body?.Body?.stkCallback||req.body).then(()=>res.status(200).json({ResultCode:0,ResultDesc:'Accepted'})).catch(e=>{console.error('[money] callback',e.message);res.status(200).json({ResultCode:0,ResultDesc:'Accepted'});});});
 router.mpesaCallback=(req,res)=>handleMoneyCallback(req.body?.Body?.stkCallback||req.body).then(()=>res.status(200).json({ResultCode:0,ResultDesc:'Accepted'})).catch(e=>{console.error('[money] callback',e.message);res.status(200).json({ResultCode:0,ResultDesc:'Accepted'});});
+router.requireMoneyStepUp=requireMoneyStepUp;

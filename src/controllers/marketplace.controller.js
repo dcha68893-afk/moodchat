@@ -1236,10 +1236,6 @@ class MarketplaceController {
                 }
             }
 
-            if (req.body?.Result || req.body?.result) {
-                await _handleWalletB2CResult(req.body);
-                return res.status(200).json({ ResultCode: 0, ResultDesc: 'Accepted' });
-            }
             const body = req.body?.Body?.stkCallback || req.body;
             const resultCode = body?.ResultCode ?? body?.result_code;
 
@@ -1381,76 +1377,6 @@ class MarketplaceController {
     //  • The charge for an order is read from the order(s) in the DB, never from the client.
     // ══════════════════════════════════════════════════════════════════════════
 
-
-    // POST /api/marketplace/wallet/transfer { recipient, amount, note? }
-    async walletTransfer(req,res,next) {
-        let t=null;
-        try {
-            const senderId=req.user?.id;
-            if(!senderId) return next(new AppError('Authentication required',401));
-            const amount=Math.round(Number(req.body?.amount)*100)/100;
-            if(!Number.isFinite(amount)||amount<10||amount>150000) return next(new AppError('Transfer amount must be between KES 10 and KES 150,000.',400));
-            const recipientKey=String(req.body?.recipient||'').trim();
-            if(!recipientKey) return next(new AppError('Recipient username, email, or phone is required.',400));
-            const db=getDb(),Wallet=db.Wallet,WalletTx=db.WalletTransaction,Users=db.Users||db.User,seq=getSequelize();
-            if(!Wallet||!WalletTx||!Users||!seq) return next(new AppError('Wallet transfer service unavailable.',503));
-            const cleanPhone=recipientKey.replace(/\s/g,'');
-            const where=recipientKey.includes('@')?{email:recipientKey.toLowerCase()}:(/^\+?(?:254|0)?[17]\d{8}$/.test(cleanPhone)?{phone:cleanPhone}:{username:recipientKey});
-            const recipient=await Users.findOne({where,attributes:['id','username','email','phone','firstName','lastName']});
-            if(!recipient) return next(new AppError('Recipient not found.',404));
-            if(String(recipient.id)===String(senderId)) return next(new AppError('You cannot send money to yourself.',400));
-            const ids=[Number(senderId),Number(recipient.id)].sort((a,b)=>a-b);
-            t=await seq.transaction();
-            const wallets=[];
-            for(const uid of ids){let w=await Wallet.findOne({where:{userId:uid},transaction:t,lock:t.LOCK.UPDATE});if(!w)w=await Wallet.create({userId:uid,balance:0,currency:'KES'},{transaction:t});wallets.push(w);}
-            const sender=wallets[ids.indexOf(Number(senderId))],receiver=wallets[ids.indexOf(Number(recipient.id))];
-            if(sender.isFrozen||receiver.isFrozen){await t.rollback();return next(new AppError('This wallet is unavailable for transfers.',403));}
-            const balance=Math.round(parseFloat(sender.balance||0)*100)/100;
-            if(balance<amount){await t.rollback();return res.status(402).json({success:false,code:'INSUFFICIENT_FUNDS',message:'Insufficient wallet balance. Available: KES '+balance.toFixed(2)+'.'});}
-            const senderBalance=Math.round((balance-amount)*100)/100,receiverBalance=Math.round((parseFloat(receiver.balance||0)+amount)*100)/100;
-            const ref='TRF-'+Date.now()+'-'+crypto.randomBytes(4).toString('hex'),note=String(req.body?.note||'').trim().slice(0,120);
-            await sender.update({balance:senderBalance},{transaction:t}); await receiver.update({balance:receiverBalance},{transaction:t});
-            await WalletTx.create({walletId:sender.id,userId:senderId,type:'debit',amount,currency:'KES',balanceAfter:senderBalance,reference:ref,description:'Transfer to @'+recipient.username,metadata:{kind:'wallet_transfer',status:'completed',direction:'outgoing',recipient_id:recipient.id,note}},{transaction:t});
-            await WalletTx.create({walletId:receiver.id,userId:recipient.id,type:'credit',amount,currency:'KES',balanceAfter:receiverBalance,reference:ref,description:'Transfer from NECPRA user',metadata:{kind:'wallet_transfer',status:'completed',direction:'incoming',sender_id:senderId,note}},{transaction:t});
-            await t.commit();
-            return ok(res,{status:'completed',amount,balance:senderBalance,reference:ref,recipient:{id:recipient.id,username:recipient.username}},'Transfer successful');
-        } catch(e){if(t)await t.rollback().catch(()=>{});err(next,e,'walletTransfer');}
-    }
-
-    // POST /api/marketplace/wallet/withdraw { amount, phone }
-    async walletWithdraw(req,res,next) {
-        let t=null;
-        try {
-            const userId=req.user?.id;
-            if(!userId)return next(new AppError('Authentication required',401));
-            const amount=Math.round(Number(req.body?.amount)*100)/100;
-            if(!Number.isFinite(amount)||amount<10||amount>150000)return next(new AppError('Withdrawal amount must be between KES 10 and KES 150,000.',400));
-            const phone=_normaliseMpesaPhone(req.body?.phone);
-            if(!phone)return next(new AppError('Enter a valid Safaricom number, e.g. 0712 345 678.',400));
-            const db=getDb(),Wallet=db.Wallet,WalletTx=db.WalletTransaction,seq=getSequelize();
-            if(!Wallet||!WalletTx||!seq)return next(new AppError('Wallet withdrawal service unavailable.',503));
-            const wallet=await Wallet.findOne({where:{userId}});
-            if(!wallet)return next(new AppError('Wallet has no funds yet.',404));
-            if(wallet.isFrozen)return next(new AppError('Your wallet is frozen. Please contact support.',403));
-            t=await seq.transaction();
-            const locked=await Wallet.findByPk(wallet.id,{transaction:t,lock:t.LOCK.UPDATE});
-            const balance=Math.round(parseFloat(locked.balance||0)*100)/100;
-            if(balance<amount){await t.rollback();return res.status(402).json({success:false,code:'INSUFFICIENT_FUNDS',message:'Insufficient wallet balance. Available: KES '+balance.toFixed(2)+'.'});}
-            const newBalance=Math.round((balance-amount)*100)/100,ref='WD-'+Date.now()+'-'+crypto.randomBytes(4).toString('hex');
-            await locked.update({balance:newBalance},{transaction:t});
-            const tx=await WalletTx.create({walletId:locked.id,userId,type:'debit',amount,currency:locked.currency||'KES',balanceAfter:newBalance,reference:ref,description:'M-Pesa withdrawal to '+phone.slice(-4),metadata:{kind:'wallet_withdrawal',status:'pending',phone_last4:phone.slice(-4),requested_at:new Date().toISOString()}},{transaction:t});
-            const result=await _mpesaB2CPayout({phone,amount,reference:ref,remarks:'NECPRA Wallet withdrawal'});
-            if(result?.errorMessage||result?.errorCode||(result?.ResponseCode!==undefined&&String(result.ResponseCode)!=='0')||(!result?.ConversationID&&!result?.OriginatorConversationID)){await t.rollback();return next(new AppError(result?.errorMessage||result?.ResponseDescription||'M-Pesa withdrawal could not be started.',502));}
-            await tx.update({metadata:{...(tx.metadata||{}),conversation_id:result.ConversationID||null,originator_conversation_id:result.OriginatorConversationID||null}},{transaction:t});
-            await t.commit();
-            return ok(res,{status:'pending',amount,balance:newBalance,reference:ref,phone_last4:phone.slice(-4)},'Withdrawal request sent to M-Pesa.');
-        }catch(e){if(t)await t.rollback().catch(()=>{});err(next,e,'walletWithdraw');}
-    }
-
-    async getWalletWithdrawals(req,res,next){
-        try{const userId=req.user?.id,WalletTx=getDb().WalletTransaction;if(!userId||!WalletTx)return next(new AppError('Wallet service unavailable.',503));const rows=await WalletTx.findAll({where:{userId,type:'debit'},order:[['createdAt','DESC']],limit:50});return ok(res,{withdrawals:rows.filter(x=>x.metadata?.kind==='wallet_withdrawal').map(x=>({id:x.id,status:x.metadata?.status||'pending',amount:parseFloat(x.amount),reference:x.reference,balance_after:x.balanceAfter,created_at:x.createdAt,phone_last4:x.metadata?.phone_last4||null,receipt:x.metadata?.receipt||null,failure:x.metadata?.failure||null}))});}catch(e){err(next,e,'getWalletWithdrawals');}
-    }
-
     // POST /api/marketplace/payment/wallet   { order_id, order_ids? }
     async walletPayment(req, res, next) {
         const userId = req.user?.id;
@@ -1530,7 +1456,7 @@ class MarketplaceController {
                 currency: wallet.currency || 'KES', balanceAfter: newBalance,
                 orderId: unpaid.length === 1 ? unpaid[0].id : null, reference: ref,
                 description: unpaid.length === 1 ? `Payment for order #${String(unpaid[0].id).slice(-8)}` : `Payment for ${unpaid.length} orders`,
-                metadata: { kind: 'order_payment', status: 'completed', order_ids: unpaid.map(o => o.id) },
+                metadata: { kind: 'order_payment', status: 'completed', balance_before: balance, order_ids: unpaid.map(o => o.id) },
             }, txOpts);
 
             if (t) await t.commit();
@@ -1556,7 +1482,7 @@ class MarketplaceController {
             if (!wallet) wallet = await Wallet.create({ userId, balance: 0, currency: 'KES' });
 
             const limit = Math.min(Math.max(parseInt(req.query?.limit) || 20, 1), 100);
-            const TITLES = { topup: 'Top up', order_payment: 'Order payment', refund: 'Refund', admin_credit: 'Credit from support', cashback: 'Cashback', referral: 'Referral bonus', reward: 'Reward' };
+            const TITLES = { topup: 'Top up', order_payment: 'Order payment', refund: 'Refund', admin_credit: 'Credit from support', cashback: 'Cashback', referral: 'Referral bonus', reward: 'Reward', transfer_out: 'Money sent', transfer_in: 'Money received', withdrawal: 'Withdrawal', withdrawal_reversal: 'Withdrawal refunded' };
             const transactions = WalletTransaction ? await WalletTransaction.findAll({
                 where: { userId }, order: [['createdAt', 'DESC']], limit,
             }).then(rows => rows.map(t => {
@@ -1566,7 +1492,7 @@ class MarketplaceController {
                     id: t.id,
                     direction: t.type,                                   // 'credit' | 'debit'
                     type: kind === 'topup' ? 'topup' : (t.type === 'credit' ? (kind === 'admin_credit' ? 'reward' : kind) : 'payment'),
-                    title: TITLES[kind] || (t.type === 'credit' ? 'Credit' : 'Payment'),
+                    title: (t.description && /^(Sent to|Received from)/.test(t.description) ? t.description : null) || TITLES[kind] || (t.type === 'credit' ? 'Credit' : 'Payment'),
                     status,                                              // 'pending' | 'completed' | 'failed'
                     amount: parseFloat(t.amount),
                     balance_after: t.balanceAfter != null ? parseFloat(t.balanceAfter) : null,
@@ -2170,26 +2096,23 @@ class MarketplaceController {
             let walletCredited = false;
             let manualActionNeeded = false;
             const seq = getSequelize();
-            if (order?.paymentMethod === 'wallet' && seq) {
-                const t = await seq.transaction();
+            if (order?.paymentMethod === 'wallet') {
+                // REFUND-LEDGER FIX: the old block wrote a ledger row with a non-existent `reason` column and no
+                // walletId (NOT NULL), so the insert threw, the transaction rolled back, the error was swallowed
+                // and the refund was still marked approved with no money returned. Credit through the single
+                // wallet service instead (row-locked, atomic, idempotent by REFUND-<id>); if it fails, do NOT approve.
                 try {
-                    const Wallet = db.Wallet;
-                    const WalletTransaction = db.WalletTransaction;
-                    const wallet = Wallet ? await Wallet.findOne({ where: { userId: refund.buyerId }, transaction: t, lock: t.LOCK.UPDATE }) : null;
-                    if (wallet) {
-                        await wallet.increment('balance', { by: parseFloat(refund.amount), transaction: t });
-                        if (WalletTransaction) {
-                            await WalletTransaction.create({
-                                walletId: wallet.id, userId: refund.buyerId, type: 'credit', amount: refund.amount,
-                                currency: wallet.currency || 'KES', balanceAfter: Math.round(parseFloat(wallet.balance || 0) * 100) / 100,
-                                reference: `REFUND-${refund.id}`, description: 'Marketplace refund',
-                                metadata: { kind: 'refund', status: 'completed', refund_id: refund.id, order_id: refund.orderId },
-                            }, { transaction: t });
-                        }
-                        walletCredited = true;
-                    }
-                    await t.commit();
-                } catch(_) { await t.rollback().catch(()=>{}); }
+                    const walletService = require('../services/walletService');
+                    await walletService.creditByReference({
+                        userId: refund.buyerId, amount: parseFloat(refund.amount), kind: 'refund',
+                        reference: `REFUND-${refund.id}`, description: 'Refund for order', orderId: refund.orderId || null,
+                        metadata: { refund_id: refund.id, order_id: refund.orderId, approved_by: req.user.id },
+                    });
+                    walletCredited = true;
+                } catch (e) {
+                    logger.error('[Marketplace] refund wallet credit failed:', e.message);
+                    return next(new AppError('Could not credit the buyer wallet. The refund was not approved; please retry.', 500));
+                }
             } else if (order?.paymentMethod === 'card' || order?.paymentMethod === 'mpesa') {
                 manualActionNeeded = true;
             }
@@ -2815,94 +2738,7 @@ function _socketBroadcast(req, event, data, targetUserId = null) {
     } catch(_) {}
 }
 
-async 
-function _normaliseMpesaPhone(phone) {
-    let d = String(phone == null ? '' : phone).replace(/\\D/g, '');
-    if (d.startsWith('00254')) d = d.slice(2);
-    if (/^0[17]\\d{8}$/.test(d)) d = '254' + d.slice(1);
-    else if (/^[17]\\d{8}$/.test(d)) d = '254' + d;
-    return /^254[17]\\d{8}$/.test(d) ? d : null;
-}
-
-async function _mpesaB2CPayout({ phone, amount, reference, remarks }) {
-    const consumerKey = process.env.MPESA_CONSUMER_KEY || '';
-    const consumerSecret = process.env.MPESA_CONSUMER_SECRET || '';
-    const isProd = String(process.env.MPESA_ENV || 'sandbox').toLowerCase() === 'production';
-    const shortcode = process.env.MPESA_B2C_SHORTCODE || process.env.MPESA_SHORTCODE || '';
-    const initiator = process.env.MPESA_INITIATOR_NAME || '';
-    const securityCredential = process.env.MPESA_SECURITY_CREDENTIAL || '';
-    const resultUrl = process.env.MPESA_B2C_RESULT_URL || '';
-    const timeoutUrl = process.env.MPESA_B2C_TIMEOUT_URL || '';
-    const baseUrl = isProd ? 'https://api.safaricom.co.ke' : 'https://sandbox.safaricom.co.ke';
-    const missing = [!consumerKey && 'MPESA_CONSUMER_KEY', !consumerSecret && 'MPESA_CONSUMER_SECRET', !shortcode && 'MPESA_B2C_SHORTCODE', !initiator && 'MPESA_INITIATOR_NAME', !securityCredential && 'MPESA_SECURITY_CREDENTIAL', !resultUrl && 'MPESA_B2C_RESULT_URL', !timeoutUrl && 'MPESA_B2C_TIMEOUT_URL'].filter(Boolean);
-    if (missing.length) return { errorMessage: 'M-Pesa withdrawals are not configured (' + missing.join(', ') + ').' };
-
-    const tokenRes = await fetch(baseUrl + '/oauth/v1/generate?grant_type=client_credentials', {
-        headers: { Authorization: 'Basic ' + Buffer.from(consumerKey + ':' + consumerSecret).toString('base64') }
-    });
-    const tokenJson = await tokenRes.json().catch(() => ({}));
-    if (!tokenRes.ok || !tokenJson.access_token) {
-        logger.error('[Wallet] B2C OAuth failed:', tokenRes.status, JSON.stringify(tokenJson));
-        return { errorMessage: 'M-Pesa withdrawal authorisation failed.' };
-    }
-    const payload = {
-        InitiatorName: initiator,
-        SecurityCredential: securityCredential,
-        CommandID: process.env.MPESA_B2C_COMMAND_ID || 'BusinessPayment',
-        Amount: Math.ceil(amount),
-        PartyA: shortcode,
-        PartyB: phone,
-        Remarks: String(remarks || 'NECPRA Wallet withdrawal').slice(0, 100),
-        QueueTimeOutURL: timeoutUrl,
-        ResultURL: resultUrl,
-        Occasion: String(reference || 'NECPRA-WITHDRAWAL').slice(0, 100)
-    };
-    const response = await fetch(baseUrl + '/mpesa/b2c/v1/paymentrequest', {
-        method: 'POST',
-        headers: { Authorization: 'Bearer ' + tokenJson.access_token, 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-    });
-    const json = await response.json().catch(() => ({}));
-    if (!response.ok || (json.ResponseCode !== undefined && String(json.ResponseCode) !== '0')) logger.error('[Wallet] B2C rejected:', response.status, JSON.stringify(json));
-    return json;
-}
-
-async function _handleWalletB2CResult(body) {
-    try {
-        const db = getDb(), Wallet = db.Wallet, WalletTx = db.WalletTransaction;
-        const result = body?.Result || body?.result || body;
-        const code = result?.ResultCode ?? result?.result_code;
-        const params = result?.ResultParameters?.ResultParameter || result?.result_parameters?.result_parameter || [];
-        const receipt = params.find(p => /transactionreceipt/i.test(String(p.Key || p.key || p.Name || p.name || '')))?.Value || result?.TransactionReceipt || result?.transactionReceipt || null;
-        const conversation = result?.ConversationID || result?.conversationID || result?.OriginatorConversationID || result?.originatorConversationID || null;
-        if (!Wallet || !WalletTx || !conversation) return false;
-        const candidates = await WalletTx.findAll({ where: { type: 'debit' }, order: [['createdAt', 'DESC']], limit: 100 });
-        const tx = candidates.find(row => {
-            const m = row.metadata || {};
-            return m.kind === 'wallet_withdrawal' && m.status === 'pending' && [m.conversation_id, m.originator_conversation_id].filter(Boolean).includes(conversation);
-        });
-        if (!tx) return false;
-        const seq = getSequelize(), t = seq ? await seq.transaction() : null;
-        const opts = t ? { transaction: t, lock: t.LOCK.UPDATE } : {};
-        try {
-            const locked = await WalletTx.findByPk(tx.id, opts);
-            if (!locked || locked.metadata?.status !== 'pending') { if (t) await t.rollback(); return true; }
-            const wallet = await Wallet.findByPk(locked.walletId, opts);
-            if (!wallet) { if (t) await t.rollback(); return false; }
-            if (String(code) === '0') {
-                await locked.update({ reference: receipt || locked.reference, metadata: { ...(locked.metadata || {}), status:'completed', result_code:code, receipt, completed_at:new Date().toISOString() } }, t ? { transaction:t } : {});
-            } else {
-                const restored = Math.round((parseFloat(wallet.balance || 0) + parseFloat(locked.amount || 0)) * 100) / 100;
-                await wallet.update({ balance: restored }, t ? { transaction:t } : {});
-                await locked.update({ balanceAfter:restored, metadata:{...(locked.metadata||{}),status:'failed',failure:result?.ResultDesc||result?.result_desc||'M-Pesa withdrawal failed',result_code:code,failed_at:new Date().toISOString()} }, t ? {transaction:t}:{});
-            }
-            if (t) await t.commit();
-            return true;
-        } catch(e) { if(t) await t.rollback().catch(()=>{}); throw e; }
-    } catch(e) { logger.error('[Wallet] B2C callback error:', e.message); return false; }
-}
-
-function _mpesaStkPush({ phone, amount, orderId, description, callbackUrl }) {
+async function _mpesaStkPush({ phone, amount, orderId, description, callbackUrl }) {
     // Production implementation should call Safaricom Daraja API
     const consumerKey    = process.env.MPESA_CONSUMER_KEY    || '';
     const consumerSecret = process.env.MPESA_CONSUMER_SECRET || '';

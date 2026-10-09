@@ -138,6 +138,8 @@ const ROUTE_MAPPING = {
   // PHASE14 FIX: payments.js — frontend calls /api/payments/* (mpesa, card, wallet)
   'payments.js': '/payments',
   'airtime.js': '/airtime',
+  // Wallet transfers / withdrawals (auth handled inside wallet.js; B2C callbacks are public, registered below)
+  'wallet.js': '/wallet',
   // FIX: smart-groups.js was missing — ALL Group OS tabs returned 404
   // AUTH-X FIX: smart-groups.js has its own internal auth middleware.
   // Mounting it at /groups alongside group.js (which gets a separate auth
@@ -417,6 +419,16 @@ try {
   _slog('✅ Public M-Pesa callback registered (no auth)');
 } catch (e) {
   console.error('❌ Failed to register public M-Pesa callback:', e.message);
+}
+
+// Daraja B2C (wallet withdrawal) Result/Timeout callbacks: server-to-server, no JWT, protected by a secret path segment.
+try {
+  const _walletRouter = require('./wallet');
+  router.post('/wallet/b2c/result/:secret', _walletRouter.publicB2CResult);
+  router.post('/wallet/b2c/timeout/:secret', _walletRouter.publicB2CTimeout);
+  _slog('✅ Public wallet B2C callbacks registered (secret path, no JWT)');
+} catch (e) {
+  console.error('❌ Failed to register wallet B2C callbacks:', e.message);
 }
 
 const mountResults = scanAndMountRouters();
