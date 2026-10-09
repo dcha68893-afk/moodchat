@@ -4210,6 +4210,11 @@ class Application {
     constructor() {
         this.app = express();
         global.__expressApp = this.app; // FIX-P12: required by SmartGroups IIFE mount
+        // FIX (hardening): Render puts one reverse proxy in front of the app and `trust proxy` was never set, so req.ip was the
+        // PROXY's address for every request. Every per-IP limiter (login / register / OTP brute-force limits) therefore shared one
+        // bucket across ALL users - one attacker could lock everybody out, and no limit was ever per-attacker. Trust exactly the
+        // one hop Render adds (override with TRUST_PROXY_HOPS if the deployment adds more, e.g. a CDN in front).
+        this.app.set('trust proxy', Math.max(0, parseInt(process.env.TRUST_PROXY_HOPS || '1', 10) || 0));
         this.server = null;
         this.initialized = false;
         

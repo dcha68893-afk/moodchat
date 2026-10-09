@@ -164,6 +164,29 @@ async function requestDeletion(userId, { password, confirmation, req } = {}) {
     console.warn('[AccountDeletion] Failed to remove settings row:', e.message);
   }
 
+  // FIX (delete account left the device live): push tokens / web-push subscriptions kept delivering to the phone, the
+  // account's public E2E keys stayed published, and open sockets kept the session alive until they dropped on their own.
+  // Each step is independent and best-effort so one missing table never blocks the deletion itself.
+  for (const [label, sql] of [
+    ['device push tokens',  'DELETE FROM device_push_tokens WHERE "userId" = :userId'],
+    ['web push subscriptions', 'DELETE FROM push_subscriptions WHERE "userId" = :userId'],
+    ['public encryption keys', 'DELETE FROM user_encryption_keys WHERE "userId" = :userId'],
+  ]) {
+    try { await db.sequelize.query(sql, { replacements: { userId } }); }
+    catch (e) { console.warn('[AccountDeletion] Failed to remove ' + label + ':', e.message); }
+  }
+  try {
+    const ws = require('./webSocketService');
+    const ids = ws.onlineUsers && ws.onlineUsers.get(Number(userId));
+    if (ids && ws.io && ws.io.sockets && ws.io.sockets.sockets) {
+      for (const sid of Array.from(ids)) {
+        try { const sock = ws.io.sockets.sockets.get(sid); if (sock) sock.disconnect(true); } catch (_) {}
+      }
+    }
+  } catch (e) {
+    console.warn('[AccountDeletion] Failed to disconnect live sockets:', e.message);
+  }
+
   try {
     const AuditLog = db.AuditLog;
     if (AuditLog) {

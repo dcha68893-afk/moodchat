@@ -825,6 +825,14 @@ router.post('/logout', authenticateToken, asyncHandler(async (req, res) => {
     // (`{ everywhere: true }`) for a real "log out of all devices" action
     // instead of removing the capability outright.
     const userId = req.user?.userId || req.user?.id;
+
+    // FIX (logout left this phone linked to the account): drop this device's FCM token (clients send it as `fcmToken`) so
+    // the signed-out user stops getting pushes here. Scoped to (userId, token): other devices of the same user keep theirs.
+    if (userId && req.body && typeof req.body.fcmToken === 'string' && req.body.fcmToken) {
+        try { await require('../services/pushService').unregisterToken(userId, req.body.fcmToken); }
+        catch (e) { console.warn('[Auth] Could not unlink push token on logout (non-fatal):', e.message); }
+    }
+
     if (userId && req.body.everywhere === true) {
         try {
             const TokenModel = tokenService.getTokenModel();
