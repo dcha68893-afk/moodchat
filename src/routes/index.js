@@ -364,7 +364,7 @@ function scanAndMountRouters() {
             const isSafaricomCallback = req.method === 'POST' && (
               callbackPath === '/payment/mpesa/callback' ||
               callbackPath === '/mpesa/callback' ||
-              /^\\/b2c\\/(?:result|timeout)\\/[^/]+\\/?$/.test(callbackPath)
+              /^\/b2c\/(?:result|timeout)\/[^/]+\/?$/.test(callbackPath)
             );
             if (isSafaricomCallback) return next();
             return authenticateToken(req, res, next);
