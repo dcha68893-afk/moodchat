@@ -362,6 +362,16 @@ router.post('/login', asyncHandler(async (req, res) => {
             return res.status(401).json({ success: false, message: 'Invalid credentials' });
         }
 
+        // FIX: admin Ban seller / Suspend buyer set Users.isBanned. Checked only after the password is
+        // verified so the message is never shown to someone who does not own the account.
+        if (user.isBanned === true || user.isActive === false) {
+            return res.status(403).json({
+                success: false,
+                message: 'This account has been suspended. Contact support if you think this is a mistake.',
+                errorCode: 'ACCOUNT_BANNED'
+            });
+        }
+
         // Successful login — clear any tracked failed attempts
         await loginAttemptService.clearAttempts(identifier, clientIp);
 
@@ -498,7 +508,7 @@ router.post('/google', asyncHandler(async (req, res) => {
     const result = await authService.loginWithGoogle(credential);
 
     if (!result.success) {
-        const status = result.code === 'GOOGLE_AUTH_ERROR' ? 401 : 500;
+        const status = result.code === 'ACCOUNT_BANNED' ? 403 : (result.code === 'GOOGLE_AUTH_ERROR' ? 401 : 500);
         return res.status(status).json({ success: false, message: result.message || 'Google sign-in failed' });
     }
 

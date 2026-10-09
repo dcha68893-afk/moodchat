@@ -34,6 +34,11 @@ const REQUIRED_COLUMNS = [
     table: 'Users', column: 'resetTokenExpiry',
     sql: `ALTER TABLE "Users" ADD COLUMN IF NOT EXISTS "resetTokenExpiry" TIMESTAMP WITH TIME ZONE`,
   },
+  // FIX: admin Ban seller / Suspend buyer set Users.isBanned, but the column never existed.
+  {
+    table: 'Users', column: 'isBanned',
+    sql: `ALTER TABLE "Users" ADD COLUMN IF NOT EXISTS "isBanned" BOOLEAN NOT NULL DEFAULT false`,
+  },
   {
     table: 'Users', column: 'mfaSecret',
     sql: `ALTER TABLE "Users" ADD COLUMN IF NOT EXISTS "mfaSecret" VARCHAR(255)`,

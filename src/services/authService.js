@@ -185,6 +185,15 @@ class AuthService {
         throw new Error('Invalid credentials');
       }
 
+      // FIX: admin Ban seller / Suspend buyer set Users.isBanned - a banned account must not be able to log in.
+      if (user.isBanned === true) {
+        console.log("⛔ [AuthService] Banned user login blocked:", user.id);
+        const banned = new Error('This account has been suspended. Contact support if you think this is a mistake.');
+        banned.code = 'ACCOUNT_BANNED';
+        banned.statusCode = 403;
+        throw banned;
+      }
+
       console.log("✅ [AuthService] User found:", user.id);
 
       // Validate password using model method
@@ -323,6 +332,13 @@ class AuthService {
         user = await this.User.findOne({ where: { email } });
       }
 
+      if (user && user.isBanned === true) {
+        const banned = new Error('This account has been suspended. Contact support if you think this is a mistake.');
+        banned.code = 'ACCOUNT_BANNED';
+        banned.statusCode = 403;
+        throw banned;
+      }
+
       if (user) {
         const updates = { lastSeen: new Date(), status: 'online' };
         if (!user.googleId) updates.googleId = googleId;
@@ -426,7 +442,7 @@ class AuthService {
       };
     } catch (error) {
       console.error('❌ [AuthService] Google login error:', error.message);
-      return { success: false, message: error.message, code: 'GOOGLE_AUTH_ERROR' };
+      return { success: false, message: error.message, code: error.code === 'ACCOUNT_BANNED' ? 'ACCOUNT_BANNED' : 'GOOGLE_AUTH_ERROR' };
     }
   }
 
@@ -483,6 +499,15 @@ async refreshToken(refreshToken) {
       throw new Error('Invalid or expired refresh token');
     }
     const decoded = verifyResult.decoded;
+
+    // FIX: a banned / deactivated account must not be able to keep renewing its session.
+    if (this.User) {
+      const account = await this.User.findByPk(decoded.userId, { attributes: ['id', 'isActive', 'isBanned'] });
+      if (!account || account.isActive === false || account.isBanned === true) {
+        await tokenService.invalidateRefreshToken(refreshToken).catch(() => {});
+        throw new Error('This account has been suspended');
+      }
+    }
     
     // Generate new tokens
     const tokens = this.generateTokens(decoded.userId);

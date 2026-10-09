@@ -313,6 +313,15 @@ module.exports = (sequelize, DataTypes) => {
         defaultValue: true,
         allowNull: false,
       },
+      // FIX (admin "Ban seller" / "Suspend buyer" did nothing): the marketplace admin handlers call
+      // user.update({ isBanned }) and server.js's socket upgrade check reads isBanned, but this model had
+      // no such field (and the table no such column), so Sequelize silently dropped the value.
+      // Column is created by utils/ensureSchema.js (Users.isBanned); enforced in authService login/refresh.
+      isBanned: {
+        type: DataTypes.BOOLEAN,
+        defaultValue: false,
+        allowNull: false,
+      },
       lastSeen: {
         type: DataTypes.DATE,
         allowNull: true,

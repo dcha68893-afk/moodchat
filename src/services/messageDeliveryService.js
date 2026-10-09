@@ -520,7 +520,12 @@ class MessageDeliveryService {
       if (push) {
         const pushService=require('./pushService');
         await pushService.sendToUsers([recipientId],{title:senderName,body:preview,...(senderAvatar?{imageUrl:senderAvatar}:{})},{type:'message',chatId:String(message.chatId),messageId:String(message.id||''),senderId:String(message.senderId||''),url:'/chat.html?chatId='+message.chatId+'&messageId='+(message.id||'')},{category:'messages'}).then(r=>{if(r&&r.configured===false)return;if(r&&!r.successCount)console.warn('[Push] message push not delivered to user '+recipientId+': sent=0 failed='+(r.failureCount||0));}).catch(e=>console.warn('[Push] message push error:',e.message));
-        if(!offlineSet||offlineSet.has(recipientId)){const pushNotificationService=require('./pushNotificationService');await pushNotificationService.notifyNewMessage(recipientId,{senderName,senderAvatar,content:preview,chatId:message.chatId,messageId:message.id},sequelize).catch(()=>{});}
+        /* FIX (browser/PWA user outside the app never got a notification): web push used to be sent ONLY to recipients whose socket
+           emit had failed (offlineSet). A socket whose emit "succeeds" is not proof the person is looking at the app - a backgrounded
+           tab / minimised PWA / locked phone keeps its socket open for a long time - so those users were never pushed. Always send;
+           the service worker (service-worker.js push handler) already skips the notification when the app window is focused on this
+           very chat, so an active reader is still not double-notified. */
+        { const pushNotificationService=require('./pushNotificationService');await pushNotificationService.notifyNewMessage(recipientId,{senderName,senderAvatar,content:preview,chatId:message.chatId,messageId:message.id},sequelize).catch(()=>{}); }
       }
     }));
   }
