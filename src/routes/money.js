@@ -18,7 +18,11 @@ function requireMoneyStepUp(req,res,userId){if(!verifyMoneyStepUp(req,userId)){r
 function normalizePhone(phone){let d=String(phone||'').replace(/\D/g,'');if(/^0[17]\d{8}$/.test(d))d='254'+d.slice(1);else if(/^[17]\d{8}$/.test(d))d='254'+d;if(!/^254[17]\d{8}$/.test(d))throw Object.assign(new Error('Enter a valid Kenyan M-Pesa number (07XX XXX XXX)'),{status:400});return d;}
 async function mpesaStk({phone,amount,reference,description,callbackPath}){
  const consumerKey=process.env.MPESA_CONSUMER_KEY||'',consumerSecret=process.env.MPESA_CONSUMER_SECRET||'',shortcode=process.env.MPESA_SHORTCODE||process.env.MPESA_GAME_SHORTCODE||(['production','prod','live'].includes(String(process.env.MPESA_ENV||'').trim().toLowerCase())?'':'174379'),passkey=process.env.MPESA_PASSKEY||process.env.MPESA_GAME_PASSKEY||(['production','prod','live'].includes(String(process.env.MPESA_ENV||'').trim().toLowerCase())?'':'bfb279f9aa9bdbcf158e97dd71a467cd2e0c893059b10f78e6b72ada1ed2c919');
- if(!consumerKey||!consumerSecret||!shortcode||!passkey) throw Object.assign(new Error('M-Pesa STK is not configured on the server'),{status:503,code:'MPESA_NOT_CONFIGURED'});
+ if(!consumerKey||!consumerSecret||!shortcode||!passkey){
+  const missing=[!consumerKey&&'MPESA_CONSUMER_KEY',!consumerSecret&&'MPESA_CONSUMER_SECRET',!shortcode&&'MPESA_SHORTCODE',!passkey&&'MPESA_PASSKEY'].filter(Boolean);
+  console.error('[money] M-Pesa STK not configured. MPESA_ENV='+(process.env.MPESA_ENV||'(unset)')+' missing env:',missing.join(', '));
+  throw Object.assign(new Error('Payments are temporarily unavailable. Please try again later.'),{status:503,code:'MPESA_NOT_CONFIGURED'});
+ }
  const _prod=['production','prod','live'].includes(String(process.env.MPESA_ENV||'').trim().toLowerCase()); const base=_prod?'https://api.safaricom.co.ke':'https://sandbox.safaricom.co.ke';
  const p=normalizePhone(phone); const tokenRes=await fetch(base+'/oauth/v1/generate?grant_type=client_credentials',{headers:{Authorization:'Basic '+Buffer.from(consumerKey+':'+consumerSecret).toString('base64')}}); const tokenJson=await tokenRes.json(); if(!tokenRes.ok||!tokenJson.access_token)throw Object.assign(new Error('Unable to authenticate with M-Pesa'),{status:502});
  const timestamp=new Date(Date.now()+3*3600*1000).toISOString().replace(/[^0-9]/g,'').slice(0,14); const password=Buffer.from(shortcode+passkey+timestamp).toString('base64');

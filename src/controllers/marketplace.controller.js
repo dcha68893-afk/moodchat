@@ -720,10 +720,24 @@ class MarketplaceController {
                 } catch(_) { /* non-fatal — fall through and create the order normally */ }
             }
 
-            // Group items by seller
+            // Group items by seller.
+            // FIX: the seller must come from the product row, never from the client. The cart
+            // sends seller_id:null for many listings, which became the object key "null" and then
+            // reached Postgres as sellerId "null" -> `invalid input syntax for type integer: "null"`
+            // (HTTP 500 on every checkout). Resolve each product's real seller server-side.
+            const _ids = [...new Set(items.map(i => i && i.product_id).filter(Boolean))];
+            if (!_ids.length) return next(new AppError('Cart items are missing product ids', 400));
+            const _prods = await T.findAll({ where: { id: _ids }, attributes: ['id', 'sellerId'] });
+            const _sellerOf = new Map(_prods.map(p => [String(p.id), p.sellerId]));
             const sellerGroups = {};
             for (const item of items) {
-                const sid = item.seller_id;
+                const sid = parseInt(_sellerOf.get(String(item.product_id)), 10);
+                if (!Number.isInteger(sid)) {
+                    return next(new AppError('One of the items in your cart is no longer available', 404));
+                }
+                if (sid === Number(buyerId)) {
+                    return next(new AppError('You cannot buy your own listing', 400));
+                }
                 if (!sellerGroups[sid]) sellerGroups[sid] = [];
                 sellerGroups[sid].push(item);
             }
