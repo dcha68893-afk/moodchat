@@ -658,20 +658,42 @@ router.post('/coins/mpesa/stk',paymentLimiter,async(req,res)=>{
     const r=await fetch(mpesaBase()+'/mpesa/stkpush/v1/processrequest',{method:'POST',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},body:JSON.stringify(payload)});
     const j=await r.json().catch(()=>({}));if(!r.ok||j.ResponseCode!=='0'&&j.ResponseCode!==0){await WalletTxM.update({metadata:{status:'failed',gameCoins:coins,providerResponse:j}},{where:{reference}});return res.status(502).json({error:j.errorMessage||j.ResponseDescription||'M-Pesa request failed'});}
     await WalletTxM.update({metadata:{status:'pending',gameCoins:coins,checkoutRequestId:j.CheckoutRequestID||null,merchantRequestId:j.MerchantRequestID||null}},{where:{reference}});
-    return res.status(202).json({ok:true,reference,checkoutRequestId:j.CheckoutRequestID||null,coins,amount});
+    // Daraja's SANDBOX returns success but never prompts a real phone or calls back — say so instead of "sent".
+    if(!isProd)console.warn('[games] STK sent to the Daraja SANDBOX (MPESA_ENV='+(process.env.MPESA_ENV||'(unset)')+'): no real prompt reaches a phone. Set MPESA_ENV=production.');
+    return res.status(202).json({ok:true,reference,checkoutRequestId:j.CheckoutRequestID||null,coins,amount,...(isProd?{}:{sandbox:true,message:'Payments are in test (sandbox) mode — no real M-Pesa prompt is sent to a phone. The store owner must switch M-Pesa to production.'})});
   }catch(err){console.error('[games] POST /coins/mpesa/stk:',err.stack||err.message);return res.status(500).json({error:err.message||'Payment request failed'});}
 });
 
 // POST /api/games/coins/payment-callback — public Daraja callback; URL intentionally avoids provider keywords.
-router.post('/coins/payment-callback',async(req,res)=>{
+async function gamesPaymentCallback(req,res){
   try{
+    // This handler is also registered publicly from routes/index.js (Safaricom sends no JWT), which
+    // bypasses this router's own per-request middleware, so resolve what that middleware sets up here.
+    if(!req.io)req.io=global.__socketIO||null;
+    if(db){
+      if(!Wallet)Wallet=db.models?.Wallet||db.Wallet||null;
+      if(!WalletTransaction)WalletTransaction=db.models?.WalletTransaction||db.WalletTransaction||null;
+    }
     const body=req.body||{},cb=body.Body?.stkCallback||body.Result?.Result||body.Result||{};
     const code=Number(cb.ResultCode??cb.resultCode??-1),items=cb.CallbackMetadata?.Item||cb.ResultParameters?.ResultParameter||[];
     const get=(...keys)=>{const x=items.find(i=>keys.includes(String(i.Name??i.Key)));return x?.Value};
-    const reference=String(get('AccountReference','BillRefNumber')||'');
-    if(!reference.startsWith('GC'))return res.json({ResultCode:0,ResultDesc:'Accepted'});
-    if(!WalletTransaction)return res.json({ResultCode:0,ResultDesc:'Accepted'});
-    const tx=await WalletTransaction.findOne({where:{reference}});if(!tx)return res.json({ResultCode:0,ResultDesc:'Accepted'});
+    // ROOT-CAUSE FIX (coin purchase "prompt sent" but never credited / no receipt): this used to
+    // find the purchase ONLY via an 'AccountReference' item inside CallbackMetadata. Daraja's STK
+    // callback never includes that item (it carries Amount, MpesaReceiptNumber, TransactionDate and
+    // PhoneNumber), so `reference` was always '' and every real callback was silently acknowledged
+    // and dropped — the coins were never credited and the receipt never recorded. The reliable key is
+    // the CheckoutRequestID Safaricom echoes back, which the STK route already stores on the pending row.
+    const WalletTxCb=WalletTransaction||db?.models?.WalletTransaction||db?.WalletTransaction;
+    if(!WalletTxCb)return res.json({ResultCode:0,ResultDesc:'Accepted'});
+    const checkoutId=String(cb.CheckoutRequestID||'');
+    let tx=null;
+    if(checkoutId)tx=await WalletTxCb.findOne({where:{'metadata.checkoutRequestId':checkoutId}});
+    if(!tx){
+      const reference=String(get('AccountReference','BillRefNumber')||'');
+      if(reference.startsWith('GC'))tx=await WalletTxCb.findOne({where:{reference}});
+    }
+    if(!tx){console.warn('[games] payment callback matched no pending purchase, checkoutRequestId='+(checkoutId||'(none)'));return res.json({ResultCode:0,ResultDesc:'Accepted'});}
+    if(!String(tx.reference||'').startsWith('GC'))return res.json({ResultCode:0,ResultDesc:'Accepted'});
     if(String(tx.metadata?.status||'')!=='pending')return res.json({ResultCode:0,ResultDesc:'Already processed'});
     if(code!==0){
       await tx.update({metadata:{...(tx.metadata||{}),status:'failed',resultCode:code,resultDesc:String(cb.ResultDesc||'Payment failed').slice(0,500)}});return res.json({ResultCode:0,ResultDesc:'Accepted'});
@@ -682,10 +704,13 @@ router.post('/coins/payment-callback',async(req,res)=>{
     await wallet.update({balance:nextBalance});
     await tx.update({balanceAfter:nextBalance,metadata:{...(tx.metadata||{}),status:'completed',receipt:get('MpesaReceiptNumber','TransactionReceipt')||null,completedAt:new Date().toISOString()}});
     const rec=await getOrCreate(tx.userId);await rec.update({coins:Number(rec.coins||0)+coins,lastSessionAt:new Date()});
-    emitTo(req,tx.userId,'games:coins:credited',{coins,totalCoins:Number(rec.coins||0),reference});
+    emitTo(req,tx.userId,'games:coins:credited',{coins,totalCoins:Number(rec.coins||0),reference:tx.reference});
     return res.json({ResultCode:0,ResultDesc:'Accepted'});
   }catch(err){console.error('[games] payment callback:',err.stack||err.message);return res.json({ResultCode:0,ResultDesc:'Accepted'});}
-});
+}
+router.post('/coins/payment-callback',gamesPaymentCallback);
+// Exposed so routes/index.js can register it WITHOUT the JWT wrapper the scanner puts on /games.
+router.paymentCallback=gamesPaymentCallback;
 
 function roomCode(){
   return crypto.randomBytes(5).toString('base64').replace(/[^A-Z0-9]/gi,'').toUpperCase().slice(0,8);

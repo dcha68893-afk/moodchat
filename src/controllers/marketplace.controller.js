@@ -1220,7 +1220,9 @@ class MarketplaceController {
                 }
             }
 
-            return ok(res, result, 'STK Push sent');
+            return ok(res, result, result?.sandbox
+                ? 'Payments are in test (sandbox) mode — no real M-Pesa prompt is sent to a phone. The store owner must switch M-Pesa to production.'
+                : 'STK Push sent');
         } catch(e) { err(next, e, 'initiateMpesa'); }
     }
 
@@ -1575,8 +1577,10 @@ class MarketplaceController {
                 metadata: { kind: 'topup', status: 'pending', phone_last4: digits.slice(-4) },
             });
 
-            return ok(res, { status: 'pending', checkout_request_id: result.CheckoutRequestID, amount: Math.ceil(amount) },
-                'M-Pesa prompt sent. Enter your PIN to complete the top-up.');
+            return ok(res, { status: 'pending', checkout_request_id: result.CheckoutRequestID, amount: Math.ceil(amount), ...(result.sandbox ? { sandbox: true } : {}) },
+                result.sandbox
+                    ? 'Payments are in test (sandbox) mode — no real M-Pesa prompt is sent to a phone. The store owner must switch M-Pesa to production.'
+                    : 'M-Pesa prompt sent. Enter your PIN to complete the top-up.');
         } catch(e) { err(next, e, 'walletTopup'); }
     }
 
@@ -2853,6 +2857,13 @@ async function _mpesaStkPush({ phone, amount, orderId, description, callbackUrl 
         const stkJson = await stkRes.json().catch(() => ({}));
         if (!stkRes.ok || (stkJson.ResponseCode !== undefined && String(stkJson.ResponseCode) !== '0')) {
             logger.error('[Marketplace] M-Pesa STK rejected:', stkRes.status, JSON.stringify(stkJson));
+        }
+        // Daraja's SANDBOX answers ResponseCode 0 + a CheckoutRequestID but never sends a prompt to a real
+        // phone (and never calls back). When MPESA_ENV is not production/prod/live that is exactly what
+        // happens here, so flag it instead of letting the UI claim a prompt was sent.
+        if (!isProd && stkJson && typeof stkJson === 'object') {
+            stkJson.sandbox = true;
+            logger.warn('[Marketplace] STK sent to the Daraja SANDBOX (MPESA_ENV=' + (process.env.MPESA_ENV || '(unset)') + '): no real prompt reaches a phone. Set MPESA_ENV=production for live payments.');
         }
         return stkJson;
     } catch(e) {

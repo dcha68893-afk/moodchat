@@ -421,6 +421,21 @@ try {
   console.error('❌ Failed to register public M-Pesa callback:', e.message);
 }
 
+// FIX (game coin purchase: "prompt sent" but coins/receipt never arrive): /games is mounted behind
+// authenticateToken by the scanner below, and Safaricom's STK callback carries no JWT, so every real
+// callback to /api/games/coins/payment-callback got a 401 before reaching the handler. Register it
+// publicly FIRST, same as the marketplace/money callbacks above. The handler only acts on a pending
+// purchase whose secret CheckoutRequestID it issued, and ignores everything else.
+try {
+  const _gamesRouter = require('./games');
+  if (typeof _gamesRouter.paymentCallback === 'function') {
+    router.post('/games/coins/payment-callback', _gamesRouter.paymentCallback);
+    _slog('✅ Public games coin-purchase callback registered (no auth)');
+  }
+} catch (e) {
+  console.error('❌ Failed to register games coin-purchase callback:', e.message);
+}
+
 // Daraja B2C (wallet withdrawal) Result/Timeout callbacks: server-to-server, no JWT, protected by a secret path segment.
 try {
   const _walletRouter = require('./wallet');
