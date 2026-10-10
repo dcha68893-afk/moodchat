@@ -121,6 +121,10 @@ function _invalidError(code) {
   return code === 'messaging/registration-token-not-registered' || code === 'messaging/invalid-registration-token' ||
          code === 'registration-token-not-registered' || code === 'invalid-registration-token';
 }
+// The app creates the v2 channels (status_updates_v2, general_v2). Pushes addressed to the old names landed in the
+// fallback channel (no pop-up, no sound). Map any legacy/unknown name to the real channel id.
+const _CHANNEL_MAP = { status_updates: 'status_updates_v2', general: 'general_v2' };
+function _androidChannel(id) { const c = String(id || 'messages'); return _CHANNEL_MAP[c] || c; }
 function _stringData(data = {}) {
   return Object.fromEntries(Object.entries(data).map(([k, v]) => [String(k), String(v ?? '')]));
 }
@@ -168,7 +172,7 @@ async function sendToMultipleTokens(tokens, notification, data = {}, sendOptions
         : {
             notification: { title, body, ...(img ? { imageUrl: img } : {}) },
             data: _stringData(data),
-            android: { priority: 'high', ttl: 86400000, notification: { channelId: data.channelId || 'messages', sound: 'default' } },
+            android: { priority: 'high', ttl: 86400000, notification: { channelId: _androidChannel(data.channelId), sound: 'default' } },
             apns: { payload: { aps: { sound: 'default', badge: 1 } } },
             tokens: batch,
           };
@@ -178,10 +182,19 @@ async function sendToMultipleTokens(tokens, notification, data = {}, sendOptions
       response.responses.forEach((item, index) => {
         if (item.success) return;
         if (_invalidError(item.error && item.error.code)) invalidTokens.push(batch[index]);
-        else { _lastSendError = (item.error && item.error.code) + ': ' + (item.error && item.error.message); console.warn('[PushService] FCM send failed:', _lastSendError); }
+        else {
+          const code = String((item.error && item.error.code) || ''), msg = String((item.error && item.error.message) || '');
+          _lastSendError = code + ': ' + msg;
+          if (/third-party-auth-error|mismatched-credential|sender-id-mismatch|authentication-error|invalid-credential|insufficient-permission/i.test(code + ' ' + msg))
+            console.error('[PushService] FIREBASE REJECTED THE SERVER CREDENTIALS - every push will fail until FIREBASE_SERVICE_ACCOUNT on Render is a key from Firebase project \"necpra\" (matching google-services.json). Firebase said: ' + _lastSendError);
+          else console.warn('[PushService] FCM send failed:', _lastSendError);
+        }
       });
     } catch (e) {
-      _lastSendError = e.message; console.error('[PushService] multicast failed:', e.message);
+      _lastSendError = e.message;
+      if (/credential|authenticat|permission|Could not load the default credentials|invalid_grant|private key/i.test(String(e.message)))
+        console.error('[PushService] FIREBASE REJECTED THE SERVER CREDENTIALS - check FIREBASE_SERVICE_ACCOUNT on Render (must be a key from Firebase project \"necpra\"). Error: ' + e.message);
+      else console.error('[PushService] multicast failed:', e.message);
       failureCount += batch.length;
     }
   }
@@ -226,6 +239,18 @@ function _hasNativeNotify(ua) { return /NecpraNativeNotify\/\d+/.test(String(ua 
 // v3+ draws Status notifications natively; older APKs would drop a data-only status push.
 function _nativeNotifyVersion(ua) { const m = /NecpraNativeNotify\/(\d+)/.exec(String(ua || '')); return m ? Number(m[1]) : 0; }
 
+const _noTokenWarnAt = new Map();   // userId -> last warn timestamp
+function _warnNoTokens(userIds) {
+  const now = Date.now();
+  for (const id of (userIds || [])) {
+    const k = String(id);
+    if (now - (_noTokenWarnAt.get(k) || 0) < 10 * 60 * 1000) continue;
+    _noTokenWarnAt.set(k, now);
+    console.warn('[PushService] No usable device token for user ' + k + ' - the phone never registered (or the token is >90 days old / notifications disabled in settings). Not an FCM delivery failure.');
+  }
+  if (_noTokenWarnAt.size > 5000) for (const [k, t] of _noTokenWarnAt) if (now - t > 10 * 60 * 1000) _noTokenWarnAt.delete(k);
+}
+
 let _warnedNoFirebase = false;
 async function sendToUsers(userIds, notification, data = {}, options = {}) {
   if (!isConfigured()) {
@@ -238,7 +263,10 @@ async function sendToUsers(userIds, notification, data = {}, options = {}) {
   }
   const category = options.category || 'messages';
   const rows = await _tokensForUsers(userIds, category);
-  if (!rows.length) return { successCount: 0, failureCount: 0, invalidTokens: [], configured: true, noTokens: true };
+  if (!rows.length) {
+    _warnNoTokens([...new Set((userIds || []).map(Number).filter(Number.isInteger))]);
+    return { successCount: 0, failureCount: 0, invalidTokens: [], configured: true, noTokens: true };
+  }
 
   const channel = data.channelId ||
     (category === 'groups' ? 'group_messages' : category === 'status' ? 'status_updates' : category === 'other' ? 'general' : 'messages');
@@ -247,7 +275,7 @@ async function sendToUsers(userIds, notification, data = {}, options = {}) {
   const isNative = r => isStatus ? _nativeNotifyVersion(r.userAgent) >= 3 : _hasNativeNotify(r.userAgent);
   const nativeRows = (isChat || isStatus) ? rows.filter(isNative) : [];
   const legacyRows = (isChat || isStatus) ? rows.filter(r => !isNative(r)) : rows;
-  const payload = { ...data, channelId: channel };
+  const payload = { ...data, channelId: _androidChannel(channel) };
 
   const parts = [];
   if (nativeRows.length) parts.push(await sendToMultipleTokens(nativeRows.map(r => r.token), notification, payload, { dataOnly: true }));
