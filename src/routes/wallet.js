@@ -14,6 +14,7 @@ const express = require('express');
 const rateLimit = require('express-rate-limit');
 const { authenticateToken } = require('../middleware/auth');
 const { paymentLimiter } = require('../middleware/rateLimiter');
+const { requireAdult } = require('../middleware/requireAdult');
 const wallet = require('../services/walletService');
 const b2c = require('../services/darajaB2C');
 
@@ -79,7 +80,7 @@ router.get('/lookup', lookupLimiter, wrap(async (req, res) => {
   res.json({ success: true, data: { id: r.id, username: r.username, displayName: r.displayName } });
 }));
 
-router.post('/transfer', paymentLimiter, burst, hourly, stepUp, wrap(async (req, res) => {
+router.post('/transfer', paymentLimiter, requireAdult, burst, hourly, stepUp, wrap(async (req, res) => {
   const b = req.body || {};
   const result = await wallet.transfer({ fromUserId: userId(req), recipient: b.recipient || b.to, amount: b.amount, note: b.note, idempotencyKey: b.idempotencyKey || req.get('Idempotency-Key') });
   res.status(result.idempotent ? 200 : 201).json({ success: true, message: 'Transfer sent', data: result });
@@ -90,7 +91,7 @@ router.get('/ledger', wrap(async (req, res) => {
   res.json({ success: true, data: { items } });
 }));
 
-router.post('/withdraw', paymentLimiter, burst, hourly, stepUp, wrap(async (req, res) => {
+router.post('/withdraw', paymentLimiter, requireAdult, burst, hourly, stepUp, wrap(async (req, res) => {
   const b = req.body || {};
   const result = await wallet.requestWithdrawal({ userId: userId(req), amount: b.amount, phone: b.phone, idempotencyKey: b.idempotencyKey || req.get('Idempotency-Key') });
   res.status(result.idempotent ? 200 : 202).json({ success: true, message: 'Withdrawal is being processed. You will receive the money on M-Pesa shortly.', data: result });

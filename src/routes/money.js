@@ -4,6 +4,7 @@ const jwt=require('jsonwebtoken');
 const { comparePassword }=require('../utils/passwordUtils');
 const { authenticator } = require('otplib');
 const router=express.Router();
+const { requireAdult, isAdultConfirmed, confirmAdult } = require('../middleware/requireAdult');
 const db=()=>{const m=require('../models');
  // The models index exports the user model as `User` (getter), never `Users`. money.js read `d.Users`,
  // which was always undefined, so names fell back to "User <id>" and member search/add found nobody.
@@ -15,6 +16,15 @@ const moneyJwtSecret=()=>process.env.JWT_ACCESS_SECRET||process.env.JWT_SECRET||
 function verifyMoneyStepUp(req,userId){const token=String(req.get('X-Money-Step-Up')||'').trim();const secret=moneyJwtSecret();if(!token||!secret)return false;try{const p=jwt.verify(token,secret);return p&&p.type==='money_step_up'&&Number(p.userId)===Number(userId);}catch(_){return false;}}
 function requireMoneyStepUp(req,res,userId){if(!verifyMoneyStepUp(req,userId)){res.status(401).json({success:false,message:'Fresh account authentication is required for this money action.',errorCode:'MONEY_STEP_UP_REQUIRED'});return false;}return true;}
 
+/* ---- 18+ confirmation (server-enforced; see middleware/requireAdult.js) ---- */
+router.get('/adult-status',wrap(async(req,res)=>ok(res,{adultConfirmed:await isAdultConfirmed(uid(req))})));
+router.post('/adult-confirm',wrap(async(req,res)=>{const at=await confirmAdult(uid(req));ok(res,{adultConfirmed:true,confirmedAt:at});}));
+// Everything that changes money state needs the confirmation. Reads, the adult endpoints and payment-provider callbacks are exempt.
+router.use((req,res,next)=>{
+  if(req.method==='GET'||req.method==='HEAD'||req.method==='OPTIONS')return next();
+  if(/callback/i.test(req.path)||req.path==='/adult-confirm'||req.path==='/adult-status')return next();
+  return requireAdult(req,res,next);
+});
 function normalizePhone(phone){let d=String(phone||'').replace(/\D/g,'');if(/^0[17]\d{8}$/.test(d))d='254'+d.slice(1);else if(/^[17]\d{8}$/.test(d))d='254'+d;if(!/^254[17]\d{8}$/.test(d))throw Object.assign(new Error('Enter a valid Kenyan M-Pesa number (07XX XXX XXX)'),{status:400});return d;}
 async function mpesaStk({phone,amount,reference,description,callbackPath}){
  const consumerKey=process.env.MPESA_CONSUMER_KEY||'',consumerSecret=process.env.MPESA_CONSUMER_SECRET||'',shortcode=process.env.MPESA_SHORTCODE||process.env.MPESA_GAME_SHORTCODE||(['production','prod','live'].includes(String(process.env.MPESA_ENV||'').trim().toLowerCase())?'':'174379'),passkey=process.env.MPESA_PASSKEY||process.env.MPESA_GAME_PASSKEY||(['production','prod','live'].includes(String(process.env.MPESA_ENV||'').trim().toLowerCase())?'':'bfb279f9aa9bdbcf158e97dd71a467cd2e0c893059b10f78e6b72ada1ed2c919');

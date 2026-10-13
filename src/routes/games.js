@@ -625,6 +625,13 @@ async function mpesaToken(){
 router.post('/coins/mpesa/stk',paymentLimiter,async(req,res)=>{
   try{
     const userId=req.user?.id||req.userId;if(!userId)return res.status(401).json({error:'Unauthorized'});
+    // Google Play Payments policy: in-app game currency (a digital good) must not be sold through M-Pesa inside the
+    // Play-distributed Android app. The Android app identifies itself (WebView user-agent suffix "NecpraApp" and the
+    // X-Necpra-Client header from native requests); those requests are refused. GAME_COIN_PURCHASE_ENABLED=false turns
+    // purchases off everywhere (e.g. while a Play Billing integration is pending).
+    if(String(process.env.GAME_COIN_PURCHASE_ENABLED||'true').toLowerCase()==='false'||/NecpraApp/i.test(String(req.headers['user-agent']||''))||String(req.headers['x-necpra-client']||'').toLowerCase()==='android'){
+      return res.status(403).json({error:'Coins are earned by playing in the app.',code:'COIN_PURCHASE_UNAVAILABLE'});
+    }
     // Resolve lazily: at require() time the Wallet models are not registered yet, so the
     // module-level Wallet/WalletTransaction stay undefined forever and this route 503s.
     const WalletM=Wallet||db?.models?.Wallet||db?.Wallet, WalletTxM=WalletTransaction||db?.models?.WalletTransaction||db?.WalletTransaction;

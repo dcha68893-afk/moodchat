@@ -83,6 +83,25 @@ async function requestDeletion(userId, { password, confirmation, req } = {}) {
     }
   }
 
+  // Wallet safety: never let someone delete the account that holds their money. Block while the wallet has a balance or
+  // a withdrawal is still pending/processing; the user withdraws or sends it first, then deletes. A wallet lookup that
+  // fails (e.g. wallet tables not provisioned) does not block deletion.
+  try {
+    const { getSummary } = require('./walletService');
+    const w = await getSummary(userId);
+    const held = Number((w && w.balance) || 0) + Number((w && w.reserved) || 0);
+    if (held > 0) {
+      const amount = held.toLocaleString('en-KE', { maximumFractionDigits: 2 });
+      return {
+        success: false,
+        status: 409,
+        message: `Your wallet still holds KSh ${amount} (including pending withdrawals). Withdraw or send it first, then delete your account.`
+      };
+    }
+  } catch (e) {
+    console.warn('[AccountDeletion] wallet check skipped:', e.message);
+  }
+
   const originalEmail = user.email;
   const anonymizedEmail = `deleted_${user.id}@deleted.necpa.local`;
 
