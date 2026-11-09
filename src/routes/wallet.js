@@ -7,6 +7,10 @@
  *   GET  /ledger                  ledger entries (credits, debits, transfers, withdrawals, reversals)
  *   POST /withdraw                withdraw to M-Pesa via Daraja B2C           (step-up + rate limited)
  *   GET  /withdrawals             withdrawal history
+ *   GET  /dashboard               balance + pending + received/spent this month + recent activity (one call)
+ *   GET  /quote?type=&amount=     fee, limits and daily allowance BEFORE the user confirms a transfer/withdrawal
+ *   GET  /receipt/:id             receipt for one completed ledger entry or withdrawal
+ *   GET/POST /goals, POST /goals/:id/deposit|withdraw, DELETE /goals/:id   savings goals
  * Public (Safaricom → server, protected by secret path segment, mounted in routes/index.js):
  *   POST /b2c/result/:secret , POST /b2c/timeout/:secret
  */
@@ -17,6 +21,7 @@ const { paymentLimiter } = require('../middleware/rateLimiter');
 const { requireAdult } = require('../middleware/requireAdult');
 const wallet = require('../services/walletService');
 const b2c = require('../services/darajaB2C');
+const extras = require('../services/walletExtras');
 
 const router = express.Router();
 const userId = req => req.user && (req.user.id || req.user.userId);
@@ -100,6 +105,35 @@ router.post('/withdraw', paymentLimiter, requireAdult, burst, hourly, stepUp, wr
 router.get('/withdrawals', wrap(async (req, res) => {
   const items = await wallet.listWithdrawals(userId(req), { limit: Number(req.query.limit) || 30, offset: Number(req.query.offset) || 0 });
   res.json({ success: true, data: { items } });
+}));
+
+// ── dashboard / quote / receipt / goals (see services/walletExtras.js) ───────────────────────────────────────
+router.get('/dashboard', wrap(async (req, res) => {
+  res.json({ success: true, data: await extras.getDashboard(userId(req)) });
+}));
+
+router.get('/quote', wrap(async (req, res) => {
+  res.json({ success: true, data: await extras.quote(userId(req), String(req.query.type || 'transfer'), req.query.amount) });
+}));
+
+router.get('/receipt/:id', wrap(async (req, res) => {
+  res.json({ success: true, data: await extras.getReceipt(userId(req), String(req.params.id)) });
+}));
+
+router.get('/goals', wrap(async (req, res) => {
+  res.json({ success: true, data: { items: await extras.listGoals(userId(req)) } });
+}));
+router.post('/goals', requireAdult, wrap(async (req, res) => {
+  res.status(201).json({ success: true, data: await extras.createGoal(userId(req), req.body || {}) });
+}));
+router.post('/goals/:id/deposit', paymentLimiter, requireAdult, burst, wrap(async (req, res) => {
+  res.json({ success: true, data: await extras.goalMove(userId(req), req.params.id, 'deposit', (req.body || {}).amount) });
+}));
+router.post('/goals/:id/withdraw', paymentLimiter, requireAdult, burst, wrap(async (req, res) => {
+  res.json({ success: true, data: await extras.goalMove(userId(req), req.params.id, 'withdraw', (req.body || {}).amount) });
+}));
+router.delete('/goals/:id', requireAdult, wrap(async (req, res) => {
+  res.json({ success: true, data: await extras.closeGoal(userId(req), req.params.id) });
 }));
 
 module.exports = router;
