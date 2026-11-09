@@ -1574,7 +1574,7 @@ class MarketplaceController {
                 walletId: wallet.id, userId, type: 'credit', amount: Math.ceil(amount),
                 currency: wallet.currency || 'KES', balanceAfter: null, reference: result.CheckoutRequestID,
                 description: 'Wallet top-up via M-Pesa',
-                metadata: { kind: 'topup', status: 'pending', phone_last4: digits.slice(-4) },
+                metadata: { kind: 'topup', status: 'pending', checkout_request_id: result.CheckoutRequestID, phone_last4: digits.slice(-4) },
             });
 
             return ok(res, { status: 'pending', checkout_request_id: result.CheckoutRequestID, amount: Math.ceil(amount), ...(result.sandbox ? { sandbox: true } : {}) },
@@ -1590,8 +1590,10 @@ class MarketplaceController {
             const userId = req.user?.id;
             const WalletTx = getDb().WalletTransaction;
             if (!userId || !WalletTx) return next(new AppError('Not available', 503));
-            const tx = await WalletTx.findOne({ where: { userId, reference: String(req.params.ref) } });
-            if (!tx || tx.metadata?.kind !== 'topup') return next(new AppError('Top-up not found', 404));
+            // After settlement the row's `reference` is replaced by the M-Pesa receipt number,
+            // so the CheckoutRequestID the client polls with must also match metadata.checkout_request_id.
+            const tx = await _findTopupTx(String(req.params.ref), { userId });
+            if (!tx) return next(new AppError('Top-up not found', 404));
             const Wallet = getDb().Wallet;
             const wallet = Wallet ? await Wallet.findOne({ where: { userId } }) : null;
             return ok(res, { status: tx.metadata?.status || 'pending', amount: parseFloat(tx.amount), balance: wallet ? parseFloat(wallet.balance) : null,
@@ -2875,6 +2877,21 @@ async function _mpesaStkPush({ phone, amount, orderId, description, callbackUrl 
 // Safaricom reported the STK push as failed/cancelled/timed out (ResultCode != 0).
 // Record it on the order so verifyMpesa can tell the polling checkout screen to stop waiting.
 // ── Wallet top-up settlement (called from the M-Pesa callback) ────────────────
+// Finds a top-up row by CheckoutRequestID OR by the M-Pesa receipt number. On settlement the
+// row's `reference` is rewritten to the receipt, and the original CheckoutRequestID is kept in
+// metadata.checkout_request_id — so a lookup by `reference` alone stops matching once paid.
+async function _findTopupTx(ref, { userId, extra } = {}) {
+    const WalletTx = getDb().WalletTransaction;
+    if (!WalletTx || !ref) return null;
+    const where = {
+        type: 'credit',
+        [Op.or]: [{ reference: ref }, { 'metadata.checkout_request_id': ref }],
+        ...(userId ? { userId } : {}),
+    };
+    const tx = await WalletTx.findOne({ where, ...(extra || {}) });
+    return tx && tx.metadata?.kind === 'topup' ? tx : null;
+}
+
 async function _creditWalletTopup(checkoutId, receipt, paidAmount) {
     const db = getDb();
     const WalletTx = db.WalletTransaction, Wallet = db.Wallet;
@@ -2883,8 +2900,8 @@ async function _creditWalletTopup(checkoutId, receipt, paidAmount) {
     const t = seq ? await seq.transaction() : null;
     const o = t ? { transaction: t, lock: t.LOCK.UPDATE } : {};
     try {
-        const tx = await WalletTx.findOne({ where: { reference: checkoutId, type: 'credit' }, ...o });
-        if (!tx || tx.metadata?.kind !== 'topup') { if (t) await t.rollback(); return false; }
+        const tx = await _findTopupTx(checkoutId, { extra: o });
+        if (!tx) { if (t) await t.rollback(); return false; }
         if (tx.metadata?.status === 'completed') { if (t) await t.commit(); return true; }   // replayed callback
         if (paidAmount !== undefined && paidAmount !== null && Math.abs(parseFloat(tx.amount) - parseFloat(paidAmount)) > 0.5) {
             logger.error(`[Wallet] top-up amount mismatch for ${checkoutId}: paid ${paidAmount}, expected ${tx.amount}`);
@@ -2913,8 +2930,8 @@ async function _failWalletTopup(checkoutId, callbackData) {
     try {
         const WalletTx = getDb().WalletTransaction;
         if (!WalletTx) return false;
-        const tx = await WalletTx.findOne({ where: { reference: checkoutId, type: 'credit' } });
-        if (!tx || tx.metadata?.kind !== 'topup') return false;
+        const tx = await _findTopupTx(checkoutId);
+        if (!tx) return false;
         if (tx.metadata?.status === 'pending') {
             await tx.update({ metadata: { ...(tx.metadata || {}), status: 'failed', failure: callbackData?.ResultDesc || 'Payment was not completed' } });
         }
