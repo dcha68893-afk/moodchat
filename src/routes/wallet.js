@@ -112,6 +112,11 @@ router.get('/dashboard', wrap(async (req, res) => {
   res.json({ success: true, data: await extras.getDashboard(userId(req)) });
 }));
 
+router.get('/mpesa-check', wrap(async (req, res) => {
+  if (!req.user || req.user.role !== 'admin') throw new wallet.WalletError('Admin access required', 403, 'FORBIDDEN');
+  res.json({ success: true, data: extras.mpesaDiagnostics() });
+}));
+
 router.get('/quote', wrap(async (req, res) => {
   res.json({ success: true, data: await extras.quote(userId(req), String(req.query.type || 'transfer'), req.query.amount) });
 }));

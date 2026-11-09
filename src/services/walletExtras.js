@@ -37,7 +37,14 @@ async function getDashboard(userId) {
   const goals = await q(null, `SELECT COALESCE(SUM("saved_amount"),0) AS saved, COUNT(*)::int AS n FROM "wallet_savings_goals" WHERE "user_id" = :u AND "status" <> 'closed'`, { u: uid(userId) })
     .catch(() => [{ saved: 0, n: 0 }]);
   const recent = await W.listLedger(userId, { limit: 8 });
+  let username = null, displayName = null;
+  try {
+    const m = require('../models'); const User = m.User || m.Users;
+    const u = User && await User.findByPk(userId, { attributes: ['id', 'username', 'displayName'] });
+    if (u) { username = u.username || null; displayName = u.displayName || null; }
+  } catch (_) {}
   return {
+    username, displayName,
     balance: summary.balance, currency: summary.currency, isFrozen: summary.isFrozen,
     pendingWithdrawals: summary.reserved,          // money already taken from the balance, on its way to M-PESA
     pendingDeposits: r2(pend[0].total), pendingDepositCount: pend[0].n,
@@ -148,4 +155,25 @@ async function closeGoal(userId, goalId) {
   });
 }
 
-module.exports = { getDashboard, quote, getReceipt, listGoals, createGoal, goalMove, closeGoal };
+// ── M-PESA setup check (admin only; never returns secrets) ─────────────────
+function mpesaDiagnostics() {
+  const b2c = require('./darajaB2C');
+  const env = String(process.env.MPESA_ENV || '').trim().toLowerCase();
+  const live = ['production', 'prod', 'live'].includes(env);
+  const shortcode = process.env.MPESA_SHORTCODE || process.env.MPESA_GAME_SHORTCODE || '';
+  const txType = process.env.MPESA_TRANSACTION_TYPE || 'CustomerPayBillOnline';
+  const partyB = process.env.MPESA_PARTY_B || shortcode;
+  const issues = [];
+  if (!live) issues.push('MPESA_ENV is "' + (env || '(unset)') + '": Safaricom SANDBOX is used, so no real prompt reaches a phone. Set MPESA_ENV=production.');
+  if (live && (!shortcode || shortcode === '174379')) issues.push('MPESA_SHORTCODE is missing or is the sandbox code 174379. Use your real Paybill / Store number.');
+  if (!process.env.MPESA_PASSKEY && !process.env.MPESA_GAME_PASSKEY && live) issues.push('MPESA_PASSKEY is missing (live passkey from Daraja Go-Live).');
+  if (txType === 'CustomerPayBillOnline' && partyB !== shortcode) issues.push('MPESA_PARTY_B differs from MPESA_SHORTCODE but the transaction type is CustomerPayBillOnline. For a Paybill, PartyB must equal the Paybill. This causes "The receiver party information is invalid".');
+  if (txType === 'CustomerBuyGoodsOnline' && (!process.env.MPESA_PARTY_B || partyB === shortcode)) issues.push('Till (Buy Goods) needs MPESA_SHORTCODE = Store/Head-office number AND MPESA_PARTY_B = the Till number. Using the same number for both gives "The receiver party information is invalid".');
+  if (txType !== 'CustomerPayBillOnline' && txType !== 'CustomerBuyGoodsOnline') issues.push('MPESA_TRANSACTION_TYPE must be CustomerPayBillOnline (Paybill) or CustomerBuyGoodsOnline (Till).');
+  if (!(process.env.BACKEND_URL || process.env.RENDER_EXTERNAL_URL)) issues.push('BACKEND_URL is not set: M-PESA cannot call back and deposits never complete.');
+  const b2cMissing = b2c.missingConfig();
+  if (b2cMissing.length) issues.push('Withdrawals (B2C) need: ' + b2cMissing.join(', ') + '. B2C uses its own shortcode (MPESA_B2C_SHORTCODE) and initiator, not the STK Paybill/Till.');
+  return { mode: live ? 'live' : 'sandbox', mpesaEnv: env || '(unset)', stk: { shortcode, transactionType: txType, partyB }, withdrawalsConfigured: b2cMissing.length === 0, issues, ok: issues.length === 0 };
+}
+
+module.exports = { mpesaDiagnostics, getDashboard, quote, getReceipt, listGoals, createGoal, goalMove, closeGoal };

@@ -16,7 +16,9 @@
 const crypto = require('crypto');
 const fs = require('fs');
 
-const isProd = () => String(process.env.MPESA_ENV || 'sandbox').toLowerCase() === 'production';
+// Same rule the STK-push code uses (production | prod | live). It used to accept ONLY 'production', so with
+// MPESA_ENV=live/prod the deposits went to Safaricom live while withdrawals silently went to the sandbox and failed.
+const isProd = () => ['production', 'prod', 'live'].includes(String(process.env.MPESA_ENV || 'sandbox').trim().toLowerCase());
 const baseUrl = () => (isProd() ? 'https://api.safaricom.co.ke' : 'https://sandbox.safaricom.co.ke');
 const cfg = () => ({
   consumerKey: process.env.MPESA_B2C_CONSUMER_KEY || process.env.MPESA_CONSUMER_KEY || '',
