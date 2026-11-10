@@ -50,6 +50,7 @@ try { AppError = require('../middleware/errorHandler').AppError; }
 catch (_) { AppError = class extends Error { constructor(m, c=400) { super(m); this.statusCode=c; this.status='fail'; } }; }
 
 let logger;
+const stk = require('../services/mpesaStkService');
 try { logger = require('../utils/logger'); }
 catch (_) { logger = { error: console.error, info: console.info, warn: console.warn }; }
 
@@ -1175,35 +1176,38 @@ class MarketplaceController {
             }
             const amount = Math.ceil(totalAmount);
 
-            // FIX (Forensic Audit P2): Validate/derive callbackUrl.
-            // If caller doesn't supply one, auto-derive from BACKEND_URL env var.
-            // Without a valid callbackUrl, M-Pesa never delivers payment confirmation.
-            const backendUrl = process.env.BACKEND_URL || process.env.RENDER_EXTERNAL_URL || '';
-            const resolvedCallback = callback_url
-                || (backendUrl ? `${backendUrl.replace(/\/$/, '')}/api/marketplace/payment/pay-callback` : null);
-
-            if (!resolvedCallback) {
-                logger.error('[Marketplace] initiateMpesa: callbackUrl is empty. Set BACKEND_URL env var.');
-                return next(new AppError(
-                    'Payment callback URL could not be resolved. Set BACKEND_URL environment variable.',
-                    500
-                ));
+            // ONE shared STK service. The server owns the callback URL (a client-supplied callback_url is ignored),
+            // the customer-facing description, and the beneficiaries: each order's SELLER (via their approved payout
+            // account) is saved on the transaction BEFORE the prompt is sent, and credited only after payment is confirmed.
+            const bySeller = new Map();
+            for (const po of paymentOrders) {
+                const k = String(po.sellerId || 'platform');
+                const e = bySeller.get(k) || { type: po.sellerId ? 'seller' : 'platform', id: po.sellerId || undefined, amount: 0, refs: [] };
+                e.amount += Number(po.totalPrice || 0); e.refs.push(po.id); bySeller.set(k, e);
             }
-
-            // M-Pesa STK Push via Safaricom Daraja API
-            const result = await _mpesaStkPush({ phone, amount, orderId: order_id, description, callbackUrl: resolvedCallback });
-            if (result?.errorMessage || result?.errorCode || result?.ResponseCode && String(result.ResponseCode) !== '0') {
-                return next(new AppError(result.errorMessage || result.errorMessage || result.ResponseDescription || 'M-Pesa STK request was rejected by the payment provider.', 502));
+            const beneficiaries = [...bySeller.values()].map(e => ({ type: e.type, id: e.id, amount: Math.round(e.amount * 100) / 100, ref: e.refs.join(',').slice(0, 200) }));
+            const first = paymentOrders[0];
+            let out;
+            try {
+                out = await stk.initiate({
+                    req, module: 'marketplace', txType: 'order', reference: String(order_id),
+                    description: stk.text.marketplaceOrder(paymentOrders),
+                    stkReference: 'ORD' + String(first.invoiceNumber || first.id).replace(/[^A-Za-z0-9]/g, '').slice(0, 8).toUpperCase(), stkDesc: 'NECPRA Order',
+                    payer: { userId: req.user.id, phone }, amount, beneficiaries, payload: { orderIds: paymentOrders.map(o => o.id) },
+                });
+            } catch (e) {
+                if (e && typeof e.status === 'number') return next(new AppError(e.message, e.status));
+                throw e;
             }
-            if (!result?.CheckoutRequestID) {
-                return next(new AppError('M-Pesa did not return a checkout request. Please try again.', 502));
-            }
+            const result = {
+                CheckoutRequestID: out.checkoutRequestId, checkoutRequestId: out.checkoutRequestId, MerchantRequestID: out.merchantRequestId,
+                ResponseCode: '0', CustomerMessage: out.customerMessage, status: 'pending',
+                description: out.transaction.description, summary: out.transaction.summary, payment: out.transaction,
+                ...(out.sandbox ? { sandbox: true } : {}),
+            };
 
-            // P1 FIX (Forensic Audit): persist CheckoutRequestID as paymentRef
-            // immediately so the async mpesaCallback can find this order via
-            // `where: { paymentRef: checkoutId }`. Without this, the callback
-            // handler can never match the order back to the STK push request.
-            if (result?.CheckoutRequestID) {
+            // Persist CheckoutRequestID as paymentRef so verifyMpesa and any legacy callback can still find these orders.
+            {
                 const O = Model.Order;
                 if (O) {
                     await O.update(
@@ -2771,106 +2775,18 @@ const _neutralCallback = (u) => String(u || '')
     .replace(/\/money\/mpesa\/callback/i, '/money/pay-callback');
 
 async function _mpesaStkPush({ phone, amount, orderId, description, callbackUrl }) {
-    // Production implementation should call Safaricom Daraja API
-    const consumerKey    = process.env.MPESA_CONSUMER_KEY    || '';
-    const consumerSecret = process.env.MPESA_CONSUMER_SECRET || '';
-    // Same settings resolution the Games coin purchase uses (routes/games.js), so
-    // Marketplace checkout works wherever coin purchase already works: it used to read
-    // ONLY MPESA_SHORTCODE/MPESA_PASSKEY, with an empty-string passkey fallback, so a
-    // deploy that only had the MPESA_GAME_* values (or the sandbox defaults) built an
-    // invalid STK password here while games kept working.
-    const isProd         = _isProdEnv();
-    const shortcode      = process.env.MPESA_SHORTCODE || process.env.MPESA_GAME_SHORTCODE || (isProd ? '' : '174379');
-    const passkey        = process.env.MPESA_PASSKEY   || process.env.MPESA_GAME_PASSKEY   ||
-        (isProd ? '' : 'bfb279f9aa9bdbcf158e97dd71a467cd2e0c893059b10f78e6b72ada1ed2c919');
-    const baseUrl        = isProd
-        ? 'https://api.safaricom.co.ke'
-        : 'https://sandbox.safaricom.co.ke';
-
-    // Daraja only accepts 2547XXXXXXXX / 2541XXXXXXXX (digits only, no '+', no leading 0). Callers pass
-    // +254..., 07.., 01.. or 254..; anything else would come back as "Bad Request - Invalid PhoneNumber".
-    {
-        let d = String(phone == null ? '' : phone).replace(/\D/g, '');
-        if (/^0[17]\d{8}$/.test(d)) d = '254' + d.slice(1);
-        else if (/^[17]\d{8}$/.test(d)) d = '254' + d;
-        if (!/^254[17]\d{8}$/.test(d)) return { errorMessage: 'Enter a valid Safaricom M-Pesa number (07XX XXX XXX)' };
-        phone = d;
-    }
-
-    // ROOT-CAUSE FIX (checkout shows "waiting for payment" but no prompt ever reaches
-    // the buyer's phone): when the Daraja credentials were missing this returned a
-    // fake CheckoutRequestID, so initiateMpesa() answered "STK Push sent" and the UI
-    // waited forever for a prompt that was never requested. Games, by contrast,
-    // answers 503 when M-Pesa is not configured. A mock is now only possible
-    // outside production AND with MPESA_ALLOW_MOCK=true; otherwise it is a real error.
-    const _missing = [!consumerKey && 'MPESA_CONSUMER_KEY', !consumerSecret && 'MPESA_CONSUMER_SECRET',
-                      !shortcode && 'MPESA_SHORTCODE', !passkey && 'MPESA_PASSKEY'].filter(Boolean);
-    if (_missing.length) {
-        if (!isProd && process.env.MPESA_ALLOW_MOCK === 'true') {
-            logger.warn('[Marketplace] M-Pesa env vars not set — MPESA_ALLOW_MOCK=true, returning mock response');
-            return { CheckoutRequestID: 'MOCK-' + Date.now(), mock: true };
-        }
-        logger.error('[Marketplace] M-Pesa not configured, missing env: ' + _missing.join(', '));
-        return { errorMessage: 'M-Pesa payment is temporarily unavailable. Please try again later or choose another payment method.' };
-    }
-
+    // Kept for the wallet top-up flow only: the Daraja call itself now lives in ONE place (services/mpesaStkService.js).
+    // Same contract as before — returns Daraja's JSON, or { errorMessage } on any failure.
     try {
-        // 1. Get access token
-        const authRes = await fetch(`${baseUrl}/oauth/v1/generate?grant_type=client_credentials`, {
-            headers: {
-                Authorization: 'Basic ' + Buffer.from(`${consumerKey}:${consumerSecret}`).toString('base64'),
-            }
+        return await stk.sendStkPush({
+            phone, amount,
+            accountReference: orderId === 'TOPUP' ? 'WalletTopUp' : `Ord${String(orderId || 'KNT').slice(-8)}`,
+            transactionDesc: description || 'Payment',
+            callbackUrl: _neutralCallback(callbackUrl),
         });
-        const authJson = await authRes.json().catch(() => ({}));
-        const access_token = authJson.access_token;
-        if (!authRes.ok || !access_token) {
-            logger.error('[Marketplace] M-Pesa OAuth failed:', authRes.status, JSON.stringify(authJson));
-            return { errorMessage: 'M-Pesa could not be reached (authorisation failed). Please try again shortly.' };
-        }
-
-        // 2. STK Push
-        const timestamp = _eatTimestamp();
-        const password  = Buffer.from(`${shortcode}${passkey}${timestamp}`).toString('base64');
-        // Till numbers (Buy Goods) need CustomerBuyGoodsOnline + PartyB = till; paybill keeps CustomerPayBillOnline.
-        const txType    = process.env.MPESA_TRANSACTION_TYPE || 'CustomerPayBillOnline';
-        const partyB    = process.env.MPESA_PARTY_B || shortcode;
-        const cbUrl     = _neutralCallback(callbackUrl);
-        if (/mpesa|safaricom/i.test(cbUrl)) logger.warn('[Marketplace] CallBackURL contains a word Daraja production rejects: ' + cbUrl);
-        logger.info(`[Marketplace] STK -> ${baseUrl} shortcode=${shortcode} type=${txType} partyB=${partyB} callback=${cbUrl}`);
-
-        const stkRes = await fetch(`${baseUrl}/mpesa/stkpush/v1/processrequest`, {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${access_token}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                BusinessShortCode: shortcode,
-                Password: password,
-                Timestamp: timestamp,
-                TransactionType: txType,
-                Amount: Math.ceil(amount),
-                PartyA: phone,
-                PartyB: partyB,
-                PhoneNumber: phone,
-                CallBackURL: cbUrl,
-                // Production limits: AccountReference max 12 chars, TransactionDesc max 13 chars (sandbox ignores this).
-                AccountReference: `Ord${String(orderId || 'KNT').slice(-8)}`.slice(0, 12),
-                TransactionDesc: String(description || 'Payment').slice(0, 13),
-            })
-        });
-        const stkJson = await stkRes.json().catch(() => ({}));
-        if (!stkRes.ok || (stkJson.ResponseCode !== undefined && String(stkJson.ResponseCode) !== '0')) {
-            logger.error('[Marketplace] M-Pesa STK rejected:', stkRes.status, JSON.stringify(stkJson));
-        }
-        // Daraja's SANDBOX answers ResponseCode 0 + a CheckoutRequestID but never sends a prompt to a real
-        // phone (and never calls back). When MPESA_ENV is not production/prod/live that is exactly what
-        // happens here, so flag it instead of letting the UI claim a prompt was sent.
-        if (!isProd && stkJson && typeof stkJson === 'object') {
-            stkJson.sandbox = true;
-            logger.warn('[Marketplace] STK sent to the Daraja SANDBOX (MPESA_ENV=' + (process.env.MPESA_ENV || '(unset)') + '): no real prompt reaches a phone. Set MPESA_ENV=production for live payments.');
-        }
-        return stkJson;
-    } catch(e) {
+    } catch (e) {
         logger.error('[Marketplace] M-Pesa STK error:', e.message);
-        return { errorMessage: 'M-Pesa request failed. Please try again.' };
+        return { errorMessage: e.message || 'M-Pesa request failed. Please try again.' };
     }
 }
 
@@ -3039,6 +2955,48 @@ async function _handleMpesaSuccess(callbackData) {
 
 module.exports = new MarketplaceController();
 module.exports.mpesaStkPush = _mpesaStkPush;
+// Shared-STK settler for marketplace orders. Runs ONLY after Safaricom confirmed payment; idempotent.
+stk.registerModule('marketplace', {
+    async onPaid(tx) {
+        const O = Model.Order;
+        if (!O) throw new Error('Order model unavailable');
+        const ids = (tx.payload && tx.payload.orderIds) || [tx.reference];
+        const orders = await O.findAll({ where: { id: ids } });
+        if (!orders.length) throw new Error('Orders not found for this payment');
+        const dead = orders.filter(o => ['cancelled', 'refunded'].includes(o.status) && !o.paidAt);
+        if (dead.length) throw new Error('MANUAL: payment received for a cancelled/refunded order — refund required (receipt ' + tx.mpesaReceipt + ')');
+        const toPay = orders.filter(o => o.status !== 'paid' && !o.paidAt);
+        if (!toPay.length) return;
+        const payIds = toPay.map(o => o.id);
+        await O.update({ status: 'paid', paidAt: new Date(), paymentRef: tx.mpesaReceipt || tx.checkoutRequestId, paymentMethod: 'mpesa' }, { where: { id: payIds } });
+        for (const o of toPay) {
+            const alloc = (tx.allocations || []).find(a => String(a.id) === String(o.sellerId));
+            await O.update({ metadata: { ...(o.metadata || {}), stk: { transactionId: tx.id, receipt: tx.mpesaReceipt, description: tx.description, settleTo: alloc ? alloc.account : null } } }, { where: { id: o.id } });
+        }
+        try {
+            const io = global.__socketIO;
+            if (io) {
+                const updated = await O.findAll({ where: { id: payIds }, limit: 20 });
+                updated.forEach(order => {
+                    const payload = { orderId: order.id, status: 'paid', paymentRef: tx.mpesaReceipt, amount: tx.paidAmount || tx.amount, paidAt: order.paidAt };
+                    if (order.buyerId) io.to(`user:${order.buyerId}`).emit('order:status_changed', payload);
+                    if (order.sellerId) io.to(`user:${order.sellerId}`).emit('order:status_changed', payload);
+                });
+            }
+        } catch (notifyErr) { logger.warn('[Marketplace] Socket notification after STK failed:', notifyErr.message); }
+    },
+    async onFailed(tx) {
+        const O = Model.Order;
+        if (!O) return;
+        const ids = (tx.payload && tx.payload.orderIds) || [tx.reference];
+        const orders = await O.findAll({ where: { id: ids } });
+        for (const o of orders) {
+            if (o.status === 'paid' || o.paidAt) continue;
+            await o.update({ metadata: { ...(o.metadata || {}), mpesa_failure: { code: tx.resultCode ?? null, desc: tx.resultDesc || 'Payment was not completed', at: new Date().toISOString() } } });
+        }
+    },
+});
+
 // ═══════════════════════════════════════════════════════════════════════════
 // FORENSIC ADDITIONS — All methods called by frontend but missing from controller
 // ═══════════════════════════════════════════════════════════════════════════

@@ -206,6 +206,8 @@ const MODEL_WHITELIST = [
   // ── Marketplace ─────────────────────────────────────────────────────────────
   'Tool', 'Order', 'Review', 'Cart', 'Coupon', 'Wishlist',
   'Wallet', 'WalletTransaction', 'AirtimeTransaction', 'Refund', 'Payout', 'SellerProfile',
+  // ── Shared M-Pesa STK ledger + approved receiving accounts ─────────────────
+  'StkTransaction', 'ReceivingAccount',
   // ── Account security ────────────────────────────────────────────────────────
   'PasswordHistory',
   // ── Support / Contact Us ─────────────────────────────────────────────────────
@@ -414,7 +416,8 @@ async function createMissingTables() {
     'tools', 'marketplace_orders', 'marketplace_reviews', 'airtime_transactions',
     'GameRooms', 'marketplace_carts',
     'wishlists', 'coupons', 'seller_profiles', 'payouts', 'refunds',
-    'money_circles', 'money_circle_members', 'money_contributions', 'money_requests'
+    'money_circles', 'money_circle_members', 'money_contributions', 'money_requests',
+    'stk_transactions', 'receiving_accounts'
   ];
   
   const missingTables = [];
@@ -2124,6 +2127,8 @@ module.exports = {
   get Wallet()            { return db.models.Wallet            || null; },
   get WalletTransaction() { return db.models.WalletTransaction || null; },
   get AirtimeTransaction() { return db.models.AirtimeTransaction || null; },
+  get StkTransaction() { return db.models.StkTransaction || null; },
+  get ReceivingAccount() { return db.models.ReceivingAccount || null; },
   get Coupon()        { return db.models.Coupon        || null; },
   get Refund()        { return db.models.Refund        || null; },
   get SellerProfile() { return db.models.SellerProfile || null; },

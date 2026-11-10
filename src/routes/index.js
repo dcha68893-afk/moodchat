@@ -421,6 +421,17 @@ try {
   console.error('❌ Failed to register public M-Pesa callback:', e.message);
 }
 
+// ONE shared STK callback for every module (marketplace, games, airtime, money, ...). Server-to-server, no JWT, so it is
+// registered publicly BEFORE the scanner wraps /stk in authenticateToken. The legacy per-module callbacks above/below stay
+// registered only so prompts that were already in flight before this deploy still settle.
+try {
+  const _stkRouter = require('./stk');
+  router.post(['/stk/pay-callback'], _stkRouter.payCallback);
+  _slog('✅ Public shared STK callback registered (no auth)');
+} catch (e) {
+  console.error('❌ Failed to register shared STK callback:', e.message);
+}
+
 // FIX (game coin purchase: "prompt sent" but coins/receipt never arrive): /games is mounted behind
 // authenticateToken by the scanner below, and Safaricom's STK callback carries no JWT, so every real
 // callback to /api/games/coins/payment-callback got a 401 before reaching the handler. Register it

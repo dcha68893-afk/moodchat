@@ -5,6 +5,7 @@
 const express = require('express');
 const router = express.Router();
 const { paymentLimiter } = require('../middleware/rateLimiter');
+const stk = require('../services/mpesaStkService');
 // ── CRITICAL: Inject global.__socketIO into req.io so all handlers can emit ──
 router.use((req, _, next) => { if (!req.io) req.io = global.__socketIO || null; next(); });
 
@@ -632,10 +633,6 @@ router.post('/coins/mpesa/stk',paymentLimiter,async(req,res)=>{
     if(String(process.env.GAME_COIN_PURCHASE_ENABLED||'true').toLowerCase()==='false'||/NecpraApp/i.test(String(req.headers['user-agent']||''))||String(req.headers['x-necpra-client']||'').toLowerCase()==='android'){
       return res.status(403).json({error:'Coins are earned by playing in the app.',code:'COIN_PURCHASE_UNAVAILABLE'});
     }
-    // Resolve lazily: at require() time the Wallet models are not registered yet, so the
-    // module-level Wallet/WalletTransaction stay undefined forever and this route 503s.
-    const WalletM=Wallet||db?.models?.Wallet||db?.Wallet, WalletTxM=WalletTransaction||db?.models?.WalletTransaction||db?.WalletTransaction;
-    if(!WalletM||!WalletTxM)return res.status(503).json({error:'Payment wallet is unavailable'});
     const rawAmount=Math.floor(Number(req.body?.amount)||0),phone=normalizeMsisdn(req.body?.phone);
     // Any whole-shilling amount is allowed (5, 10, 50 or a custom value) within these limits.
     const MIN_COIN_KES=5,MAX_COIN_KES=150000;
@@ -643,32 +640,16 @@ router.post('/coins/mpesa/stk',paymentLimiter,async(req,res)=>{
     if(rawAmount>MAX_COIN_KES)return res.status(400).json({error:'Maximum purchase is KES '+MAX_COIN_KES.toLocaleString()});
     const amount=rawAmount;
     if(!phone)return res.status(400).json({error:'Valid Kenyan M-Pesa number required'});
-    const isProd=['production','prod','live'].includes(String(process.env.MPESA_ENV||'sandbox').trim().toLowerCase());
-    // Reuse the same M-Pesa settings as the marketplace so games do not need a separate set of variables.
-    const shortCode=process.env.MPESA_GAME_SHORTCODE||process.env.MPESA_SHORTCODE||(isProd?'':'174379');
-    const passkey=process.env.MPESA_GAME_PASSKEY||process.env.MPESA_PASSKEY||(isProd?'':'bfb279f9aa9bdbcf158e97dd71a467cd2e0c893059b10f78e6b72ada1ed2c919');
-    const proto=String(req.headers['x-forwarded-proto']||req.protocol||'https').split(',')[0].trim();
-    const host=req.headers['x-forwarded-host']||req.get('host');
-    const callback=process.env.MPESA_GAME_CALLBACK_URL||(host?proto+'://'+host+'/api/games/coins/payment-callback':'');
-    const missing=[!shortCode&&'MPESA_SHORTCODE',!passkey&&'MPESA_PASSKEY',!callback&&'MPESA_GAME_CALLBACK_URL',!process.env.MPESA_CONSUMER_KEY&&'MPESA_CONSUMER_KEY',!process.env.MPESA_CONSUMER_SECRET&&'MPESA_CONSUMER_SECRET'].filter(Boolean);
-    if(missing.length){
-      console.error('[games] M-Pesa not configured, missing env:',missing.join(', '));
-      // Variable names are only exposed outside production, to make setup easy.
-      return res.status(503).json({error:'Coin purchase is temporarily unavailable. Please try again later.',...(isProd?{}:{missing})});
-    }
-    const [wallet]=await WalletM.findOrCreate({where:{userId},defaults:{userId,currency:'KES',balance:0}});
-    const reference='GC'+Date.now().toString(36).toUpperCase()+crypto.randomBytes(5).toString('hex').toUpperCase();
+    // ONE shared STK service (services/mpesaStkService.js): saves the transaction + beneficiary first, sends the prompt,
+    // and credits the coins ONLY after Safaricom confirms payment (see the 'games' settler registered below).
     const coins=amount*2;
-    await WalletTxM.create({walletId:wallet.id,userId,type:'credit',amount,currency:'KES',balanceAfter:Number(wallet.balance||0),reference,description:'Pending Necpra game coin purchase',metadata:{status:'pending',gameCoins:coins}});
-    const ts=mpesaTimestamp(),password=Buffer.from(String(shortCode)+String(passkey)+ts).toString('base64'),token=await mpesaToken();
-    const payload={BusinessShortCode:String(shortCode),Password:password,Timestamp:ts,TransactionType:process.env.MPESA_TRANSACTION_TYPE||'CustomerPayBillOnline',Amount:amount,PartyA:phone,PartyB:String(process.env.MPESA_PARTY_B||shortCode),PhoneNumber:phone,CallBackURL:callback,AccountReference:reference.slice(0,12),TransactionDesc:'Game coins'};
-    const r=await fetch(mpesaBase()+'/mpesa/stkpush/v1/processrequest',{method:'POST',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},body:JSON.stringify(payload)});
-    const j=await r.json().catch(()=>({}));if(!r.ok||j.ResponseCode!=='0'&&j.ResponseCode!==0){await WalletTxM.update({metadata:{status:'failed',gameCoins:coins,providerResponse:j}},{where:{reference}});return res.status(502).json({error:j.errorMessage||j.ResponseDescription||'M-Pesa request failed'});}
-    await WalletTxM.update({metadata:{status:'pending',gameCoins:coins,checkoutRequestId:j.CheckoutRequestID||null,merchantRequestId:j.MerchantRequestID||null}},{where:{reference}});
-    // Daraja's SANDBOX returns success but never prompts a real phone or calls back — say so instead of "sent".
-    if(!isProd)console.warn('[games] STK sent to the Daraja SANDBOX (MPESA_ENV='+(process.env.MPESA_ENV||'(unset)')+'): no real prompt reaches a phone. Set MPESA_ENV=production.');
-    return res.status(202).json({ok:true,reference,checkoutRequestId:j.CheckoutRequestID||null,coins,amount,...(isProd?{}:{sandbox:true,message:'Payments are in test (sandbox) mode — no real M-Pesa prompt is sent to a phone. The store owner must switch M-Pesa to production.'})});
-  }catch(err){console.error('[games] POST /coins/mpesa/stk:',err.stack||err.message);return res.status(500).json({error:err.message||'Payment request failed'});}
+    const out=await stk.initiate({req,module:'games',txType:'game_coins',reference:'GC'+Date.now().toString(36).toUpperCase()+crypto.randomBytes(4).toString('hex').toUpperCase(),
+      description:stk.text.gameCoins(coins),stkReference:'GC'+coins,stkDesc:'Game Coins',profile:'game',
+      payer:{userId,phone},amount,beneficiaries:[{type:'platform'}],payload:{coins}});
+    return res.status(202).json({ok:true,reference:out.transaction.reference,checkoutRequestId:out.checkoutRequestId,coins,amount,
+      description:out.transaction.description,summary:out.transaction.summary,customerMessage:out.customerMessage,payment:out.transaction,
+      ...(out.sandbox?{sandbox:true,message:'Payments are in test (sandbox) mode — no real M-Pesa prompt is sent to a phone. The store owner must switch M-Pesa to production.'}:{})});
+  }catch(err){console.error('[games] POST /coins/mpesa/stk:',err.stack||err.message);return res.status(err.status||500).json({error:err.message||'Payment request failed',code:err.code});}
 });
 
 // POST /api/games/coins/payment-callback — public Daraja callback; URL intentionally avoids provider keywords.
@@ -716,6 +697,18 @@ async function gamesPaymentCallback(req,res){
   }catch(err){console.error('[games] payment callback:',err.stack||err.message);return res.json({ResultCode:0,ResultDesc:'Accepted'});}
 }
 router.post('/coins/payment-callback',gamesPaymentCallback);
+// Shared-STK settler: coins are credited ONLY after the payment is confirmed. The coin pack is the product; the money
+// itself belongs to NECPRA, so the player's KES wallet balance is NOT credited (the old callback also did that).
+stk.registerModule('games',{
+  async onPaid(tx){
+    if(tx.payload&&tx.payload.coinsCredited)return;
+    const coins=Math.max(0,Number(tx.payload&&tx.payload.coins)||Math.floor(Number(tx.amount)*2));
+    const rec=await getOrCreate(tx.payerUserId);
+    await rec.update({coins:Number(rec.coins||0)+coins,lastSessionAt:new Date()});
+    await tx.update({payload:{...(tx.payload||{}),coinsCredited:true,coinsCreditedAt:new Date().toISOString()}});
+    emitTo({io:global.__socketIO||null},tx.payerUserId,'games:coins:credited',{coins,totalCoins:Number(rec.coins||0),reference:tx.reference});
+  }
+});
 // Exposed so routes/index.js can register it WITHOUT the JWT wrapper the scanner puts on /games.
 router.paymentCallback=gamesPaymentCallback;
 

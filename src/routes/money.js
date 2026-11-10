@@ -3,6 +3,7 @@ const express=require('express');
 const jwt=require('jsonwebtoken');
 const { comparePassword }=require('../utils/passwordUtils');
 const { authenticator } = require('otplib');
+const stk=require('../services/mpesaStkService');
 const router=express.Router();
 const { requireAdult, isAdultConfirmed, confirmAdult } = require('../middleware/requireAdult');
 const db=()=>{const m=require('../models');
@@ -26,21 +27,7 @@ router.use((req,res,next)=>{
   return requireAdult(req,res,next);
 });
 function normalizePhone(phone){let d=String(phone||'').replace(/\D/g,'');if(/^0[17]\d{8}$/.test(d))d='254'+d.slice(1);else if(/^[17]\d{8}$/.test(d))d='254'+d;if(!/^254[17]\d{8}$/.test(d))throw Object.assign(new Error('Enter a valid Kenyan M-Pesa number (07XX XXX XXX)'),{status:400});return d;}
-async function mpesaStk({phone,amount,reference,description,callbackPath}){
- const consumerKey=process.env.MPESA_CONSUMER_KEY||'',consumerSecret=process.env.MPESA_CONSUMER_SECRET||'',shortcode=process.env.MPESA_SHORTCODE||process.env.MPESA_GAME_SHORTCODE||(['production','prod','live'].includes(String(process.env.MPESA_ENV||'').trim().toLowerCase())?'':'174379'),passkey=process.env.MPESA_PASSKEY||process.env.MPESA_GAME_PASSKEY||(['production','prod','live'].includes(String(process.env.MPESA_ENV||'').trim().toLowerCase())?'':'bfb279f9aa9bdbcf158e97dd71a467cd2e0c893059b10f78e6b72ada1ed2c919');
- if(!consumerKey||!consumerSecret||!shortcode||!passkey){
-  const missing=[!consumerKey&&'MPESA_CONSUMER_KEY',!consumerSecret&&'MPESA_CONSUMER_SECRET',!shortcode&&'MPESA_SHORTCODE',!passkey&&'MPESA_PASSKEY'].filter(Boolean);
-  console.error('[money] M-Pesa STK not configured. MPESA_ENV='+(process.env.MPESA_ENV||'(unset)')+' missing env:',missing.join(', '));
-  throw Object.assign(new Error('Payments are temporarily unavailable. Please try again later.'),{status:503,code:'MPESA_NOT_CONFIGURED'});
- }
- const _prod=['production','prod','live'].includes(String(process.env.MPESA_ENV||'').trim().toLowerCase()); const base=_prod?'https://api.safaricom.co.ke':'https://sandbox.safaricom.co.ke';
- const p=normalizePhone(phone); const tokenRes=await fetch(base+'/oauth/v1/generate?grant_type=client_credentials',{headers:{Authorization:'Basic '+Buffer.from(consumerKey+':'+consumerSecret).toString('base64')}}); const tokenJson=await tokenRes.json(); if(!tokenRes.ok||!tokenJson.access_token)throw Object.assign(new Error('Unable to authenticate with M-Pesa'),{status:502});
- const timestamp=new Date(Date.now()+3*3600*1000).toISOString().replace(/[^0-9]/g,'').slice(0,14); const password=Buffer.from(shortcode+passkey+timestamp).toString('base64');
- const backend=process.env.BACKEND_URL||process.env.RENDER_EXTERNAL_URL||''; if(!backend)throw Object.assign(new Error('BACKEND_URL is required for M-Pesa callbacks'),{status:500});
- const callback=backend.replace(/\/$/,'')+callbackPath;
- const res=await fetch(base+'/mpesa/stkpush/v1/processrequest',{method:'POST',headers:{Authorization:'Bearer '+tokenJson.access_token,'Content-Type':'application/json'},body:JSON.stringify({BusinessShortCode:shortcode,Password:password,Timestamp:timestamp,TransactionType:process.env.MPESA_TRANSACTION_TYPE||'CustomerPayBillOnline',Amount:Math.ceil(amount),PartyA:p,PartyB:process.env.MPESA_PARTY_B||shortcode,PhoneNumber:p,CallBackURL:callback,AccountReference:String(reference).slice(0,12),TransactionDesc:String(description||'NECPRA Money').slice(0,13)})});
- const data=await res.json(); if(!res.ok||data.ResponseCode&&String(data.ResponseCode)!=='0')throw Object.assign(new Error(data.errorMessage||data.ResponseDescription||'M-Pesa STK request failed'),{status:502,provider:data}); return data;
-}
+// STK prompts are sent ONLY by the shared service (services/mpesaStkService.js).
 async function handleMoneyCallback(body){
  const d=db(),checkoutId=body?.CheckoutRequestID;if(!checkoutId)return;
  const items=body?.CallbackMetadata?.Item||[];const receipt=items.find(i=>i.Name==='MpesaReceiptNumber')?.Value;const amount=Number(items.find(i=>i.Name==='Amount')?.Value||0);
@@ -298,9 +285,15 @@ router.post('/circles/:id/contributions',wrap(async(req,res)=>{
 router.post('/circles/:id/contributions/:contributionId/pay',wrap(async(req,res)=>{
  const d=db(),userId=uid(req);if(!userId)return res.status(401).json({success:false,message:'Unauthorized'});
  const c=await d.MoneyContribution?.findOne({where:{id:req.params.contributionId,circleId:req.params.id,contributorId:userId,status:'pending'}});if(!c)return res.status(404).json({success:false,message:'Pending contribution not found'});
- const result=await mpesaStk({phone:req.body?.phone,amount:Number(c.amount),reference:'NC'+String(c.id).replace(/-/g,'').slice(-10),description:'NECPRA Circle',callbackPath:'/api/money/pay-callback'});
- await c.update({paymentRef:result.CheckoutRequestID,metadata:{...(c.metadata||{}),checkoutRequestId:result.CheckoutRequestID}});
- return ok(res,{status:'pending',contributionId:c.id,checkoutRequestId:result.CheckoutRequestID},202);
+ const circle=await d.MoneyCircle.findByPk(c.circleId);if(!circle)return res.status(404).json({success:false,message:'Circle not found'});
+ const isFund=/fundrais/i.test(circle.name||'')||(circle.settings&&circle.settings.kind==='fundraiser');
+ // Beneficiary = the circle (its APPROVED receiving account is resolved + saved before the prompt is sent).
+ const out=await stk.initiate({req,module:'money',txType:isFund?'fundraiser_contribution':'circle_contribution',reference:c.id,
+  description:isFund?stk.text.fundraiser(circle.name):stk.text.circleContribution(circle.name),
+  stkReference:stk.clean(circle.name,12),stkDesc:isFund?'Fundraiser':'Contribution',
+  payer:{userId,phone:req.body?.phone},amount:Number(c.amount),beneficiaries:[{type:'circle',id:circle.id,name:circle.name}],payload:{circleId:circle.id,contributionId:c.id}});
+ await c.update({paymentRef:out.checkoutRequestId,metadata:{...(c.metadata||{}),checkoutRequestId:out.checkoutRequestId,stkTransactionId:out.transaction.id}});
+ return ok(res,{status:'pending',contributionId:c.id,checkoutRequestId:out.checkoutRequestId,payment:out.transaction,description:out.transaction.description,customerMessage:out.customerMessage},202);
 }));
 
 router.get('/requests',wrap(async(req,res)=>{
@@ -370,10 +363,46 @@ router.post('/requests/:id/pay',wrap(async(req,res)=>{
  const R=await d.MoneyRequest?.findOne({where:{id:req.params.id,recipientUserId:userId,status:'requested'}});
  if(!R)return res.status(404).json({success:false,message:'Active payment request not found'});
  if(R.expiresAt&&new Date(R.expiresAt)<new Date()){await R.update({status:'expired'});return res.status(410).json({success:false,message:'This request has expired'});}
- const result=await mpesaStk({phone:req.body?.phone||R.recipientPhone,amount:Number(R.amount),reference:'NR'+String(R.id).replace(/-/g,'').slice(-10),description:'NECPRA Payment',callbackPath:'/api/money/pay-callback'});
- await R.update({paymentRef:result.CheckoutRequestID,metadata:{...(R.metadata||{}),checkoutRequestId:result.CheckoutRequestID}});
- return ok(res,{status:'pending',requestId:R.id,checkoutRequestId:result.CheckoutRequestID},202);
+
+ // Beneficiary = the person who made the request (the NECPRA account that will receive the money).
+ const User=d.Users;const requester=User?await User.findByPk(R.requesterId):null;
+ const reqName=requester?(requester.displayName||requester.username):'NECPRA user';
+ const out=await stk.initiate({req,module:'money',txType:'payment_request',reference:R.id,description:stk.text.paymentTo(reqName),
+  stkReference:'REQ'+String(R.id).replace(/-/g,'').slice(0,8).toUpperCase(),stkDesc:'Payment',
+  payer:{userId,phone:req.body?.phone||R.recipientPhone},amount:Number(R.amount),beneficiaries:[{type:'user',id:R.requesterId,name:reqName}],payload:{requestId:R.id,purpose:R.purpose}});
+ await R.update({paymentRef:out.checkoutRequestId,metadata:{...(R.metadata||{}),checkoutRequestId:out.checkoutRequestId,stkTransactionId:out.transaction.id}});
+ return ok(res,{status:'pending',requestId:R.id,checkoutRequestId:out.checkoutRequestId,payment:out.transaction,description:out.transaction.description,customerMessage:out.customerMessage},202);
 }));
+
+
+/* Shared-STK settler: runs ONLY after Safaricom confirmed payment; idempotent (safe to retry). */
+stk.registerModule('money',{
+ async onPaid(tx,h){
+  const d=db();
+  if(tx.txType==='circle_contribution'||tx.txType==='fundraiser_contribution'){
+   const C=await d.MoneyContribution.findByPk(tx.reference);if(!C)throw new Error('Contribution record not found');
+   if(C.status==='paid')return;
+   await d.sequelize.transaction(async t=>{
+    const [moved]=await d.MoneyContribution.update({status:'paid',paymentRef:tx.mpesaReceipt||tx.checkoutRequestId,
+     metadata:{...(C.metadata||{}),checkoutRequestId:tx.checkoutRequestId,receipt:tx.mpesaReceipt,stkTransactionId:tx.id,settledTo:tx.beneficiaryAccount}},
+     {where:{id:C.id,status:{[d.Op.ne]:'paid'}},transaction:t});
+    if(moved)await d.MoneyCircle.increment('collectedAmount',{by:Number(tx.amount),where:{id:C.circleId},transaction:t});
+   });
+   return;
+  }
+  if(tx.txType==='payment_request'){
+   const R=await d.MoneyRequest.findByPk(tx.reference);if(!R)throw new Error('Payment request not found');
+   // the requester is the beneficiary: credit their NECPRA wallet once (reference STK-<tx>-0 makes a replay a no-op)
+   await h.creditUserWallet(tx,R.requesterId,tx.amount,0);
+   if(R.status!=='paid')await R.update({status:'paid',paymentRef:tx.mpesaReceipt||tx.checkoutRequestId,metadata:{...(R.metadata||{}),checkoutRequestId:tx.checkoutRequestId,receipt:tx.mpesaReceipt,stkTransactionId:tx.id}});
+  }
+ },
+ async onFailed(tx){
+  const d=db();
+  if(tx.txType==='payment_request'){const R=await d.MoneyRequest.findByPk(tx.reference);if(R&&R.status==='requested')await R.update({status:'expired',metadata:{...(R.metadata||{}),failureCode:tx.resultCode,failureDescription:tx.resultDesc}});}
+  else{const C=await d.MoneyContribution.findByPk(tx.reference);if(C&&C.status==='pending')await C.update({status:'failed',metadata:{...(C.metadata||{}),failureCode:tx.resultCode,failureDescription:tx.resultDesc}});}
+ }
+});
 
 module.exports=router;
 
