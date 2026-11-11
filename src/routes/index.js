@@ -138,6 +138,8 @@ const ROUTE_MAPPING = {
   // PHASE14 FIX: payments.js — frontend calls /api/payments/* (mpesa, card, wallet)
   'payments.js': '/payments',
   'airtime.js': '/airtime',
+  // NECPRA DUKA SMART (replaces the user-facing Marketplace). Auth is applied inside duka.js AND by this router.
+  'duka.js': '/duka',
   // Wallet transfers / withdrawals (auth handled inside wallet.js; B2C callbacks are public, registered below)
   'wallet.js': '/wallet',
   // FIX: smart-groups.js was missing — ALL Group OS tabs returned 404
