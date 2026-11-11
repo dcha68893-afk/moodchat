@@ -1,12 +1,25 @@
 'use strict';
 /**
- * NECPRA DUKA SMART — Phase 1 API (mounted at /api/duka by routes/index.js).
+ * NECPRA DUKA SMART — Phase 1 + 2 API (mounted at /api/duka by routes/index.js).
  *
  *   Shops      GET/POST /shops · GET/PATCH/DELETE(archive) /shops/:shopId
  *   Products   GET/POST /shops/:shopId/products · GET/PATCH/DELETE .../products/:id
  *   Stock      POST .../products/:id/stock · GET .../products/:id/movements
+ *   Customers  GET/POST /shops/:shopId/customers
+ *   Sales/POS  POST /shops/:shopId/sales · GET /shops/:shopId/sales · GET /shops/:shopId/sales/:saleId (receipt)
  *   Dashboard  GET /shops/:shopId/dashboard
  *   Audit      GET /shops/:shopId/audit
+ *
+ * Sales (Phase 2)
+ *  - The sale id is a client-generated UUID and is the idempotency key: replaying the same POST (a
+ *    network retry or an offline-outbox resend) returns the stored sale and never touches stock again.
+ *  - One DB transaction writes the sale, its items, its payments, the stock deductions + ledger rows and
+ *    the audit entry — a sale is either fully recorded or not at all, and stock can never go negative.
+ *  - All money is computed server-side in integer cents/milli-units (BigInt for qty x price), never floats.
+ *  - Credit is NOT cash: amount_paid counts only real payments; balance_due is what the customer still owes.
+ *  - M-PESA is never accepted without a receipt code. 'verified' is only set when that code matches a PAID
+ *    NECPRA STK transaction for at least the amount; otherwise it is stored as 'receipt_recorded' (the
+ *    shopkeeper's own attestation) and reported separately so it is never presented as verified.
  *
  * Security model
  *  - Every route requires a valid JWT (authenticateToken is applied here and by index.js).
@@ -89,6 +102,18 @@ const ensureObject = (b) => {
   return b;
 };
 
+/* ───────────── exact money maths (integer cents / milli-units; BigInt where products can exceed 2^53) ───────────── */
+const toCents = (v) => Math.round(v * 100);
+const toMilli = (v) => Math.round(v * 1000);
+const fromCents = (c) => c / 100;
+// qty(milli) x price(cents) / 1000, rounded half-up → cents
+const lineCents = (qMilli, pCents) => Number((BigInt(qMilli) * BigInt(pCents) + 500n) / 1000n);
+const MAX_CENTS = Math.round(MAX_MONEY * 100);
+const MPESA_CODE_RE = /^[A-Z0-9]{10}$/;
+const MAX_SALE_LINES = 100;
+const SOLD_AT_MAX_AGE_MS = 90 * 24 * 3600 * 1000; // offline sales may be synced up to 90 days late
+const SOLD_AT_MAX_FUTURE_MS = 10 * 60 * 1000;     // tolerate small device clock drift
+
 /* ───────────── serializers ───────────── */
 const N = (v) => (v === null || v === undefined ? null : Number(v));
 const shopOut = (r) => ({
@@ -112,6 +137,24 @@ const movementOut = (r) => ({
   id: r.id, productId: r.product_id, type: r.type, qtyChange: N(r.qty_change), balanceAfter: N(r.balance_after),
   unitCost: N(r.unit_cost), referenceType: r.reference_type, referenceId: r.reference_id, note: r.note,
   clientOpId: r.client_op_id, createdAt: r.created_at
+});
+const customerOut = (r) => ({
+  id: r.id, name: r.name, phone: r.phone, isActive: r.is_active, createdAt: r.created_at,
+  outstandingBalance: r.outstanding === undefined ? undefined : N(r.outstanding)
+});
+const saleOut = (r) => ({
+  id: r.id, shopId: r.shop_id, receiptNo: r.receipt_no, customerId: r.customer_id, customerName: r.customer_name,
+  subtotal: N(r.subtotal), discountAmount: N(r.discount_amount), total: N(r.total), amountPaid: N(r.amount_paid),
+  balanceDue: N(r.balance_due), cogs: N(r.cogs), grossProfit: Math.round((N(r.total) - N(r.cogs)) * 100) / 100,
+  paymentStatus: r.payment_status, status: r.status, note: r.note, soldAt: r.sold_at, createdAt: r.created_at
+});
+const saleItemOut = (r) => ({
+  id: r.id, productId: r.product_id, name: r.product_name, unit: r.unit,
+  qty: N(r.qty), unitPrice: N(r.unit_price), unitCost: N(r.unit_cost), lineTotal: N(r.line_total)
+});
+const paymentOut = (r) => ({
+  id: r.id, method: r.method, amount: N(r.amount), mpesaReceipt: r.mpesa_receipt, payerPhone: r.payer_phone,
+  verification: r.verification, createdAt: r.created_at
 });
 
 /* ───────────── router factory (injectable for tests) ───────────── */
@@ -354,9 +397,10 @@ function buildRouter(opts = {}) {
       const [p] = await run('SELECT * FROM duka_products WHERE id=:id AND shop_id=:shopId FOR UPDATE',
         { id: requireProductId(req), shopId: shop.id }, t);
       if (!p) throw new HttpError(404, 'Product not found', 'PRODUCT_NOT_FOUND');
-      // Extend this query as later phases add tables that reference products (sale items, purchases).
+      // Extend this query as later phases add tables that reference products (purchases).
       const [{ n }] = await run(
-        `SELECT COUNT(*)::int AS n FROM duka_stock_movements WHERE product_id = :id AND type <> 'opening'`, { id: p.id }, t);
+        `SELECT (SELECT COUNT(*) FROM duka_stock_movements WHERE product_id = :id AND type <> 'opening')::int
+              + (SELECT COUNT(*) FROM duka_sale_items WHERE product_id = :id)::int AS n`, { id: p.id }, t);
       if (n > 0) {
         await run('UPDATE duka_products SET is_active=FALSE, updated_at=NOW() WHERE id=:id RETURNING id', { id: p.id }, t);
         await audit(t, req, shop.id, 'product.archive', 'product', p.id, productOut(p), { isActive: false });
@@ -416,6 +460,292 @@ function buildRouter(opts = {}) {
     res.json({ success: true, data: { movements: rows.map(movementOut) } });
   }));
 
+  /* ───── Customers (needed so credit / partial-payment sales have a named debtor) ───── */
+  router.get('/shops/:shopId/customers', wrap(async (req, res) => {
+    const shop = await ownedShop(req);
+    const repl = { shopId: shop.id, limit: Math.min(Math.max(parseInt(req.query.limit, 10) || 100, 1), 500) };
+    let w = 'c.shop_id = :shopId AND c.is_active';
+    if (has(req.query.search)) {
+      repl.search = `%${String(req.query.search).slice(0, 80).replace(/[\\%_]/g, '\\$&')}%`;
+      w += ' AND (c.name ILIKE :search OR c.phone ILIKE :search)';
+    }
+    const rows = await run(
+      `SELECT c.*, COALESCE((SELECT SUM(s.balance_due) FROM duka_sales s
+                              WHERE s.customer_id = c.id AND s.status = 'completed'), 0) AS outstanding
+         FROM duka_customers c WHERE ${w} ORDER BY lower(c.name) ASC LIMIT :limit`, repl);
+    res.json({ success: true, data: { customers: rows.map(customerOut) } });
+  }));
+
+  router.post('/shops/:shopId/customers', wrap(async (req, res) => {
+    const b = ensureObject(req.body);
+    const id = uuid(b.id, 'id');
+    const name = str(b.name, 'Customer name', { max: 120, required: true });
+    const phone = phoneKE(b.phone, 'Phone');
+    const out = await tx(async (t) => {
+      const shop = await ownedShop(req, { write: true, t, lock: true });
+      if (id) {
+        const ex = (await run('SELECT * FROM duka_customers WHERE id = :id', { id }, t))[0];
+        if (ex) {
+          if (ex.shop_id !== shop.id) throw new HttpError(409, 'This id is already in use', 'ID_CONFLICT');
+          return { customer: ex, created: false };
+        }
+      }
+      const [customer] = await run(
+        `INSERT INTO duka_customers (id,shop_id,name,phone) VALUES (COALESCE(:id::uuid, gen_random_uuid()),:shopId,:name,:phone) RETURNING *`,
+        { id, shopId: shop.id, name, phone }, t);
+      await audit(t, req, shop.id, 'customer.create', 'customer', customer.id, null, customerOut(customer));
+      return { customer, created: true };
+    });
+    res.status(out.created ? 201 : 200).json({ success: true, data: { customer: customerOut(out.customer), idempotent: !out.created } });
+  }));
+
+  /* ───── Sales / POS ───── */
+  function parseSaleBody(b) {
+    const id = uuid(b.id, 'Sale id', { required: true });
+    if (!Array.isArray(b.items) || b.items.length === 0) throw new HttpError(400, 'Add at least one product to the sale', 'VALIDATION_ERROR');
+    if (b.items.length > MAX_SALE_LINES) throw new HttpError(400, `A sale can have at most ${MAX_SALE_LINES} lines`, 'VALIDATION_ERROR');
+    const seen = new Set();
+    const items = b.items.map((it, i) => {
+      const o = ensureObject(it);
+      const productId = uuid(o.productId, `Item ${i + 1} product`, { required: true });
+      if (seen.has(productId)) throw new HttpError(400, 'The same product appears twice — combine it into one line', 'VALIDATION_ERROR');
+      seen.add(productId);
+      const q = qty(o.qty, `Item ${i + 1} quantity`, { required: true });
+      if (!(q > 0)) throw new HttpError(400, `Item ${i + 1} quantity must be greater than zero`, 'VALIDATION_ERROR');
+      const price = has(o.unitPrice) ? money(o.unitPrice, `Item ${i + 1} price`) : null;
+      return { productId, qMilli: toMilli(q), priceCents: price === null ? null : toCents(price) };
+    });
+
+    let discount = { type: 'amount', cents: 0, pctHundredths: 0 };
+    if (has(b.discount)) {
+      const d = ensureObject(b.discount);
+      if (d.type === 'percent') {
+        const pct = num(d.value, 'Discount percent', { dp: 2, max: 100, required: true });
+        discount = { type: 'percent', cents: 0, pctHundredths: Math.round(pct * 100) };
+      } else if (d.type === 'amount' || d.type === undefined) {
+        discount = { type: 'amount', cents: toCents(money(d.value, 'Discount', { required: true })), pctHundredths: 0 };
+      } else {
+        throw new HttpError(400, 'Discount type must be "amount" or "percent"', 'VALIDATION_ERROR');
+      }
+    }
+
+    const rawPays = has(b.payments) ? b.payments : [];
+    if (!Array.isArray(rawPays) || rawPays.length > 10) throw new HttpError(400, 'Invalid payments', 'VALIDATION_ERROR');
+    const codes = new Set();
+    const payments = rawPays.map((p, i) => {
+      const o = ensureObject(p);
+      if (o.method !== 'cash' && o.method !== 'mpesa') throw new HttpError(400, `Payment ${i + 1}: method must be "cash" or "mpesa"`, 'VALIDATION_ERROR');
+      const amount = money(o.amount, `Payment ${i + 1} amount`, { required: true });
+      if (!(amount > 0)) throw new HttpError(400, `Payment ${i + 1} amount must be greater than zero`, 'VALIDATION_ERROR');
+      const out = { method: o.method, cents: toCents(amount), mpesaReceipt: null, payerPhone: null };
+      if (o.method === 'mpesa') {
+        const code = str(o.mpesaReceipt, 'M-PESA receipt code', { max: 20 });
+        const norm = code ? code.toUpperCase().replace(/\s/g, '') : '';
+        // Never record an M-PESA payment as received without the receipt code that proves it.
+        if (!MPESA_CODE_RE.test(norm)) {
+          throw new HttpError(400, 'An M-PESA payment needs the 10-character M-PESA receipt code (e.g. SGH7K2L9QX)', 'MPESA_RECEIPT_REQUIRED');
+        }
+        if (codes.has(norm)) throw new HttpError(400, 'The same M-PESA receipt code is used twice', 'VALIDATION_ERROR');
+        codes.add(norm);
+        out.mpesaReceipt = norm;
+        out.payerPhone = phoneKE(o.payerPhone, 'Payer phone');
+      }
+      return out;
+    });
+
+    let soldAt = null;
+    if (has(b.soldAt)) {
+      const d = new Date(b.soldAt);
+      if (typeof b.soldAt !== 'string' || Number.isNaN(d.getTime())) throw new HttpError(400, 'soldAt must be a valid date-time', 'VALIDATION_ERROR');
+      if (d.getTime() > Date.now() + SOLD_AT_MAX_FUTURE_MS) throw new HttpError(400, 'soldAt cannot be in the future', 'VALIDATION_ERROR');
+      if (d.getTime() < Date.now() - SOLD_AT_MAX_AGE_MS) throw new HttpError(400, 'soldAt is too old to record', 'VALIDATION_ERROR');
+      soldAt = d.toISOString();
+    }
+    return {
+      id, items, discount, payments, soldAt,
+      customerId: uuid(b.customerId, 'customerId'),
+      note: str(b.note, 'Note', { max: 240 })
+    };
+  }
+
+  async function loadSaleDetail(shopId, saleId, t) {
+    const [sale] = await run('SELECT * FROM duka_sales WHERE id = :saleId AND shop_id = :shopId', { saleId, shopId }, t);
+    if (!sale) return null;
+    const [items, payments] = await Promise.all([
+      run('SELECT * FROM duka_sale_items WHERE sale_id = :saleId ORDER BY product_name', { saleId }, t),
+      run('SELECT * FROM duka_sale_payments WHERE sale_id = :saleId ORDER BY created_at, id', { saleId }, t)
+    ]);
+    return { sale, items, payments };
+  }
+  const receiptOut = (shop, d) => ({
+    shop: { name: shop.name, phone: shop.phone, location: shop.location, kraPin: shop.kra_pin, receiptFooter: shop.receipt_footer, currency: shop.currency },
+    sale: saleOut(d.sale), items: d.items.map(saleItemOut), payments: d.payments.map(paymentOut)
+  });
+
+  router.post('/shops/:shopId/sales', wrap(async (req, res) => {
+    const b = parseSaleBody(ensureObject(req.body));
+    const out = await tx(async (t) => {
+      const shop = await ownedShop(req, { write: true, t, lock: true }); // serialises sales per shop (receipt numbers, stock)
+
+      // Idempotency: same sale id → return what was stored, change nothing.
+      const [dupe] = await run('SELECT shop_id FROM duka_sales WHERE id = :id', { id: b.id }, t);
+      if (dupe) {
+        if (dupe.shop_id !== shop.id) throw new HttpError(409, 'This id is already in use', 'ID_CONFLICT');
+        return { shop, detail: await loadSaleDetail(shop.id, b.id, t), created: false };
+      }
+
+      const ids = b.items.map((i) => i.productId);
+      const prods = await run(
+        'SELECT * FROM duka_products WHERE shop_id = :shopId AND id IN (:ids) ORDER BY id FOR UPDATE', { shopId: shop.id, ids }, t);
+      const byId = new Map(prods.map((p) => [p.id, p]));
+
+      // Price lines, check stock, compute totals — all in integer cents.
+      let subtotal = 0, cogs = 0;
+      const lines = b.items.map((it) => {
+        const p = byId.get(it.productId);
+        if (!p) throw new HttpError(404, 'A product in this sale was not found in your shop', 'PRODUCT_NOT_FOUND');
+        if (!p.is_active) throw new HttpError(409, `"${p.name}" is archived and cannot be sold`, 'PRODUCT_INACTIVE');
+        const stockMilli = toMilli(Number(p.stock_qty));
+        if (it.qMilli > stockMilli) {
+          throw new HttpError(409, `Not enough stock for "${p.name}": only ${Number(p.stock_qty)} ${p.unit} available`, 'INSUFFICIENT_STOCK');
+        }
+        const priceCents = it.priceCents === null ? toCents(Number(p.selling_price)) : it.priceCents;
+        const costCents = toCents(Number(p.buying_price));
+        const lineTotal = lineCents(it.qMilli, priceCents);
+        if (lineTotal > MAX_CENTS) throw new HttpError(400, 'A line total is too large', 'VALIDATION_ERROR');
+        subtotal += lineTotal;
+        cogs += lineCents(it.qMilli, costCents);
+        return { it, p, priceCents, costCents, lineTotal, newBal: (stockMilli - it.qMilli) / 1000 };
+      });
+      if (subtotal > MAX_CENTS) throw new HttpError(400, 'The sale total is too large', 'VALIDATION_ERROR');
+
+      const discountCents = b.discount.type === 'percent'
+        ? Number((BigInt(subtotal) * BigInt(b.discount.pctHundredths) + 5000n) / 10000n)
+        : b.discount.cents;
+      if (discountCents > subtotal) throw new HttpError(400, 'The discount cannot be more than the sale subtotal', 'DISCOUNT_TOO_LARGE');
+      const total = subtotal - discountCents;
+      if (total <= 0) throw new HttpError(400, 'The sale total must be greater than zero', 'VALIDATION_ERROR');
+
+      const paid = b.payments.reduce((s, p) => s + p.cents, 0);
+      if (paid > total) throw new HttpError(400, 'The payments are more than the sale total', 'OVERPAYMENT');
+      const balance = total - paid;
+
+      // Credit / partial payment needs a named customer who belongs to THIS shop.
+      let customer = null;
+      if (b.customerId) {
+        [customer] = await run('SELECT * FROM duka_customers WHERE id = :id AND shop_id = :shopId AND is_active', { id: b.customerId, shopId: shop.id }, t);
+        if (!customer) throw new HttpError(404, 'Customer not found', 'CUSTOMER_NOT_FOUND');
+      }
+      if (balance > 0 && !customer) {
+        throw new HttpError(400, 'Choose or add the customer who owes the balance (credit and part-payments need a customer)', 'CUSTOMER_REQUIRED');
+      }
+
+      // M-PESA evidence: 'verified' only if the code matches a PAID NECPRA STK transaction for >= amount.
+      const hasStk = (await run(`SELECT to_regclass('stk_transactions') IS NOT NULL AS ok`, {}, t))[0].ok;
+      for (const p of b.payments) {
+        p.verification = 'none';
+        if (p.method !== 'mpesa') continue;
+        p.verification = 'receipt_recorded';
+        if (hasStk) {
+          const [stk] = await run(
+            `SELECT 1 AS ok FROM stk_transactions WHERE mpesa_receipt = :code AND status = 'paid' AND paid_amount >= :amt LIMIT 1`,
+            { code: p.mpesaReceipt, amt: fromCents(p.cents) }, t);
+          if (stk) p.verification = 'verified';
+        }
+      }
+
+      const [{ last_no: receiptNo }] = await run(
+        `INSERT INTO duka_receipt_counters (shop_id, last_no) VALUES (:shopId, 1)
+         ON CONFLICT (shop_id) DO UPDATE SET last_no = duka_receipt_counters.last_no + 1 RETURNING last_no`, { shopId: shop.id }, t);
+
+      const paymentStatus = balance === 0 ? 'paid' : paid === 0 ? 'credit' : 'partial';
+      const [sale] = await run(
+        `INSERT INTO duka_sales (id,shop_id,receipt_no,customer_id,customer_name,subtotal,discount_amount,total,amount_paid,
+                                 balance_due,cogs,payment_status,note,sold_at,created_by)
+         VALUES (:id,:shopId,:receiptNo,:customerId,:customerName,:subtotal,:discount,:total,:paid,:balance,:cogs,:status,:note,
+                 COALESCE(:soldAt::timestamptz, NOW()),:userId) RETURNING *`,
+        {
+          id: b.id, shopId: shop.id, receiptNo, customerId: customer ? customer.id : null, customerName: customer ? customer.name : null,
+          subtotal: fromCents(subtotal), discount: fromCents(discountCents), total: fromCents(total), paid: fromCents(paid),
+          balance: fromCents(balance), cogs: fromCents(cogs), status: paymentStatus, note: b.note, soldAt: b.soldAt, userId: req.user.id
+        }, t);
+
+      for (const l of lines) {
+        await run(
+          `INSERT INTO duka_sale_items (sale_id,shop_id,product_id,product_name,unit,qty,unit_price,unit_cost,line_total)
+           VALUES (:saleId,:shopId,:productId,:name,:unit,:qty,:price,:cost,:lineTotal) RETURNING id`,
+          {
+            saleId: sale.id, shopId: shop.id, productId: l.p.id, name: l.p.name, unit: l.p.unit, qty: l.it.qMilli / 1000,
+            price: fromCents(l.priceCents), cost: fromCents(l.costCents), lineTotal: fromCents(l.lineTotal)
+          }, t);
+        await run('UPDATE duka_products SET stock_qty = :bal, updated_at = NOW() WHERE id = :id RETURNING id', { bal: l.newBal, id: l.p.id }, t);
+        await run(
+          `INSERT INTO duka_stock_movements (shop_id,product_id,type,qty_change,balance_after,unit_cost,reference_type,reference_id,note,created_by)
+           VALUES (:shopId,:productId,'sale',:change,:bal,:cost,'sale',:saleId,:note,:userId) RETURNING id`,
+          {
+            shopId: shop.id, productId: l.p.id, change: -(l.it.qMilli / 1000), bal: l.newBal, cost: fromCents(l.costCents),
+            saleId: sale.id, note: `Sale #${receiptNo}`, userId: req.user.id
+          }, t);
+      }
+      for (const p of b.payments) {
+        await run(
+          `INSERT INTO duka_sale_payments (sale_id,shop_id,method,amount,mpesa_receipt,payer_phone,verification)
+           VALUES (:saleId,:shopId,:method,:amount,:code,:phone,:ver) RETURNING id`,
+          { saleId: sale.id, shopId: shop.id, method: p.method, amount: fromCents(p.cents), code: p.mpesaReceipt, phone: p.payerPhone, ver: p.verification }, t);
+      }
+      await audit(t, req, shop.id, 'sale.create', 'sale', sale.id, null,
+        { receiptNo, total: fromCents(total), paid: fromCents(paid), balanceDue: fromCents(balance), lines: lines.length, paymentStatus });
+      return { shop, detail: await loadSaleDetail(shop.id, sale.id, t), created: true };
+    });
+    res.status(out.created ? 201 : 200).json({ success: true, data: { ...receiptOut(out.shop, out.detail), idempotent: !out.created } });
+  }));
+
+  router.get('/shops/:shopId/sales', wrap(async (req, res) => {
+    const shop = await ownedShop(req);
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 200);
+    const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+    const where = ['s.shop_id = :shopId'];
+    const repl = { shopId: shop.id, limit, offset };
+    // from / to are Nairobi calendar dates (YYYY-MM-DD), inclusive.
+    for (const [key, op] of [['from', '>='], ['to', '<=']]) {
+      if (has(req.query[key])) {
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(String(req.query[key])) || Number.isNaN(Date.parse(req.query[key]))) {
+          throw new HttpError(400, `${key} must be a date like 2026-11-11`, 'VALIDATION_ERROR');
+        }
+        repl[key] = req.query[key];
+        where.push(`(s.sold_at AT TIME ZONE 'Africa/Nairobi')::date ${op} :${key}::date`);
+      }
+    }
+    if (has(req.query.customerId)) { repl.customerId = uuid(req.query.customerId, 'customerId'); where.push('s.customer_id = :customerId'); }
+    if (req.query.unpaid === 'true') where.push(`s.balance_due > 0 AND s.status = 'completed'`);
+    const w = where.join(' AND ');
+    const [rows, [sum]] = await Promise.all([
+      run(`SELECT s.* FROM duka_sales s WHERE ${w} ORDER BY s.sold_at DESC, s.receipt_no DESC LIMIT :limit OFFSET :offset`, repl),
+      run(`SELECT COUNT(*)::int AS n, COALESCE(SUM(total),0) AS total, COALESCE(SUM(amount_paid),0) AS paid,
+                  COALESCE(SUM(balance_due),0) AS due, COALESCE(SUM(cogs),0) AS cogs
+             FROM duka_sales s WHERE ${w} AND s.status = 'completed'`, repl)
+    ]);
+    res.json({
+      success: true,
+      data: {
+        sales: rows.map(saleOut),
+        summary: {
+          count: sum.n, total: N(sum.total), amountPaid: N(sum.paid), balanceDue: N(sum.due), cogs: N(sum.cogs),
+          grossProfit: Math.round((N(sum.total) - N(sum.cogs)) * 100) / 100
+        },
+        limit, offset
+      }
+    });
+  }));
+
+  router.get('/shops/:shopId/sales/:saleId', wrap(async (req, res) => {
+    const shop = await ownedShop(req);
+    const saleId = req.params.saleId;
+    const detail = UUID_RE.test(saleId || '') ? await loadSaleDetail(shop.id, saleId.toLowerCase()) : null;
+    if (!detail) throw new HttpError(404, 'Sale not found', 'SALE_NOT_FOUND');
+    res.json({ success: true, data: receiptOut(shop, detail) });
+  }));
+
   /* ───── Dashboard (real data only; sections whose tables arrive in later phases report null, not 0) ───── */
   router.get('/shops/:shopId/dashboard', wrap(async (req, res) => {
     const shop = await ownedShop(req);
@@ -434,6 +764,24 @@ function buildRouter(opts = {}) {
     const recent = await run(
       `SELECT m.*, p.name AS product_name FROM duka_stock_movements m JOIN duka_products p ON p.id = m.product_id
         WHERE m.shop_id = :shopId ORDER BY m.created_at DESC, m.id DESC LIMIT 10`, { shopId: shop.id });
+    // "Today" is the Nairobi calendar day. Cash/M-PESA received counts only real payments; credit is shown apart.
+    const [td] = await run(
+      `SELECT COUNT(*)::int AS n, COALESCE(SUM(total),0) AS total, COALESCE(SUM(cogs),0) AS cogs,
+              COALESCE(SUM(balance_due),0) AS credit
+         FROM duka_sales WHERE shop_id = :shopId AND status = 'completed'
+          AND (sold_at AT TIME ZONE 'Africa/Nairobi')::date = (NOW() AT TIME ZONE 'Africa/Nairobi')::date`, { shopId: shop.id });
+    const rcv = await run(
+      `SELECT p.method, p.verification, COALESCE(SUM(p.amount),0) AS amt
+         FROM duka_sale_payments p JOIN duka_sales s ON s.id = p.sale_id
+        WHERE s.shop_id = :shopId AND s.status = 'completed'
+          AND (s.sold_at AT TIME ZONE 'Africa/Nairobi')::date = (NOW() AT TIME ZONE 'Africa/Nairobi')::date
+        GROUP BY p.method, p.verification`, { shopId: shop.id });
+    const sumRcv = (f) => Math.round(rcv.filter(f).reduce((s, r) => s + N(r.amt), 0) * 100) / 100;
+    const [debt] = await run(
+      `SELECT COALESCE(SUM(balance_due),0) AS owed, COUNT(*) FILTER (WHERE balance_due > 0)::int AS n
+         FROM duka_sales WHERE shop_id = :shopId AND status = 'completed'`, { shopId: shop.id });
+    const recentSales = await run(
+      `SELECT * FROM duka_sales WHERE shop_id = :shopId AND status = 'completed' ORDER BY sold_at DESC, receipt_no DESC LIMIT 8`, { shopId: shop.id });
     res.json({
       success: true,
       data: {
@@ -446,8 +794,20 @@ function buildRouter(opts = {}) {
         },
         lowStockProducts: low.map(productOut),
         recentStockMovements: recent.map((r) => ({ ...movementOut(r), productName: r.product_name })),
-        // Filled in by Phases 2–4. null = "not tracked yet" so the UI never shows a made-up zero.
-        todaySales: null, estimatedProfit: null, totalExpenses: null, customerDebts: null, supplierDebts: null
+        // Phase 2: sales are tracked, so these are real (a genuine 0 when nothing was sold).
+        todaySales: {
+          count: td.n, total: N(td.total),
+          cashReceived: sumRcv((r) => r.method === 'cash'),
+          mpesaReceived: sumRcv((r) => r.method === 'mpesa'),
+          mpesaVerified: sumRcv((r) => r.method === 'mpesa' && r.verification === 'verified'),
+          creditGiven: N(td.credit)
+        },
+        // Gross profit on today's sales (revenue − cost of goods sold). Expenses are not deducted until Phase 3.
+        estimatedProfit: Math.round((N(td.total) - N(td.cogs)) * 100) / 100,
+        customerDebts: { total: N(debt.owed), openSales: debt.n },
+        recentSales: recentSales.map(saleOut),
+        // Filled in by Phase 3. null = "not tracked yet" so the UI never shows a made-up zero.
+        totalExpenses: null, supplierDebts: null
       }
     });
   }));
@@ -469,7 +829,8 @@ function buildRouter(opts = {}) {
     if (err instanceof HttpError) return res.status(err.status).json({ success: false, message: err.message, errorCode: err.code });
     if (err && err.original && err.original.code === '23505') {
       const c = String(err.original.constraint || '');
-      const message = /barcode/.test(c) ? 'Another product in this shop already uses that barcode'
+      const message = /sale_payments_receipt/.test(c) ? 'That M-PESA receipt code was already recorded in this shop'
+        : /barcode/.test(c) ? 'Another product in this shop already uses that barcode'
         : /shops_owner_name/.test(c) ? 'You already have a shop with that name'
         : /products_shop_name/.test(c) ? 'This shop already has a product with that name' : 'Duplicate record';
       return res.status(409).json({ success: false, message, errorCode: 'DUPLICATE' });
