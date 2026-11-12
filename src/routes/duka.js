@@ -877,6 +877,14 @@ function buildRouter(opts = {}) {
           AND (received_at AT TIME ZONE 'Africa/Nairobi')::date = (NOW() AT TIME ZONE 'Africa/Nairobi')::date`, { shopId: shop.id });
     const recentSales = await run(
       `SELECT * FROM duka_sales WHERE shop_id = :shopId AND status = 'completed' ORDER BY sold_at DESC, receipt_no DESC LIMIT 8`, { shopId: shop.id });
+    let finOutstanding = 0;
+    try {
+      const { position } = require('../services/dukaFinancing');
+      for (const p of await run(`SELECT * FROM duka_fin_plans WHERE shop_id=:s AND status IN ('approved','active')`, { s: shop.id })) {
+        const [pd] = await run('SELECT COALESCE(SUM(amount),0) AS s FROM duka_fin_payments WHERE plan_id=:p', { p: p.id });
+        finOutstanding += position(p, Math.round(Number(pd.s) * 100)).balance;
+      }
+    } catch (_) { finOutstanding = 0; } // table not migrated yet: dashboard must still load
     res.json({
       success: true,
       data: {
@@ -906,7 +914,9 @@ function buildRouter(opts = {}) {
         stockLossesToday: Math.round(N(lossToday.amt) * 100) / 100,
         netProfit: Math.round((N(td.total) - N(td.cogs) - N(ex.amt) - N(lossToday.amt)) * 100) / 100,
         debtCollectedToday: Math.round(N(col.amt) * 100) / 100,
-        supplierDebts: Math.round(N(sup.owed) * 100) / 100
+        supplierDebts: Math.round(N(sup.owed) * 100) / 100,
+        // Device financing is kept out of revenue/profit; shown only as an obligation.
+        outstandingDeviceFinancing: finOutstanding
       }
     });
   }));
@@ -931,6 +941,9 @@ function buildRouter(opts = {}) {
   // Group Buying (uses waste analysis for allocation advice) and Smart Scale device management.
   require('../services/dukaGroupBuy').mount(mountCtx);
   require('../services/dukaDevices').mountOwner(mountCtx);
+  // Device financing (separate from sales) and Chama-linked group buying (reuses money_circles; moves no Chama money).
+  require('../services/dukaFinancing').mount(mountCtx);
+  require('../services/dukaChama').mount(mountCtx);
 
   // eslint-disable-next-line no-unused-vars
   router.use((err, req, res, next) => {
