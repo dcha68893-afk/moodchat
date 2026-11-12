@@ -122,12 +122,23 @@ const shopOut = (r) => ({
   kraPin: r.kra_pin, currency: r.currency, receiptFooter: r.receipt_footer, status: r.status,
   createdAt: r.created_at, updatedAt: r.updated_at
 });
+
+/* A pack is how the shop BUYS (crate, tray, sack); the product unit is how it SELLS (egg, kg). Both or neither. */
+function packPair(unitRaw, sizeRaw) {
+  const E = HttpError;
+  const unit = str(unitRaw, 'Pack unit', { max: 20 });
+  const size = qty(sizeRaw, 'Pack size');
+  if (!unit && !size) return { unit: null, size: null };
+  if (!unit || !size || !(size > 0)) throw new E(400, 'A pack needs both a name (e.g. crate) and how many selling units it holds (e.g. 30)', 'VALIDATION_ERROR');
+  return { unit, size };
+}
 const productOut = (r) => {
   const stock = N(r.stock_qty), min = N(r.min_stock);
   const buy = N(r.buying_price), sell = N(r.selling_price);
   return {
     id: r.id, shopId: r.shop_id, name: r.name, description: r.description || null, barcode: r.barcode, category: r.category, unit: r.unit,
     buyingPrice: buy, sellingPrice: sell, stockQty: stock, minStock: min, isActive: r.is_active,
+    packUnit: r.pack_unit || null, packSize: r.pack_size == null ? null : N(r.pack_size),
     isLowStock: stock <= 0 || (min > 0 && stock <= min),
     isOutOfStock: stock <= 0,
     marginPerUnit: Math.round((sell - buy) * 100) / 100,
@@ -333,6 +344,8 @@ function buildRouter(opts = {}) {
       minStock: qty(b.minStock, 'Minimum stock') || 0,
       openingStock: qty(b.stockQty ?? b.openingStock, 'Available stock') || 0
     };
+    const pk = packPair(b.packUnit, b.packSize);
+    d.packUnit = pk.unit; d.packSize = pk.size;
     const out = await tx(async (t) => {
       const shop = await ownedShop(req, { write: true, t, lock: true });
       if (id) {
@@ -343,8 +356,8 @@ function buildRouter(opts = {}) {
         }
       }
       const [product] = await run(
-        `INSERT INTO duka_products (id,shop_id,name,description,barcode,category,unit,buying_price,selling_price,stock_qty,min_stock)
-         VALUES (COALESCE(:id::uuid, gen_random_uuid()),:shopId,:name,:description,:barcode,:category,:unit,:buyingPrice,:sellingPrice,:openingStock,:minStock)
+        `INSERT INTO duka_products (id,shop_id,name,description,barcode,category,unit,buying_price,selling_price,stock_qty,min_stock${d.packUnit ? ',pack_unit,pack_size' : ''})
+         VALUES (COALESCE(:id::uuid, gen_random_uuid()),:shopId,:name,:description,:barcode,:category,:unit,:buyingPrice,:sellingPrice,:openingStock,:minStock${d.packUnit ? ',:packUnit,:packSize' : ''})
          RETURNING *`,
         { id, shopId: shop.id, ...d }, t);
       if (d.openingStock > 0) {
@@ -386,9 +399,13 @@ function buildRouter(opts = {}) {
         min: 'minStock' in b ? (qty(b.minStock, 'Minimum stock') || 0) : before.min_stock,
         active: 'isActive' in b ? !!b.isActive : before.is_active
       };
+      if ('packUnit' in b || 'packSize' in b) {
+        const pk = packPair('packUnit' in b ? b.packUnit : before.pack_unit, 'packSize' in b ? b.packSize : before.pack_size);
+        f.packUnit = pk.unit; f.packSize = pk.size;
+      }
       const [after] = await run(
         `UPDATE duka_products SET name=:name,description=:description,barcode=:barcode,category=:category,unit=:unit,buying_price=:buying,
-           selling_price=:selling,min_stock=:min,is_active=:active,updated_at=NOW() WHERE id=:id RETURNING *`,
+           selling_price=:selling,min_stock=:min,is_active=:active${'packUnit' in f ? ',pack_unit=:packUnit,pack_size=:packSize' : ''},updated_at=NOW() WHERE id=:id RETURNING *`,
         { ...f, id: before.id }, t);
       await audit(t, req, shop.id, 'product.update', 'product', before.id, productOut(before), productOut(after));
       return after;
@@ -848,6 +865,11 @@ function buildRouter(opts = {}) {
     const [ex] = await run(
       `SELECT COALESCE(SUM(amount),0) AS amt FROM duka_expenses WHERE shop_id = :shopId AND status = 'active'
           AND expense_date = (NOW() AT TIME ZONE 'Africa/Nairobi')::date`, { shopId: shop.id });
+    // Confirmed spoilage / damage written off today (at cost). An inventory loss, never a sale, but it does reduce profit.
+    const hasLosses = (await run(`SELECT to_regclass('duka_stock_losses') IS NOT NULL AS ok`, {}))[0].ok;
+    const [lossToday] = hasLosses ? await run(
+      `SELECT COALESCE(SUM(loss_value),0) AS amt FROM duka_stock_losses WHERE shop_id = :shopId
+          AND detected_on = (NOW() AT TIME ZONE 'Africa/Nairobi')::date`, { shopId: shop.id }) : [{ amt: 0 }];
     const [sup] = await run(
       `SELECT COALESCE(SUM(CASE WHEN type='bill' THEN amount ELSE -amount END),0) AS owed FROM duka_supplier_entries WHERE shop_id = :shopId`, { shopId: shop.id });
     const [col] = await run(
@@ -879,9 +901,10 @@ function buildRouter(opts = {}) {
         estimatedProfit: Math.round((N(td.total) - N(td.cogs)) * 100) / 100,
         customerDebts: { total: N(debt.owed), openSales: debt.n },
         recentSales: recentSales.map(saleOut),
-        // Phase 5. estimatedProfit stays GROSS profit; netProfit = gross profit − today's expenses.
+        // Phase 5. estimatedProfit stays GROSS profit; netProfit = gross profit − today's expenses − today's confirmed stock losses.
         totalExpenses: Math.round(N(ex.amt) * 100) / 100,
-        netProfit: Math.round((N(td.total) - N(td.cogs) - N(ex.amt)) * 100) / 100,
+        stockLossesToday: Math.round(N(lossToday.amt) * 100) / 100,
+        netProfit: Math.round((N(td.total) - N(td.cogs) - N(ex.amt) - N(lossToday.amt)) * 100) / 100,
         debtCollectedToday: Math.round(N(col.amt) * 100) / 100,
         supplierDebts: Math.round(N(sup.owed) * 100) / 100
       }

@@ -60,9 +60,19 @@ function mount(ctx) {
   router.post('/shops/:shopId/products/:productId/batches', wrap(async (req, res) => {
     const b = ensureObject(req.body);
     const id = uuid(b.id, 'id', { required: true });
-    const q = qty(b.qty, 'Quantity', { required: true });
-    if (!(q > 0)) throw bad('Quantity must be greater than zero');
-    const unitCost = money(b.unitCost, 'Unit cost', { required: true });
+    // Buying in packs (crate/tray/sack): send packs + packCost (price of ONE pack). The server converts to selling units
+    // using the product's pack size, so 2 crates of 30 eggs at KSh 360 each = 60 eggs at KSh 12 each. Otherwise qty + unitCost.
+    const inPacks = has(b.packs) || has(b.packCost);
+    let q, unitCost, packsIn = null;
+    if (inPacks) {
+      if (has(b.qty) || has(b.unitCost)) throw bad('Send either packs + packCost, or qty + unitCost, not both');
+      packsIn = qty(b.packs, 'Number of packs', { required: true });
+      if (!(packsIn > 0)) throw bad('Number of packs must be greater than zero');
+    } else {
+      q = qty(b.qty, 'Quantity', { required: true });
+      if (!(q > 0)) throw bad('Quantity must be greater than zero');
+      unitCost = money(b.unitCost, 'Unit cost', { required: true });
+    }
     const shelf = has(b.shelfLifeDays) ? qty(b.shelfLifeDays, 'Shelf life (days)') : null;
     if (shelf != null && !(shelf > 0 && shelf <= 365)) throw bad('Shelf life must be between 0 and 365 days');
     let receivedAt = null;
@@ -80,12 +90,21 @@ function mount(ctx) {
         const [s] = await run('SELECT 1 AS ok FROM duka_suppliers WHERE id=:id AND shop_id=:shopId', { id: supplierId, shopId: shop.id }, t);
         if (!s) throw bad('Supplier not found in this shop');
       }
+      if (inPacks) {
+        const [pp] = await run('SELECT pack_unit, pack_size FROM duka_products WHERE id=:id AND shop_id=:shopId', { id: req.params.productId, shopId: shop.id }, t);
+        if (!pp) throw new HttpError(404, 'Product not found', 'PRODUCT_NOT_FOUND');
+        if (!pp.pack_size) throw bad('This product has no pack size yet. Set its pack (for example crate = 30 eggs) first.');
+        const packCost = money(b.packCost, 'Price per pack', { required: true });
+        q = r3(packsIn * Number(pp.pack_size));
+        if (!(q > 0)) throw bad('Quantity must be greater than zero');
+        unitCost = r2(packCost / Number(pp.pack_size));
+      }
       const r = await receiveBatch(run, t, {
         shopId: shop.id, productId: req.params.productId, batchId: id, qty: q, unitCost, shelfLifeDays: shelf, receivedAt,
         batchRef: str(b.batchRef, 'Batch reference', { max: 60 }), supplierId, condition: str(b.condition, 'Condition', { max: 160 }),
         userId: req.user.id, source: 'purchase', note: 'Stock received'
       });
-      if (r.created) await audit(t, req, shop.id, 'stock.batch', 'product', r.product.id, null, { batchId: id, qty: q, unitCost });
+      if (r.created) await audit(t, req, shop.id, 'stock.batch', 'product', r.product.id, null, { batchId: id, qty: q, unitCost, packs: packsIn });
       return r;
     });
     res.status(out.created ? 201 : 200).json({

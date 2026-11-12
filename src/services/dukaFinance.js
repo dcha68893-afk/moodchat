@@ -14,7 +14,8 @@
  *   cost of goods sold = buying price of what was sold (snapshotted on the sale)
  *   gross profit       = revenue − cost of goods sold
  *   expenses           = running costs (rent, transport...); voided ones are ignored
- *   NET PROFIT         = gross profit − expenses                                 — the "actual profit"
+ *   stock losses       = confirmed spoiled/damaged stock at cost (duka_stock_losses); an inventory loss, never a sale
+ *   NET PROFIT         = gross profit − expenses − stock losses                                 — the "actual profit"
  *   cash received      = real payments taken at the till + customer debt collections (NOT credit, NOT profit)
  *   credit given       = sale value not paid at the till (customer debt)
  *   supplier payments  = money paid to suppliers. NOT an expense: stock cost reaches profit through COGS when sold.
@@ -404,7 +405,7 @@ function mount(ctx) {
     const base = { shopId: shop.id, from, to, p };
     const SALE_DAY = `(s.sold_at AT TIME ZONE 'Africa/Nairobi')`;
     const B = (col) => `to_char(date_trunc(:p, ${col})::date,'YYYY-MM-DD')`;
-    const [series, sales, saleCash, collected, exps, supPaid, cats] = await Promise.all([
+    const [series, sales, saleCash, collected, exps, supPaid, cats, lossRows] = await Promise.all([
       run(`SELECT to_char(g::date,'YYYY-MM-DD') AS b FROM generate_series(date_trunc(:p, :from::date), :to::date, ('1 ' || :p)::interval) g ORDER BY 1`, base),
       run(`SELECT ${B(SALE_DAY)} AS b, COUNT(*)::int AS n, COALESCE(SUM(s.total),0) AS revenue, COALESCE(SUM(s.cogs),0) AS cogs,
                   COALESCE(SUM(s.discount_amount),0) AS discount,
@@ -420,26 +421,32 @@ function mount(ctx) {
       run(`SELECT ${B('e.entry_date')} AS b, COALESCE(SUM(e.amount),0) AS amt FROM duka_supplier_entries e
             WHERE e.shop_id = :shopId AND e.type = 'payment' AND e.entry_date BETWEEN :from AND :to GROUP BY 1`, base),
       run(`SELECT category, COALESCE(SUM(amount),0) AS amt FROM duka_expenses
-            WHERE shop_id = :shopId AND status = 'active' AND expense_date BETWEEN :from AND :to GROUP BY 1 ORDER BY 2 DESC`, base)
+            WHERE shop_id = :shopId AND status = 'active' AND expense_date BETWEEN :from AND :to GROUP BY 1 ORDER BY 2 DESC`, base),
+      // Confirmed spoilage/damage at cost (duka_stock_losses). An inventory loss: not a sale, not an expense, but it reduces profit.
+      (async () => {
+        const [{ ok }] = await run(`SELECT to_regclass('duka_stock_losses') IS NOT NULL AS ok`, {});
+        return ok ? run(`SELECT ${B('l.detected_on')} AS b, COALESCE(SUM(l.loss_value),0) AS amt FROM duka_stock_losses l
+            WHERE l.shop_id = :shopId AND l.detected_on BETWEEN :from AND :to GROUP BY 1`, base) : [];
+      })()
     ]);
     const idx = (rows) => Object.fromEntries(rows.map((r) => [r.b, r]));
-    const S = idx(sales), C = idx(collected), E = idx(exps), P = idx(supPaid);
+    const S = idx(sales), C = idx(collected), E = idx(exps), P = idx(supPaid), L = idx(lossRows);
     const cashBy = (m) => Object.fromEntries(saleCash.filter((r) => r.method === m).map((r) => [r.b, Number(r.amt)]));
     const CASH = cashBy('cash'), MP = cashBy('mpesa');
     const rows = series.map(({ b }) => {
       const s = S[b] || {};
-      const revenue = r2(s.revenue), cogs = r2(s.cogs), exp = r2((E[b] || {}).amt);
+      const revenue = r2(s.revenue), cogs = r2(s.cogs), exp = r2((E[b] || {}).amt), loss = r2((L[b] || {}).amt);
       const cash = r2(CASH[b]), mpesa = r2(MP[b]), coll = r2((C[b] || {}).amt);
       return {
         periodStart: b, salesCount: s.n || 0, revenue, costOfGoodsSold: cogs, grossProfit: r2(revenue - cogs),
-        expenses: exp, netProfit: r2(revenue - cogs - exp),
+        expenses: exp, stockLosses: loss, netProfit: r2(revenue - cogs - exp - loss),
         cashFromSales: cash, mpesaFromSales: mpesa, debtCollected: coll, totalCashReceived: r2(cash + mpesa + coll),
         creditGiven: r2(s.credit), discountsGiven: r2(s.discount), supplierPayments: r2((P[b] || {}).amt)
       };
     });
     const sum = (k) => r2(rows.reduce((a, r) => a + r[k], 0));
     const totals = {};
-    ['salesCount', 'revenue', 'costOfGoodsSold', 'grossProfit', 'expenses', 'netProfit', 'cashFromSales', 'mpesaFromSales', 'debtCollected',
+    ['salesCount', 'revenue', 'costOfGoodsSold', 'grossProfit', 'expenses', 'stockLosses', 'netProfit', 'cashFromSales', 'mpesaFromSales', 'debtCollected',
       'totalCashReceived', 'creditGiven', 'discountsGiven', 'supplierPayments'].forEach((k) => { totals[k] = k === 'salesCount' ? rows.reduce((a, r) => a + r.salesCount, 0) : sum(k); });
     const [snap] = await run(
       `SELECT (SELECT COALESCE(SUM(balance_due),0) FROM duka_sales WHERE shop_id = :shopId AND status = 'completed') AS cust,
@@ -454,7 +461,8 @@ function mount(ctx) {
         definitions: {
           revenue: 'Value of completed sales after discounts (may include credit not yet paid).',
           grossProfit: 'Revenue minus the buying cost of what was sold.',
-          netProfit: 'Gross profit minus expenses. This is the actual profit.',
+          stockLosses: 'Confirmed spoiled/damaged stock written off at its buying cost. An inventory loss, not a sale and not an expense.',
+          netProfit: 'Gross profit minus expenses minus confirmed stock losses. This is the actual profit.',
           totalCashReceived: 'Money really received: cash and M-PESA at the till plus customer debt collections. Not profit.',
           creditGiven: 'Sales value not paid at the till (customer debt).',
           supplierPayments: 'Money paid to suppliers. Not an expense: stock cost reaches profit when the stock is sold.'
