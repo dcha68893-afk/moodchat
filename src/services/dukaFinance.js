@@ -291,16 +291,21 @@ function mount(ctx) {
       }
       let verification = 'none';
       if (code) {
-        const dup = await run('SELECT 1 FROM duka_sale_payments WHERE shop_id = :shopId AND mpesa_receipt = :code LIMIT 1', { shopId: shop.id, code }, t);
-        if (dup.length) throw new HttpError(409, 'That M-PESA receipt code was already recorded in this shop', 'DUPLICATE');
-        verification = 'receipt_recorded';
-        // 'verified' only if the code matches a PAID NECPRA STK transaction for at least this amount.
+        // A receipt code can pay for one thing only, in ANY shop.
+        const dup = await run(
+          `SELECT 1 FROM duka_sale_payments WHERE mpesa_receipt = :code
+           UNION ALL SELECT 1 FROM duka_debt_payments WHERE mpesa_receipt = :code LIMIT 1`, { code }, t);
+        if (dup.length) throw new HttpError(409, 'That M-PESA receipt code was already recorded', 'DUPLICATE');
+        // Counted as received ONLY if the code matches a PAID NECPRA STK transaction for at least this amount.
         const hasStk = (await run(`SELECT to_regclass('stk_transactions') IS NOT NULL AS ok`, {}, t))[0].ok;
-        if (hasStk) {
-          const stk = await run(
-            `SELECT 1 AS ok FROM stk_transactions WHERE mpesa_receipt = :code AND status = 'paid' AND paid_amount >= :amt LIMIT 1`, { code, amt: amount }, t);
-          if (stk.length) verification = 'verified';
+        const stk = hasStk ? await run(
+          `SELECT 1 AS ok FROM stk_transactions WHERE mpesa_receipt = :code AND status = 'paid' AND paid_amount >= :amt LIMIT 1`, { code, amt: amount }, t) : [];
+        if (!stk.length) {
+          throw new HttpError(409,
+            `M-PESA receipt ${code} could not be confirmed as a paid NECPRA M-PESA payment of KSh ${amount.toFixed(2)}, so it was not counted as paid. Nothing was saved.`,
+            'MPESA_NOT_VERIFIED');
         }
+        verification = 'verified';
       }
       const sales = await run(
         `SELECT id, balance_due FROM duka_sales WHERE shop_id = :shopId AND customer_id = :cid AND status = 'completed' AND balance_due > 0

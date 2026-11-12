@@ -32,6 +32,8 @@ d('duka phase 1', () => {
     await require('../../migrations/20261111000002-create-duka-smart-phase2.js').up({ sequelize });
     await require('../../migrations/20261111000002-create-duka-smart-phase2.js').up({ sequelize }); // idempotent re-run
     await require('../../migrations/20261111000003-create-duka-smart-phase5-finance.js').up({ sequelize });
+    await require('../../migrations/20261111000004-duka-sale-void-and-product-description.js').up({ sequelize });
+    await require('../../migrations/20261111000004-duka-sale-void-and-product-description.js').up({ sequelize }); // idempotent re-run
     await sequelize.query('TRUNCATE duka_audit_log, duka_sale_payments, duka_sale_items, duka_sales, duka_customers, duka_receipt_counters, duka_stock_movements, duka_products, duka_shops CASCADE');
     const { buildRouter } = require('../../src/routes/duka');
     const app = express();
@@ -121,6 +123,20 @@ d('duka phase 1', () => {
     const s = await call(A, 'GET', `${P}?search=maize`);
     expect(s.body.data.total).toBe(1);
     expect((await call(A, 'GET', `${P}?search=%25`)).body.data.total).toBe(0); // LIKE wildcard escaped
+  });
+
+  test('product description: saved, edited, cleared, validated and searchable', async () => {
+    const U = 409;
+    const { sid } = await mk(U, 'Desc shop', {});
+    const id = uid();
+    const c = await call(U, 'POST', `/shops/${sid}/products`, { id, name: 'Maize flour', description: '2kg packet, Jogoo brand', buyingPrice: 100, sellingPrice: 130 });
+    expect(c.status).toBe(201); expect(c.body.data.product.description).toBe('2kg packet, Jogoo brand');
+    expect((await call(U, 'POST', `/shops/${sid}/products`, { name: 'Too long', description: 'x'.repeat(501), buyingPrice: 1, sellingPrice: 2 })).status).toBe(400);
+    expect((await call(U, 'GET', `/shops/${sid}/products?search=jogoo`)).body.data.products).toHaveLength(1);
+    const e = await call(U, 'PATCH', `/shops/${sid}/products/${id}`, { description: 'Updated note' });
+    expect(e.body.data.product.description).toBe('Updated note'); expect(e.body.data.product.name).toBe('Maize flour');
+    expect((await call(U, 'PATCH', `/shops/${sid}/products/${id}`, { sellingPrice: 140 })).body.data.product.description).toBe('Updated note'); // untouched by other edits
+    expect((await call(U, 'PATCH', `/shops/${sid}/products/${id}`, { description: '' })).body.data.product.description).toBeNull();
   });
 
   test('stock ledger: adjust, idempotent retry, no negative stock, concurrency', async () => {
@@ -340,8 +356,18 @@ d('duka phase 1', () => {
     expect((await call(B, 'POST', `/shops/${bShop}/sales`, { id: uid(), customerId: cid, items: [{ productId: ids.flour, qty: 1 }], payments: [] })).status).toBe(404);
   });
 
-  test('M-PESA is never accepted without a receipt code; codes cannot be reused; verified only against paid STK', async () => {
+  // Shared by the M-PESA / void tests. Never dropped: other suites run against the same database in parallel.
+  const ensureStk = async () => {
+    await sequelize.query(`CREATE TABLE IF NOT EXISTS stk_transactions (mpesa_receipt VARCHAR(40), status VARCHAR(20), paid_amount NUMERIC(15,2))`);
+    await sequelize.query(`INSERT INTO stk_transactions SELECT v.c, v.s, v.a FROM (VALUES
+      ('PAID123456','paid',120::numeric), ('SHORT12345','paid',50::numeric), ('FAIL123456','failed',120::numeric),
+      ('SPLIT12345','paid',100::numeric), ('VOIDPAID12','paid',120::numeric)) AS v(c,s,a)
+      WHERE NOT EXISTS (SELECT 1 FROM stk_transactions x WHERE x.mpesa_receipt = v.c)`);
+  };
+
+  test('M-PESA needs a receipt code AND a confirmed paid NECPRA transaction; unverified is never counted as paid; codes are single-use across shops', async () => {
     const A = 406; // own user: Phase 1 tests already use up A's shop limit
+    await ensureStk();
     const { sid, ids } = await mk(A, 'POS mpesa', { soda: { name: 'Soda', buyingPrice: 40, sellingPrice: 60, stockQty: 100 } });
     const P = `/shops/${sid}/sales`;
     const item = [{ productId: ids.soda, qty: 2 }];
@@ -349,29 +375,86 @@ d('duka phase 1', () => {
     expect(noCode.status).toBe(400); expect(noCode.body.errorCode).toBe('MPESA_RECEIPT_REQUIRED');
     expect((await call(A, 'POST', P, { id: uid(), items: item, payments: [{ method: 'mpesa', amount: 120, mpesaReceipt: 'SHORT' }] })).status).toBe(400);
     expect((await call(A, 'POST', P, { id: uid(), items: item, payments: [{ method: 'mpesa', amount: 120, mpesaReceipt: 'bad code!!' }] })).status).toBe(400);
+    // A well-formed code that NECPRA has no paid STK record for is NOT accepted: nothing saved, no stock change.
+    const unverifiedId = uid();
+    const unv = await call(A, 'POST', P, { id: unverifiedId, items: item, payments: [{ method: 'mpesa', amount: 120, mpesaReceipt: 'sgh7k2l9qx', payerPhone: '0711222333' }] });
+    expect(unv.status).toBe(409); expect(unv.body.errorCode).toBe('MPESA_NOT_VERIFIED');
+    expect((await call(A, 'GET', `${P}/${unverifiedId}`)).status).toBe(404);
     expect(await stockOf(A, sid, ids.soda)).toBe(100);
-    const ok = await call(A, 'POST', P, { id: uid(), items: item, payments: [{ method: 'mpesa', amount: 120, mpesaReceipt: 'sgh7k2l9qx', payerPhone: '0711222333' }] });
+    // Amount too low / failed transaction: still not accepted.
+    expect((await call(A, 'POST', P, { id: uid(), items: item, payments: [{ method: 'mpesa', amount: 120, mpesaReceipt: 'SHORT12345' }] })).body.errorCode).toBe('MPESA_NOT_VERIFIED');
+    expect((await call(A, 'POST', P, { id: uid(), items: item, payments: [{ method: 'mpesa', amount: 120, mpesaReceipt: 'FAIL123456' }] })).body.errorCode).toBe('MPESA_NOT_VERIFIED');
+    expect(await stockOf(A, sid, ids.soda)).toBe(100);
+    // Verified payment is accepted and counted.
+    const ok = await call(A, 'POST', P, { id: uid(), items: item, payments: [{ method: 'mpesa', amount: 120, mpesaReceipt: 'paid123456', payerPhone: '0711222333' }] });
     expect(ok.status).toBe(201);
-    expect(ok.body.data.payments[0]).toMatchObject({ method: 'mpesa', mpesaReceipt: 'SGH7K2L9QX', verification: 'receipt_recorded', payerPhone: '+254711222333' });
-    const reuse = await call(A, 'POST', P, { id: uid(), items: item, payments: [{ method: 'mpesa', amount: 120, mpesaReceipt: 'SGH7K2L9QX' }] });
-    expect(reuse.status).toBe(409); expect(reuse.body.message).toMatch(/already recorded/);
-    expect(await stockOf(A, sid, ids.soda)).toBe(98);   // the rejected reuse deducted nothing
-    // Split payment cash + mpesa.
-    const split = await call(A, 'POST', P, { id: uid(), items: item, payments: [{ method: 'cash', amount: 20 }, { method: 'mpesa', amount: 100, mpesaReceipt: 'ABC1234567' }] });
-    expect(split.body.data.sale.paymentStatus).toBe('paid');
-    // A code that matches a PAID stk_transactions row for >= amount is marked verified (table created here only for the test).
-    await sequelize.query(`CREATE TABLE IF NOT EXISTS stk_transactions (mpesa_receipt VARCHAR(40), status VARCHAR(20), paid_amount NUMERIC(15,2))`);
-    await sequelize.query(`INSERT INTO stk_transactions VALUES ('PAID123456','paid',120), ('SHORT12345','paid',50), ('FAIL123456','failed',120)`);
-    const v = await call(A, 'POST', P, { id: uid(), items: item, payments: [{ method: 'mpesa', amount: 120, mpesaReceipt: 'PAID123456' }] });
-    expect(v.body.data.payments[0].verification).toBe('verified');
-    const lowPaid = await call(A, 'POST', P, { id: uid(), items: item, payments: [{ method: 'mpesa', amount: 120, mpesaReceipt: 'SHORT12345' }] });
-    expect(lowPaid.body.data.payments[0].verification).toBe('receipt_recorded');
-    const failed = await call(A, 'POST', P, { id: uid(), items: item, payments: [{ method: 'mpesa', amount: 120, mpesaReceipt: 'FAIL123456' }] });
-    expect(failed.body.data.payments[0].verification).toBe('receipt_recorded');
-    await sequelize.query('DROP TABLE stk_transactions');
+    expect(ok.body.data.payments[0]).toMatchObject({ method: 'mpesa', mpesaReceipt: 'PAID123456', verification: 'verified', payerPhone: '+254711222333' });
+    expect(ok.body.data.sale.paymentStatus).toBe('paid');
+    // The same code cannot pay twice — not in this shop, and not in another shop/user's shop.
+    const reuse = await call(A, 'POST', P, { id: uid(), items: item, payments: [{ method: 'mpesa', amount: 120, mpesaReceipt: 'PAID123456' }] });
+    expect(reuse.status).toBe(409); expect(reuse.body.errorCode).toBe('MPESA_RECEIPT_USED');
+    const other = await mk(4061, 'POS mpesa other', { soda: { name: 'Soda', buyingPrice: 40, sellingPrice: 60, stockQty: 10 } });
+    const cross = await call(4061, 'POST', `/shops/${other.sid}/sales`, { id: uid(), items: [{ productId: other.ids.soda, qty: 2 }], payments: [{ method: 'mpesa', amount: 120, mpesaReceipt: 'PAID123456' }] });
+    expect(cross.status).toBe(409); expect(cross.body.errorCode).toBe('MPESA_RECEIPT_USED');
+    expect(await stockOf(A, sid, ids.soda)).toBe(98);   // only the one verified sale deducted stock
+    // Split payment cash + verified mpesa.
+    const split = await call(A, 'POST', P, { id: uid(), items: item, payments: [{ method: 'cash', amount: 20 }, { method: 'mpesa', amount: 100, mpesaReceipt: 'SPLIT12345' }] });
+    expect(split.status).toBe(201); expect(split.body.data.sale.paymentStatus).toBe('paid');
     const dash = (await call(A, 'GET', `/shops/${sid}/dashboard`)).body.data;
-    expect(dash.todaySales.mpesaReceived).toBe(120 + 100 + 120 * 3);
-    expect(dash.todaySales.mpesaVerified).toBe(120);    // only the matched one counts as verified
+    expect(dash.todaySales.mpesaReceived).toBe(120 + 100);
+    expect(dash.todaySales.mpesaVerified).toBe(120 + 100);   // every M-PESA shilling counted is verified
+  });
+
+  test('void sale: reason required, stock restored via ledger, refund due reported, idempotent, owner only, excluded from totals', async () => {
+    const A = 408;
+    await ensureStk();
+    const { sid, ids } = await mk(A, 'POS void', { tea: { name: 'Tea', buyingPrice: 30, sellingPrice: 50, stockQty: 20 } });
+    const cid = uid(); await call(A, 'POST', `/shops/${sid}/customers`, { id: cid, name: 'Void Cust' });
+    const saleId = uid();
+    const made = await call(A, 'POST', `/shops/${sid}/sales`, { id: saleId, customerId: cid, items: [{ productId: ids.tea, qty: 4 }], payments: [{ method: 'cash', amount: 120 }] });
+    expect(made.status).toBe(201);                       // total 200, paid 120, owes 80
+    expect(await stockOf(A, sid, ids.tea)).toBe(16);
+    const V = `/shops/${sid}/sales/${saleId}/void`;
+    expect((await call(A, 'POST', V, {})).status).toBe(400);                         // reason required
+    expect((await call(A, 'POST', V, { reason: 'x' })).status).toBe(400);
+    expect((await call(B, 'POST', V, { reason: 'not mine' })).status).toBe(404);     // other user cannot probe/void
+    expect((await call(A, 'POST', `/shops/${sid}/sales/${uid()}/void`, { reason: 'missing sale' })).status).toBe(404);
+    const v = await call(A, 'POST', V, { reason: 'Customer returned goods' });
+    expect(v.status).toBe(200);
+    expect(v.body.data.sale).toMatchObject({ status: 'voided', voidReason: 'Customer returned goods' });
+    expect(v.body.data.refundDue).toBe(120);             // money the shopkeeper must hand back
+    expect(v.body.data.idempotent).toBe(false);
+    expect(await stockOf(A, sid, ids.tea)).toBe(20);     // stock restored
+    const mv = (await call(A, 'GET', `/shops/${sid}/products/${ids.tea}/movements`)).body.data.movements;
+    expect(mv[0]).toMatchObject({ type: 'return', qtyChange: 4, balanceAfter: 20, referenceType: 'sale' });
+    // Replay changes nothing.
+    const again = await call(A, 'POST', V, { reason: 'Customer returned goods' });
+    expect(again.status).toBe(200); expect(again.body.data.idempotent).toBe(true);
+    expect(await stockOf(A, sid, ids.tea)).toBe(20);
+    // Voided sale is out of totals, debts and the customer's balance, but stays in history.
+    const list = (await call(A, 'GET', `/shops/${sid}/sales`)).body.data;
+    expect(list.sales).toHaveLength(1); expect(list.sales[0].status).toBe('voided');
+    expect(list.summary).toMatchObject({ count: 0, total: 0, amountPaid: 0, balanceDue: 0 });
+    const custs = (await call(A, 'GET', `/shops/${sid}/customers`)).body.data.customers;
+    expect(custs.find((c) => c.id === cid).outstandingBalance).toBe(0);
+    const dash = (await call(A, 'GET', `/shops/${sid}/dashboard`)).body.data;
+    expect(dash.todaySales.count).toBe(0); expect(dash.customerDebts.total).toBe(0);
+    // A voided sale cannot be collected against.
+    expect((await call(A, 'POST', `/shops/${sid}/customers/${cid}/payments`, { id: uid(), amount: 10, method: 'cash' })).body.errorCode).toBe('NO_DEBT');
+    // Once customer debt money has been applied to a sale, cancelling it is blocked.
+    const s2 = uid();
+    await call(A, 'POST', `/shops/${sid}/sales`, { id: s2, customerId: cid, items: [{ productId: ids.tea, qty: 2 }], payments: [] });   // 100 credit
+    expect((await call(A, 'POST', `/shops/${sid}/customers/${cid}/payments`, { id: uid(), amount: 40, method: 'cash' })).status).toBe(201);
+    const blocked = await call(A, 'POST', `/shops/${sid}/sales/${s2}/void`, { reason: 'try after collection' });
+    expect(blocked.status).toBe(409); expect(blocked.body.errorCode).toBe('SALE_HAS_COLLECTIONS');
+    expect(await stockOf(A, sid, ids.tea)).toBe(18);
+    // Voiding a sale paid by verified M-PESA reports the refund due; the code stays used (cannot be replayed).
+    const s3 = uid();
+    expect((await call(A, 'POST', `/shops/${sid}/sales`, { id: s3, items: [{ productId: ids.tea, qty: 1 }, ], payments: [{ method: 'mpesa', amount: 50, mpesaReceipt: 'VOIDPAID12' }] })).status).toBe(201);
+    const vm = await call(A, 'POST', `/shops/${sid}/sales/${s3}/void`, { reason: 'Wrong item' });
+    expect(vm.body.data.refundDue).toBe(50);
+    const replay = await call(A, 'POST', `/shops/${sid}/sales`, { id: uid(), items: [{ productId: ids.tea, qty: 1 }], payments: [{ method: 'mpesa', amount: 50, mpesaReceipt: 'VOIDPAID12' }] });
+    expect(replay.body.errorCode).toBe('MPESA_RECEIPT_USED');
   });
 
   test('sales are isolated: another user sees nothing and changes nothing; delete protection respects sale history', async () => {

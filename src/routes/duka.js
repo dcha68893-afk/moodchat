@@ -126,7 +126,7 @@ const productOut = (r) => {
   const stock = N(r.stock_qty), min = N(r.min_stock);
   const buy = N(r.buying_price), sell = N(r.selling_price);
   return {
-    id: r.id, shopId: r.shop_id, name: r.name, barcode: r.barcode, category: r.category, unit: r.unit,
+    id: r.id, shopId: r.shop_id, name: r.name, description: r.description || null, barcode: r.barcode, category: r.category, unit: r.unit,
     buyingPrice: buy, sellingPrice: sell, stockQty: stock, minStock: min, isActive: r.is_active,
     isLowStock: stock <= 0 || (min > 0 && stock <= min),
     isOutOfStock: stock <= 0,
@@ -147,7 +147,8 @@ const saleOut = (r) => ({
   id: r.id, shopId: r.shop_id, receiptNo: r.receipt_no, customerId: r.customer_id, customerName: r.customer_name,
   subtotal: N(r.subtotal), discountAmount: N(r.discount_amount), total: N(r.total), amountPaid: N(r.amount_paid),
   balanceDue: N(r.balance_due), cogs: N(r.cogs), grossProfit: Math.round((N(r.total) - N(r.cogs)) * 100) / 100,
-  paymentStatus: r.payment_status, status: r.status, note: r.note, soldAt: r.sold_at, createdAt: r.created_at
+  paymentStatus: r.payment_status, status: r.status, note: r.note, soldAt: r.sold_at, createdAt: r.created_at,
+  voidReason: r.void_reason || null, voidedAt: r.voided_at || null
 });
 const saleItemOut = (r) => ({
   id: r.id, productId: r.product_id, name: r.product_name, unit: r.unit,
@@ -301,7 +302,7 @@ function buildRouter(opts = {}) {
     if (req.query.includeArchived !== 'true') where.push('p.is_active');
     if (has(req.query.search)) {
       repl.search = `%${String(req.query.search).slice(0, 80).replace(/[\\%_]/g, '\\$&')}%`;
-      where.push(`(p.name ILIKE :search OR p.barcode ILIKE :search OR p.category ILIKE :search)`);
+      where.push(`(p.name ILIKE :search OR p.barcode ILIKE :search OR p.category ILIKE :search OR p.description ILIKE :search)`);
     }
     if (has(req.query.category)) { repl.category = String(req.query.category).slice(0, 80); where.push('lower(p.category) = lower(:category)'); }
     if (req.query.lowStock === 'true') where.push('(p.stock_qty <= 0 OR (p.min_stock > 0 AND p.stock_qty <= p.min_stock))');
@@ -322,6 +323,7 @@ function buildRouter(opts = {}) {
       name: str(b.name, 'Product name', { max: 160, required: true }),
       barcode: str(b.barcode, 'Barcode', { max: 64 }),
       category: str(b.category, 'Category', { max: 80 }),
+      description: str(b.description, 'Description', { max: 500 }),
       unit: str(b.unit, 'Unit', { max: 20 }) || 'piece',
       buyingPrice: money(b.buyingPrice, 'Buying price', { required: true }),
       sellingPrice: money(b.sellingPrice, 'Selling price', { required: true }),
@@ -338,8 +340,8 @@ function buildRouter(opts = {}) {
         }
       }
       const [product] = await run(
-        `INSERT INTO duka_products (id,shop_id,name,barcode,category,unit,buying_price,selling_price,stock_qty,min_stock)
-         VALUES (COALESCE(:id::uuid, gen_random_uuid()),:shopId,:name,:barcode,:category,:unit,:buyingPrice,:sellingPrice,:openingStock,:minStock)
+        `INSERT INTO duka_products (id,shop_id,name,description,barcode,category,unit,buying_price,selling_price,stock_qty,min_stock)
+         VALUES (COALESCE(:id::uuid, gen_random_uuid()),:shopId,:name,:description,:barcode,:category,:unit,:buyingPrice,:sellingPrice,:openingStock,:minStock)
          RETURNING *`,
         { id, shopId: shop.id, ...d }, t);
       if (d.openingStock > 0) {
@@ -374,6 +376,7 @@ function buildRouter(opts = {}) {
         name: 'name' in b ? str(b.name, 'Product name', { max: 160, required: true }) : before.name,
         barcode: 'barcode' in b ? str(b.barcode, 'Barcode', { max: 64 }) : before.barcode,
         category: 'category' in b ? str(b.category, 'Category', { max: 80 }) : before.category,
+        description: 'description' in b ? str(b.description, 'Description', { max: 500 }) : before.description,
         unit: 'unit' in b ? (str(b.unit, 'Unit', { max: 20 }) || 'piece') : before.unit,
         buying: 'buyingPrice' in b ? money(b.buyingPrice, 'Buying price', { required: true }) : before.buying_price,
         selling: 'sellingPrice' in b ? money(b.sellingPrice, 'Selling price', { required: true }) : before.selling_price,
@@ -381,7 +384,7 @@ function buildRouter(opts = {}) {
         active: 'isActive' in b ? !!b.isActive : before.is_active
       };
       const [after] = await run(
-        `UPDATE duka_products SET name=:name,barcode=:barcode,category=:category,unit=:unit,buying_price=:buying,
+        `UPDATE duka_products SET name=:name,description=:description,barcode=:barcode,category=:category,unit=:unit,buying_price=:buying,
            selling_price=:selling,min_stock=:min,is_active=:active,updated_at=NOW() WHERE id=:id RETURNING *`,
         { ...f, id: before.id }, t);
       await audit(t, req, shop.id, 'product.update', 'product', before.id, productOut(before), productOut(after));
@@ -641,18 +644,30 @@ function buildRouter(opts = {}) {
         throw new HttpError(400, 'Choose or add the customer who owes the balance (credit and part-payments need a customer)', 'CUSTOMER_REQUIRED');
       }
 
-      // M-PESA evidence: 'verified' only if the code matches a PAID NECPRA STK transaction for >= amount.
+      // M-PESA is accepted ONLY when the receipt code matches a PAID NECPRA STK transaction for >= the amount.
+      // A code typed in by the shopkeeper is not proof of payment, so it is never counted as money received.
       const hasStk = (await run(`SELECT to_regclass('stk_transactions') IS NOT NULL AS ok`, {}, t))[0].ok;
       for (const p of b.payments) {
         p.verification = 'none';
         if (p.method !== 'mpesa') continue;
-        p.verification = 'receipt_recorded';
+        // A receipt code can pay for one thing only — in ANY shop (the DB index only guards within one shop).
+        const [used] = await run(
+          `SELECT 1 AS ok FROM duka_sale_payments WHERE mpesa_receipt = :code
+           UNION ALL SELECT 1 FROM duka_debt_payments WHERE mpesa_receipt = :code LIMIT 1`, { code: p.mpesaReceipt }, t);
+        if (used) throw new HttpError(409, `M-PESA receipt ${p.mpesaReceipt} has already been used for another payment`, 'MPESA_RECEIPT_USED');
+        let stk = null;
         if (hasStk) {
-          const [stk] = await run(
+          [stk] = await run(
             `SELECT 1 AS ok FROM stk_transactions WHERE mpesa_receipt = :code AND status = 'paid' AND paid_amount >= :amt LIMIT 1`,
             { code: p.mpesaReceipt, amt: fromCents(p.cents) }, t);
-          if (stk) p.verification = 'verified';
         }
+        if (!stk) {
+          throw new HttpError(409,
+            `M-PESA receipt ${p.mpesaReceipt} could not be confirmed as a paid NECPRA M-PESA payment of KSh ${fromCents(p.cents).toFixed(2)}, so it was not counted as paid. ` +
+            'Nothing was saved. Remove the M-PESA amount and put the balance on credit, then collect it once the payment is confirmed.',
+            'MPESA_NOT_VERIFIED');
+        }
+        p.verification = 'verified';
       }
 
       const [{ last_no: receiptNo }] = await run(
@@ -736,6 +751,51 @@ function buildRouter(opts = {}) {
         },
         limit, offset
       }
+    });
+  }));
+
+  // Cancel (void) a completed sale. Safeguards: owner only, reason required, one-way and idempotent,
+  // blocked once customer debt payments have been applied to the sale, stock goes back through the ledger
+  // in the same transaction, and the money that was received is reported as `refundDue` (handed back by the shopkeeper —
+  // NECPRA never moves M-PESA money automatically here).
+  router.post('/shops/:shopId/sales/:saleId/void', wrap(async (req, res) => {
+    const b = ensureObject(req.body);
+    const reason = str(b.reason, 'Reason', { max: 240, required: true });
+    if (reason.length < 3) throw new HttpError(400, 'Please give a short reason for cancelling this sale', 'VALIDATION_ERROR');
+    const saleId = req.params.saleId;
+    if (!UUID_RE.test(saleId || '')) throw new HttpError(404, 'Sale not found', 'SALE_NOT_FOUND');
+    const out = await tx(async (t) => {
+      const shop = await ownedShop(req, { write: true, t, lock: true }); // same per-shop lock the sale itself takes
+      const [sale] = await run('SELECT * FROM duka_sales WHERE id = :id AND shop_id = :shopId FOR UPDATE', { id: saleId.toLowerCase(), shopId: shop.id }, t);
+      if (!sale) throw new HttpError(404, 'Sale not found', 'SALE_NOT_FOUND');
+      if (sale.status === 'voided') return { shop, detail: await loadSaleDetail(shop.id, sale.id, t), created: false };
+      const [coll] = await run('SELECT COUNT(*)::int AS n FROM duka_debt_allocations WHERE sale_id = :id', { id: sale.id }, t);
+      if (coll.n > 0) {
+        throw new HttpError(409, 'Money was collected from the customer against this sale later, so it cannot be cancelled here. Record a correction instead.', 'SALE_HAS_COLLECTIONS');
+      }
+      const items = await run('SELECT * FROM duka_sale_items WHERE sale_id = :id ORDER BY product_id', { id: sale.id }, t);
+      const prods = await run('SELECT * FROM duka_products WHERE shop_id = :shopId AND id IN (:ids) ORDER BY id FOR UPDATE',
+        { shopId: shop.id, ids: items.map((i) => i.product_id) }, t);
+      const byId = new Map(prods.map((p) => [p.id, p]));
+      for (const it of items) {
+        const p = byId.get(it.product_id);
+        if (!p) throw new HttpError(409, 'A product from this sale no longer exists, so stock cannot be restored', 'PRODUCT_NOT_FOUND');
+        const bal = Math.round((Number(p.stock_qty) + Number(it.qty)) * 1000) / 1000;
+        await run('UPDATE duka_products SET stock_qty = :bal, updated_at = NOW() WHERE id = :id RETURNING id', { bal, id: p.id }, t);
+        await run(
+          `INSERT INTO duka_stock_movements (shop_id,product_id,type,qty_change,balance_after,unit_cost,reference_type,reference_id,note,created_by)
+           VALUES (:shopId,:productId,'return',:change,:bal,:cost,'sale',:saleId,:note,:userId) RETURNING id`,
+          { shopId: shop.id, productId: p.id, change: Number(it.qty), bal, cost: it.unit_cost, saleId: sale.id, note: `Cancelled sale #${sale.receipt_no}`, userId: req.user.id }, t);
+      }
+      await run(`UPDATE duka_sales SET status='voided', void_reason=:reason, voided_at=NOW(), voided_by=:userId WHERE id=:id RETURNING id`,
+        { reason, userId: req.user.id, id: sale.id }, t);
+      await audit(t, req, shop.id, 'sale.void', 'sale', sale.id, { status: 'completed', total: N(sale.total), amountPaid: N(sale.amount_paid) },
+        { status: 'voided', reason, refundDue: N(sale.amount_paid) });
+      return { shop, detail: await loadSaleDetail(shop.id, sale.id, t), created: true };
+    });
+    res.json({
+      success: true,
+      data: { ...receiptOut(out.shop, out.detail), refundDue: N(out.detail.sale.amount_paid), idempotent: !out.created }
     });
   }));
 

@@ -22,7 +22,7 @@ d('duka phase 5 finance', () => {
 
   beforeAll(async () => {
     sequelize = new Sequelize(URL_, { logging: false });
-    for (const m of ['20261111000001-create-duka-smart-phase1', '20261111000002-create-duka-smart-phase2', '20261111000003-create-duka-smart-phase5-finance']) {
+    for (const m of ['20261111000001-create-duka-smart-phase1', '20261111000002-create-duka-smart-phase2', '20261111000003-create-duka-smart-phase5-finance', '20261111000004-duka-sale-void-and-product-description']) {
       await require(`../../migrations/${m}.js`).up({ sequelize });
       await require(`../../migrations/${m}.js`).up({ sequelize }); // idempotent re-run
     }
@@ -129,8 +129,16 @@ d('duka phase 5 finance', () => {
     expect([r1.paymentStatus, r1.balanceDue, r1.amountPaid]).toEqual(['paid', 0, 300]);
     expect([r2.paymentStatus, r2.balanceDue, r2.amountPaid]).toEqual(['partial', 100, 50]);
     const code = 'QWE1RTY2UI';
+    // An M-PESA code NECPRA cannot confirm is rejected and does not reduce the debt.
+    await sequelize.query(`CREATE TABLE IF NOT EXISTS stk_transactions (mpesa_receipt VARCHAR(40), status VARCHAR(20), paid_amount NUMERIC(15,2))`);
+    await sequelize.query(`DELETE FROM stk_transactions WHERE mpesa_receipt IN ('QWE1RTY2UI','ABCD1234EF')`); // clean slate so the test can be re-run
+    const un = await call(A, 'POST', `/shops/${shopId}/customers/${custId}/payments`, { id: uid(), amount: 100, method: 'mpesa', mpesaReceipt: code });
+    expect(un.status).toBe(409); expect(un.body.errorCode).toBe('MPESA_NOT_VERIFIED');
+    expect((await call(A, 'GET', `/shops/${shopId}/debts`)).body.data.customersOweYou.total).toBe(100);
+    await sequelize.query(`CREATE TABLE IF NOT EXISTS stk_transactions (mpesa_receipt VARCHAR(40), status VARCHAR(20), paid_amount NUMERIC(15,2))`);
+    await sequelize.query(`INSERT INTO stk_transactions SELECT 'QWE1RTY2UI','paid',100 WHERE NOT EXISTS (SELECT 1 FROM stk_transactions WHERE mpesa_receipt = 'QWE1RTY2UI')`);
     const m1 = await call(A, 'POST', `/shops/${shopId}/customers/${custId}/payments`, { id: uid(), amount: 100, method: 'mpesa', mpesaReceipt: code });
-    expect(m1.status).toBe(201); expect(m1.body.data.payment.verification).toBe('receipt_recorded'); // never "verified" without a paid STK record
+    expect(m1.status).toBe(201); expect(m1.body.data.payment.verification).toBe('verified');
     expect(m1.body.data.remainingBalance).toBe(0);
     expect((await call(A, 'POST', `/shops/${shopId}/customers/${custId}/payments`, { id: uid(), amount: 1, method: 'cash' })).body.errorCode).toBe('NO_DEBT');
     const st = await call(A, 'GET', `/shops/${shopId}/customers/${custId}/statement`);
@@ -138,6 +146,7 @@ d('duka phase 5 finance', () => {
     expect((await call(B, 'POST', `/shops/${shopId}/customers/${custId}/payments`, { id: uid(), amount: 1, method: 'cash' })).status).toBe(404);
     // a used sale receipt code cannot be reused for a debt payment
     const sale3 = uid();
+    await sequelize.query(`INSERT INTO stk_transactions SELECT 'ABCD1234EF','paid',100 WHERE NOT EXISTS (SELECT 1 FROM stk_transactions WHERE mpesa_receipt = 'ABCD1234EF')`);
     await call(A, 'POST', `/shops/${shopId}/sales`, { id: sale3, customerId: custId, items: [{ productId: prodId, qty: 2 }], payments: [{ method: 'mpesa', amount: 100, mpesaReceipt: 'ABCD1234EF' }] });
     const dup = await call(A, 'POST', `/shops/${shopId}/customers/${custId}/payments`, { id: uid(), amount: 50, method: 'mpesa', mpesaReceipt: 'ABCD1234EF' });
     expect(dup.status).toBe(409);
