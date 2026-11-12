@@ -199,6 +199,9 @@ function buildRouter(opts = {}) {
     return id.toLowerCase();
   }
 
+  // Smart Scale firmware authenticates with a device key, not a user JWT: registered BEFORE authenticate.
+  require('../services/dukaDevices').mountDevice({ router, run, tx, wrap, HttpError, v: { has, str, money, qty, uuid, phoneKE, ensureObject } });
+
   router.use(authenticate);
   router.use((req, res, next) => {
     if (!req.user || !Number.isInteger(Number(req.user.id))) {
@@ -898,10 +901,13 @@ function buildRouter(opts = {}) {
   }));
 
   // Phase 5 — expenses, suppliers, debts, collections and daily/weekly/monthly reports.
-  require('../services/dukaFinance').mount({
-    router, run, tx, wrap, audit, ownedShop, HttpError,
-    v: { has, str, money, uuid, phoneKE, ensureObject }
-  });
+  const mountCtx = { router, run, tx, wrap, audit, ownedShop, HttpError, v: { has, str, money, qty, uuid, phoneKE, ensureObject } };
+  require('../services/dukaFinance').mount(mountCtx);
+  // Perishable batches, spoilage losses, Smart Waste Prevention (reads sales + stock; changes no prices).
+  require('../services/dukaWaste').mount(mountCtx);
+  // Group Buying (uses waste analysis for allocation advice) and Smart Scale device management.
+  require('../services/dukaGroupBuy').mount(mountCtx);
+  require('../services/dukaDevices').mountOwner(mountCtx);
 
   // eslint-disable-next-line no-unused-vars
   router.use((err, req, res, next) => {
