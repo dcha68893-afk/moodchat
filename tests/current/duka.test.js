@@ -31,6 +31,7 @@ d('duka phase 1', () => {
     await require('../../migrations/20261111000001-create-duka-smart-phase1.js').up({ sequelize }); // idempotent re-run
     await require('../../migrations/20261111000002-create-duka-smart-phase2.js').up({ sequelize });
     await require('../../migrations/20261111000002-create-duka-smart-phase2.js').up({ sequelize }); // idempotent re-run
+    await require('../../migrations/20261111000003-create-duka-smart-phase5-finance.js').up({ sequelize });
     await sequelize.query('TRUNCATE duka_audit_log, duka_sale_payments, duka_sale_items, duka_sales, duka_customers, duka_receipt_counters, duka_stock_movements, duka_products, duka_shops CASCADE');
     const { buildRouter } = require('../../src/routes/duka');
     const app = express();
@@ -182,7 +183,7 @@ d('duka phase 1', () => {
     // Phase 2 tracks sales: a shop with no sales shows a real zero; Phase 3 sections stay null (not tracked yet).
     expect(dash.todaySales.total).toBe(0); expect(dash.todaySales.count).toBe(0);
     expect(dash.customerDebts.total).toBe(0);
-    expect(dash.totalExpenses).toBeNull(); expect(dash.supplierDebts).toBeNull();
+    expect(dash.totalExpenses).toBe(0); expect(dash.supplierDebts).toBe(0);
   });
 
   /* ───────────────────────── Phase 2: POS / sales ───────────────────────── */

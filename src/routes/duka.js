@@ -9,6 +9,7 @@
  *   Sales/POS  POST /shops/:shopId/sales · GET /shops/:shopId/sales · GET /shops/:shopId/sales/:saleId (receipt)
  *   Dashboard  GET /shops/:shopId/dashboard
  *   Audit      GET /shops/:shopId/audit
+ *   Finance    expenses, suppliers, debts, collections, reports → see services/dukaFinance.js (Phase 5)
  *
  * Sales (Phase 2)
  *  - The sale id is a client-generated UUID and is the idempotency key: replaying the same POST (a
@@ -780,6 +781,15 @@ function buildRouter(opts = {}) {
     const [debt] = await run(
       `SELECT COALESCE(SUM(balance_due),0) AS owed, COUNT(*) FILTER (WHERE balance_due > 0)::int AS n
          FROM duka_sales WHERE shop_id = :shopId AND status = 'completed'`, { shopId: shop.id });
+    // Phase 5: real expense / supplier / collection figures (Nairobi "today").
+    const [ex] = await run(
+      `SELECT COALESCE(SUM(amount),0) AS amt FROM duka_expenses WHERE shop_id = :shopId AND status = 'active'
+          AND expense_date = (NOW() AT TIME ZONE 'Africa/Nairobi')::date`, { shopId: shop.id });
+    const [sup] = await run(
+      `SELECT COALESCE(SUM(CASE WHEN type='bill' THEN amount ELSE -amount END),0) AS owed FROM duka_supplier_entries WHERE shop_id = :shopId`, { shopId: shop.id });
+    const [col] = await run(
+      `SELECT COALESCE(SUM(amount),0) AS amt FROM duka_debt_payments WHERE shop_id = :shopId
+          AND (received_at AT TIME ZONE 'Africa/Nairobi')::date = (NOW() AT TIME ZONE 'Africa/Nairobi')::date`, { shopId: shop.id });
     const recentSales = await run(
       `SELECT * FROM duka_sales WHERE shop_id = :shopId AND status = 'completed' ORDER BY sold_at DESC, receipt_no DESC LIMIT 8`, { shopId: shop.id });
     res.json({
@@ -802,12 +812,15 @@ function buildRouter(opts = {}) {
           mpesaVerified: sumRcv((r) => r.method === 'mpesa' && r.verification === 'verified'),
           creditGiven: N(td.credit)
         },
-        // Gross profit on today's sales (revenue − cost of goods sold). Expenses are not deducted until Phase 3.
+        // Gross profit on today's sales (revenue − cost of goods sold). Expenses are deducted in netProfit (Phase 5).
         estimatedProfit: Math.round((N(td.total) - N(td.cogs)) * 100) / 100,
         customerDebts: { total: N(debt.owed), openSales: debt.n },
         recentSales: recentSales.map(saleOut),
-        // Filled in by Phase 3. null = "not tracked yet" so the UI never shows a made-up zero.
-        totalExpenses: null, supplierDebts: null
+        // Phase 5. estimatedProfit stays GROSS profit; netProfit = gross profit − today's expenses.
+        totalExpenses: Math.round(N(ex.amt) * 100) / 100,
+        netProfit: Math.round((N(td.total) - N(td.cogs) - N(ex.amt)) * 100) / 100,
+        debtCollectedToday: Math.round(N(col.amt) * 100) / 100,
+        supplierDebts: Math.round(N(sup.owed) * 100) / 100
       }
     });
   }));
@@ -824,6 +837,12 @@ function buildRouter(opts = {}) {
     });
   }));
 
+  // Phase 5 — expenses, suppliers, debts, collections and daily/weekly/monthly reports.
+  require('../services/dukaFinance').mount({
+    router, run, tx, wrap, audit, ownedShop, HttpError,
+    v: { has, str, money, uuid, phoneKE, ensureObject }
+  });
+
   // eslint-disable-next-line no-unused-vars
   router.use((err, req, res, next) => {
     if (err instanceof HttpError) return res.status(err.status).json({ success: false, message: err.message, errorCode: err.code });
@@ -831,6 +850,8 @@ function buildRouter(opts = {}) {
       const c = String(err.original.constraint || '');
       const message = /sale_payments_receipt/.test(c) ? 'That M-PESA receipt code was already recorded in this shop'
         : /barcode/.test(c) ? 'Another product in this shop already uses that barcode'
+        : /debt_payments_receipt/.test(c) ? 'That M-PESA receipt code was already recorded in this shop'
+        : /suppliers_shop_name/.test(c) ? 'You already have a supplier with that name'
         : /shops_owner_name/.test(c) ? 'You already have a shop with that name'
         : /products_shop_name/.test(c) ? 'This shop already has a product with that name' : 'Duplicate record';
       return res.status(409).json({ success: false, message, errorCode: 'DUPLICATE' });
