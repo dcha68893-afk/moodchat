@@ -5282,6 +5282,11 @@ class Application {
                     const seq = db.sequelize || db;
                     require('./jobs/liveLocationExpiry').startExpirySweep(seq);
                 } catch(e){ console.warn('[Server] liveLocationExpiry job:', e.message); }
+                // DUKA SMART: Smart Scale instalment push/SMS reminders (hourly sweep; DB-deduplicated across cluster workers)
+                try {
+                    const db = require('./models');
+                    require('./services/dukaFinancingReminders').startJob(db.sequelize || db);
+                } catch(e){ console.warn('[Server] dukaFinancingReminders job:', e.message); }
                 } catch (err) {
                     console.warn('[Server] KeepAlive job failed to start (non-fatal):', err.message);
                 }

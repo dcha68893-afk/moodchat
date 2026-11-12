@@ -934,7 +934,7 @@ function buildRouter(opts = {}) {
   }));
 
   // Phase 5 — expenses, suppliers, debts, collections and daily/weekly/monthly reports.
-  const mountCtx = { router, run, tx, wrap, audit, ownedShop, HttpError, v: { has, str, money, qty, uuid, phoneKE, ensureObject } };
+  const mountCtx = { router, run, tx, wrap, audit, ownedShop, HttpError, getSequelize, v: { has, str, money, qty, uuid, phoneKE, ensureObject } };
   require('../services/dukaFinance').mount(mountCtx);
   // Perishable batches, spoilage losses, Smart Waste Prevention (reads sales + stock; changes no prices).
   require('../services/dukaWaste').mount(mountCtx);
@@ -944,6 +944,8 @@ function buildRouter(opts = {}) {
   // Device financing (separate from sales) and Chama-linked group buying (reuses money_circles; moves no Chama money).
   require('../services/dukaFinancing').mount(mountCtx);
   require('../services/dukaFinancingStk').mount(mountCtx);
+  // Push + SMS reminders for instalments (reminders only; never touches the device or sales).
+  require('../services/dukaFinancingReminders').mount(mountCtx);
   require('../services/dukaChama').mount(mountCtx);
   // Admin console lists (admins = DUKA_ADMIN_IDS in .env). Marketplace admin is not part of this.
   require('../services/dukaAdmin').mount(mountCtx);

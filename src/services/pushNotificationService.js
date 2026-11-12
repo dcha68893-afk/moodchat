@@ -88,6 +88,14 @@ function _buildPayload(type, data) {
       data:    { type: 'mention', chatId: data.chatId, messageId: data.messageId, url: `/chat.html?chatId=${data.chatId}` },
       requireInteraction: true, // stays until dismissed
     },
+    'duka:financing': {
+      title:   data.title || 'NECPRA DUKA SMART',
+      body:    _truncate(data.message || '', 140),
+      icon:    '/icons/icon-192.png',
+      badge:   '/icons/badge-72.png',
+      tag:     `duka-fin-${data.kind || 'reminder'}`,
+      data:    { type: 'duka:financing', kind: data.kind, url: '/duka.html' },
+    },
     'friend:request': {
       title:   `${data.fromName || 'Someone'} sent you a friend request`,
       body:    data.message || 'Wants to connect with you on Kynecta',
@@ -176,27 +184,29 @@ async function _getRecipientNotificationPrefs(userId, type, sequelize) {
 }
 
 async function sendToUser(userId, type, data, sequelize) {
-  if (!webpush || !sequelize) return;
+  if (!webpush || !sequelize) return 0;
 
   const prefs = await _getRecipientNotificationPrefs(userId, type, sequelize);
-  if (!prefs.enabled) return;
+  if (!prefs.enabled) return 0;
 
   const subs = await sequelize.query(
     `SELECT id, endpoint, p256dh, auth FROM push_subscriptions WHERE "userId"=:userId`,
     { replacements: { userId }, type: sequelize.QueryTypes.SELECT }
   );
-  if (!subs || subs.length === 0) return;
+  if (!subs || subs.length === 0) return 0;
 
   const payload   = _buildPayload(type, data);
   payload.silent  = !prefs.sound;
   payload.vibrate = prefs.vibrate ? [200, 100, 200] : [];
   const expired   = [];
+  let delivered   = 0;   // returned so callers (e.g. DUKA instalment reminders) can log honestly
 
   await Promise.allSettled(subs.map(async (sub) => {
     const result = await sendToSubscription(
       { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } },
       payload
     );
+    if (result === true) delivered++;
     if (result === 'expired') expired.push(sub.id);
   }));
 
@@ -207,6 +217,7 @@ async function sendToUser(userId, type, data, sequelize) {
       { replacements: { ids: expired } }
     ).catch(() => {});
   }
+  return delivered;
 }
 
 // ── New message notification ──────────────────────────────────────────────────
