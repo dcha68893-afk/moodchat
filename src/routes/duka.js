@@ -943,7 +943,10 @@ function buildRouter(opts = {}) {
   require('../services/dukaDevices').mountOwner(mountCtx);
   // Device financing (separate from sales) and Chama-linked group buying (reuses money_circles; moves no Chama money).
   require('../services/dukaFinancing').mount(mountCtx);
+  require('../services/dukaFinancingStk').mount(mountCtx);
   require('../services/dukaChama').mount(mountCtx);
+  // Admin console lists (admins = DUKA_ADMIN_IDS in .env). Marketplace admin is not part of this.
+  require('../services/dukaAdmin').mount(mountCtx);
 
   // eslint-disable-next-line no-unused-vars
   router.use((err, req, res, next) => {

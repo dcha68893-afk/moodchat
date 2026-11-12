@@ -226,7 +226,7 @@ const registry = new Map();
 function registerModule(name, handlers) { registry.set(String(name), handlers); }
 function ensureModulesLoaded() {
   // Settlers register themselves when their module file loads; load them lazily in case a callback arrives first.
-  for (const f of ['../routes/money', '../routes/games', '../routes/airtime', '../controllers/marketplace.controller']) {
+  for (const f of ['../routes/money', '../routes/games', '../routes/airtime', '../routes/duka', '../controllers/marketplace.controller']) {
     try { require(f); } catch (e) { logger.warn('[stk] could not load settler module ' + f + ': ' + e.message); }
   }
 }
