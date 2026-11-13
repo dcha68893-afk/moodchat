@@ -140,6 +140,8 @@ const ROUTE_MAPPING = {
   'airtime.js': '/airtime',
   // NECPRA DUKA SMART (replaces the user-facing Marketplace). Auth is applied inside duka.js AND by this router.
   'duka.js': '/duka',
+  // NECPRA Universal Voice: config + metadata-only audit (JWT required).
+  'voice.js': '/voice',
   // Wallet transfers / withdrawals (auth handled inside wallet.js; B2C callbacks are public, registered below)
   'wallet.js': '/wallet',
   // FIX: smart-groups.js was missing — ALL Group OS tabs returned 404
