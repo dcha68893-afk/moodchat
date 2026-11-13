@@ -43,7 +43,7 @@ router.get('/overview',wrap(async(req,res)=>{
  const memberRows=d.MoneyCircleMember?await d.MoneyCircleMember.findAll({where:{userId,status:'active'},attributes:['circleId']}):[];
  const memberIds=memberRows.map(x=>x.circleId);
  const [circles,requests,contributions]=await Promise.all([
-  d.MoneyCircle?.findAll({where:memberIds.length?{[d.Op.or]:[{ownerId:userId},{id:memberIds}]}:{ownerId:userId},order:[['createdAt','DESC']],limit:30})||[],
+  d.MoneyCircle?.findAll({where:{[d.Op.and]:[memberIds.length?{[d.Op.or]:[{ownerId:userId},{id:memberIds}]}:{ownerId:userId},{status:{[d.Op.ne]:'cancelled'}}]},order:[['createdAt','DESC']],limit:30})||[],
   d.MoneyRequest?.findAll({where:{requesterId:userId},order:[['createdAt','DESC']],limit:20})||[],
   d.MoneyContribution?.findAll({where:{contributorId:userId},order:[['createdAt','DESC']],limit:20})||[]
  ]);
@@ -81,9 +81,9 @@ router.get('/circles',wrap(async(req,res)=>{
  if(Member){
   const rows=await Member.findAll({where:{userId,status:'active'},attributes:['circleId']});
   const ids=rows.map(x=>x.circleId);
-  if(ids.length)circles=await d.MoneyCircle.findAll({where:{id:ids},order:[['createdAt','DESC']]});
+  if(ids.length)circles=await d.MoneyCircle.findAll({where:{id:ids,status:{[d.Op.ne]:'cancelled'}},order:[['createdAt','DESC']]});
  }
- if(!circles.length&&d.MoneyCircle)circles=await d.MoneyCircle.findAll({where:{ownerId:userId},order:[['createdAt','DESC']]});
+ if(!circles.length&&d.MoneyCircle)circles=await d.MoneyCircle.findAll({where:{ownerId:userId,status:{[d.Op.ne]:'cancelled'}},order:[['createdAt','DESC']]});
  return ok(res,{circles});
 }));
 
@@ -96,12 +96,16 @@ router.post('/circles',wrap(async(req,res)=>{
  const allowed=['chama','family','trip','event','emergency','project','purchase','other'];
  const circle=await d.MoneyCircle.create({ownerId:userId,name:name.trim(),purpose:String(purpose||'').trim()||null,targetAmount:target,type:allowed.includes(type)?type:'other'});
  if(d.MoneyCircleMember)await d.MoneyCircleMember.create({circleId:circle.id,userId,role:'owner',status:'active'});
- return ok(res,{circle},201);
+ // Where this chama receives money. Default = the owner's NECPRA wallet account so contributions work immediately.
+ let receiving=null,receivingWarning=null;
+ try{receiving=await setReceiving(d,circle,userId,req.body?.receiving||{method:'wallet'});}
+ catch(e){receivingWarning=e.message||'Receiving account could not be set';console.warn('[money] receiving on create',e.message);}
+ return ok(res,{circle,receiving,receivingWarning},201);
 }));
 
 router.get('/circles/:id',wrap(async(req,res)=>{
  const d=db(),userId=uid(req);if(!userId)return res.status(401).json({success:false,message:'Unauthorized'});
- const circle=await d.MoneyCircle?.findByPk(req.params.id);if(!circle)return res.status(404).json({success:false,message:'Circle not found'});
+ const circle=await d.MoneyCircle?.findByPk(req.params.id);if(!circle||circle.status==='cancelled')return res.status(404).json({success:false,message:'Circle not found (it may have been deleted)'});
  const member=d.MoneyCircleMember?await d.MoneyCircleMember.findOne({where:{circleId:circle.id,userId,status:'active'}}):null;
  if(!member)return res.status(403).json({success:false,message:'Not a circle member'});
  // Every figure below comes from MoneyContribution rows. A row only becomes 'paid' inside
@@ -136,7 +140,7 @@ router.get('/circles/:id',wrap(async(req,res)=>{
  const ledgerTotal=paidList.reduce((n,c)=>n+Number(c.amount||0),0);
  const cashTotal=paidList.filter(isOffline).reduce((n,c)=>n+Number(c.amount||0),0);
  const guests=[...guestMap.values()].sort((a,b)=>(b.contributed-a.contributed)||a.name.localeCompare(b.name));
- return ok(res,{circle,isOwner:circle.ownerId===userId,members,guests,schedule:sched?{...sched,daysLeft:W.dayDiff(sched.dueDate,W.nairobiParts())}:null,
+ return ok(res,{circle,isOwner:circle.ownerId===userId,receiving:await receivingSummary(d,circle.id),members,guests,schedule:sched?{...sched,daysLeft:W.dayDiff(sched.dueDate,W.nairobiParts())}:null,
   totals:{collected:ledgerTotal,mpesa:ledgerTotal-cashTotal,cash:cashTotal,paidCount:paidList.length,membersPaid:members.filter(m=>m.contributed>0||m.items.length>0).length,membersUnpaid:members.filter(m=>!(m.contributed>0||m.items.length>0)).length},
   contributions:paidList.slice(0,100).map(c=>{const meta=c.metadata||{},k=Number(c.contributorId),off=isOffline(c);return {...c.toJSON(),offline:off,item:meta.item||null,contributorName:(off&&k===0)?(meta.guestName||'Guest'):(nm.get(k)||'Member')}})});
 }));
@@ -275,6 +279,7 @@ router.post('/circles/:id/offline-contributions/:contributionId/void',wrap(async
 router.post('/circles/:id/contributions',wrap(async(req,res)=>{
  const d=db(),userId=uid(req);if(!userId)return res.status(401).json({success:false,message:'Unauthorized'});
  const circle=await d.MoneyCircle?.findByPk(req.params.id);if(!circle)return res.status(404).json({success:false,message:'Circle not found'});
+ if(circle.status==='cancelled')return res.status(410).json({success:false,message:'This chama was deleted by its owner and no longer accepts contributions.'});
  const member=await d.MoneyCircleMember?.findOne({where:{circleId:circle.id,userId,status:'active'}});if(!member)return res.status(403).json({success:false,message:'Not a circle member'});
  const sc0=circle.settings&&circle.settings.schedule,fixedAmt=sc0&&Number(sc0.amountPerMember)>0?Number(sc0.amountPerMember):0; // owner turned "same amount for every member" on: prompt is exactly that amount
  const amount=fixedAmt||Number(req.body?.amount);if(!Number.isFinite(amount)||amount<=0)return res.status(400).json({success:false,message:'Valid amount required'});
@@ -294,6 +299,90 @@ router.post('/circles/:id/contributions/:contributionId/pay',wrap(async(req,res)
   payer:{userId,phone:req.body?.phone},amount:Number(c.amount),beneficiaries:[{type:'circle',id:circle.id,name:circle.name}],payload:{circleId:circle.id,contributionId:c.id}});
  await c.update({paymentRef:out.checkoutRequestId,metadata:{...(c.metadata||{}),checkoutRequestId:out.checkoutRequestId,stkTransactionId:out.transaction.id}});
  return ok(res,{status:'pending',contributionId:c.id,checkoutRequestId:out.checkoutRequestId,payment:out.transaction,description:out.transaction.description,customerMessage:out.customerMessage},202);
+}));
+
+
+/* ───────── Chama receiving destination + delete ─────────
+ * Receiving account = where the chama's money is meant to go. Two choices:
+ *   wallet : the owner's NECPRA wallet account. NECPRA controls it, so it is approved immediately.
+ *   phone  : an M-Pesa contact number. It is approved immediately only when it is the owner's OWN registered number
+ *            (or CHAMA_PHONE_AUTO_APPROVE=true). Any other number goes to admin approval first, and contributions
+ *            stay paused until it is approved, so nobody can point a chama at a stranger's number unchecked.
+ * Only the owner can change it, with the same fresh-password step-up as other money actions. */
+function _maskPhone(p){p=String(p||'');return p.length>=9?p.slice(0,5)+'•••'+p.slice(-3):p;}
+function _acctView(r){if(!r)return null;return {id:r.id,method:r.method==='wallet'?'wallet':'phone',status:r.status,accountName:r.accountName,
+ label:r.method==='wallet'?'Necpra account (wallet)':'M-Pesa '+_maskPhone(r.accountNumber),rejectionReason:r.rejectionReason||null};}
+async function receivingSummary(d,circleId){
+ try{const RA=d.ReceivingAccount;if(!RA)return {active:null,pending:null};
+  const rows=await RA.findAll({where:{ownerType:'circle',ownerId:String(circleId),status:['approved','pending','rejected']},order:[['createdAt','DESC']],limit:10});
+  const active=rows.find(r=>r.status==='approved')||null;
+  const pending=rows.find(r=>r.status==='pending'&&(!active||new Date(r.createdAt)>new Date(active.approvedAt||active.createdAt)))||null;
+  const rejected=!pending?rows.find(r=>r.status==='rejected'&&(!active||new Date(r.createdAt)>new Date(active.approvedAt||active.createdAt))):null;
+  return {active:_acctView(active),pending:_acctView(pending),rejected:_acctView(rejected)};
+ }catch(e){return {active:null,pending:null};}
+}
+async function setReceiving(d,circle,userId,spec){
+ const RA=d.ReceivingAccount;if(!RA)throw Object.assign(new Error('Receiving accounts are unavailable'),{status:503});
+ const method=String(spec.method||'wallet').toLowerCase()==='phone'||String(spec.method||'').toLowerCase()==='mpesa_phone'?'mpesa_phone':'wallet';
+ const owner=d.Users?await d.Users.findByPk(userId,{attributes:['id','username','firstName','lastName','phone']}):null;
+ const ownerName=owner?([owner.firstName,owner.lastName].filter(Boolean).join(' ')||owner.username||'Owner'):'Owner';
+ const ownerKey=String(circle.id);
+ if(method==='wallet'){
+  await RA.update({status:'suspended'},{where:{ownerType:'circle',ownerId:ownerKey,status:['approved','pending']}});
+  const row=await RA.create({ownerType:'circle',ownerId:ownerKey,method:'wallet',accountName:(circle.name+' (Necpra account)').slice(0,160),status:'approved',submittedBy:userId,approvedBy:userId,approvedAt:new Date(),metadata:{auto:'wallet',walletOwnerId:userId}});
+  return _acctView(row);
+ }
+ let phone;try{phone=stk.normalizePhone(String(spec.phone||''));}catch(_){throw Object.assign(new Error('Enter a valid Safaricom number, e.g. 0712 345 678'),{status:400});}
+ let own='';try{own=owner&&owner.phone?stk.normalizePhone(String(owner.phone)):'';}catch(_){own='';}
+ const auto=(own&&own===phone)||String(process.env.CHAMA_PHONE_AUTO_APPROVE||'').toLowerCase()==='true';
+ const name=String(spec.accountName||'').trim()||(auto&&own===phone?ownerName:'');
+ if(!name)throw Object.assign(new Error('Enter the name registered on that M-Pesa number'),{status:400});
+ const dup=await RA.findOne({where:{ownerType:'circle',ownerId:ownerKey,method:'mpesa_phone',accountNumber:phone,status:['approved','pending']}});
+ if(dup)return _acctView(dup);
+ if(auto)await RA.update({status:'suspended'},{where:{ownerType:'circle',ownerId:ownerKey,status:['approved','pending']}});
+ else await RA.update({status:'suspended'},{where:{ownerType:'circle',ownerId:ownerKey,status:'pending'}}); // the old approved account keeps working until the new number is approved
+ const row=await RA.create({ownerType:'circle',ownerId:ownerKey,method:'mpesa_phone',accountNumber:phone,accountName:name.slice(0,160),status:auto?'approved':'pending',submittedBy:userId,approvedBy:auto?userId:null,approvedAt:auto?new Date():null,metadata:{auto:auto?'owner_phone':null}});
+ return _acctView(row);
+}
+
+router.get('/circles/:id/receiving',wrap(async(req,res)=>{
+ const d=db(),userId=uid(req);if(!userId)return res.status(401).json({success:false,message:'Unauthorized'});
+ const circle=await d.MoneyCircle?.findByPk(req.params.id);if(!circle||circle.status==='cancelled')return res.status(404).json({success:false,message:'Circle not found'});
+ const member=await d.MoneyCircleMember?.findOne({where:{circleId:circle.id,userId,status:'active'}});if(!member)return res.status(403).json({success:false,message:'Not a circle member'});
+ return ok(res,{isOwner:circle.ownerId===userId,...(await receivingSummary(d,circle.id))});
+}));
+
+router.put('/circles/:id/receiving',wrap(async(req,res)=>{
+ const d=db(),userId=uid(req);if(!userId)return res.status(401).json({success:false,message:'Unauthorized'});
+ const circle=await d.MoneyCircle?.findByPk(req.params.id);if(!circle||circle.status==='cancelled')return res.status(404).json({success:false,message:'Circle not found'});
+ if(circle.ownerId!==userId)return res.status(403).json({success:false,message:'Only the chama owner can choose where money is received'});
+ if(!requireMoneyStepUp(req,res,userId))return;
+ const acct=await setReceiving(d,circle,userId,req.body||{});
+ const pending=acct&&acct.status==='pending';
+ return ok(res,{account:acct,...(await receivingSummary(d,circle.id)),message:pending?'Saved. This number must be approved before it receives money. Until then the current account is used.':'Saved. New contributions will be received there.'});
+}));
+
+// Delete a chama (owner only). Nothing collected -> removed completely. Money already collected -> the chama is closed and hidden but its
+// ledger is kept (cancelled), because deleting records of real money would make it untraceable. Open M-Pesa prompts must finish first.
+router.delete('/circles/:id',wrap(async(req,res)=>{
+ const d=db(),userId=uid(req);if(!userId)return res.status(401).json({success:false,message:'Unauthorized'});
+ const circle=await d.MoneyCircle?.findByPk(req.params.id);if(!circle)return res.status(404).json({success:false,message:'Circle not found'});
+ if(circle.ownerId!==userId)return res.status(403).json({success:false,message:'Only the chama owner can delete it'});
+ if(circle.status==='cancelled')return ok(res,{deleted:true,archived:true});
+ if(!requireMoneyStepUp(req,res,userId))return;
+ const pending=await d.MoneyContribution.count({where:{circleId:circle.id,status:'pending',createdAt:{[d.Op.gte]:new Date(Date.now()-15*60*1000)}}});
+ if(pending>0)return res.status(409).json({success:false,message:'A member has an M-Pesa payment in progress. Wait a few minutes and try again.'});
+ const paidRows=await d.MoneyContribution.count({where:{circleId:circle.id,status:'paid'}});
+ const collected=Number(circle.collectedAmount||0);
+ const memberIds=(await d.MoneyCircleMember.findAll({where:{circleId:circle.id,status:'active'},attributes:['userId']})).map(m=>Number(m.userId)).filter(x=>x&&x!==userId);
+ let archived=false;
+ await d.sequelize.transaction(async t=>{
+  if(d.ReceivingAccount)await d.ReceivingAccount.update({status:'suspended'},{where:{ownerType:'circle',ownerId:String(circle.id),status:['approved','pending']},transaction:t});
+  if(paidRows>0||collected>0){archived=true;await circle.update({status:'cancelled',settings:{...(circle.settings||{}),deletedAt:new Date().toISOString(),deletedBy:userId}},{transaction:t});}
+  else{await d.MoneyContribution.destroy({where:{circleId:circle.id},transaction:t});await d.MoneyCircleMember.destroy({where:{circleId:circle.id},transaction:t});await circle.destroy({transaction:t});}
+ });
+ try{const W=require('../services/moneyReminderWorker');for(const m of memberIds)await W.notify(m,circle,'Chama closed: '+circle.name,'The owner has deleted this chama. It no longer accepts contributions.','closed');}catch(e){console.warn('[money] delete notify failed',e.message);}
+ return ok(res,{deleted:true,archived,message:archived?'Chama closed and removed from your lists. Its contribution records were kept because money had already been collected.':'Chama deleted.'});
 }));
 
 router.get('/requests',wrap(async(req,res)=>{
