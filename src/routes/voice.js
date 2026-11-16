@@ -92,8 +92,19 @@ function createRouter(opts = {}) {
     if (opts.isAdmin) return opts.isAdmin(req);
     const id = callerId(req); if (!id) return false;
     if (String(process.env.ADMIN_USER_IDS || '').split(',').map((v) => Number(v.trim())).filter(Number.isFinite).includes(id)) return true;
-    const u = await require('../models').Users.findByPk(id, { attributes: ['id', 'role'] }).catch(() => null);
-    return ['admin', 'superadmin', 'administrator'].includes(String(u && u.role || '').toLowerCase());
+    const ADMIN_ROLES = ['admin', 'superadmin', 'administrator'];
+    // Same env-based fallback as middleware/auth.js adminOnly (token issued before the account was promoted).
+    const lc = (v) => String(v || '').toLowerCase().trim();
+    const envEmail = lc(process.env.ADMIN_EMAIL), envUser = lc(process.env.ADMIN_USERNAME);
+    if ((envEmail && lc(req.user && req.user.email) === envEmail) || (envUser && lc(req.user && req.user.username) === envUser)) return true;
+    if (ADMIN_ROLES.includes(lc(req.user && req.user.role))) return true;
+    // FIX (GET /api/voice/phrases/admin + /phrases/actions -> 500): `require('../models').Users` is undefined (the models export only
+    // exposes a `User` getter plus db.models.*), so `.Users.findByPk` threw a TypeError that adminOnly turned into a 500.
+    const m = require('../models');
+    const UserModel = m.User || (m.models && (m.models.Users || m.models.User)) || null;
+    if (!UserModel) return false;
+    const u = await UserModel.findByPk(id, { attributes: ['id', 'role'] }).catch(() => null);
+    return ADMIN_ROLES.includes(lc(u && u.role));
   }
   const adminOnly = async (req, res, next) => { try { if (!(await isAdminReq(req))) return res.status(403).json({ ok: false, error: 'Admin access required' }); next(); } catch (e) { res.status(500).json({ ok: false, error: 'admin_check_failed' }); } };
   const bust = () => { _cache = null; };

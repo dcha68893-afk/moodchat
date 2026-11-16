@@ -47,6 +47,37 @@ function priceShares(qtys, unitPrice, transportFee, feeSplit) {
 
 function mount(ctx) {
   const { router, run, tx, wrap, HttpError, v } = ctx;
+  /* ECOSYSTEM: after a successful group-buy step, tell every Chama this order is shared with (members get a notice that carries the
+   * group's chat id). Best-effort and read-only: it never changes the order, and a failure here can never fail the step itself. */
+  const STEP_TEXT = {
+    quotes: ['New supplier quotation', (n) => `A supplier sent a quotation for ${n}. Compare it before the order closes.`],
+    lock: ['Supplier chosen', (n) => `A supplier quote was chosen for ${n}. Confirm your share and pay.`],
+    confirm: ['Group order confirmed', (n) => `${n} is confirmed with the supplier.`],
+    cancel: ['Group order cancelled', (n) => `${n} was cancelled. Anything you paid is queued for refund.`],
+    delivery: ['Delivery recorded', (n) => `${n} has been delivered. Confirm receipt to add your stock to your DUKA inventory.`],
+    'chama/link': ['Group order shared with your chama', (n) => `${n}: join with your own shop and quantity.`]
+  };
+  router.use('/group-buy/orders/:orderId', (req, res, next) => {
+    if (req.method !== 'POST') return next();
+    const step = String(req.path || '').replace(/^\/+|\/+$/g, '');
+    const text = STEP_TEXT[step];
+    if (!text) return next();
+    res.on('finish', () => {
+      if (res.statusCode < 200 || res.statusCode >= 300) return;
+      (async () => {
+        const orderId = req.params.orderId;
+        const [o] = await run('SELECT product_name, unit FROM duka_gb_orders WHERE id=:id', { id: orderId }).catch(() => []);
+        if (!o) return;
+        const d = require('../models'), eco = require('./ecosystemLink');
+        const links = await run('SELECT circle_id FROM duka_chama_links WHERE order_id=:id', { id: orderId }).catch(() => []);
+        for (const l of links) {
+          const circle = await d.MoneyCircle.findByPk(l.circle_id); if (!circle) continue;
+          await eco.announce(d, circle, 'groupbuy_' + step.replace('/', '_'), text[0] + ': ' + o.product_name, text[1](o.product_name), { orderId, module: 'tools', actionUrl: '/duka.html', exceptUserId: req.user && req.user.id });
+        }
+      })().catch((e) => console.warn('[ecosystem] group-buy announce failed', e.message));
+    });
+    next();
+  });
   const { has, str, money, qty, uuid, phoneKE, ensureObject } = v;
   const bad = (msg, code) => new HttpError(400, msg, code || 'VALIDATION_ERROR');
   const nf = (what) => new HttpError(404, `${what} not found`, 'NOT_FOUND');

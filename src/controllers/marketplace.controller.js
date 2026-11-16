@@ -2273,8 +2273,22 @@ class MarketplaceController {
             const db = getDb();
             const SellerProfile = db.SellerProfile;
             if (!SellerProfile) return next(new AppError('SellerProfile unavailable', 503));
-            const profile = await SellerProfile.findOne({ where: { userId: req.params.id } });
-            if (!profile) return next(new AppError('KYC record not found for this seller', 404));
+            let profile = await SellerProfile.findOne({ where: { userId: req.params.id } });
+            if (!profile) {
+                // FIX (POST /admin/sellers/:id/verify -> 404): the sellers list also contains users who have listings (or role 'seller')
+                // but never submitted KYC, so they have no seller_profiles row and every Verify/Reject click 404'd.
+                // Create the row on demand so the admin's decision is recorded.
+                const sellerUserId = parseInt(req.params.id, 10);
+                if (!Number.isInteger(sellerUserId)) return next(new AppError('Invalid seller id', 400));
+                const UsersModel = db.Users || db.User;
+                const u = UsersModel ? await UsersModel.findByPk(sellerUserId, { attributes: ['id', 'username'] }).catch(() => null) : null;
+                if (!u) return next(new AppError('Seller not found', 404));
+                profile = await SellerProfile.create({
+                    userId: sellerUserId,
+                    businessName: String(u.username || ('Seller ' + sellerUserId)).slice(0, 255),
+                    kycStatus: 'pending_review',
+                });
+            }
             const { approved, reason } = req.body || {};
             if (approved) {
                 await profile.update({ kycStatus: 'approved', verified: true, verifiedAt: new Date(), verifiedBy: req.user.id });

@@ -10,6 +10,9 @@
  *  - On the due date and every day after (overdue): up to 3 prompts a day - 08:00, 13:00, 18:00.
  *    Each slot only goes to members who still have not paid, so a member who pays in the morning
  *    gets no afternoon/evening prompt, and one who pays at lunch gets no evening prompt.
+ *  - TIME LIMIT: reminders are NOT endless. The chama owner chooses how long they keep coming after the due date
+ *    (schedule.reminderDuration = { value, unit:'hours'|'days' }, counted from 08:00 on the due date, the first slot).
+ *    When it runs out, the push/in-app prompts AND the bottom ticker stop. Schedules saved before this existed use 7 days.
  *  - "Paid" is derived from confirmed (status=paid) MoneyContribution rows created since
  *    schedule.startedAt, never typed in by anyone. paid >= amountPerMember (or > 0 if no amount set).
  *
@@ -29,6 +32,26 @@ function dayDiff(dueDate, todayStr) {
   const a = Date.parse(dueDate + 'T00:00:00Z'), b = Date.parse(todayStr + 'T00:00:00Z');
   return Math.round((a - b) / 86400000); // >0 days left, 0 today, <0 overdue
 }
+const DEFAULT_WINDOW_HOURS = 7 * 24, MAX_WINDOW_HOURS = 90 * 24;
+/** Normalise { value, unit } -> { value, unit, hours } or null when invalid. */
+function parseDuration(d) {
+  if (!d || typeof d !== 'object') return null;
+  const unit = d.unit === 'hours' ? 'hours' : d.unit === 'days' ? 'days' : null;
+  const value = Math.floor(Number(d.value));
+  if (!unit || !Number.isFinite(value) || value < 1) return null;
+  const hours = unit === 'days' ? value * 24 : value;
+  if (hours > MAX_WINDOW_HOURS) return null;
+  return { value, unit, hours };
+}
+/** Epoch ms after which no more reminders (push or ticker) are shown for this schedule. */
+function reminderStopAt(sched) {
+  if (!sched || !sched.dueDate) return Infinity;
+  const dur = parseDuration(sched.reminderDuration);
+  const hours = dur ? dur.hours : DEFAULT_WINDOW_HOURS;
+  const start = Date.parse(sched.dueDate + 'T08:00:00+03:00'); // first reminder slot on the due date (Nairobi)
+  return Number.isFinite(start) ? start + hours * 3600000 : Infinity;
+}
+function remindersExpired(sched, now = Date.now()) { return now > reminderStopAt(sched); }
 const fmt = n => 'KSh ' + Number(n || 0).toLocaleString('en-KE', { maximumFractionDigits: 2 });
 
 /** Map userId -> amount confirmed-paid in the current cycle. */
@@ -80,6 +103,7 @@ async function tick(slotIdx) {
     const s0 = c0.settings && c0.settings.schedule;
     if (!s0 || !s0.dueDate || s0.remindersEnabled === false) continue;
     const diff = dayDiff(s0.dueDate, today);
+    if (diff <= 0 && remindersExpired(s0)) continue; // saver's reminder time limit has run out
     const send = diff <= 0 || (slotIdx === 0 && (diff === 1 || diff === 3));
     if (!send) continue;
     try {
@@ -108,4 +132,4 @@ function start() {
   console.log('[moneyReminder] started (08:00 / 13:00 / 18:00 ' + TZ + ')');
 }
 
-module.exports = { start, tick, paidByMember, hasPaid, unpaidMembers, notify, dueText, dayDiff, nairobiParts };
+module.exports = { parseDuration, reminderStopAt, remindersExpired, start, tick, paidByMember, hasPaid, unpaidMembers, notify, dueText, dayDiff, nairobiParts };

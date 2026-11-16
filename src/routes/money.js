@@ -4,6 +4,7 @@ const jwt=require('jsonwebtoken');
 const { comparePassword }=require('../utils/passwordUtils');
 const { authenticator } = require('otplib');
 const stk=require('../services/mpesaStkService');
+const eco=require('../services/ecosystemLink');
 const router=express.Router();
 const { requireAdult, isAdultConfirmed, confirmAdult } = require('../middleware/requireAdult');
 const db=()=>{const m=require('../models');
@@ -32,7 +33,7 @@ async function handleMoneyCallback(body){
  const d=db(),checkoutId=body?.CheckoutRequestID;if(!checkoutId)return;
  const items=body?.CallbackMetadata?.Item||[];const receipt=items.find(i=>i.Name==='MpesaReceiptNumber')?.Value;const amount=Number(items.find(i=>i.Name==='Amount')?.Value||0);
  const C=d.MoneyContribution&&await d.MoneyContribution.findOne({where:{paymentRef:checkoutId}});
- if(C){if(Number(C.amount)!==amount)return;if(body.ResultCode===0||String(body.ResultCode)==='0'){if(C.status!=='paid'){const [moved]=await d.MoneyContribution.update({status:'paid',paymentRef:receipt||checkoutId,metadata:{...(C.metadata||{}),checkoutRequestId:checkoutId,receipt}},{where:{id:C.id,status:{[d.Op.ne]:'paid'}}});if(moved)await d.MoneyCircle.increment('collectedAmount',{by:amount,where:{id:C.circleId}});}}else if(C.status==='pending')await C.update({status:'failed',metadata:{...(C.metadata||{}),failureCode:body.ResultCode,failureDescription:body.ResultDesc}});return;}
+ if(C){if(Number(C.amount)!==amount)return;if(body.ResultCode===0||String(body.ResultCode)==='0'){if(C.status!=='paid'){const [moved]=await d.MoneyContribution.update({status:'paid',paymentRef:receipt||checkoutId,metadata:{...(C.metadata||{}),checkoutRequestId:checkoutId,receipt}},{where:{id:C.id,status:{[d.Op.ne]:'paid'}}});if(moved){await d.MoneyCircle.increment('collectedAmount',{by:amount,where:{id:C.circleId}});eco.announcePaid(d,C.circleId,C.contributorId,amount);}}}else if(C.status==='pending')await C.update({status:'failed',metadata:{...(C.metadata||{}),failureCode:body.ResultCode,failureDescription:body.ResultDesc}});return;}
  const R=d.MoneyRequest&&await d.MoneyRequest.findOne({where:{paymentRef:checkoutId}});if(R){if(Number(R.amount)!==amount)return;if(body.ResultCode===0||String(body.ResultCode)==='0'){if(R.status!=='paid')await R.update({status:'paid',paymentRef:receipt||checkoutId,metadata:{...(R.metadata||{}),checkoutRequestId:checkoutId,receipt}});}else if(R.status==='requested')await R.update({status:'expired',metadata:{...(R.metadata||{}),failureCode:body.ResultCode,failureDescription:body.ResultDesc}});}
 }
 
@@ -65,7 +66,7 @@ router.get('/overview',wrap(async(req,res)=>{
  const dues=[];
  try{const W=require('../services/moneyReminderWorker'),today=W.nairobiParts();
   for(const c of circles){const sc=c.settings&&c.settings.schedule;if(!sc||!sc.dueDate||sc.remindersEnabled===false)continue;
-   const daysLeft=W.dayDiff(sc.dueDate,today);if(daysLeft>3)continue;
+   const daysLeft=W.dayDiff(sc.dueDate,today);if(daysLeft>3)continue;if(daysLeft<=0&&W.remindersExpired(sc))continue; /* saver's reminder time limit is over: ticker stops too */
    const pm=await W.paidByMember(d,c);if(W.hasPaid(sc,pm.get(Number(userId))||0))continue;
    dues.push({circleId:c.id,name:c.name,amount:Number(sc.amountPerMember||0),dueDate:sc.dueDate,daysLeft});}}catch(e){console.error('[money] dues',e.message);}
  const tracked=circles.reduce((n,x)=>n+Number(x.collectedAmount||0),0);
@@ -96,11 +97,18 @@ router.post('/circles',wrap(async(req,res)=>{
  const allowed=['chama','family','trip','event','emergency','project','purchase','other'];
  const circle=await d.MoneyCircle.create({ownerId:userId,name:name.trim(),purpose:String(purpose||'').trim()||null,targetAmount:target,type:allowed.includes(type)?type:'other'});
  if(d.MoneyCircleMember)await d.MoneyCircleMember.create({circleId:circle.id,userId,role:'owner',status:'active'});
+ // Optional: create this chama FROM a group (groupChatId). The creator must be an admin of that group; all group members join the chama.
+ let linkedGroup=null;
+ const gcid=Number(req.body?.groupChatId);
+ if(Number.isInteger(gcid)&&gcid>0){
+  if(!(await eco.isGroupAdmin(d,gcid,userId))){await circle.destroy().catch(()=>{});return res.status(403).json({success:false,message:'Only an admin of that group can create a chama for it'});}
+  const added=await eco.linkCircleToGroup(d,circle,gcid);linkedGroup={chatId:gcid,membersAdded:added};
+ }
  // Where this chama receives money. Default = the owner's NECPRA wallet account so contributions work immediately.
  let receiving=null,receivingWarning=null;
  try{receiving=await setReceiving(d,circle,userId,req.body?.receiving||{method:'wallet'});}
  catch(e){receivingWarning=e.message||'Receiving account could not be set';console.warn('[money] receiving on create',e.message);}
- return ok(res,{circle,receiving,receivingWarning},201);
+ return ok(res,{circle,receiving,receivingWarning,linkedGroup},201);
 }));
 
 router.get('/circles/:id',wrap(async(req,res)=>{
@@ -190,6 +198,92 @@ router.post('/circles/:id/members',wrap(async(req,res)=>{
  return ok(res,{member,created},created?201:200);
 }));
 
+// Groups the caller administers (to pick one when creating a chama for a group).
+router.get('/my-groups',wrap(async(req,res)=>{
+ const d=db(),userId=uid(req);if(!userId)return res.status(401).json({success:false,message:'Unauthorized'});
+ const parts=await d.ChatParticipant.findAll({where:{userId,role:'admin'},attributes:['chatId']});
+ const Chat=d.Chat;const chats=Chat&&parts.length?await Chat.findAll({where:{id:parts.map(p=>p.chatId),type:'group'},attributes:['id','name']}):[];
+ return ok(res,{groups:chats.map(c=>({id:c.id,name:c.name||('Group '+c.id)}))});
+}));
+
+// ───── Admin review of chama receiving numbers ─────
+// A chama that picks "a contact / M-Pesa number" that is NOT the owner's own registered number stays 'pending' (contributions paused)
+// until a platform admin approves it here. Same admin rule as /api/voice: ADMIN_USER_IDS, ADMIN_EMAIL/ADMIN_USERNAME, token role, or DB role.
+async function moneyIsAdmin(req){
+ const id=uid(req);if(!id)return false;
+ if(String(process.env.ADMIN_USER_IDS||'').split(',').map(v=>Number(v.trim())).filter(Number.isFinite).includes(id))return true;
+ const lc=v=>String(v||'').toLowerCase().trim(),R=['admin','superadmin','administrator'];
+ const ee=lc(process.env.ADMIN_EMAIL),eu=lc(process.env.ADMIN_USERNAME);
+ if((ee&&lc(req.user&&req.user.email)===ee)||(eu&&lc(req.user&&req.user.username)===eu))return true;
+ if(R.includes(lc(req.user&&req.user.role)))return true;
+ const u=await db().Users?.findByPk(id,{attributes:['id','role']}).catch(()=>null);
+ return R.includes(lc(u&&u.role));
+}
+router.get('/admin/receiving-accounts',wrap(async(req,res)=>{
+ if(!(await moneyIsAdmin(req)))return res.status(403).json({success:false,message:'Admin access required'});
+ const d=db(),st=['pending','approved','rejected'].includes(String(req.query.status))?String(req.query.status):'pending';
+ const rows=await d.ReceivingAccount.findAll({where:{ownerType:'circle',status:st},order:[['createdAt','DESC']],limit:100});
+ const circles=await d.MoneyCircle.findAll({where:{id:rows.map(r=>r.ownerId)},attributes:['id','name','ownerId']});
+ const cm=new Map(circles.map(c=>[String(c.id),c]));
+ const accounts=rows.map(r=>{const c=cm.get(String(r.ownerId));return {id:r.id,circleId:r.ownerId,circleName:c?c.name:null,ownerUserId:c?c.ownerId:null,method:r.method,accountNumber:r.accountNumber,accountName:r.accountName,status:r.status,rejectionReason:r.rejectionReason||null,submittedAt:r.createdAt};});
+ return ok(res,{accounts});
+}));
+async function decideReceiving(req,res,approve){
+ if(!(await moneyIsAdmin(req)))return res.status(403).json({success:false,message:'Admin access required'});
+ const d=db(),adminId=uid(req);
+ const ra=await d.ReceivingAccount.findOne({where:{id:req.params.id,ownerType:'circle'}});if(!ra)return res.status(404).json({success:false,message:'Receiving account not found'});
+ if(ra.status!=='pending')return res.status(409).json({success:false,message:'This request was already '+ra.status});
+ const reason=String(req.body?.reason||'').trim().slice(0,255);
+ if(!approve&&!reason)return res.status(400).json({success:false,message:'Give a short reason so the chama owner knows what to fix'});
+ if(approve){
+  // The newly approved number replaces the previously approved one (only one active receiving account per chama).
+  await d.ReceivingAccount.update({status:'suspended'},{where:{ownerType:'circle',ownerId:ra.ownerId,status:'approved',id:{[d.Op.ne]:ra.id}}});
+  await ra.update({status:'approved',approvedBy:adminId,approvedAt:new Date(),rejectionReason:null});
+ }else await ra.update({status:'rejected',rejectionReason:reason});
+ try{const circle=await d.MoneyCircle.findByPk(ra.ownerId);if(circle)await require('../services/moneyReminderWorker').notify(circle.ownerId,circle,approve?'Receiving number approved: '+circle.name:'Receiving number not approved: '+circle.name,approve?'Your chama can now receive contributions on that number.':'Reason: '+reason+'. Open the chama settings to choose another number or use your Necpra account.',approve?'recv_ok':'recv_no');}catch(e){console.warn('[money] receiving notify failed',e.message);}
+ return ok(res,{id:ra.id,status:ra.status});
+}
+router.post('/admin/receiving-accounts/:id/approve',wrap((req,res)=>decideReceiving(req,res,true)));
+router.post('/admin/receiving-accounts/:id/reject',wrap((req,res)=>decideReceiving(req,res,false)));
+
+// ───── Ecosystem: link an existing chama to a group, re-sync group members, and one shared status view ─────
+router.post('/circles/:id/link-group',wrap(async(req,res)=>{
+ const d=db(),userId=uid(req);if(!userId)return res.status(401).json({success:false,message:'Unauthorized'});
+ const circle=await d.MoneyCircle?.findByPk(req.params.id);if(!circle)return res.status(404).json({success:false,message:'Circle not found'});
+ if(circle.ownerId!==userId)return res.status(403).json({success:false,message:'Only the circle owner can link it to a group'});
+ const chatId=Number(req.body?.chatId);if(!Number.isInteger(chatId)||chatId<1)return res.status(400).json({success:false,message:'Choose a group'});
+ if(!(await eco.isGroupAdmin(d,chatId,userId)))return res.status(403).json({success:false,message:'You must be an admin of that group'});
+ const added=await eco.linkCircleToGroup(d,circle,chatId);
+ return ok(res,{linked:true,chatId,membersAdded:added});
+}));
+// Group admin/owner pulls in people who joined the group after it was linked (never automatic: joining a chama means being asked for money).
+router.post('/circles/:id/sync-group',wrap(async(req,res)=>{
+ const d=db(),userId=uid(req);if(!userId)return res.status(401).json({success:false,message:'Unauthorized'});
+ const circle=await d.MoneyCircle?.findByPk(req.params.id);if(!circle)return res.status(404).json({success:false,message:'Circle not found'});
+ if(circle.ownerId!==userId)return res.status(403).json({success:false,message:'Only the circle owner can sync members'});
+ const chatId=eco.groupChatIdOf(circle);if(!chatId)return res.status(409).json({success:false,message:'This chama is not linked to a group'});
+ return ok(res,{membersAdded:await eco.syncGroupMembers(d,circle,chatId)});
+}));
+// One view for the group screen / chama screen: who paid, what is collected, linked DUKA group-buy orders.
+router.get('/circles/:id/ecosystem',wrap(async(req,res)=>{
+ const d=db(),userId=uid(req);if(!userId)return res.status(401).json({success:false,message:'Unauthorized'});
+ const circle=await d.MoneyCircle?.findByPk(req.params.id);if(!circle)return res.status(404).json({success:false,message:'Circle not found'});
+ const me=await d.MoneyCircleMember.findOne({where:{circleId:circle.id,userId,status:'active'}});if(!me)return res.status(404).json({success:false,message:'Circle not found'});
+ const sm=await eco.summary(d,circle),isOwner=circle.ownerId===userId;
+ // Other members see paid / not paid only; the owner also sees the amounts per member.
+ const members=sm.members.map(m=>isOwner?m:{userId:m.userId,hasPaid:m.hasPaid});
+ return ok(res,{circle:{id:circle.id,name:circle.name,status:circle.status},groupChatId:eco.groupChatIdOf(circle),summary:{...sm,members},orders:await eco.linkedOrders(d,circle.id),isOwner});
+}));
+// The chama(s) attached to a group chat (for the group screen). Group members only.
+router.get('/by-group/:chatId',wrap(async(req,res)=>{
+ const d=db(),userId=uid(req);if(!userId)return res.status(401).json({success:false,message:'Unauthorized'});
+ const chatId=Number(req.params.chatId);if(!Number.isInteger(chatId)||chatId<1)return res.status(400).json({success:false,message:'Bad group'});
+ const mine=await d.ChatParticipant.findOne({where:{chatId,userId}});if(!mine)return res.status(404).json({success:false,message:'Group not found'});
+ const rows=await d.MoneyCircle.findAll({where:{status:'active'},attributes:['id','name','ownerId','collectedAmount','settings']});
+ const circles=rows.filter(c=>eco.groupChatIdOf(c)===chatId).map(c=>({id:c.id,name:c.name,isOwner:c.ownerId===userId,collectedAmount:Number(c.collectedAmount||0),dueDate:c.settings&&c.settings.schedule&&c.settings.schedule.dueDate||null}));
+ return ok(res,{circles});
+}));
+
 // Owner sets / changes / clears the contribution schedule. Changing it starts a new cycle (startedAt = now),
 // so earlier payments no longer count as "paid" for the new due date.
 router.put('/circles/:id/schedule',wrap(async(req,res)=>{
@@ -203,7 +297,14 @@ router.put('/circles/:id/schedule',wrap(async(req,res)=>{
   const dueDate=String(req.body?.dueDate||'').trim(),amount=Number(req.body?.amountPerMember||0);
   if(!/^\d{4}-\d{2}-\d{2}$/.test(dueDate)||isNaN(Date.parse(dueDate+'T00:00:00Z')))return res.status(400).json({success:false,message:'Choose a valid due date'});
   if(!Number.isFinite(amount)||amount<0||amount>1000000)return res.status(400).json({success:false,message:'Enter a valid amount per member'});
-  settings.schedule={dueDate,amountPerMember:amount,remindersEnabled:req.body?.remindersEnabled!==false,startedAt:new Date().toISOString()};
+  // How long reminders keep coming after the due date: { value, unit:'hours'|'days' } (max 90 days). Omitted => keep the existing choice, else 7 days.
+  let reminderDuration=W.parseDuration(circle.settings&&circle.settings.schedule&&circle.settings.schedule.reminderDuration)||{value:7,unit:'days'};
+  if(req.body?.reminderDuration!==undefined){
+   const pd=W.parseDuration(req.body.reminderDuration);
+   if(!pd)return res.status(400).json({success:false,message:'Choose how long reminders should appear: 1 hour up to 90 days'});
+   reminderDuration=pd;
+  }
+  settings.schedule={dueDate,amountPerMember:amount,remindersEnabled:req.body?.remindersEnabled!==false,startedAt:new Date().toISOString(),reminderDuration:{value:reminderDuration.value,unit:reminderDuration.unit}};
   delete settings.reminderLog;
  }
  circle.settings=settings;circle.changed('settings',true);await circle.save();
@@ -260,7 +361,7 @@ router.post('/circles/:id/offline-contributions',wrap(async(req,res)=>{
  if(recent>=30)return res.status(429).json({success:false,message:'Too many entries in a minute. Wait a moment and try again.'});
  const contribution=await d.MoneyContribution.create({circleId:circle.id,contributorId,amount,method:item?'in_kind':'cash',status:'paid',note:note||null,
   metadata:{offline:true,recordedBy:userId,recordedAt:new Date().toISOString(),item:item||null,guestName}});
- if(amount>0)await d.MoneyCircle.increment('collectedAmount',{by:amount,where:{id:circle.id}});
+ if(amount>0){await d.MoneyCircle.increment('collectedAmount',{by:amount,where:{id:circle.id}});eco.announcePaid(d,circle.id,contributorId,amount);}
  return ok(res,{contribution},201);
 }));
 
@@ -476,6 +577,7 @@ stk.registerModule('money',{
      metadata:{...(C.metadata||{}),checkoutRequestId:tx.checkoutRequestId,receipt:tx.mpesaReceipt,stkTransactionId:tx.id,settledTo:tx.beneficiaryAccount}},
      {where:{id:C.id,status:{[d.Op.ne]:'paid'}},transaction:t});
     if(moved)await d.MoneyCircle.increment('collectedAmount',{by:Number(tx.amount),where:{id:C.circleId},transaction:t});
+    if(moved)t.afterCommit(()=>{eco.announcePaid(d,C.circleId,C.contributorId,Number(tx.amount));});
    });
    return;
   }
