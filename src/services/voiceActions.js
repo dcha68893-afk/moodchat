@@ -63,6 +63,15 @@ const ACTIONS = [
   { id: 'messages.read_from', module: 'messages', desc: 'Read the messages from a named person', slots: { name: str() }, phrase: (s) => 'read my messages from ' + s.name },
   { id: 'messages.open_chat', module: 'messages', desc: 'Open the chat with a named person', slots: { name: str() }, phrase: (s) => 'open chat with ' + s.name },
   { id: 'messages.search_chat', module: 'messages', desc: 'Search for a chat with a named person', slots: { name: str() }, phrase: (s) => 'search chat with ' + s.name },
+  // Chat-list actions on ONE named chat. The Messenger screen asks the user to confirm archive / delete / block before doing anything.
+  { id: 'messages.archive_chat', module: 'messages', desc: 'Archive the chat with a named person (the app asks the user to confirm)', slots: { name: str() }, phrase: (s) => 'archive chat with ' + s.name },
+  { id: 'messages.mute_chat', module: 'messages', desc: 'Mute the notifications of the chat with a named person', slots: { name: str() }, phrase: (s) => 'mute chat with ' + s.name },
+  { id: 'messages.unmute_chat', module: 'messages', desc: 'Unmute the chat with a named person', slots: { name: str() }, phrase: (s) => 'unmute chat with ' + s.name },
+  { id: 'messages.favourite_chat', module: 'messages', desc: 'Add the chat with a named person to favourites', slots: { name: str() }, phrase: (s) => 'add ' + s.name + ' to favourites' },
+  { id: 'messages.unfavourite_chat', module: 'messages', desc: 'Remove the chat with a named person from favourites', slots: { name: str() }, phrase: (s) => 'remove ' + s.name + ' from favourites' },
+  { id: 'messages.mark_unread', module: 'messages', desc: 'Mark the chat with a named person as unread', slots: { name: str() }, phrase: (s) => 'mark chat with ' + s.name + ' as unread' },
+  { id: 'messages.delete_chat', module: 'messages', desc: 'Delete the chat with a named person from the user\'s own account (the app asks the user to confirm)', slots: { name: str() }, phrase: (s) => 'delete chat with ' + s.name },
+  { id: 'messages.block_user', module: 'messages', desc: 'Block a named person from messaging the user (the app asks the user to confirm)', slots: { name: str() }, phrase: (s) => 'block ' + s.name },
   // ───── Groups ─────
   { id: 'groups.open', module: 'group', desc: 'Open a named group chat', slots: { name: str() }, phrase: (s) => 'open group ' + s.name },
   { id: 'groups.create', module: 'group', desc: 'Create a new group with a name', slots: { name: str() }, phrase: (s) => 'create group ' + s.name },
@@ -72,6 +81,11 @@ const ACTIONS = [
   { id: 'groups.count', module: 'group', desc: 'How many groups the user is in', slots: {}, phrase: () => 'how many groups do i have' },
   { id: 'groups.refresh', module: 'group', desc: 'Refresh the groups list', slots: {}, phrase: () => 'refresh groups' },
   { id: 'groups.close', module: 'group', desc: 'Close the open group', slots: {}, phrase: () => 'close this group' },
+  { id: 'groups.info', module: 'group', desc: 'Show the info / details of the open group', slots: {}, phrase: () => 'show group info' },
+  { id: 'groups.pinned', module: 'group', desc: 'Show the pinned messages of the open group', slots: {}, phrase: () => 'show pinned messages' },
+  { id: 'groups.media', module: 'group', desc: 'Show the files and media shared in the open group', slots: {}, phrase: () => 'show group media' },
+  { id: 'groups.add_member', module: 'group', desc: 'Add one of the user\'s friends to a group (the open one if no group is named). The app asks the user to confirm', slots: { name: str(), group: str(false) }, phrase: (s) => 'add ' + s.name + ' to ' + (s.group ? 'the ' + s.group + ' group' : 'this group') },
+  { id: 'groups.leave', module: 'group', desc: 'Leave a group the user is in (the open one if no group is named). The app asks the user to confirm', slots: { group: str(false) }, phrase: (s) => s.group ? 'leave the ' + s.group + ' group' : 'leave this group' },
   // ───── Status ─────
   { id: 'status.view', module: 'status', desc: 'Watch the status / story of a named person', slots: { name: str() }, phrase: (s) => 'show ' + s.name + ' status' },
   { id: 'status.who', module: 'status', desc: 'Who has posted a status', slots: {}, phrase: () => 'who posted a status' },
@@ -82,6 +96,8 @@ const ACTIONS = [
   { id: 'status.close', module: 'status', desc: 'Close the status viewer', slots: {}, phrase: () => 'close status' },
   { id: 'status.vibes', module: 'status', desc: 'Open Vibes (video feed)', slots: {}, phrase: () => 'open vibes' },
   { id: 'status.love', module: 'status', desc: 'Love / react with a heart to the current status', slots: {}, phrase: () => 'love this status' },
+  { id: 'status.mine', module: 'status', desc: 'Open the user\'s own status', slots: {}, phrase: () => 'show my status' },
+  { id: 'status.viewers', module: 'status', desc: 'Who has viewed the user\'s own status / how many views it has', slots: {}, phrase: () => 'who viewed my status' },
   // ───── Settings (security, passwords, PIN, backup, sessions and account deletion are never changed by voice) ─────
   { id: 'settings.open_section', module: 'settings', desc: 'Open a Settings section', slots: { section: en(SECTIONS) }, phrase: (s) => 'open ' + s.section + ' settings' },
   { id: 'settings.theme', module: 'settings', desc: 'Switch the app between dark mode and light mode', slots: { theme: en(['dark', 'light']) }, phrase: (s) => s.theme === 'dark' ? 'turn on dark mode' : 'turn off dark mode' },
