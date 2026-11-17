@@ -13,7 +13,8 @@ const NAV_PAGES = ['messages', 'money', 'friends', 'tools', 'group', 'status', '
 const NAV_WORD = { messages: 'messenger', money: 'wallet', friends: 'friends', tools: 'duka smart', group: 'groups', status: 'status', settings: 'settings', games: 'games' };
 
 const FRIEND_TAB = { friends: 'show my friends list', discover: 'show discover', requests: 'show requests', sent: 'show sent requests', groups: 'show discover groups', nearby: 'show nearby' };
-const MONEY_TAB = { wallet: 'open wallet', circles: 'open chama', goals: 'open savings goals', requests: 'open payment requests', paylater: 'open pay later', airtime: 'open airtime', activity: 'open activity' };
+const MONEY_TAB = { wallet: 'open wallet', circles: 'open chama', goals: 'open savings goals', requests: 'open payment requests', airtime: 'open airtime', activity: 'open activity' };
+const MONEY_ACTION = { add_money: 'open add money', send_money: 'open send money', withdraw: 'open withdraw money', receive: 'open receive money', new_goal: 'create new savings goal', new_circle: 'create a money circle', new_request: 'create a payment request' };
 
 const GAME_WORD = { block: 'block puzzle', trivia: 'trivia', crossword: 'crossword', chess: 'chess' };
 const SECTIONS = ['profile', 'security', 'privacy', 'notifications', 'appearance', 'storage', 'advanced', 'chat'];
@@ -44,16 +45,17 @@ const ACTIONS = [
   { id: 'friends.search', module: 'friends', desc: 'Search for a person by name in Friends', slots: { query: str() }, phrase: (s) => 'search for ' + s.query },
   { id: 'friends.refresh', module: 'friends', desc: 'Refresh the Friends list', slots: {}, phrase: () => 'refresh friends' },
 
-  // ───── Money (wallet, chama, pay later) ─────
+  // ───── Money (wallet, chama, savings, requests and transfers) ─────
   { id: 'money.balance', module: 'money', desc: 'What is the wallet balance / how much money does the user have', slots: {}, phrase: () => 'what is my balance' },
   { id: 'money.transactions', module: 'money', desc: 'Show / read the latest wallet transactions', slots: {}, phrase: () => 'show my latest transactions' },
   { id: 'money.received', module: 'money', desc: 'How much money the user received', slots: {}, phrase: () => 'how much have i received' },
   { id: 'money.spent', module: 'money', desc: 'How much money the user spent, today or this month', slots: { period: en(['today', 'month']) }, phrase: (s) => 'how much did i spend ' + (s.period === 'month' ? 'this month' : 'today') },
-  { id: 'money.orders', module: 'money', desc: 'Show the user\'s pending / unpaid Pay Later orders', slots: {}, phrase: () => 'show my pending orders' },
   { id: 'money.chama_month', module: 'money', desc: 'What chama contributions are due this month', slots: {}, phrase: () => 'chama contributions this month' },
   { id: 'money.chama_outstanding', module: 'money', desc: 'Who still owes / has not paid their chama contribution', slots: {}, phrase: () => 'outstanding chama contributions' },
-  { id: 'money.open_tab', module: 'money', desc: 'Open a Money tab: wallet, chama (circles), savings goals, payment requests, pay later, airtime/data bundles, activity',
+  { id: 'money.open_tab', module: 'money', desc: 'Open a Money tab: wallet, chama (circles), savings goals, payment requests, airtime/data bundles, activity',
     slots: { tab: en(Object.keys(MONEY_TAB)) }, phrase: (s) => MONEY_TAB[s.tab] },
+  { id: 'money.open_action', module: 'money', desc: 'Open an existing Money form: add money, send money, withdraw money, receive money, create a savings goal, create a money circle, or create a payment request. Never submit a payment.',
+    slots: { action: en(Object.keys(MONEY_ACTION)) }, phrase: (s) => MONEY_ACTION[s.action] },
   { id: 'money.prepare_transfer', module: 'money', desc: 'Prepare (NOT make) a payment of an amount to a person or phone number; the app only opens a pre-filled Send screen that the user must confirm',
     slots: { amount: num(), to: str() }, phrase: (s) => 'send ' + s.amount + ' to ' + s.to },
 
