@@ -167,7 +167,8 @@ const saleItemOut = (r) => ({
 });
 const paymentOut = (r) => ({
   id: r.id, method: r.method, amount: N(r.amount), mpesaReceipt: r.mpesa_receipt, payerPhone: r.payer_phone,
-  verification: r.verification, createdAt: r.created_at
+  channel: r.channel || null, recipientPhone: r.recipient_phone || null, verification: r.verification,
+  verifiedAt: r.verified_at || null, verifiedBy: r.verified_by == null ? null : Number(r.verified_by), createdAt: r.created_at
 });
 
 /* ───────────── router factory (injectable for tests) ───────────── */
@@ -555,6 +556,8 @@ function buildRouter(opts = {}) {
 
     const rawPays = has(b.payments) ? b.payments : [];
     if (!Array.isArray(rawPays) || rawPays.length > 10) throw new HttpError(400, 'Invalid payments', 'VALIDATION_ERROR');
+    const rawPending = has(b.pendingPayments) ? b.pendingPayments : [];
+    if (!Array.isArray(rawPending) || rawPending.length > 10) throw new HttpError(400, 'Invalid pending M-PESA payments', 'VALIDATION_ERROR');
     const codes = new Set();
     const payments = rawPays.map((p, i) => {
       const o = ensureObject(p);
@@ -565,16 +568,27 @@ function buildRouter(opts = {}) {
       if (o.method === 'mpesa') {
         const code = str(o.mpesaReceipt, 'M-PESA receipt code', { max: 20 });
         const norm = code ? code.toUpperCase().replace(/\s/g, '') : '';
-        // Never record an M-PESA payment as received without the receipt code that proves it.
-        if (!MPESA_CODE_RE.test(norm)) {
-          throw new HttpError(400, 'An M-PESA payment needs the 10-character M-PESA receipt code (e.g. SGH7K2L9QX)', 'MPESA_RECEIPT_REQUIRED');
-        }
+        if (!MPESA_CODE_RE.test(norm)) throw new HttpError(400, 'An M-PESA payment needs the 10-character M-PESA receipt code', 'MPESA_RECEIPT_REQUIRED');
         if (codes.has(norm)) throw new HttpError(400, 'The same M-PESA receipt code is used twice', 'VALIDATION_ERROR');
-        codes.add(norm);
-        out.mpesaReceipt = norm;
-        out.payerPhone = phoneKE(o.payerPhone, 'Payer phone');
+        codes.add(norm); out.mpesaReceipt = norm; out.payerPhone = phoneKE(o.payerPhone, 'Payer phone');
       }
       return out;
+    });
+    const pendingPayments = rawPending.map((p, i) => {
+      const o = ensureObject(p);
+      if (o.method !== 'mpesa') throw new HttpError(400, `Pending payment ${i + 1} must use M-PESA`, 'VALIDATION_ERROR');
+      const amount = money(o.amount, `Pending payment ${i + 1} amount`, { required: true });
+      if (!(amount > 0)) throw new HttpError(400, 'Pending M-PESA amount must be greater than zero', 'VALIDATION_ERROR');
+      const code = str(o.mpesaReceipt, 'M-PESA receipt code', { max: 20 }).toUpperCase().replace(/\s/g, '');
+      if (!MPESA_CODE_RE.test(code)) throw new HttpError(400, 'Enter the 10-character M-PESA receipt code', 'MPESA_RECEIPT_REQUIRED');
+      if (codes.has(code)) throw new HttpError(400, 'The same M-PESA receipt code is used twice', 'VALIDATION_ERROR');
+      codes.add(code);
+      const channel = str(o.channel, 'M-PESA channel', { max: 12, required: true }).toLowerCase();
+      if (!['till', 'paybill', 'phone'].includes(channel)) throw new HttpError(400, 'M-PESA channel must be till, paybill or phone', 'VALIDATION_ERROR');
+      let recipient = str(o.recipient, 'M-PESA recipient', { max: 24, required: true });
+      if (channel === 'phone') recipient = phoneKE(recipient, 'M-PESA recipient phone');
+      else if (!/^\d{4,12}$/.test(recipient)) throw new HttpError(400, 'Till or Paybill number must contain 4 to 12 digits', 'VALIDATION_ERROR');
+      return { method: 'mpesa', cents: toCents(amount), mpesaReceipt: code, payerPhone: phoneKE(o.payerPhone, 'Payer phone'), channel, recipient };
     });
 
     let soldAt = null;
@@ -586,7 +600,7 @@ function buildRouter(opts = {}) {
       soldAt = d.toISOString();
     }
     return {
-      id, items, discount, payments, soldAt,
+      id, items, discount, payments, pendingPayments, soldAt,
       customerId: uuid(b.customerId, 'customerId'),
       note: str(b.note, 'Note', { max: 240 })
     };
@@ -651,8 +665,10 @@ function buildRouter(opts = {}) {
       if (total <= 0) throw new HttpError(400, 'The sale total must be greater than zero', 'VALIDATION_ERROR');
 
       const paid = b.payments.reduce((s, p) => s + p.cents, 0);
-      if (paid > total) throw new HttpError(400, 'The payments are more than the sale total', 'OVERPAYMENT');
+      const pendingManual = b.pendingPayments.reduce((s, p) => s + p.cents, 0);
+      if (paid + pendingManual > total) throw new HttpError(400, 'The payments are more than the sale total', 'OVERPAYMENT');
       const balance = total - paid;
+      const uncovered = total - paid - pendingManual;
 
       // Credit / partial payment needs a named customer who belongs to THIS shop.
       let customer = null;
@@ -660,8 +676,8 @@ function buildRouter(opts = {}) {
         [customer] = await run('SELECT * FROM duka_customers WHERE id = :id AND shop_id = :shopId AND is_active', { id: b.customerId, shopId: shop.id }, t);
         if (!customer) throw new HttpError(404, 'Customer not found', 'CUSTOMER_NOT_FOUND');
       }
-      if (balance > 0 && !customer) {
-        throw new HttpError(400, 'Choose or add the customer who owes the balance (credit and part-payments need a customer)', 'CUSTOMER_REQUIRED');
+      if (uncovered > 0 && !customer) {
+        throw new HttpError(400, 'Choose or add the customer who owes the balance not covered by cash or pending M-PESA', 'CUSTOMER_REQUIRED');
       }
 
       // M-PESA is accepted ONLY when the receipt code matches a PAID NECPRA STK transaction for >= the amount.
@@ -694,7 +710,7 @@ function buildRouter(opts = {}) {
         `INSERT INTO duka_receipt_counters (shop_id, last_no) VALUES (:shopId, 1)
          ON CONFLICT (shop_id) DO UPDATE SET last_no = duka_receipt_counters.last_no + 1 RETURNING last_no`, { shopId: shop.id }, t);
 
-      const paymentStatus = balance === 0 ? 'paid' : paid === 0 ? 'credit' : 'partial';
+      const paymentStatus = balance === 0 ? 'paid' : pendingManual >= balance ? 'pending' : paid === 0 ? 'credit' : 'partial';
       const [sale] = await run(
         `INSERT INTO duka_sales (id,shop_id,receipt_no,customer_id,customer_name,subtotal,discount_amount,total,amount_paid,
                                  balance_due,cogs,payment_status,note,sold_at,created_by)
@@ -729,8 +745,18 @@ function buildRouter(opts = {}) {
            VALUES (:saleId,:shopId,:method,:amount,:code,:phone,:ver) RETURNING id`,
           { saleId: sale.id, shopId: shop.id, method: p.method, amount: fromCents(p.cents), code: p.mpesaReceipt, phone: p.payerPhone, ver: p.verification }, t);
       }
+      for (const p of b.pendingPayments) {
+        const [used] = await run(
+          `SELECT 1 AS ok FROM duka_sale_payments WHERE mpesa_receipt = :code
+           UNION ALL SELECT 1 FROM duka_debt_payments WHERE mpesa_receipt = :code LIMIT 1`, { code: p.mpesaReceipt }, t);
+        if (used) throw new HttpError(409, `M-PESA receipt ${p.mpesaReceipt} has already been used for another payment`, 'MPESA_RECEIPT_USED');
+        await run(
+          `INSERT INTO duka_sale_payments (sale_id,shop_id,method,amount,mpesa_receipt,payer_phone,channel,recipient_phone,verification)
+           VALUES (:saleId,:shopId,'mpesa',:amount,:code,:payer,:channel,:recipient,'pending_manual') RETURNING id`,
+          { saleId: sale.id, shopId: shop.id, amount: fromCents(p.cents), code: p.mpesaReceipt, payer: p.payerPhone, channel: p.channel, recipient: p.recipient }, t);
+      }
       await audit(t, req, shop.id, 'sale.create', 'sale', sale.id, null,
-        { receiptNo, total: fromCents(total), paid: fromCents(paid), balanceDue: fromCents(balance), lines: lines.length, paymentStatus });
+        { receiptNo, total: fromCents(total), paid: fromCents(paid), pendingManual: fromCents(pendingManual), balanceDue: fromCents(balance), lines: lines.length, paymentStatus });
       return { shop, detail: await loadSaleDetail(shop.id, sale.id, t), created: true };
     });
     res.status(out.created ? 201 : 200).json({ success: true, data: { ...receiptOut(out.shop, out.detail), idempotent: !out.created } });
@@ -827,6 +853,41 @@ function buildRouter(opts = {}) {
     res.json({ success: true, data: receiptOut(shop, detail) });
   }));
 
+  router.post('/shops/:shopId/sales/:saleId/payments/:paymentId/confirm-manual', wrap(async (req, res) => {
+    const b = ensureObject(req.body);
+    if (b.confirm !== true) throw new HttpError(400, 'Explicit confirmation is required', 'CONFIRMATION_REQUIRED');
+    const saleId = req.params.saleId, paymentId = req.params.paymentId;
+    if (!UUID_RE.test(saleId || '') || !UUID_RE.test(paymentId || '')) throw new HttpError(404, 'Payment not found', 'PAYMENT_NOT_FOUND');
+    const out = await tx(async (t) => {
+      const shop = await ownedShop(req, { write: true, t, lock: true });
+      const [sale] = await run('SELECT * FROM duka_sales WHERE id=:id AND shop_id=:shopId FOR UPDATE', { id: saleId.toLowerCase(), shopId: shop.id }, t);
+      if (!sale) throw new HttpError(404, 'Sale not found', 'SALE_NOT_FOUND');
+      if (sale.status !== 'completed') throw new HttpError(409, 'A cancelled sale cannot receive a payment', 'SALE_VOIDED');
+      const [pay] = await run('SELECT * FROM duka_sale_payments WHERE id=:id AND sale_id=:saleId AND shop_id=:shopId FOR UPDATE', { id: paymentId.toLowerCase(), saleId: sale.id, shopId: shop.id }, t);
+      if (!pay) throw new HttpError(404, 'Payment not found', 'PAYMENT_NOT_FOUND');
+      if (pay.verification === 'manual_confirmed') return { shop, detail: await loadSaleDetail(shop.id, sale.id, t), created: false };
+      if (pay.verification !== 'pending_manual') throw new HttpError(409, 'This payment is not awaiting manual confirmation', 'PAYMENT_NOT_PENDING');
+      const amountC = toCents(Number(pay.amount)), paidC = toCents(Number(sale.amount_paid)), totalC = toCents(Number(sale.total));
+      if (amountC > toCents(Number(sale.balance_due))) throw new HttpError(409, 'This payment is greater than the remaining sale balance', 'OVERPAYMENT');
+      const nextPaid = paidC + amountC, nextBalance = totalC - nextPaid;
+      const [pending] = await run(
+        `SELECT COALESCE(SUM(amount),0) AS amount FROM duka_sale_payments WHERE sale_id=:saleId AND verification='pending_manual' AND id<>:paymentId`,
+        { saleId: sale.id, paymentId: pay.id }, t);
+      const pendingC = toCents(Number(pending.amount));
+      const status = nextBalance === 0 ? 'paid' : pendingC >= nextBalance ? 'pending' : nextPaid === 0 ? 'credit' : 'partial';
+      await run('UPDATE duka_sales SET amount_paid=:paid,balance_due=:balance,payment_status=:status WHERE id=:id RETURNING id',
+        { paid: fromCents(nextPaid), balance: fromCents(nextBalance), status, id: sale.id }, t);
+      await run(
+        `UPDATE duka_sale_payments SET verification='manual_confirmed',verified_by=:userId,verified_at=NOW() WHERE id=:id RETURNING id`,
+        { userId: req.user.id, id: pay.id }, t);
+      await audit(t, req, shop.id, 'sale.payment_manual_confirm', 'sale_payment', pay.id,
+        { verification: 'pending_manual', amount: N(pay.amount), receipt: pay.mpesa_receipt },
+        { verification: 'manual_confirmed', amount: N(pay.amount), receipt: pay.mpesa_receipt });
+      return { shop, detail: await loadSaleDetail(shop.id, sale.id, t), created: true };
+    });
+    res.json({ success: true, data: { ...receiptOut(out.shop, out.detail), idempotent: !out.created } });
+  }));
+
   /* ───── Dashboard (real data only; sections whose tables arrive in later phases report null, not 0) ───── */
   router.get('/shops/:shopId/dashboard', wrap(async (req, res) => {
     const shop = await ownedShop(req);
@@ -849,7 +910,7 @@ function buildRouter(opts = {}) {
     const [td] = await run(
       `SELECT COUNT(*)::int AS n, COALESCE(SUM(total),0) AS total, COALESCE(SUM(cogs),0) AS cogs,
               COALESCE(SUM(balance_due),0) AS credit
-         FROM duka_sales WHERE shop_id = :shopId AND status = 'completed'
+         FROM duka_sales WHERE shop_id = :shopId AND status = 'completed' AND customer_id IS NOT NULL
           AND (sold_at AT TIME ZONE 'Africa/Nairobi')::date = (NOW() AT TIME ZONE 'Africa/Nairobi')::date`, { shopId: shop.id });
     const rcv = await run(
       `SELECT p.method, p.verification, COALESCE(SUM(p.amount),0) AS amt
@@ -860,7 +921,7 @@ function buildRouter(opts = {}) {
     const sumRcv = (f) => Math.round(rcv.filter(f).reduce((s, r) => s + N(r.amt), 0) * 100) / 100;
     const [debt] = await run(
       `SELECT COALESCE(SUM(balance_due),0) AS owed, COUNT(*) FILTER (WHERE balance_due > 0)::int AS n
-         FROM duka_sales WHERE shop_id = :shopId AND status = 'completed'`, { shopId: shop.id });
+         FROM duka_sales WHERE shop_id = :shopId AND status = 'completed' AND customer_id IS NOT NULL`, { shopId: shop.id });
     // Phase 5: real expense / supplier / collection figures (Nairobi "today").
     const [ex] = await run(
       `SELECT COALESCE(SUM(amount),0) AS amt FROM duka_expenses WHERE shop_id = :shopId AND status = 'active'
@@ -901,8 +962,9 @@ function buildRouter(opts = {}) {
         todaySales: {
           count: td.n, total: N(td.total),
           cashReceived: sumRcv((r) => r.method === 'cash'),
-          mpesaReceived: sumRcv((r) => r.method === 'mpesa'),
+          mpesaReceived: sumRcv((r) => r.method === 'mpesa' && r.verification !== 'pending_manual'),
           mpesaVerified: sumRcv((r) => r.method === 'mpesa' && r.verification === 'verified'),
+          mpesaPending: sumRcv((r) => r.method === 'mpesa' && r.verification === 'pending_manual'),
           creditGiven: N(td.credit)
         },
         // Gross profit on today's sales (revenue − cost of goods sold). Expenses are deducted in netProfit (Phase 5).

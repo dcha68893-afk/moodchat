@@ -34,6 +34,8 @@ d('duka phase 1', () => {
     await require('../../migrations/20261111000003-create-duka-smart-phase5-finance.js').up({ sequelize });
     await require('../../migrations/20261111000004-duka-sale-void-and-product-description.js').up({ sequelize });
     await require('../../migrations/20261111000004-duka-sale-void-and-product-description.js').up({ sequelize }); // idempotent re-run
+    await require('../../migrations/20261118000001-duka-manual-mpesa.js').up({ sequelize });
+    await require('../../migrations/20261118000001-duka-manual-mpesa.js').up({ sequelize }); // idempotent re-run
     await sequelize.query('TRUNCATE duka_audit_log, duka_sale_payments, duka_sale_items, duka_sales, duka_customers, duka_receipt_counters, duka_stock_movements, duka_products, duka_shops CASCADE');
     const { buildRouter } = require('../../src/routes/duka');
     const app = express();
@@ -403,6 +405,45 @@ d('duka phase 1', () => {
     const dash = (await call(A, 'GET', `/shops/${sid}/dashboard`)).body.data;
     expect(dash.todaySales.mpesaReceived).toBe(120 + 100);
     expect(dash.todaySales.mpesaVerified).toBe(120 + 100);   // every M-PESA shilling counted is verified
+  });
+
+  test('external M-PESA receipts stay pending until the shop owner checks and confirms them', async () => {
+    const A = 987654;
+    const { sid, ids } = await mk(A, 'POS external mpesa', { soda: { name: 'Soda', buyingPrice: 40, sellingPrice: 60, stockQty: 20 } });
+    const saleId = uid(), code = 'EXT1234567';
+    const made = await call(A, 'POST', `/shops/${sid}/sales`, {
+      id: saleId, items: [{ productId: ids.soda, qty: 2 }], payments: [],
+      pendingPayments: [{ method: 'mpesa', amount: 120, mpesaReceipt: code, channel: 'till', recipient: '1234567', payerPhone: '0711222333' }]
+    });
+    expect(made.status).toBe(201);
+    expect(made.body.data.sale).toMatchObject({ amountPaid: 0, balanceDue: 120, paymentStatus: 'pending' });
+    expect(made.body.data.payments[0]).toMatchObject({
+      method: 'mpesa', mpesaReceipt: code, verification: 'pending_manual', channel: 'till', recipientPhone: '1234567'
+    });
+    const before = (await call(A, 'GET', `/shops/${sid}/dashboard`)).body.data;
+    expect(before.todaySales.mpesaReceived).toBe(0);
+    expect(before.todaySales.mpesaPending).toBe(120);
+    const outsider = await call(987655, 'POST', `/shops/${sid}/sales/${saleId}/payments/${made.body.data.payments[0].id}/confirm-manual`, { confirm: true });
+    expect(outsider.status).toBe(404);
+    const confirmPath = `/shops/${sid}/sales/${saleId}/payments/${made.body.data.payments[0].id}/confirm-manual`;
+    const confirmed = await call(A, 'POST', confirmPath, { confirm: true });
+    expect(confirmed.status).toBe(200);
+    expect(confirmed.body.data.sale).toMatchObject({ amountPaid: 120, balanceDue: 0, paymentStatus: 'paid' });
+    expect(confirmed.body.data.payments[0].verification).toBe('manual_confirmed');
+    const replay = await call(A, 'POST', confirmPath, { confirm: true });
+    expect(replay.status).toBe(200);
+    expect(replay.body.data.idempotent).toBe(true);
+    expect(replay.body.data.sale.amountPaid).toBe(120);
+    const duplicate = await call(A, 'POST', `/shops/${sid}/sales`, {
+      id: uid(), items: [{ productId: ids.soda, qty: 2 }], payments: [],
+      pendingPayments: [{ method: 'mpesa', amount: 120, mpesaReceipt: code, channel: 'till', recipient: '1234567' }]
+    });
+    expect(duplicate.status).toBe(409);
+    expect(duplicate.body.errorCode).toBe('MPESA_RECEIPT_USED');
+    const dash = (await call(A, 'GET', `/shops/${sid}/dashboard`)).body.data;
+    expect(dash.todaySales.mpesaReceived).toBe(120);
+    expect(dash.todaySales.mpesaVerified).toBe(0);
+    expect(dash.todaySales.mpesaPending).toBe(0);
   });
 
   test('void sale: reason required, stock restored via ledger, refund due reported, idempotent, owner only, excluded from totals', async () => {
