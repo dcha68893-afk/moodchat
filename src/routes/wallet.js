@@ -22,6 +22,16 @@ const { requireAdult } = require('../middleware/requireAdult');
 const wallet = require('../services/walletService');
 const b2c = require('../services/darajaB2C');
 const extras = require('../services/walletExtras');
+const riskSvc = require('../services/intelligence/risk').createService();
+const riskHash = require('../services/intelligence/risk').sha;
+// Financial Intelligence (OBSERVE ONLY): records a risk score for the audit trail. It never blocks, delays or alters a payment, and a failure here is ignored.
+function observeRisk(req, kind, amount, counterparty) {
+  try {
+    if (String(process.env.NECPRA_AI_ENABLED || 'true').toLowerCase() === 'false') return;
+    const uid = req.user && (req.user.id || req.user.userId);
+    Promise.resolve(riskSvc.assessAndRecord({ userId: uid, kind, amount: Number(amount) || 0, counterparty: counterparty ? String(counterparty).slice(0, 64) : null, deviceHash: riskHash(req.get('x-device-id')) }, { mode: 'observe' })).catch(() => {});
+  } catch (_) { /* never affects the payment */ }
+}
 
 const router = express.Router();
 const userId = req => req.user && (req.user.id || req.user.userId);
@@ -87,6 +97,7 @@ router.get('/lookup', lookupLimiter, wrap(async (req, res) => {
 
 router.post('/transfer', paymentLimiter, requireAdult, burst, hourly, stepUp, wrap(async (req, res) => {
   const b = req.body || {};
+  observeRisk(req, 'transfer', b.amount, b.recipient || b.to);
   const result = await wallet.transfer({ fromUserId: userId(req), recipient: b.recipient || b.to, amount: b.amount, note: b.note, idempotencyKey: b.idempotencyKey || req.get('Idempotency-Key') });
   res.status(result.idempotent ? 200 : 201).json({ success: true, message: 'Transfer sent', data: result });
 }));
@@ -98,6 +109,7 @@ router.get('/ledger', wrap(async (req, res) => {
 
 router.post('/withdraw', paymentLimiter, requireAdult, burst, hourly, stepUp, wrap(async (req, res) => {
   const b = req.body || {};
+  observeRisk(req, 'withdrawal', b.amount, null);
   const result = await wallet.requestWithdrawal({ userId: userId(req), amount: b.amount, phone: b.phone, idempotencyKey: b.idempotencyKey || req.get('Idempotency-Key') });
   res.status(result.idempotent ? 200 : 202).json({ success: true, message: 'Withdrawal is being processed. You will receive the money on M-Pesa shortly.', data: result });
 }));

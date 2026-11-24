@@ -142,6 +142,8 @@ const ROUTE_MAPPING = {
   'duka.js': '/duka',
   // NECPRA Universal Voice: config + metadata-only audit (JWT required).
   'voice.js': '/voice',
+  // NECPRA Intelligence Engine: ask / risk scoring (JWT required, per-user quota).
+  'intelligence.js': '/intelligence',
   // Wallet transfers / withdrawals (auth handled inside wallet.js; B2C callbacks are public, registered below)
   'wallet.js': '/wallet',
   // FIX: smart-groups.js was missing — ALL Group OS tabs returned 404
