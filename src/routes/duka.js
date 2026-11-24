@@ -891,7 +891,7 @@ function buildRouter(opts = {}) {
   /* ───── Dashboard (real data only; sections whose tables arrive in later phases report null, not 0) ───── */
   router.get('/shops/:shopId/dashboard', wrap(async (req, res) => {
     const shop = await ownedShop(req);
-    const [s] = await run(
+    const pS = run(
       `SELECT COUNT(*)::int AS products,
               COALESCE(SUM(stock_qty),0) AS units,
               COALESCE(SUM(GREATEST(stock_qty,0) * buying_price),0) AS stock_cost,
@@ -899,53 +899,62 @@ function buildRouter(opts = {}) {
               COUNT(*) FILTER (WHERE stock_qty <= 0)::int AS out_of_stock,
               COUNT(*) FILTER (WHERE stock_qty > 0 AND min_stock > 0 AND stock_qty <= min_stock)::int AS low_stock
          FROM duka_products WHERE shop_id = :shopId AND is_active`, { shopId: shop.id });
-    const low = await run(
+    const pLow = run(
       `SELECT * FROM duka_products WHERE shop_id = :shopId AND is_active
           AND (stock_qty <= 0 OR (min_stock > 0 AND stock_qty <= min_stock))
         ORDER BY (stock_qty <= 0) DESC, stock_qty ASC, lower(name) LIMIT 20`, { shopId: shop.id });
-    const recent = await run(
+    const pRecent = run(
       `SELECT m.*, p.name AS product_name FROM duka_stock_movements m JOIN duka_products p ON p.id = m.product_id
         WHERE m.shop_id = :shopId ORDER BY m.created_at DESC, m.id DESC LIMIT 10`, { shopId: shop.id });
     // "Today" is the Nairobi calendar day. Cash/M-PESA received counts only real payments; credit is shown apart.
-    const [td] = await run(
+    const pTd = run(
       `SELECT COUNT(*)::int AS n, COALESCE(SUM(total),0) AS total, COALESCE(SUM(cogs),0) AS cogs,
               COALESCE(SUM(balance_due),0) AS credit
          FROM duka_sales WHERE shop_id = :shopId AND status = 'completed' AND customer_id IS NOT NULL
           AND (sold_at AT TIME ZONE 'Africa/Nairobi')::date = (NOW() AT TIME ZONE 'Africa/Nairobi')::date`, { shopId: shop.id });
-    const rcv = await run(
+    const pRcv = run(
       `SELECT p.method, p.verification, COALESCE(SUM(p.amount),0) AS amt
          FROM duka_sale_payments p JOIN duka_sales s ON s.id = p.sale_id
         WHERE s.shop_id = :shopId AND s.status = 'completed'
           AND (s.sold_at AT TIME ZONE 'Africa/Nairobi')::date = (NOW() AT TIME ZONE 'Africa/Nairobi')::date
         GROUP BY p.method, p.verification`, { shopId: shop.id });
     const sumRcv = (f) => Math.round(rcv.filter(f).reduce((s, r) => s + N(r.amt), 0) * 100) / 100;
-    const [debt] = await run(
+    const pDebt = run(
       `SELECT COALESCE(SUM(balance_due),0) AS owed, COUNT(*) FILTER (WHERE balance_due > 0)::int AS n
          FROM duka_sales WHERE shop_id = :shopId AND status = 'completed' AND customer_id IS NOT NULL`, { shopId: shop.id });
     // Phase 5: real expense / supplier / collection figures (Nairobi "today").
-    const [ex] = await run(
+    const pEx = run(
       `SELECT COALESCE(SUM(amount),0) AS amt FROM duka_expenses WHERE shop_id = :shopId AND status = 'active'
           AND expense_date = (NOW() AT TIME ZONE 'Africa/Nairobi')::date`, { shopId: shop.id });
     // Confirmed spoilage / damage written off today (at cost). An inventory loss, never a sale, but it does reduce profit.
-    const hasLosses = (await run(`SELECT to_regclass('duka_stock_losses') IS NOT NULL AS ok`, {}))[0].ok;
-    const [lossToday] = hasLosses ? await run(
-      `SELECT COALESCE(SUM(loss_value),0) AS amt FROM duka_stock_losses WHERE shop_id = :shopId
-          AND detected_on = (NOW() AT TIME ZONE 'Africa/Nairobi')::date`, { shopId: shop.id }) : [{ amt: 0 }];
-    const [sup] = await run(
+    const pLoss = (async () => {
+      const hasLosses = (await run(`SELECT to_regclass('duka_stock_losses') IS NOT NULL AS ok`, {}))[0].ok;
+      return hasLosses ? (await run(
+        `SELECT COALESCE(SUM(loss_value),0) AS amt FROM duka_stock_losses WHERE shop_id = :shopId
+          AND detected_on = (NOW() AT TIME ZONE 'Africa/Nairobi')::date`, { shopId: shop.id }))[0] : { amt: 0 };
+    })();
+    const pSup = run(
       `SELECT COALESCE(SUM(CASE WHEN type='bill' THEN amount ELSE -amount END),0) AS owed FROM duka_supplier_entries WHERE shop_id = :shopId`, { shopId: shop.id });
-    const [col] = await run(
+    const pCol = run(
       `SELECT COALESCE(SUM(amount),0) AS amt FROM duka_debt_payments WHERE shop_id = :shopId
           AND (received_at AT TIME ZONE 'Africa/Nairobi')::date = (NOW() AT TIME ZONE 'Africa/Nairobi')::date`, { shopId: shop.id });
-    const recentSales = await run(
+    const pRecentSales = run(
       `SELECT * FROM duka_sales WHERE shop_id = :shopId AND status = 'completed' ORDER BY sold_at DESC, receipt_no DESC LIMIT 8`, { shopId: shop.id });
-    let finOutstanding = 0;
-    try {
-      const { position } = require('../services/dukaFinancing');
-      for (const p of await run(`SELECT * FROM duka_fin_plans WHERE shop_id=:s AND status IN ('approved','active')`, { s: shop.id })) {
-        const [pd] = await run('SELECT COALESCE(SUM(amount),0) AS s FROM duka_fin_payments WHERE plan_id=:p', { p: p.id });
-        finOutstanding += position(p, Math.round(Number(pd.s) * 100)).balance;
-      }
-    } catch (_) { finOutstanding = 0; } // table not migrated yet: dashboard must still load
+    // Independent of everything else here, so it runs alongside the other queries instead of after them.
+    const pFin = (async () => {
+      try {
+        const { position } = require('../services/dukaFinancing');
+        const plans = await run(`SELECT * FROM duka_fin_plans WHERE shop_id=:s AND status IN ('approved','active')`, { s: shop.id });
+        const paid = await Promise.all(plans.map((p) => run('SELECT COALESCE(SUM(amount),0) AS s FROM duka_fin_payments WHERE plan_id=:p', { p: p.id })));
+        let total = 0;
+        plans.forEach((p, k) => { total += position(p, Math.round(Number(paid[k][0].s) * 100)).balance; });
+        return total;
+      } catch (_) { return 0; } // table not migrated yet: dashboard must still load
+    })();
+    /* FIX (DUKA dashboard slow): these ~12 independent queries used to run one after another (one database round trip each, so
+       the screen took the sum of all of them). They now run together on the pool and the response waits only for the slowest. */
+    const [[s], low, recent, [td], rcv, [debt], [ex], lossToday, [sup], [col], recentSales, finOutstanding] =
+      await Promise.all([pS, pLow, pRecent, pTd, pRcv, pDebt, pEx, pLoss, pSup, pCol, pRecentSales, pFin]);
     res.json({
       success: true,
       data: {
