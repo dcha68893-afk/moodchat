@@ -410,6 +410,17 @@ module.exports = (sequelize, DataTypes) => {
       underscored: false,
       freezeTableName: true,
       hooks: {
+        // FIX (BACKGROUND SYNC - NEW USERS NOT DETECTED): tell every connected client a new account exists so open apps refresh
+        // Discover / chat list at once. Lives on the model so ALL sign-up paths (email, Google, admin-created) are covered.
+        // Payload is deliberately minimal (no email/phone). Never blocks or fails the sign-up.
+        afterCreate: async (user) => {
+          try {
+            const io = global.__socketIO || global.io;
+            if (io && typeof io.emit === 'function') {
+              io.emit('user:registered', { id: user.id, username: user.username, createdAt: user.createdAt });
+            }
+          } catch (_) { /* best-effort */ }
+        },
         beforeCreate: async (user) => {
           // CRITICAL: ONLY hash if password is NOT already hashed
           if (user.password && user.password.length > 0 && !user.password.startsWith('$2b$')) {

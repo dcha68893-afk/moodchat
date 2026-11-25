@@ -262,7 +262,7 @@ class ChatService {
                  FROM chats c
                  INNER JOIN chat_participants cp ON cp."chatId" = c.id AND cp."userId" = :userId
                  WHERE c."isActive" = true
-                   AND (cp."hiddenAt" IS NULL OR c."lastMessageAt" IS NULL OR c."lastMessageAt" > cp."hiddenAt")
+                   AND (cp."hiddenAt" IS NULL OR c."lastMessageAt" > cp."hiddenAt")
                  ${typeClause} ${searchClause}
                  ORDER BY ${orderCol} ${orderDir} NULLS LAST
                  LIMIT :limit OFFSET :offset`,
@@ -278,7 +278,7 @@ class ChatService {
                 `SELECT COUNT(*) AS total FROM chats c
                  INNER JOIN chat_participants cp ON cp."chatId" = c.id AND cp."userId" = :userId
                  WHERE c."isActive" = true
-                   AND (cp."hiddenAt" IS NULL OR c."lastMessageAt" IS NULL OR c."lastMessageAt" > cp."hiddenAt")
+                   AND (cp."hiddenAt" IS NULL OR c."lastMessageAt" > cp."hiddenAt")
                  ${typeClause} ${searchClause}`,
                 { replacements: { ...replacements, userIdStr: String(userId), userIdInt: Number.isFinite(Number(userId)) ? Number(userId) : -1 }, type: sequelize.QueryTypes.SELECT }
             );

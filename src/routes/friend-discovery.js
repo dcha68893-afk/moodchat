@@ -3,6 +3,10 @@ const { Op } = require('sequelize');
 const db = require('../models');
 
 const router = express.Router();
+
+// FIX (NEW USERS NOT DETECTED): discovery answers must never be cached by the browser/service worker/proxies, otherwise a
+// user who registered a minute ago is missing from the list until the cache expires.
+router.use((req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
 const Users = db.models.Users;
 const Friend = db.models.Friend;
 const sequelize = db.sequelize || db;
@@ -138,7 +142,9 @@ router.get('/browse', async (req,res) => {
     const userId=me(req); if(!userId) return res.status(401).json({success:false,message:'Authentication required'});
     const limit=Math.min(Math.max(Number(req.query.limit)||30,1),60);
     const offset=Math.max(Number(req.query.offset)||0,0);
-    const users=await Users.findAll({where:{id:{[Op.ne]:userId},isActive:true},attributes:attrs,order:[['username','ASC']],limit,offset});
+    // FIX (NEW USERS NOT DETECTED): this listed users A-Z with a 30-row page, so a newly registered user (any name sorting after the
+    // first 30) never appeared in Browse. Newest accounts come first now; offset paging still reaches everyone.
+    const users=await Users.findAll({where:{id:{[Op.ne]:userId},isActive:true},attributes:attrs,order:[['createdAt','DESC'],['id','DESC']],limit,offset});
     const count=await Users.count({where:{id:{[Op.ne]:userId},isActive:true}});
     return res.json({success:true,data:{users:await decorate(userId,users),total:count,offset,limit,hasMore:offset+users.length<count}});
   } catch(error){console.error('[FriendDiscovery] browse',error);return res.status(500).json({success:false,message:'Unable to browse users'});}
@@ -162,10 +168,16 @@ router.get('/suggestions', async (req,res) => {
       if(directIds.has(a)&&b!==userId&&!directIds.has(b)) scores.set(b,(scores.get(b)||0)+1);
       if(directIds.has(b)&&a!==userId&&!directIds.has(a)) scores.set(a,(scores.get(a)||0)+1);
     }
-    const ids=[...scores.entries()].sort((a,b)=>b[1]-a[1]||a[0]-b[0]).slice(0,limit).map(x=>x[0]);
+    // Reserve a few slots for the NEWEST accounts so a brand-new user (who has no mutual friends yet) always shows up.
+    const mutualSlots=Math.max(limit-6,1);
+    const ids=[...scores.entries()].sort((a,b)=>b[1]-a[1]||a[0]-b[0]).slice(0,mutualSlots).map(x=>x[0]);
     let users=ids.length?await Users.findAll({where:{id:{[Op.in]:ids},isActive:true},attributes:attrs}):[];
     const order=new Map(ids.map((id,i)=>[id,i])); users.sort((a,b)=>(order.get(Number(a.id))??999)-(order.get(Number(b.id))??999));
-    if(!users.length) users=await Users.findAll({where:{id:{[Op.ne]:userId},isActive:true},attributes:attrs,order:[['createdAt','DESC']],limit});
+    if(users.length<limit){
+      const skip=[userId,...directIds,...users.map(u=>Number(u.id))];
+      const fill=await Users.findAll({where:{id:{[Op.notIn]:skip},isActive:true},attributes:attrs,order:[['createdAt','DESC'],['id','DESC']],limit:limit-users.length});
+      users=users.concat(fill);
+    }
     const decorated=await decorate(userId,users);
     for(const u of decorated) u.mutualCount=scores.get(Number(u.id))||u.mutualCount||0;
     return res.json({success:true,data:{users:decorated,reason:ids.length?'mutuals':'discover'}});
