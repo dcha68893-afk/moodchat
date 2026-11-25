@@ -26,6 +26,9 @@ const T = {
   ask_amount: { en: 'How much?', sw: 'Kiasi gani?' },
   ask_to: { en: 'Who should it go to? Say a name or phone number.', sw: 'Itumwe kwa nani? Sema jina au namba ya simu.' },
   ask_product: { en: 'Which product?', sw: 'Bidhaa gani?' },
+  ask_task: { en: 'What should I remind you about?', sw: 'Nikukumbushe nini?' },
+  reminder_past: { en: 'That time has already passed. Please give a time in the future.', sw: 'Muda huo umeshapita. Tafadhali taja muda ujao.' },
+  reminder_limit: { en: 'You have too many active reminders. Please finish or cancel some first.', sw: 'Una vikumbusho vingi sana. Tafadhali maliza au ghairi vingine kwanza.' },
   ask_when: { en: 'When should I remind you? For example "tomorrow".', sw: 'Nikukumbushe lini? Kwa mfano "kesho".' },
   ask_items_text: { en: 'What did you sell, and how many?', sw: 'Uliuza nini, na ngapi?' },
   cannot_period: { en: 'I can do that only for today, this week or this month.', sw: 'Naweza kufanya hivyo kwa leo, wiki hii au mwezi huu tu.' },
@@ -35,10 +38,11 @@ const T = {
 };
 const say = (k, lang) => (lang === 'sw' ? T[k].sw : T[k].en);
 const pickLang = (text, hint) => (/^sw/i.test(String(hint || '')) || SW_HINT.test(String(text || '')) ? 'sw' : 'en');
-const MISSING_Q = { name: 'ask_name', amount: 'ask_amount', to: 'ask_to', product: 'ask_product', when: 'ask_when', items_text: 'ask_items_text' };
+const MISSING_Q = { name: 'ask_name', amount: 'ask_amount', to: 'ask_to', product: 'ask_product', when: 'ask_when', task: 'ask_task', items_text: 'ask_items_text' };
 
 function createEngine(deps = {}) {
   const tools = deps.tools;                       // { run(name,args) }
+  const reminders = deps.reminders || null;       // optional personal-reminders store (see reminders.js)
   const llm = deps.llm || null;                   // optional local adapter: async ({text, catalogue}) -> { action, slots, confidence }
   const store = deps.contextStore || new Map();   // userId -> { lastIntent, lastSlots, pending, at }
   const now = deps.now || (() => Date.now());
@@ -70,12 +74,13 @@ function createEngine(deps = {}) {
       let rec = recognise(text, { lang });
 
       // 1) answering a question we asked ("Who?" -> "Wanjiru")
-      if (ctx && ctx.pending && (!rec.matched || rec.intent === ctx.pending.intent || rec.missing && rec.missing.length)) {
+      if (ctx && ctx.pending && (!rec.matched || rec.intent === ctx.pending.intent || rec.missing && rec.missing.length || (ctx.pending.missing[0] === 'when' && nlp.parseWhen(text)))) {   // a time given while we wait for a time answers that question ("tomorrow" must not start a forecast)
         const p = ctx.pending, prep = nlp.prepare(text), slots = Object.assign({}, p.slots);
         const field = p.missing[0];
         const filled = (() => {
           if (field === 'amount') return nlp.extractAmount(prep);
-          if (field === 'when') return nlp.extractDueDate(prep);
+          if (field === 'when') { const w = nlp.parseWhen(text); if (w) { slots.whenAt = w.dueAt; return w.date; } return nlp.extractDueDate(prep); }
+          if (field === 'task') return text.trim().replace(/[?.!,]+$/, '').slice(0, 140) || null;
           if (field === 'to') return nlp.extractPhone(prep) || (text.trim().split(/\s+/).slice(0, 3).join(' ') || null);
           return text.trim().replace(/[?.!,]+$/, '').split(/\s+/).slice(0, field === 'items_text' ? 24 : 3).join(' ') || null;
         })();
@@ -115,10 +120,22 @@ function createEngine(deps = {}) {
         return { type: 'clarify', reason: 'missing', missing: rec.missing[0], say: say(MISSING_Q[rec.missing[0]] || 'ask_name', lang), lang };
       }
 
-      // 6) reminders are only PREPARED (the client stores/schedules after the user confirms)
+      // 6) reminders: saved for the caller only when a reminders store is configured (and only reported saved once the row exists);
+      //    without a store we fall back to "prepared" so the client confirms and schedules it itself.
       if (rec.intent === 'reminder.create') {
         setCtx(uid, { lastIntent: rec.intent, lastSlots: rec.slots, lastTool: null, pending: null });
-        return { type: 'prepare', intent: rec.intent, sensitive: true, requiresConfirmation: true, reminder: { when: rec.slots.when, text: text.slice(0, 140) }, say: say('confirm_first', lang), lang };
+        if (reminders && rec.slots.whenAt) {
+          const task = rec.slots.task || null;
+          if (!task) { setCtx(uid, { pending: { intent: rec.intent, slots: rec.slots, missing: ['task'], rec } }); return { type: 'clarify', reason: 'missing', missing: 'task', say: say('ask_task', lang), lang }; }
+          let r; try { r = await reminders.create(userId, { text: task, dueAt: rec.slots.whenAt, source: 'voice' }); } catch (_) { r = { ok: false, error: 'store_failed' }; }
+          if (r && r.ok) {
+            const when = require('./reminders').fmtWhen(r.reminder.dueAt, lang);
+            return { type: 'answer', intent: rec.intent, source: 'saved', say: lang === 'sw' ? `Sawa, nitakukumbusha "${task}" ${when}.` : `Done. I will remind you "${task}" on ${when} (Nairobi time).`, reminder: r.reminder, undo: { method: 'DELETE', path: '/api/intelligence/reminders/' + r.reminder.id }, lang };
+          }
+          const why = { time_in_past: 'reminder_past', too_many_reminders: 'reminder_limit' }[r && r.error];
+          return { type: 'answer', intent: rec.intent, source: 'none', say: say(why || 'tool_failed', lang), lang };
+        }
+        return { type: 'prepare', intent: rec.intent, sensitive: true, requiresConfirmation: true, reminder: { when: rec.slots.when, text: rec.slots.task || text.slice(0, 140) }, say: say('confirm_first', lang), lang };
       }
 
       // 7) read-only server tool

@@ -184,4 +184,35 @@ function createService(opts = {}) {
   return { priceCheck, trending, recommend, sellerInsights, peerPrices };
 }
 
-module.exports = { categorise, assessPrice, popularityScore, sellerSummary, createService, MIN_PEERS, MIN_COBUYERS, CATEGORY_WORDS };
+const kesFmt = (n) => 'KES ' + Number(n || 0).toLocaleString('en-KE', { maximumFractionDigits: 0 });
+/** Read-only "tools" for the voice/chat engine: same names style as tools.js, run(name, { userId }) -> { ok, data, say:{en,sw}, kind }. */
+function voiceTools(svc) {
+  const list = (items) => items.slice(0, 3).map((i) => `${i.title} (${kesFmt(i.price)})`).join(', ');
+  return {
+    async run(name, args) {
+      const userId = args && args.userId;
+      if (name === 'market.trending') {
+        const items = await svc.trending(5);
+        if (!items.length) return { ok: true, data: { items }, say: { en: 'There is nothing trending on the marketplace yet.', sw: 'Hakuna bidhaa zinazovuma sokoni bado.' }, kind: 'retrieved' };
+        return { ok: true, data: { items }, kind: 'retrieved', say: { en: `Popular on the marketplace right now: ${list(items)}.`, sw: `Zinazopendwa sokoni sasa: ${list(items)}.` } };
+      }
+      if (name === 'market.recommend') {
+        const r = await svc.recommend(userId, 5);
+        if (!r.items.length) return { ok: true, data: r, say: { en: 'I have nothing to recommend yet.', sw: 'Sina cha kupendekeza bado.' }, kind: 'retrieved' };
+        return { ok: true, data: r, kind: 'retrieved', caveat: r.note, say: { en: (r.personalised ? 'Based on your purchases, you might like: ' : 'These are popular items, not personalised: ') + list(r.items) + '.', sw: (r.personalised ? 'Kulingana na ulichonunua, unaweza kupenda: ' : 'Hizi ni bidhaa maarufu, si za kukuchagulia wewe: ') + list(r.items) + '.' } };
+      }
+      if (name === 'market.seller') {
+        const r = await svc.sellerInsights(userId);
+        if (!r.listings) return { ok: true, data: r, say: { en: 'You have no active listings on the marketplace.', sw: 'Huna bidhaa zinazouzwa sokoni.' }, kind: 'retrieved' };
+        const ch = r.revenue.changePct == null ? '' : ` (${r.revenue.changePct >= 0 ? '+' : ''}${r.revenue.changePct}% vs the 30 days before)`;
+        const tip = r.tips[0];
+        return { ok: true, data: r, kind: 'retrieved', caveat: r.note, say: {
+          en: `Marketplace, last 30 days: ${kesFmt(r.revenue.last30)} from ${r.orders.last30} orders${ch}.` + (tip ? ' ' + tip.en : ''),
+          sw: `Sokoni, siku 30 zilizopita: ${kesFmt(r.revenue.last30)} kutoka oda ${r.orders.last30}${ch.replace('vs the 30 days before', 'ikilinganishwa na siku 30 kabla')}.` + (tip ? ' ' + tip.sw : '') } };
+      }
+      return { ok: false, error: 'unknown_tool' };
+    }
+  };
+}
+
+module.exports = { voiceTools, categorise, assessPrice, popularityScore, sellerSummary, createService, MIN_PEERS, MIN_COBUYERS, CATEGORY_WORDS };

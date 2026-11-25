@@ -106,4 +106,46 @@ function extractDueDate(prepared, now = new Date()) {
   return null;
 }
 
-module.exports = { normalize, prepare, numberWordsToDigits, extractAmount, extractPhone, extractPeriod, extractDueDate, PERIOD_WORDS };
+const WEEKDAYS = { sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6, jumapili: 0, jumatatu: 1, jumanne: 2, jumatano: 3, alhamisi: 4, ijumaa: 5, jumamosi: 6 };
+
+/**
+ * Parse WHEN a reminder should fire, from what the person said (English / Kiswahili), in Nairobi time (UTC+3).
+ * Understands: "in 2 hours", "baada ya masaa 2", "in 30 minutes", "tomorrow", "kesho", "friday", "at 8am", "at 14:30", "saa tatu asubuhi".
+ * Only a date -> 09:00. Only a time -> today if still ahead, otherwise tomorrow. "at 8" with no am/pm: 1-6 = pm, 7-11 = am (the reply states the
+ * exact time so the person can correct it). Swahili clock: saa moja = 07:00 ... saa tatu = 09:00 ... saa kumi na mbili = 18:00 (jioni/usiku -> pm).
+ * Returns { date:'YYYY-MM-DD', time:'HH:MM', dueAt:ISO(UTC), label } or null when nothing about time was said (or it is in the past).
+ */
+function parseWhen(text, now = new Date()) {
+  const p = prepare(text);
+  const NAIROBI = 3 * 3600 * 1000, DAY = 86400000, nowMs = now.getTime();
+  const fmt = (ms) => { const d = new Date(ms + NAIROBI); return { date: d.toISOString().slice(0, 10), time: d.toISOString().slice(11, 16) }; };
+  const done = (ms) => (ms > nowMs ? Object.assign(fmt(ms), { dueAt: new Date(ms).toISOString() }, { label: null }) : null);
+  const rel = /\b(?:in|baada ya)\s+(?:masaa\s+|saa\s+)?(\d{1,3})\s*(hours?|hrs?|minutes?|mins?|masaa|saa|dakika)?\b/.exec(p);
+  if (rel && (rel[2] || /baada ya\s+(?:masaa|saa)/.test(rel[0]))) {
+    const n = Number(rel[1]), unit = rel[2] || 'saa', mins = /^(min|dakika)/.test(unit) ? n : n * 60;
+    if (mins > 0 && mins <= 60 * 24 * 30) return done(nowMs + mins * 60000);
+  }
+  const base = Date.UTC(...(() => { const d = new Date(nowMs + NAIROBI); return [d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()]; })()) - NAIROBI;   // Nairobi midnight as UTC ms
+  let dayMs = null;
+  const d0 = extractDueDate(p, now);
+  if (d0) { const [y, m, d] = d0.split('-').map(Number); dayMs = Date.UTC(y, m - 1, d) - NAIROBI; }
+  else {
+    const wd = new RegExp(' (' + Object.keys(WEEKDAYS).join('|') + ')(?= )').exec(p);
+    if (wd) { const today = new Date(nowMs + NAIROBI).getUTCDay(); let add = (WEEKDAYS[wd[1]] - today + 7) % 7; if (add === 0) add = 7; dayMs = base + add * DAY; }
+  }
+  let mins = null;
+  const raw = String(text == null ? '' : text).toLowerCase();   // keep ':' (normalize() drops it)
+  const en = /\b(\d{1,2}):(\d{2})\s*(am|pm)?/.exec(raw) || /\bat\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?(?!\d)/.exec(p);
+  if (en) {
+    let h = Number(en[1]); const m = Number(en[2] || 0);
+    if (h <= 23 && m <= 59) { if (en[3]) { if (h > 12 || h === 0) h = -1; else h = (h % 12) + (en[3] === 'pm' ? 12 : 0); } else if (h >= 1 && h <= 6) h += 12; if (h >= 0) mins = h * 60 + m; }
+  } else {
+    const sw = /\bsaa\s+(\d{1,2})\b(?:\s+(asubuhi|mchana|jioni|usiku))?/.exec(p);
+    if (sw) { const n = Number(sw[1]); if (n >= 1 && n <= 12) { let h = (n + 5) % 12 + 1; if (sw[2] === 'jioni' || sw[2] === 'usiku') { if (h < 12) h += 12; } else if (sw[2] === 'mchana' && h <= 3) h += 12; mins = h * 60; } }
+  }
+  if (dayMs == null && mins == null) return null;
+  if (dayMs == null) { dayMs = base; if (base + mins * 60000 <= nowMs) dayMs = base + DAY; }
+  return done(dayMs + (mins == null ? 9 * 60 : mins) * 60000);
+}
+
+module.exports = { normalize, prepare, numberWordsToDigits, extractAmount, extractPhone, extractPeriod, extractDueDate, parseWhen, PERIOD_WORDS };

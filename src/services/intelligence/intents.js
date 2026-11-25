@@ -32,7 +32,7 @@ const LEX = {
   UPDOWN: ['drop', 'dropped', 'down', 'decrease', 'decreased', 'fell', 'lower', 'less', 'imeshuka', 'imepungua', 'increase', 'increased', 'up', 'rose', 'higher', 'more', 'imeongezeka', 'imepanda', 'change', 'changed'],
   BUYQ: ['should i buy', 'should i purchase', 'should i restock', 'what to buy', 'what to purchase', 'what to restock', 'purchase', 'restock', 'reorder', 'order more', 'agiza', 'niagize', 'nunue nini', 'ninunue', 'nikununue', 'nunua nini', 'nahitaji kuagiza', 'need to buy', 'need to order', 'to buy', 'to order'],
   SLOW: ['slow moving', 'slow mover', 'slow movers', 'not selling', 'dont sell', 'hazinunuliwi', 'hazitoki', 'zinakaa', 'zinazokaa', 'zinazokaa sana', 'dead stock', 'zimekaa', 'hazitoki sana', 'slowest', 'worst selling', 'least selling'],
-  BEST: ['best selling', 'top selling', 'bestsellers', 'best seller', 'most sold', 'zinazouzwa zaidi', 'zinazotoka', 'popular', 'most profitable', 'best products'],
+  BEST: ['best selling', 'top selling', 'bestsellers', 'best seller', 'best sellers', 'sells best', 'sell best', 'most sold', 'zinazouzwa sana', 'zinazouzwa vizuri', 'zinazouzwa zaidi', 'zinazotoka', 'popular', 'most profitable', 'best products'],
   DEBT: ['owes me', 'owe me', 'who owes', 'madeni', 'deni', 'wanadaiwa', 'wanaonidai', 'credit customers', 'on credit', 'unpaid customers', 'wateja wanaodaiwa', 'receivables', 'hawajanilipa', 'wamenidai', 'hawajalipa', 'wanaodaiwa', 'wanaonidai', 'not paid me', 'havent paid me', 'wakopaji', 'wamekopa'],
   EXPV: ['expense', 'expenses', 'gharama', 'matumizi ya duka', 'spent on', 'nimelipia', 'nililipia', 'rekodi gharama', 'record expense', 'add expense', 'i paid for', 'paid for'],
   SALEV: ['i sold', 'we sold', 'nimeuza', 'niliuza', 'tumeuza', 'nimeuzia', 'tumeuzia', 'customer bought', 'amenunua', 'wamenunua'],
@@ -45,6 +45,10 @@ const LEX = {
   MSGW: ['message', 'messages', 'ujumbe', 'texts', 'sms', 'meseji', 'inbox'],
   UNREAD: ['unread', 'new', 'mpya', 'pending', 'waiting', 'hazijasomwa', 'latest', 'za mwisho'],
   MSGSEND: ['send a message', 'send message', 'message', 'tumia ujumbe', 'mtumie ujumbe', 'mwandikie', 'andika ujumbe', 'dm', 'chat with', 'write to'],
+  MARKETW: ['marketplace', 'market place', 'sokoni', 'soko la mtandaoni', 'online market', 'necpra market', 'necpra marketplace'],
+  TRENDW: ['trending', 'popular', 'most popular', 'hot items', 'hot right now', 'selling fast', 'maarufu', 'zinazouzwa sana', 'zinazopendwa'],
+  RECOMW: ['recommend', 'recommendation', 'recommendations', 'suggest', 'suggestions', 'should i buy', 'what to buy', 'nipendekezee', 'pendekeza', 'nini ninunue'],
+  MYSHOP: ['my listings', 'my products', 'my shop', 'my store', 'my seller', 'as a seller', 'seller insights', 'seller performance', 'bidhaa zangu', 'duka langu', 'mauzo yangu'],
   FRIENDW: ['friend', 'friends', 'rafiki', 'marafiki', 'mshikaji', 'washikaji', 'buddy', 'mate', 'jamaa'],
   GROUPW: ['group', 'groups', 'kikundi', 'vikundi'],
   GAMECOINS: ['coins', 'coin', 'sarafu'],
@@ -90,7 +94,7 @@ const RULES = [
   R('duka.restock', 0.9, ['BUYQ'], [], { tool: 'duka.restock' }),
   R('duka.restock', 0.85, ['PRODUCTW', 'BUYQ'], [], { tool: 'duka.restock' }),
   R('duka.slow_movers', 0.9, ['SLOW'], [], { tool: 'duka.slow_movers' }),
-  R('duka.best_sellers', 0.85, ['BEST'], [], { tool: 'duka.best_sellers' }),
+  R('duka.best_sellers', 0.85, ['BEST'], ['MARKETW'], { tool: 'duka.best_sellers' }),
   R('duka.customers_count', 0.9, ['COUNTQ', 'CUST'], ['DEBT'], { ui: 'duka.customers_count' }),
   R('duka.debts', 0.9, ['DEBT'], ['CHAMA'], { ui: 'duka.debts', tool: 'duka.unpaid_customers', slotsFrom: ['who'] }),
   R('duka.debts', 0.82, ['CUST', 'NOTPAID'], ['CHAMA'], { ui: 'duka.debts', tool: 'duka.unpaid_customers' }),
@@ -107,6 +111,10 @@ const RULES = [
   R('duka.sale', 0.9, ['SALEV'], [], { ui: 'duka.sale', requires: ['items_text'], sensitive: true }),
   R('duka.expense', 0.85, ['EXPV'], ['HOWMUCH', 'UNNEC'], { ui: 'duka.expense', requires: ['amount'], sensitive: true }),
   R('duka.expense', 0.84, ['SPENT', 'AMT'], ['HOWMUCH', 'SENDV', 'UNNEC', 'RECV'], { ui: 'duka.expense', requires: ['amount'], sensitive: true }),
+  // ── marketplace (read-only, caller-scoped; every rule needs the marketplace word so DUKA questions are never captured) ──
+  R('market.trending', 0.88, ['MARKETW', 'TRENDW'], ['RECOMW'], { tool: 'market.trending' }),
+  R('market.recommend', 0.88, ['MARKETW', 'RECOMW'], [], { tool: 'market.recommend' }),
+  R('market.seller', 0.88, ['MARKETW', 'MYSHOP'], ['RECOMW', 'TRENDW'], { tool: 'market.seller' }),
   // ── transactions search ──
   R('finance.find_transaction', 0.85, ['FIND', 'TXNW'], ['SENDV', 'REMIND'], { tool: 'finance.find_transaction' }),
   // ── reminders (prepared only) ──
@@ -142,7 +150,10 @@ function extractSlots(rule, original, prepared) {
   if (period) slots.period = period;
   const amount = nlp.extractAmount(prepared); if (amount != null) slots.amount = amount;
   const phone = nlp.extractPhone(prepared); if (phone) slots.phone = phone;
-  const due = rule.intent === 'reminder.create' ? nlp.extractDueDate(prepared) : null; if (due) slots.when = due;
+  if (rule.intent === 'reminder.create') {
+    const w = nlp.parseWhen(original); if (w) { slots.when = w.date; slots.whenAt = w.dueAt; } else { const due = nlp.extractDueDate(prepared); if (due) slots.when = due; }
+    const task = require('./reminders').taskText(original); if (task) slots.task = task;
+  }
   const need = rule.requires || [];
   const allGroups = Object.keys(LEX);
   if (need.includes('to')) { slots.to = phone || (leftoverWords(original, prepared, allGroups.filter((g) => g !== 'STOP'))[0] || null); if (slots.to && slots.phone && slots.to === slots.phone) slots.to = phone; }
@@ -209,7 +220,8 @@ function recognise(text, opts = {}) {
     sensitive: !!top.rule.sensitive,
     note: top.rule.note || null,
     missing,
-    ambiguous: !!(rival && top.weight - rival.weight < AMBIGUITY_MARGIN),
+    // an explicit "remind me ..." is a clear instruction about WHAT kind of request this is (the rest of the sentence is just the task text)
+    ambiguous: !!(rival && top.intent !== 'reminder.create' && top.weight - rival.weight < AMBIGUITY_MARGIN),
     candidates,
     prepared,
     lang: opts.lang || null

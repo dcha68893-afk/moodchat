@@ -6,6 +6,7 @@
  *   POST /risk/assess { kind, amount, counterparty?, purpose?, expectedAmount?, deviceId? } -> score + reasons (records an audit row; NEVER blocks or moves money)
  *   POST /risk/:id/resolve { outcome: 'ok'|'report', note? }   the user's own answer to a warning (false-positive path)
  *   GET  /risk                       the caller's own recent risk events
+ *   /marketplace/*  and  /reminders/*  see the sections below
  * Every handler is scoped to req.user.id. No endpoint accepts a userId from the client.
  */
 const express = require('express');
@@ -15,6 +16,7 @@ const { createEngine } = require('../services/intelligence/engine');
 const { createTools } = require('../services/intelligence/tools');
 const risk = require('../services/intelligence/risk');
 const marketplace = require('../services/intelligence/marketplace');
+const remindersLib = require('../services/intelligence/reminders');
 
 const enabled = () => String(process.env.NECPRA_AI_ENABLED || 'true').toLowerCase() !== 'false';
 const KINDS = new Set(['transfer', 'withdrawal', 'money_request', 'contribution', 'stk', 'payment']);
@@ -23,10 +25,13 @@ const PER_MIN = Number(process.env.NECPRA_AI_PER_MIN || 30), PER_DAY = Number(pr
 function createRouter(opts = {}) {
   const router = express.Router();
   const getSequelize = opts.getSequelize || (() => require('../models').sequelize);
-  const tools = opts.tools || createTools({ getSequelize });
-  const engine = opts.engine || createEngine({ tools, llm: opts.llm || require('../services/intelligence/llm').adapter() });
-  const riskSvc = opts.risk || risk.createService({ getSequelize });
+  const baseTools = opts.tools || createTools({ getSequelize });
   const mkt = opts.marketplace || marketplace.createService({ getSequelize });
+  const mktTools = marketplace.voiceTools(mkt);
+  const tools = { run: (name, args) => (String(name).startsWith('market.') ? mktTools.run(name, args) : baseTools.run(name, args)) };   // marketplace tools are read-only and caller-scoped too
+  const remSvc = opts.reminders || remindersLib.createService({ getSequelize });
+  const engine = opts.engine || createEngine({ tools, reminders: remSvc, llm: opts.llm || require('../services/intelligence/llm').adapter() });
+  const riskSvc = opts.risk || risk.createService({ getSequelize });
   const authenticate = opts.authenticate || ((req, res, next) => require('../middleware/auth').authenticateToken(req, res, next));
   const limiter = opts.rateLimiter || apiRateLimiter;
   const uidOf = (req) => (req.user && (req.user.id != null ? req.user.id : req.user.userId));
@@ -118,6 +123,20 @@ function createRouter(opts = {}) {
     res.json(Object.assign({ ok: true }, marketplace.categorise(b.title, b.description)));
   }));
   router.get('/marketplace/seller', limiter, guard(async (req, res) => res.json(await mkt.sellerInsights(uidOf(req)))));
+
+  /* ───── Personal assistant: reminders (caller's own only) ─────
+   *   POST   /reminders {text, dueAt(ISO)}   GET /reminders?status=pending|done|cancelled   GET /reminders/due
+   *   POST   /reminders/:id/done             DELETE /reminders/:id   (cancels) */
+  const send = (res, r, key) => (r.ok ? res.json({ ok: true, [key || 'reminder']: r.reminder }) : res.status(r.status || 400).json({ ok: false, error: r.error }));
+  router.post('/reminders', limiter, express.json({ limit: '2kb' }), guard(async (req, res) => {
+    const b = req.body || {};
+    if (typeof b.text !== 'string' || typeof b.dueAt !== 'string' || Number.isNaN(Date.parse(b.dueAt))) return res.status(400).json({ ok: false, error: 'bad_request' });
+    return send(res, await remSvc.create(uidOf(req), { text: b.text, dueAt: b.dueAt, source: 'api' }));
+  }));
+  router.get('/reminders/due', limiter, guard(async (req, res) => res.json({ ok: true, reminders: await remSvc.due(uidOf(req)) })));
+  router.get('/reminders', limiter, guard(async (req, res) => res.json({ ok: true, reminders: await remSvc.list(uidOf(req), req.query.status, req.query.limit) })));
+  router.post('/reminders/:id/done', limiter, guard(async (req, res) => (UUID_RE.test(String(req.params.id)) ? send(res, await remSvc.done(uidOf(req), req.params.id)) : res.status(400).json({ ok: false, error: 'bad_id' }))));
+  router.delete('/reminders/:id', limiter, guard(async (req, res) => (UUID_RE.test(String(req.params.id)) ? send(res, await remSvc.cancel(uidOf(req), req.params.id)) : res.status(400).json({ ok: false, error: 'bad_id' }))));
 
   return router;
 }

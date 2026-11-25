@@ -910,8 +910,8 @@ function buildRouter(opts = {}) {
     const pTd = run(
       `SELECT COUNT(*)::int AS n, COALESCE(SUM(total),0) AS total, COALESCE(SUM(cogs),0) AS cogs,
               COALESCE(SUM(balance_due),0) AS credit
-         FROM duka_sales WHERE shop_id = :shopId AND status = 'completed' AND customer_id IS NOT NULL
-          AND (sold_at AT TIME ZONE 'Africa/Nairobi')::date = (NOW() AT TIME ZONE 'Africa/Nairobi')::date`, { shopId: shop.id });
+         FROM duka_sales WHERE shop_id = :shopId AND status = 'completed'
+          AND (sold_at AT TIME ZONE 'Africa/Nairobi')::date = (NOW() AT TIME ZONE 'Africa/Nairobi')::date`, { shopId: shop.id });   // ALL of today's completed sales (anonymous cash sales included); only the DEBT query below is limited to named customers
     const pRcv = run(
       `SELECT p.method, p.verification, COALESCE(SUM(p.amount),0) AS amt
          FROM duka_sale_payments p JOIN duka_sales s ON s.id = p.sale_id
