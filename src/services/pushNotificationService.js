@@ -96,6 +96,15 @@ function _buildPayload(type, data) {
       tag:     `duka-fin-${data.kind || 'reminder'}`,
       data:    { type: 'duka:financing', kind: data.kind, url: '/duka.html' },
     },
+    'reminder': {
+      title:   'Reminder',
+      body:    _truncate(data.text || '', 140),
+      icon:    '/icons/icon-192.png',
+      badge:   '/icons/badge-72.png',
+      tag:     `reminder-${data.reminderId}`,
+      requireInteraction: true,
+      data:    { type: 'reminder', reminderId: data.reminderId, url: '/chat.html' },
+    },
     'friend:request': {
       title:   `${data.fromName || 'Someone'} sent you a friend request`,
       body:    data.message || 'Wants to connect with you on Kynecta',
