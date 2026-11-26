@@ -120,6 +120,9 @@ async function requestDeletion(userId, { password, confirmation, req } = {}) {
       resetToken: null,
       resetTokenExpiry: null,
       deletionRequestedAt: new Date(),
+      // Release identifiers so the deleted account cannot be found, re-linked via Google, or block re-registration.
+      googleId: null,
+      phone: null,
     });
   } catch (e) {
     console.warn('[AccountDeletion] Full update failed, retrying with core fields only:', e.message);
@@ -134,6 +137,7 @@ async function requestDeletion(userId, { password, confirmation, req } = {}) {
       resetToken: null,
       resetTokenExpiry: null,
       deletionRequestedAt: new Date(),
+      googleId: null,
     });
   }
 
