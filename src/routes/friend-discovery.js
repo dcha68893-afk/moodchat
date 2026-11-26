@@ -94,7 +94,7 @@ router.get('/search', async (req,res) => {
     const userId=me(req); if(!userId) return res.status(401).json({success:false,message:'Authentication required'});
     const q=String(req.query.q||'').trim();
     if(q.length<2) return res.json({success:true,data:{users:[],total:0}});
-    const limit=Math.min(Math.max(Number(req.query.limit)||25,1),50);
+    const limit=Math.min(Math.max(Number(req.query.limit)||25,1),200);
     const users=await Users.findAll({where:{id:{[Op.ne]:userId},isActive:true,[Op.or]:[
       {username:{[Op.iLike]:`%${q}%`}},{firstName:{[Op.iLike]:`%${q}%`}},{lastName:{[Op.iLike]:`%${q}%`}}
     ]},attributes:attrs,order:[['username','ASC']],limit});
@@ -140,7 +140,9 @@ router.get('/search', async (req,res) => {
 router.get('/browse', async (req,res) => {
   try {
     const userId=me(req); if(!userId) return res.status(401).json({success:false,message:'Authentication required'});
-    const limit=Math.min(Math.max(Number(req.query.limit)||30,1),60);
+    // FIX (Discover capped at 30/60 users): allow bigger pages (up to 200) so the app can load EVERY user in few requests.
+    // Paging with offset/hasMore is unchanged, so older app versions keep working.
+    const limit=Math.min(Math.max(Number(req.query.limit)||30,1),200);
     const offset=Math.max(Number(req.query.offset)||0,0);
     // FIX (NEW USERS NOT DETECTED): this listed users A-Z with a 30-row page, so a newly registered user (any name sorting after the
     // first 30) never appeared in Browse. Newest accounts come first now; offset paging still reaches everyone.
