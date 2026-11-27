@@ -19,10 +19,12 @@ const threshold=n=>Math.max(1,Math.floor(Number(n)/2)+1);
 async function tally(type,id,t){const r=await q("SELECT vote,COUNT(*)::int AS count FROM chama_governance_votes WHERE request_type=:type AND request_id=:id GROUP BY vote",{type,id},t);return {approve:Number(r.find(x=>x.vote==='approve')?.count||0),reject:Number(r.find(x=>x.vote==='reject')?.count||0)};}
 router.use((req,res,next)=>['GET','HEAD','OPTIONS'].includes(req.method)?next():requireAdult(req,res,next));
 
+const userModel=()=>{const m=db();return m.User||m.Users||(m.sequelize&&m.sequelize.models&&(m.sequelize.models.Users||m.sequelize.models.User))||null;};
+async function names(ids){const out={name:k=>'Member #'+k,avatar:()=>null};try{const U=userModel(),list=[...new Set(ids.map(Number).filter(Boolean))];if(!U||!list.length)return out;const us=await U.findAll({where:{id:list},attributes:['id','username','firstName','lastName','avatar']});const nm=new Map(us.map(u=>[Number(u.id),[u.firstName,u.lastName].filter(Boolean).join(' ')||u.username||('Member #'+u.id)])),av=new Map(us.map(u=>[Number(u.id),u.avatar||null]));return{name:k=>nm.get(Number(k))||('Member #'+k),avatar:k=>av.get(Number(k))||null};}catch(e){console.error('[chama-management] names:',e.message);return out;}}
 router.get('/circles/:id/dashboard',wrap(async(req,res)=>{
  const id=req.params.id,c=await circle(id,uid(req));
  const [members,totals,funds,goals,loans,requests,meetings]=await Promise.all([
- q("SELECT m.user_id AS \"userId\",COALESCE(r.role,m.role) AS role,m.status FROM money_circle_members m LEFT JOIN chama_member_roles r ON r.circle_id=m.circle_id AND r.user_id=m.user_id WHERE m.circle_id=:id AND m.status='active' ORDER BY m."createdAt"",{id}),
+ q("SELECT m.user_id AS \"userId\",COALESCE(r.role,m.role) AS role,m.status FROM money_circle_members m LEFT JOIN chama_member_roles r ON r.circle_id=m.circle_id AND r.user_id=m.user_id WHERE m.circle_id=:id AND m.status='active' ORDER BY m.\"createdAt\"",{id}),
  q("SELECT (COALESCE((SELECT SUM(amount) FROM money_contributions WHERE circle_id=:id AND status='paid'),0)+COALESCE(SUM(CASE WHEN direction='in' THEN amount ELSE -amount END),0))::numeric(15,2) AS balance,COALESCE(SUM(CASE WHEN direction='out' THEN amount ELSE 0 END),0)::numeric(15,2) AS expenses FROM chama_ledger_entries WHERE circle_id=:id AND status='posted'",{id}),
  q("SELECT f.id,f.name,f.fund_type AS type,f.target_amount AS \"targetAmount\",COALESCE(SUM(CASE WHEN l.direction='in' THEN l.amount ELSE -l.amount END),0)::numeric(15,2) AS balance FROM chama_funds f LEFT JOIN chama_ledger_entries l ON l.fund_id=f.id AND l.status='posted' WHERE f.circle_id=:id AND f.status='active' GROUP BY f.id ORDER BY f.created_at",{id}),
  q("SELECT g.id,g.title,g.target_amount AS \"targetAmount\",g.deadline,g.status,COALESCE(SUM(a.amount),0)::numeric(15,2) AS allocated FROM chama_savings_goals g LEFT JOIN chama_goal_allocations a ON a.goal_id=g.id WHERE g.circle_id=:id GROUP BY g.id ORDER BY g.created_at DESC",{id}),
@@ -30,7 +32,11 @@ router.get('/circles/:id/dashboard',wrap(async(req,res)=>{
  q("SELECT r.id,r.request_type AS type,r.amount,r.description,r.status,r.requested_by AS \"requestedBy\",r.created_at AS \"createdAt\",COALESCE(v.approve,0)::int AS approvals,COALESCE(v.reject,0)::int AS rejections FROM chama_governance_requests r LEFT JOIN (SELECT request_id,SUM(CASE WHEN vote='approve' THEN 1 ELSE 0 END) approve,SUM(CASE WHEN vote='reject' THEN 1 ELSE 0 END) reject FROM chama_governance_votes WHERE request_type='request' GROUP BY request_id) v ON v.request_id=r.id WHERE r.circle_id=:id ORDER BY r.created_at DESC LIMIT 50",{id}),
  q("SELECT id,title,notes,starts_at AS \"startsAt\",status FROM chama_meetings WHERE circle_id=:id ORDER BY starts_at DESC LIMIT 20",{id})
  ]);
- res.json({success:true,circle:{id:c.c.id,name:c.c.name,targetAmount:Number(c.c.targetAmount||0)},role:c.role,summary:{members:members.length,balance:Number(totals[0]?.balance||0),expenses:Number(totals[0]?.expenses||0)},members,funds,goals,loans,requests,meetings});
+ const me=uid(req),nm=await names([...members.map(x=>x.userId),...requests.map(x=>x.requestedBy),...loans.map(x=>x.borrowerId)]);
+ res.json({success:true,me,circle:{id:c.c.id,name:c.c.name,targetAmount:Number(c.c.targetAmount||0)},role:c.role,summary:{members:members.length,balance:Number(totals[0]?.balance||0),expenses:Number(totals[0]?.expenses||0)},
+  members:members.map(x=>({...x,name:nm.name(x.userId),avatar:nm.avatar(x.userId),isYou:Number(x.userId)===me})),funds,goals,
+  loans:loans.map(x=>({...x,borrowerName:nm.name(x.borrowerId),isYou:Number(x.borrowerId)===me})),
+  requests:requests.map(x=>({...x,requestedByName:nm.name(x.requestedBy),isYou:Number(x.requestedBy)===me})),meetings});
 }));
 
 router.put('/circles/:id/members/:userId/role',wrap(async(req,res)=>{

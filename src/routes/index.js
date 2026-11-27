@@ -157,6 +157,9 @@ const ROUTE_MAPPING = {
   // FIX (contact-us-goes-nowhere): new "Contact Us" backend — public submit
   // endpoint plus admin-only inbox (handled inside routes/contact.js itself).
   'contact.js': '/contact',
+  // Chama management (governance, loans, funds, meetings, reports, audit). Explicit so route discovery can never change its URL.
+  // Auth: the scanner wraps it in authenticateToken; mutating calls also require an adult (requireAdult inside the router).
+  'chama-management.js': '/chama-management',
 };
 
 // ===== HELPER FUNCTIONS =====
