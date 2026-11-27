@@ -5,6 +5,7 @@ const { comparePassword }=require('../utils/passwordUtils');
 const { authenticator } = require('otplib');
 const stk=require('../services/mpesaStkService');
 const eco=require('../services/ecosystemLink');
+const rot=require('../services/chamaRotation');
 const router=express.Router();
 const { requireAdult, isAdultConfirmed, confirmAdult } = require('../middleware/requireAdult');
 const db=()=>{const m=require('../models');
@@ -148,9 +149,28 @@ router.get('/circles/:id',wrap(async(req,res)=>{
  const ledgerTotal=paidList.reduce((n,c)=>n+Number(c.amount||0),0);
  const cashTotal=paidList.filter(isOffline).reduce((n,c)=>n+Number(c.amount||0),0);
  const guests=[...guestMap.values()].sort((a,b)=>(b.contributed-a.contributed)||a.name.localeCompare(b.name));
- return ok(res,{circle,isOwner:circle.ownerId===userId,receiving:await receivingSummary(d,circle.id),members,guests,schedule:sched?{...sched,daysLeft:W.dayDiff(sched.dueDate,W.nairobiParts())}:null,
+ const rotState=(await rot.loadState(d,circle)).state;
+ return ok(res,{circle,isOwner:circle.ownerId===userId,receiving:await receivingSummary(d,circle.id),groupChatId:eco.groupChatIdOf(circle),rotation:rotState,members,guests,schedule:sched?{...sched,daysLeft:W.dayDiff(sched.dueDate,W.nairobiParts())}:null,
   totals:{collected:ledgerTotal,mpesa:ledgerTotal-cashTotal,cash:cashTotal,paidCount:paidList.length,membersPaid:members.filter(m=>m.contributed>0||m.items.length>0).length,membersUnpaid:members.filter(m=>!(m.contributed>0||m.items.length>0)).length},
   contributions:paidList.slice(0,100).map(c=>{const meta=c.metadata||{},k=Number(c.contributorId),off=isOffline(c);return {...c.toJSON(),offline:off,item:meta.item||null,contributorName:(off&&k===0)?(meta.guestName||'Guest'):(nm.get(k)||'Member')}})});
+}));
+
+// Chama rotation (who receives now / next / already received). Owner-only writes. Records only: no money moves here.
+router.put('/circles/:id/rotation',wrap(async(req,res)=>{
+ const d=db(),userId=uid(req);if(!userId)return res.status(401).json({success:false,message:'Unauthorized'});
+ try{const circle=await rot.setOrder(d,req.params.id,userId,req.body?.order);const st=(await rot.loadState(d,circle)).state;return ok(res,{rotation:st});}
+ catch(e){return res.status(e.status||500).json({success:false,message:e.message||'Could not save the rotation',errorCode:e.errorCode});}
+}));
+router.post('/circles/:id/rotation/payout',wrap(async(req,res)=>{
+ const d=db(),userId=uid(req);if(!userId)return res.status(401).json({success:false,message:'Unauthorized'});
+ if(!requireMoneyStepUp(req,res,userId))return;
+ try{
+  const out=await rot.recordPayout(d,req.params.id,userId,{payoutId:req.body?.id,amount:req.body?.amount,note:req.body?.note});
+  const st=(await rot.loadState(d,out.circle)).state;
+  if(out.entry){try{const nm=(st.history[0]&&st.history[0].name)||'a member';
+   await eco.announce(d,out.circle,'payout','Payout recorded: '+out.circle.name,nm+' received KSh '+Number(out.entry.amount).toLocaleString('en-KE')+' from the chama.'+(st.current?' Next in line: '+st.current.name+'.':''));}catch(e){console.warn('[money] payout notify failed',e.message);}}
+  return ok(res,{rotation:st,replay:!!out.replay},out.replay?200:201);
+ }catch(e){return res.status(e.status||500).json({success:false,message:e.message||'Could not record the payout',errorCode:e.errorCode});}
 }));
 
 // Type-to-search for the "Add member" box (owner only, same rule as adding).
