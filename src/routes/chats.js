@@ -181,7 +181,7 @@ router.get(
                         as: 'chatParticipants',
                         where: { userId: userId },
                         required: true,
-                        attributes: ['userId', 'joinedAt']
+                        attributes: ['userId', 'joinedAt', 'hiddenAt']
                     },
                     {
                         model: User,
@@ -197,8 +197,22 @@ router.get(
                 subQuery: false
             });
             
+            // ROOT-CAUSE FIX (DELETED CHAT STAYS IN THE LIST): "Delete chat" on a direct chat only sets chat_participants.hiddenAt for this
+            // user (chatService.deleteChat). This route - the one the app really calls - never looked at hiddenAt, so the chat came back
+            // from the server on every refresh (the phone only hid it while its own local note of the deletion survived). Leave out a chat
+            // this user hid, until a newer message arrives (same rule chatService.getUserChats uses).
+            const _hiddenOut = new Set();
+            (chats || []).forEach((chat) => {
+                const mine = (chat.chatParticipants || [])[0];
+                const hiddenAt = mine && mine.hiddenAt ? new Date(mine.hiddenAt).getTime() : null;
+                if (hiddenAt === null) return;
+                const lastAt = chat.lastMessageAt ? new Date(chat.lastMessageAt).getTime() : 0;
+                if (!(lastAt > hiddenAt)) _hiddenOut.add(chat.id);
+            });
+            const visibleChats = (chats || []).filter((chat) => !_hiddenOut.has(chat.id));
+
             // Format chats for response
-            const formattedChats = await Promise.all((chats || []).map(async (chat) => {
+            const formattedChats = await Promise.all(visibleChats.map(async (chat) => {
                 const chatObj = chat.toJSON ? chat.toJSON() : chat;
                 
                 // FIXED: Use correct alias 'chatParticipantUser' instead of 'user'
@@ -266,10 +280,10 @@ router.get(
                 data: {
                     chats: formattedChats,
                     pagination: {
-                        total: count,
+                        total: Math.max(0, count - _hiddenOut.size),
                         page: parseInt(page),
                         limit: parseInt(limit),
-                        pages: Math.ceil(count / parseInt(limit))
+                        pages: Math.ceil(Math.max(0, count - _hiddenOut.size) / parseInt(limit))
                     }
                 }
             });

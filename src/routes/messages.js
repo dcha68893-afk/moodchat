@@ -292,7 +292,10 @@ router.post('/read', asyncHandler(async (req, res) => {
          LEFT JOIN "ReadReceipts" rr ON rr."messageId" = m.id AND rr."userId" = :userId
         WHERE m."chatId" = :chatId AND m."senderId" != :userId AND m."isDeleted" = false AND rr.id IS NULL`,
       { replacements: { chatId: Number(chatId), userId }, type: sequelize.QueryTypes.SELECT }
-    ).catch(() => []);
+    ).catch((err) => { console.error('[messages/read] unread lookup failed:', err && err.message); return null; });
+    // A failed lookup is NOT "nothing to mark": answering success here left the unread badge on the server forever while the
+    // app believed the chat had been read. Report the failure so the client keeps its read marker and asks again.
+    if (rows === null) return res.status(500).json({ success: false, message: 'Could not mark chat as read' });
     ids = rows.map(r => r.id);
     if (ids.length === 0) return res.json({ success: true, marked: 0 });
   }
@@ -300,12 +303,33 @@ router.post('/read', asyncHandler(async (req, res) => {
     return res.status(400).json({ success: false, message: 'messageIds array or chatId is required' });
   }
 
-  await sequelize.query(
-    `INSERT INTO "ReadReceipts" ("messageId","userId","readAt","createdAt","updatedAt")
-     SELECT unnest(ARRAY[:ids]::int[]), :userId, NOW(), NOW(), NOW()
-     ON CONFLICT ("messageId","userId") DO NOTHING`,
-    { replacements: { ids, userId }, type: sequelize.QueryTypes.INSERT }
-  ).catch(() => {});
+  // ON CONFLICT needs the unique (messageId,userId) index; a database created before that index existed rejects the whole
+  // statement, and the old `.catch(() => {})` hid it - so nothing was ever recorded as read there. Try the fast form, then fall
+  // back to a form that does not depend on the index, and only report success when one of them really wrote.
+  let receiptsWritten = false;
+  try {
+    await sequelize.query(
+      `INSERT INTO "ReadReceipts" ("messageId","userId","readAt","createdAt","updatedAt")
+       SELECT unnest(ARRAY[:ids]::int[]), :userId, NOW(), NOW(), NOW()
+       ON CONFLICT ("messageId","userId") DO NOTHING`,
+      { replacements: { ids, userId }, type: sequelize.QueryTypes.INSERT }
+    );
+    receiptsWritten = true;
+  } catch (err) {
+    console.error('[messages/read] ON CONFLICT insert failed, retrying without it:', err && err.message);
+    try {
+      await sequelize.query(
+        `INSERT INTO "ReadReceipts" ("messageId","userId","readAt","createdAt","updatedAt")
+         SELECT x, :userId, NOW(), NOW(), NOW() FROM unnest(ARRAY[:ids]::int[]) AS x
+          WHERE NOT EXISTS (SELECT 1 FROM "ReadReceipts" r WHERE r."messageId" = x AND r."userId" = :userId)`,
+        { replacements: { ids, userId }, type: sequelize.QueryTypes.INSERT }
+      );
+      receiptsWritten = true;
+    } catch (err2) {
+      console.error('[messages/read] read receipts could not be written:', err2 && err2.message);
+    }
+  }
+  if (!receiptsWritten) return res.status(500).json({ success: false, message: 'Could not save read state' });
 
   // Tell the sender(s) their message(s) were read, over the live socket if
   // connected — same generic transport every other realtime event here uses.

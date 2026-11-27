@@ -1089,7 +1089,9 @@ class ChatService {
                 // Direct chat: per-user hide only. Do NOT touch the shared
                 // chats row and do NOT remove/destroy the participant row.
                 await sequelize.query(
-                    `UPDATE chat_participants SET "hiddenAt" = NOW(), "updatedAt" = NOW()
+                    // clearedAt too: a deleted chat is gone for good for this person. When it comes back (a new message), only messages
+                    // from after the deletion are shown - the old history does not return (history/list queries already honour clearedAt).
+                    `UPDATE chat_participants SET "hiddenAt" = NOW(), "clearedAt" = NOW(), "updatedAt" = NOW()
                      WHERE "chatId" = :chatId AND "userId" = :userId`,
                     { replacements: { chatId, userId } }
                 );
